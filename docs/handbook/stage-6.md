@@ -1,2974 +1,3524 @@
-# Membership, workspace objects, credentials, and grants  `stage-6`
+# External Surface Ingress and Authentication  `stage-6`
 
-This stage is the system’s permission desk. It runs behind the scenes whenever a person or agent tries to view workspace data, use an outside account, or change shared settings. The central object system defines a common way to list, read, create, update, and delete workspace records, while agent and object scope keep track of “who is acting” so the wrong agent cannot accidentally use the wrong powers.
+This stage is the system’s front door. It runs during normal operation, when people or outside services contact UFO through Slack, a web browser, the command line, debugger pages, hosted site links, or sandbox links. Its first job is to check that each caller is allowed in, using signatures, cookies, membership checks, or signed links. Its second job is to translate each outside request into the system’s internal conversation or viewing flow.
 
-Several files turn important workspace things into safe, inspectable objects. Agents, members, conversations, artifacts, credential slots, memories, synced pages, and external sources each get clear rules about what can be seen or changed. Sensitive areas are locked down: secrets are never shown, artifacts cannot be invented directly, conversations and memories are mostly read-only, and membership cannot lose its last admin.
-
-Other parts decide access. Seats control which members an agent may answer. Web audience rules decide who can use agents in the portal. Connector account objects manage connected services, separating the account itself from an agent’s permission to use it. Together, these pieces act like guards, labels, and filing cabinets for workspace power.
+The Slack surface checks that messages and button clicks really came from Slack, then turns them into conversation turns and sends results back. The web surface serves the main portal, signs users in, supports chat, and streams live updates. The UFO command-line surface does the same kind of bridge for terminal users. The debugger surface gives read-only views into sessions, transcripts, files, and live events. The hosted sites surface decides who may open a shared site and displays it safely. The ingress server forwards browser traffic through signed sandbox links to the correct running sandbox, including live WebSocket traffic.
 
 ## Files in this stage
 
-### Built-in workspace objects
-Core object types expose agents, shared files, past conversations, credential slots, and members while enforcing each type's safety rules.
+### Sandbox link ingress
+Public signed ingress routes browser HTTP and WebSocket traffic into live sandboxed sites after validating the viewer and target port.
 
-### `core/src/ufo/agents.py`
+### `core/src/ufo/ingress_serve.py`
 
-`domain_logic` · `request handling for object list/get/status/apply/delete operations`
+`entrypoint` · `startup and request handling`
 
-This file is the object interface for workspace agents. In plain terms, it lets the rest of the system say: “show me the agent,” “show me its current status,” or “change its allowed settings.” It does not create new agents, delete agents, or change the system prompt. Those actions are deliberately blocked or routed elsewhere.
+This file is the front door for sandbox-hosted sites. Each site gets its own signed hostname, and the hostname itself says which conversation and port the browser is trying to open. That matters because browser cookies, storage, links, redirects, and assets all behave naturally when a site owns its own origin, while still keeping one site separate from another.
 
-The main settings owned here are the agent’s model and whether it may use public internet access. The system prompt is shown as read-only status, along with a digest, which is a short fingerprint used to prove which prompt version a proposal is based on. Prompt edits go through a governance path, like a formal change request, so they do not conflict with direct setting edits here.
+The flow is like a guarded relay station. First, special “view” links are exchanged for a short-lived session cookie tied to exactly one site. Later requests must bring that cookie back. The server reads the requested site from the Host header, verifies the cookie, looks up the live sandbox for that conversation, asks the carrier how to reach the requested port, and then streams traffic between the browser and the sandbox without loading whole responses into memory.
 
-The file reads and writes the `agent` database table inside the current workspace. It also enforces permissions. A speaker must be a workspace admin to edit an agent. If editing an agent other than the current one, the running agent must also be the main agent. This is like a building rule where tenants can update their own room only if they are authorized, but changing another room requires the building manager.
-
-One important detail is the `auto` model setting. The stored value may say “auto,” but status and list views report the concrete model actually being used right now.
+It is also careful about safety boundaries. It strips headers that should not cross a proxy, forces responses to be uncacheable so a CDN cannot serve private site bytes without rechecking access, hides the ingress session cookie from sandbox code, and prevents sandbox sites from setting cookies in UFO’s reserved namespace. WebSockets receive the same access checks as HTTP, plus an Origin check so one sandbox site cannot open a live socket into another.
 
 #### Function details
 
-##### `_effective_model`  (lines 43–48)
+##### `IngressServe.app`  (lines 196–228)
 
 ```
-def _effective_model(ctx: ToolContext, stored: str) -> str
+def app(self) -> FastAPI
 ```
 
-**Purpose**: This helper turns the stored model setting into the model name a reader should actually see. If the database says `auto`, it reports the concrete model chosen for the current turn instead of the word `auto`.
+**Purpose**: Builds the web application and declares which paths belong to ingress itself versus which paths should be forwarded to the sandbox site. This is the routing map for both normal HTTP requests and WebSocket connections.
 
-**Data flow**: It receives the current tool context and the model value stored in the database. If the stored value is the special `auto` marker, it reads the resolved model from the current agent context; otherwise it keeps the stored value. It returns the model name to display.
+**Data flow**: It starts with the configured IngressServe object. It creates a FastAPI application, attaches routes for view-token opening, token-less refusals, catch-all HTTP proxying, WebSocket view-path refusal, and catch-all WebSocket proxying. It returns the finished application to the server runner.
 
-**Call relations**: The list and status views call this helper when showing an agent’s model. This keeps display behavior consistent while still leaving the saved spec unchanged, so reading and reapplying an object does not accidentally replace `auto` with today’s concrete model.
+**Call relations**: The process startup code creates an IngressServe and asks this method for the app before handing it to Uvicorn. Once Uvicorn is running, the routes installed here decide whether a request goes to _open, _proxy, _socket, or one of the refusal helpers.
 
-*Call graph*: called by 2 (list, status).
-
-
-##### `AgentObjects.list`  (lines 74–101)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This function returns a paged list of agents in the current workspace. Each row gives a short human-readable summary, including whether the agent is the main agent, which model it is using, and whether public internet is allowed.
-
-**Data flow**: It starts with the current tool context and a list query, then opens a workspace database transaction. It reads agent names, stored models, main-agent flags, and internet-access flags for the current workspace. It turns those database rows into object rows with friendly summaries, then wraps them into an object page result.
-
-**Call relations**: When the object system needs to show available `agent` objects, it calls this method. During that flow, it asks `_effective_model` to present the resolved model name, then hands the finished rows to the object paging helper so callers get the normal object-list shape.
-
-*Call graph*: calls 1 internal fn (_effective_model); 5 external calls (__init__, select, workspace_tx, object_page, ws_current).
+*Call graph*: 1 external calls (FastAPI).
 
 
-##### `AgentObjects.get`  (lines 103–116)
+##### `IngressServe._no_view_token`  (lines 230–236)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None
+async def _no_view_token(self, request: Request) -> Response
 ```
 
-**Purpose**: This function returns the editable specification for one named agent, or `None` if that agent does not exist. The spec includes only the settings this object path owns: model and public-internet access.
+**Purpose**: Answers requests to the view-link path when no token was provided. It prevents an empty or malformed link from being treated as a valid site opener.
 
-**Data flow**: It receives a context and an agent name. It looks up the database row for that name. If no row is found, it returns nothing. If a row exists, it builds an `AgentSpec` from the stored model and internet-access flag, then packages that with the row’s creation and update times.
+**Data flow**: It receives an HTTP request. If the method is not GET or HEAD, it returns a 405 response saying which methods are allowed. Otherwise it returns a plain 403 message saying the link is not valid.
 
-**Call relations**: The object system calls this when someone asks for the stored definition of a single agent. It relies on `_row` for the database lookup, then returns an object detail that can be compared with or used by later apply operations.
+**Call relations**: IngressServe.app routes the bare view path here. This keeps token exchange separate from _open, which expects a token-bearing path segment.
 
-*Call graph*: calls 1 internal fn (_row); 2 external calls (__init__, __init__).
-
-
-##### `AgentObjects.status`  (lines 118–133)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This function returns the live read-only status for one named agent. It includes whether the agent is main, the current prompt, a digest of that prompt, and the effective model currently in use.
-
-**Data flow**: It receives the context, agent name, and an optional expected generation value. It looks up the agent row. If the row is missing, it returns nothing. Otherwise it builds a status dictionary from the database row, computes a prompt digest from the prompt text, and converts `auto` into the concrete model visible for this turn.
-
-**Call relations**: The object system calls this when a caller wants the agent’s current state rather than just its editable spec. It uses `_row` to read the database, `prompt_digest` to provide a safe fingerprint for governance proposals, and `_effective_model` to report the model a member should understand as active.
-
-*Call graph*: calls 2 internal fn (_row, _effective_model); 1 external calls (prompt_digest).
+*Call graph*: 1 external calls (Response).
 
 
-##### `AgentObjects.apply`  (lines 135–165)
+##### `IngressServe._open`  (lines 238–269)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: AgentSpec, old: AgentSpec | None, *, expected_generation: UUID | None) -> None
+async def _open(self, request: Request, view_path: str) -> Response
 ```
 
-**Purpose**: This function updates an existing agent’s model and public-internet permission. It refuses creation, checks admin rules, and then writes the approved settings to the database.
+**Purpose**: Turns a valid one-time-style view token in the URL into a session cookie for the exact site named by the request hostname. This is how a viewer moves from a shared link to a browser session that can load the site’s assets.
 
-**Data flow**: It receives the current context, target agent name, desired spec, old spec, and an optional expected generation value. If there is no old spec or no matching database row, it rejects the request because this path cannot create agents. It then checks whether the speaker is an admin and whether the current agent is allowed to edit the target. If the checks pass, it updates the model, internet-access flag, and update timestamp in the current workspace’s agent table.
+**Data flow**: It receives the HTTP request and the token-like path text. It checks the method, reads the site identity from the hostname through _site, verifies the token, confirms the token matches that same conversation and port, mints a short-lived session token, sets it as a cookie, and returns a redirect to the site root. If any check fails, it returns a plain error response.
 
-**Call relations**: The object system calls this when someone applies a change to an `agent` object. It uses `_row` to confirm the target exists, asks the tool context about admin and main-agent authority, raises clear errors when the operation is not allowed, and finally performs the database update for the fields this file owns.
+**Call relations**: The route table sends view-link requests here. It calls _site to bind the token to the hostname, then relies on token verification and cookie-setting helpers from other modules. Later, _dial_site verifies the session cookie this method created.
 
-*Call graph*: calls 3 internal fn (_row, agent_is_main, speaker_is_admin); 5 external calls (__init__, __init__, update, workspace_tx, ws_current).
-
-
-##### `AgentObjects.delete`  (lines 167–174)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This function always refuses to delete an agent through the object interface. Agents are treated as existing workspace actors, not disposable objects in this path.
-
-**Data flow**: It receives the context, agent name, and optional expected generation value, but does not read or change any database data. It immediately raises an error explaining that agents cannot be deleted through objects.
-
-**Call relations**: The object system calls this if a caller tries to delete an `agent` object. Instead of handing off to any database operation, it stops the flow with a `VerbNotSupported` error so deletion must be handled elsewhere, if it is allowed at all.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_site); 7 external calls (replace, now, RedirectResponse, Response, mint_ingress_token, verify_ingress_token, set_session_cookie).
 
 
-##### `AgentObjects._row`  (lines 176–193)
+##### `IngressServe._site`  (lines 271–282)
 
 ```
-async def _row(self, name: str) -> sa.Row | None
+def _site(self, request: HTTPConnection) -> tuple[UUID, int] | None
 ```
 
-**Purpose**: This private helper fetches the database record for one named agent in the current workspace. It centralizes the lookup so get, status, and apply all use the same definition of “this agent.”
+**Purpose**: Figures out which sandbox site a request hostname refers to. It turns a signed subdomain label into a conversation ID and port, or says “no site here” if the host is not valid for this ingress server.
 
-**Data flow**: It receives an agent name. It opens a workspace database transaction and selects the prompt, id, model, main-agent flag, internet-access flag, and timestamps for that name within the current workspace. It returns the single matching row or `None` if no agent matches.
+**Data flow**: It reads the hostname from the incoming HTTP or WebSocket connection. It checks that the hostname ends under the configured base host, removes that suffix, and asks the site-label parser to decode the remaining label. It returns a conversation-and-port pair, or None if the hostname is outside the expected domain or cannot be decoded.
 
-**Call relations**: The get, status, and apply methods call this before doing their own work. It is the shared doorway to the `agent` table for single-agent operations, ensuring each higher-level action starts from the same current workspace row.
+**Call relations**: _open uses this before accepting a view token, and _dial_site uses it before allowing any HTTP or WebSocket traffic to reach a sandbox. It delegates the label decoding to parse_site_label.
 
-*Call graph*: called by 3 (apply, get, status); 3 external calls (select, workspace_tx, ws_current).
+*Call graph*: called by 2 (_dial_site, _open); 1 external calls (parse_site_label).
 
 
-### `core/src/ufo/artifacts.py`
+##### `IngressServe._dial_site`  (lines 284–330)
+
+```
+async def _dial_site(self, connection: HTTPConnection) -> DialedSite | SiteRefusal
+```
+
+**Purpose**: Performs the main access gate for a site. It checks that the request names a real site, that the session cookie authorizes that exact site, and that the sandbox is currently reachable.
+
+**Data flow**: It receives an HTTP or WebSocket connection. It extracts the target site with _site, verifies the ingress session cookie, compares the cookie claims to the hostname, looks up the stored sandbox handle in the database, converts that into a live sandbox handle for the configured backend, and asks the carrier to dial the requested port. It returns either a DialedSite with connection details or a SiteRefusal with a status code and message.
+
+**Call relations**: _proxy and _socket both call this so HTTP and WebSockets use the same doorway. It calls _stored_handle for the database lookup and then hands the sandbox handle to the carrier, warning when no live target can be found.
+
+*Call graph*: calls 2 internal fn (_site, _stored_handle); called by 2 (_proxy, _socket); 8 external calls (__init__, __init__, __init__, now, warn, verify_ingress_token, sandbox_handle_id, ws).
+
+
+##### `IngressServe._proxy`  (lines 332–375)
+
+```
+async def _proxy(self, request: Request, path: str) -> Response
+```
+
+**Purpose**: Forwards an authorized HTTP request to the sandbox site and streams the response back to the viewer. It acts like a careful middleperson rather than a simple blind pipe.
+
+**Data flow**: It receives the viewer request and requested path. It calls _dial_site; if access fails, it returns the refusal message. If access succeeds, it builds the upstream URL, prepares safe forwarded headers, streams the request body when one is present, sends the request with the shared HTTP client, and returns a streaming response. While copying response headers back, it removes unsafe cache and proxy headers, forces no-store caching, and filters Set-Cookie values through _confined_cookie.
+
+**Call relations**: The catch-all HTTP route installed by app sends site traffic here. It uses _upstream_url, _upstream_headers, _body, and _confined_cookie as its helper parts, and reports upstream failures as a plain 502 message.
+
+*Call graph*: calls 5 internal fn (_body, _confined_cookie, _dial_site, _upstream_headers, _upstream_url); 7 external calls (stream, Response, StreamingResponse, Request, BackgroundTask, log_error, ws).
+
+
+##### `IngressServe._upstream_url`  (lines 377–380)
+
+```
+def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str
+```
+
+**Purpose**: Builds the exact URL used to contact the sandbox service. It preserves the requested path and query string while aiming it at the carrier-provided host.
+
+**Data flow**: It takes a scheme such as http, https, ws, or wss; an upstream host; a path; and the raw query-string bytes. It safely quotes the path so special characters are represented correctly, appends the query string if present, and returns a full URL string.
+
+**Call relations**: _proxy uses this for ordinary HTTP forwarding, and _socket uses it for WebSocket forwarding. It is the shared URL builder for both protocols.
+
+*Call graph*: called by 2 (_proxy, _socket); 1 external calls (quote).
+
+
+##### `IngressServe._stored_handle`  (lines 382–392)
+
+```
+async def _stored_handle(self, workspace_id: UUID, conversation_id: UUID) -> str | None
+```
+
+**Purpose**: Looks up the saved sandbox handle for a conversation in a workspace. This is the database step that connects an authorized site request to the sandbox instance that may still be running.
+
+**Data flow**: It receives a workspace ID and conversation ID. It opens a workspace database transaction, selects the conversation row matching both IDs, and reads its sandbox_handle field. It returns that handle string, or None if no matching row exists.
+
+**Call relations**: _dial_site calls this after verifying the session cookie. The result is then converted into the backend-specific container identity used to dial the sandbox.
+
+*Call graph*: called by 1 (_dial_site); 2 external calls (select, workspace_tx).
+
+
+##### `IngressServe._upstream_headers`  (lines 394–428)
+
+```
+def _upstream_headers(self, request: HTTPConnection, dial_headers: Mapping[str, str]) -> list[tuple[str, str]]
+```
+
+**Purpose**: Chooses which viewer request headers are safe to send to the sandbox. It protects proxy internals, WebSocket handshake details, and the ingress session cookie from being exposed to sandbox code.
+
+**Data flow**: It receives the incoming connection and any extra headers supplied by the sandbox dial target. It walks through the viewer’s headers, drops hop-by-hop proxy headers, Host, WebSocket handshake headers, and headers replaced by dial-supplied values. For Cookie headers, it removes the ingress session cookie but keeps the site’s own cookies. It returns a list of lower-cased header name/value pairs, followed by the dial target’s required headers.
+
+**Call relations**: _proxy uses this when building HTTP requests, and _socket uses it when opening the upstream WebSocket. It is one of the main safety filters between the browser and sandbox.
+
+*Call graph*: called by 2 (_proxy, _socket).
+
+
+##### `IngressServe._confined_cookie`  (lines 430–457)
+
+```
+def _confined_cookie(self, header: str) -> str | None
+```
+
+**Purpose**: Filters one Set-Cookie header from the sandbox before it reaches the browser. It lets the site set its own cookies, but stops it from writing UFO session cookies or broad parent-domain cookies.
+
+**Data flow**: It receives a raw Set-Cookie header value. It reads the cookie name, rejects malformed or empty-name cookies, rejects names starting with the reserved UFO prefix, removes any Domain attribute, and returns the cleaned cookie string. If the cookie is unsafe, it returns None so the caller can drop it.
+
+**Call relations**: _proxy calls this for each upstream Set-Cookie response header. The cleaned result, when present, is appended to the response sent back to the browser.
+
+*Call graph*: called by 1 (_proxy).
+
+
+##### `IngressServe._body`  (lines 459–469)
+
+```
+async def _body(self, upstream: httpx.Response) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams raw response bytes from the sandbox to the viewer and makes sure the upstream response is closed afterward. This avoids buffering a whole file or page in memory.
+
+**Data flow**: It receives an httpx response object from the upstream sandbox request. It yields each raw byte chunk as it arrives. Whether streaming finishes normally or fails partway through, it closes the upstream response so the connection can be released.
+
+**Call relations**: _proxy passes this generator into StreamingResponse. The background close still exists, but this helper also closes the upstream response if streaming fails before the background task runs.
+
+*Call graph*: called by 1 (_proxy); 2 external calls (aclose, aiter_raw).
+
+
+##### `IngressServe._no_socket_view`  (lines 471–477)
+
+```
+async def _no_socket_view(self, websocket: WebSocket) -> None
+```
+
+**Purpose**: Rejects WebSocket attempts to the view-token path. The view path is only for exchanging a token over HTTP, not for opening a live socket.
+
+**Data flow**: It receives a WebSocket handshake. It creates a refusal saying the link is not valid and passes that refusal to _refuse, which sends an HTTP-style denial response instead of accepting the socket.
+
+**Call relations**: IngressServe.app routes WebSocket handshakes on the view path here. This prevents token-bearing paths from falling through to _socket and being forwarded into sandbox code.
+
+*Call graph*: calls 1 internal fn (_refuse); 1 external calls (__init__).
+
+
+##### `IngressServe._socket`  (lines 479–530)
+
+```
+async def _socket(self, websocket: WebSocket, path: str) -> None
+```
+
+**Purpose**: Connects an authorized browser WebSocket to the sandbox site’s own WebSocket endpoint. This supports live reload, push updates, and other protocols that need a long-lived two-way channel.
+
+**Data flow**: It receives the viewer WebSocket and requested path. It first checks that the browser Origin host matches the addressed site, then calls _dial_site for the normal site/session/sandbox checks. If allowed, it builds the upstream WebSocket URL, forwards safe headers and requested subprotocols, opens the sandbox WebSocket with size and timeout limits, accepts the viewer socket using the subprotocol chosen upstream, and relays traffic in both directions. On refusal or failure, it sends a denial or close message.
+
+**Call relations**: The catch-all WebSocket route sends traffic here. It uses _same_origin before _dial_site, then uses _upstream_url and _upstream_headers to connect upstream, _relay to move messages, _refuse for handshake denial, and _end for cleanup closes.
+
+*Call graph*: calls 7 internal fn (_dial_site, _end, _refuse, _relay, _same_origin, _upstream_headers, _upstream_url); 6 external calls (__init__, accept, log_error, ws, connect, Subprotocol).
+
+
+##### `IngressServe._same_origin`  (lines 532–544)
+
+```
+def _same_origin(self, websocket: WebSocket) -> bool
+```
+
+**Purpose**: Checks that a WebSocket was opened by the same site it is trying to reach. This blocks one sandbox-hosted site from using the browser’s cookies to open a socket into another site.
+
+**Data flow**: It reads the Origin header from the WebSocket handshake and compares that origin’s hostname with the requested WebSocket hostname. It returns true only when an Origin exists and the hostnames match.
+
+**Call relations**: _socket calls this before doing the usual site/session dialing. HTTP requests do not use this exact check because browser rules for normal HTTP are different from WebSocket handshakes.
+
+*Call graph*: called by 1 (_socket); 1 external calls (urlsplit).
+
+
+##### `IngressServe._refuse`  (lines 546–553)
+
+```
+async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None
+```
+
+**Purpose**: Rejects a WebSocket handshake with a clear HTTP-style status and message. This lets the viewer receive the same kind of explanation it would get from a refused HTTP request.
+
+**Data flow**: It receives the WebSocket handshake object and a SiteRefusal containing a status code and message. It wraps the message in a plain text Response and sends it as a denial response without accepting the WebSocket.
+
+**Call relations**: _no_socket_view uses this for view-path WebSocket attempts, and _socket uses it for failed origin, authorization, or upstream-opening checks.
+
+*Call graph*: called by 2 (_no_socket_view, _socket); 2 external calls (send_denial_response, Response).
+
+
+##### `IngressServe._relay`  (lines 555–572)
+
+```
+async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None
+```
+
+**Purpose**: Runs the two halves of a WebSocket relay at the same time: browser to site and site to browser. It stops both sides as soon as either side finishes or fails.
+
+**Data flow**: It receives the accepted viewer WebSocket and the connected upstream WebSocket. It starts one task for messages from viewer to site and another for messages from site to viewer, waits until one finishes, cancels the other, waits for cancellation cleanup, and re-raises any real failure from the completed task.
+
+**Call relations**: _socket calls this after both WebSocket connections are open. It delegates the actual message copying to _viewer_to_site and _site_to_viewer.
+
+*Call graph*: calls 2 internal fn (_site_to_viewer, _viewer_to_site); called by 1 (_socket); 3 external calls (create_task, gather, wait).
+
+
+##### `IngressServe._viewer_to_site`  (lines 574–583)
+
+```
+async def _viewer_to_site(self, viewer: WebSocket, upstream: ClientConnection) -> None
+```
+
+**Purpose**: Copies WebSocket messages from the browser to the sandbox site while preserving whether each message is text or bytes. Some WebSocket protocols care about that difference.
+
+**Data flow**: It repeatedly receives messages from the viewer socket. If it sees a disconnect message, it returns. Otherwise it sends the text value or byte value onward to the upstream site connection.
+
+**Call relations**: _relay starts this as one of its paired background tasks. It is the browser-to-sandbox half of the live WebSocket pipe.
+
+*Call graph*: called by 1 (_relay); 2 external calls (receive, send).
+
+
+##### `IngressServe._site_to_viewer`  (lines 585–598)
+
+```
+async def _site_to_viewer(self, upstream: ClientConnection, viewer: WebSocket) -> None
+```
+
+**Purpose**: Copies WebSocket messages from the sandbox site back to the browser and then closes the browser side with an appropriate close code. This lets the site’s client understand why the connection ended when possible.
+
+**Data flow**: It reads messages from the upstream site connection. Text messages are sent as text to the viewer, and byte messages are sent as bytes. When the upstream loop ends, it chooses the upstream close code or a normal default, replaces forbidden wire codes with a generic upstream-gone code, and calls _end to close the viewer socket.
+
+**Call relations**: _relay starts this as the sandbox-to-browser half of the WebSocket pipe. It calls _end when the upstream side has finished.
+
+*Call graph*: calls 1 internal fn (_end); called by 1 (_relay); 3 external calls (suppress, send_bytes, send_text).
+
+
+##### `IngressServe._end`  (lines 600–610)
+
+```
+async def _end(self, viewer: WebSocket, code: int, reason: str) -> None
+```
+
+**Purpose**: Tries to close the viewer WebSocket without letting cleanup errors hide the original problem. It treats the connection as already over if the viewer has disappeared.
+
+**Data flow**: It receives the viewer WebSocket, a close code, and a reason string. It attempts to send a WebSocket close frame with those values. If closing raises any exception, it suppresses it and returns.
+
+**Call relations**: _site_to_viewer calls this when the sandbox side ends, and _socket calls it after relay failures. It is the final cleanup helper for WebSocket sessions.
+
+*Call graph*: called by 2 (_site_to_viewer, _socket); 2 external calls (suppress, close).
+
+
+##### `ingress_base_host`  (lines 613–624)
+
+```
+def ingress_base_host(configured: str | None) -> str
+```
+
+**Purpose**: Extracts the wildcard base hostname that all sandbox site hostnames must live under. It refuses to start the ingress server if this required public URL is missing or unusable.
+
+**Data flow**: It receives the configured ingress public URL or None. It parses the URL and reads its hostname. If a hostname exists, it returns it; otherwise it raises a runtime error explaining the missing configuration.
+
+**Call relations**: run calls this during startup before creating IngressServe. The returned base host is later used by _site to decide whether incoming hostnames belong to this deployment.
+
+*Call graph*: called by 1 (run); 1 external calls (urlsplit).
+
+
+##### `upstream_client`  (lines 627–650)
+
+```
+def upstream_client() -> httpx.AsyncClient
+```
+
+**Purpose**: Creates the shared HTTP client used to contact sandbox sites. It is deliberately configured not to remember or replay cookies between sites.
+
+**Data flow**: It takes no inputs. It builds an async HTTP client with connection limits, timeouts, and a cookie jar whose policy allows no domains. It returns that client for reuse by the ingress server.
+
+**Call relations**: run calls this once at startup and stores the result in IngressServe. _proxy later uses that client to send authorized HTTP requests to sandbox origins.
+
+*Call graph*: called by 1 (run); 4 external calls (CookieJar, DefaultCookiePolicy, AsyncClient, Limits).
+
+
+##### `run`  (lines 653–673)
+
+```
+def run() -> None
+```
+
+**Purpose**: Starts the ingress server process. It loads configuration, initializes observability and database access, prepares sandbox dialing, builds the ingress application, and hands it to Uvicorn to serve traffic.
+
+**Data flow**: It reads configuration and environment settings, sets up logging/tracing, loads extension manifests, initializes and checks the database, ensures the ingress signing secret is available, computes the base host, chooses the sandbox carrier, creates the upstream HTTP client, constructs IngressServe, logs the chosen port, and starts the ASGI web server. After Uvicorn starts, it serves requests until the process stops.
+
+**Call relations**: This is the top-level entry used to launch this file’s service. It calls ingress_base_host and upstream_client for local setup, and it wires in services from configuration, database, extension loading, sandbox selection, and Uvicorn.
+
+*Call graph*: calls 2 internal fn (ingress_base_host, upstream_client); 12 external calls (__init__, run, load_config, init_db, verify_db_reachable, load_manifests, init_o11y, log, owner_dsn, ingress_secret (+2 more)).
+
+
+### Browser inspection surfaces
+Web-facing pages expose debugger and hosted-site views while enforcing workspace, link, and viewer authorization.
+
+### `extensions/debugger/ufo_ext_debugger/surface.py`
+
+`io_transport` · `request handling`
+
+This file is the bridge between a browser-based debugger and the stored session data for a single workspace. Think of it like a secure observation window: an authorized operator can look into what happened in a workspace, but this file does not create or change the underlying conversation data.
+
+The file serves a prebuilt React app from `static/index.html`. Once the page loads, it asks the `api/` routes in this file for the actual data. Those routes read through `SurfaceContext`, which is already scoped to the allowed workspace before these handlers run. That scoping is important: it means every conversation, file, transcript, and live turn lookup is naturally limited to the workspace the operator is allowed to see.
+
+Most handlers follow the same pattern. They read an ID from the URL, check that it is a valid UUID (a standard unique identifier), ask `SurfaceContext` for the requested data, and return either JSON or a clear 404 error. File contents are streamed back as raw bytes. Live turn updates use Server-Sent Events, or SSE, which is a simple browser-friendly way for the server to keep sending events over one open HTTP response.
+
+The `ROUTES` table at the bottom connects URL paths to these handlers, including the session-binding POST route that stores the operator bearer token in a secure cookie rather than putting it in a URL.
+
+#### Function details
+
+##### `app_page`  (lines 40–45)
+
+```
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves the debugger web page to the browser. If the frontend app has not been built yet, it raises a clear error telling the developer what build step is missing.
+
+**Data flow**: It receives the current surface context and HTTP request, checks whether the built HTML file was loaded when this module started, and turns that HTML text into an HTTP page response. If the HTML is missing, nothing is returned; instead, it stops with an error explaining that the debugger app needs to be built.
+
+**Call relations**: This is called when a browser requests the root debugger page. It hands the already-built app shell to `HTMLResponse`; after that, the browser uses the other API routes in this file to fetch the real debugger data.
+
+*Call graph*: 1 external calls (HTMLResponse).
+
+
+##### `workspace_meta`  (lines 48–55)
+
+```
+async def workspace_meta(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns basic information about the workspace currently being inspected. It also extracts the Slack team ID when the workspace has a Slack installation recorded in the expected form.
+
+**Data flow**: It reads the workspace ID from `SurfaceContext` and asks the context for the Slack installation value. If that value starts with the expected `team:` prefix, it strips the prefix to produce a plain Slack team ID. It returns a JSON object containing the workspace ID and, when available, the Slack team.
+
+**Call relations**: The debugger frontend calls this route to label the workspace it is showing. The function relies on `SurfaceContext.installation` for the stored installation record and wraps the result with `JSONResponse` for the browser.
+
+*Call graph*: calls 1 internal fn (installation); 1 external calls (JSONResponse).
+
+
+##### `conversations`  (lines 58–60)
+
+```
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the list of conversations visible in the current workspace. This gives the debugger its main index of sessions to inspect.
+
+**Data flow**: It asks `SurfaceContext` for the workspace’s conversations, converts each returned model into JSON-friendly data, and sends the list back as a JSON response.
+
+**Call relations**: The frontend calls this when it needs to show available conversations. The function delegates the actual workspace-scoped lookup to `SurfaceContext.list_conversations` and only formats the result for HTTP.
+
+*Call graph*: calls 1 internal fn (list_conversations); 1 external calls (JSONResponse).
+
+
+##### `conversation_turns`  (lines 63–68)
+
+```
+async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the turns inside one conversation. A turn is one step or exchange in the operator session, so this endpoint lets the debugger show the conversation’s timeline.
+
+**Data flow**: It reads `conversation_id` from the URL and uses `_uuid_param` to make sure it is a valid UUID. If the ID is invalid, it returns a 404 JSON error. Otherwise it asks `SurfaceContext` for that conversation’s turns, converts them to JSON-friendly dictionaries, and returns them.
+
+**Call relations**: The frontend calls this after a conversation is selected. This function uses `_uuid_param` for safe URL parsing, then relies on `SurfaceContext.list_turns` for the workspace-scoped data.
+
+*Call graph*: calls 2 internal fn (list_turns, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `conversation_transcript`  (lines 71–78)
+
+```
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the saved transcript for one conversation. The transcript is the readable record of what was said or exchanged.
+
+**Data flow**: It reads and validates `conversation_id` from the request path. If the ID is invalid, it returns a 404 error saying there is no such conversation. If the ID is valid, it asks `SurfaceContext` for the transcript; if none exists, it returns a 404 error saying there is no transcript. Otherwise it serializes the transcript to JSON.
+
+**Call relations**: The debugger frontend calls this when it wants the full transcript view. The helper `_uuid_param` protects the lookup from malformed IDs, and `SurfaceContext.read_transcript` supplies the actual stored transcript.
+
+*Call graph*: calls 2 internal fn (read_transcript, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `conversation_compactions`  (lines 81–85)
+
+```
+async def conversation_compactions(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists the compaction records for a conversation. Compaction is when older conversation content is summarized or compressed, and these records help an operator see when that happened.
+
+**Data flow**: It reads `conversation_id` from the URL and validates it as a UUID. If the ID is invalid, it returns a 404 JSON error. Otherwise it asks `SurfaceContext` for the compaction entries and returns them as a JSON list.
+
+**Call relations**: The frontend calls this to show the available summary/compression checkpoints for a conversation. The function uses `_uuid_param` for parsing and `SurfaceContext.list_compactions` for the workspace-scoped records.
+
+*Call graph*: calls 2 internal fn (list_compactions, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `compaction_record`  (lines 88–103)
+
+```
+async def compaction_record(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the details of one specific compaction record. It shows what messages existed before compaction, what remained after, and the summary that was produced.
+
+**Data flow**: It reads `conversation_id` and `index` from the URL. The conversation ID must be a valid UUID, and the index must be made only of digits. If either check fails, it returns a 404 error. It then asks `SurfaceContext` for that compaction record; if missing, it returns another 404. If found, it builds a JSON object with the record index, the before messages, the after messages, and the summary.
+
+**Call relations**: The frontend calls this when an operator opens one compaction entry. This function combines safe path parsing through `_uuid_param` with the detailed lookup from `SurfaceContext.read_compaction`, then formats nested message models for JSON.
+
+*Call graph*: calls 2 internal fn (read_compaction, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `workspace_files`  (lines 106–111)
+
+```
+async def workspace_files(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists files associated with a conversation’s workspace area. This lets the debugger show what files were available or produced during that session.
+
+**Data flow**: It reads `conversation_id` from the URL, validates it as a UUID, and returns a 404 error if it is not valid. For a valid ID, it asks `SurfaceContext` for the file list, converts each file entry to JSON-friendly data, and returns the list.
+
+**Call relations**: The frontend calls this when it needs a file browser for a selected conversation. `_uuid_param` handles ID validation, while `SurfaceContext.list_workspace_files` provides the actual file metadata.
+
+*Call graph*: calls 2 internal fn (list_workspace_files, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `workspace_file`  (lines 114–124)
+
+```
+async def workspace_file(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Streams the contents of one workspace file back to the browser. It is used when an operator wants to download or inspect a specific file connected to a conversation.
+
+**Data flow**: It reads and validates the `conversation_id`, then takes the requested file path from the URL. If the conversation ID is invalid, the path is rejected by the context, or no file is found, it returns a 404 JSON error. If the file exists, it returns a streaming response with raw binary content.
+
+**Call relations**: The frontend calls this after a file is selected from the file list. The function uses `_uuid_param` for the conversation ID, asks `SurfaceContext.read_workspace_file` for a readable stream, and passes that stream to `StreamingResponse` so the file can be sent without loading it all into a JSON object.
+
+*Call graph*: calls 2 internal fn (read_workspace_file, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
+
+
+##### `turn`  (lines 127–134)
+
+```
+async def turn(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns detailed information about one turn in a session. This helps the debugger inspect a single step in the conversation or operator workflow.
+
+**Data flow**: It reads `turn_id` from the URL and validates it as a UUID. If the ID is invalid, it returns a 404 error. Otherwise it asks `SurfaceContext` for the turn detail; if no matching turn exists, it returns a 404. If found, it serializes the detail model to JSON.
+
+**Call relations**: The frontend calls this when an operator opens a specific turn. The function relies on `_uuid_param` for safe ID parsing and `SurfaceContext.turn_detail` for the workspace-scoped turn lookup.
+
+*Call graph*: calls 2 internal fn (turn_detail, _uuid_param); 1 external calls (JSONResponse).
+
+
+##### `stream`  (lines 137–142)
+
+```
+async def stream(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Opens a live event stream for one turn. This lets the debugger watch ongoing turn activity as it happens, instead of only seeing a finished record.
+
+**Data flow**: It reads and validates `turn_id`, then checks that the turn exists. If the ID is bad or the turn is missing, it returns a 404 JSON error. Otherwise it reads the `Last-Event-ID` request header, which tells the server where a previously dropped stream left off, and returns a Server-Sent Events stream produced by `_events`.
+
+**Call relations**: The frontend calls this while watching a live turn. This function verifies the turn through `SurfaceContext.turn_detail`, then hands the ongoing work to `_events` and wraps it in `StreamingResponse` with the `text/event-stream` media type expected by browsers.
+
+*Call graph*: calls 3 internal fn (turn_detail, _events, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
+
+
+##### `_events`  (lines 145–147)
+
+```
+async def _events(ctx: SurfaceContext, turn_id: UUID, since: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Turns the context’s live turn feed into browser-ready event bytes. It is the small adapter between the internal live-frame stream and the Server-Sent Events format.
+
+**Data flow**: It receives the current context, the turn ID, and a cursor string saying where to resume. It asks `SurfaceContext.tail` for live frames after that point. For each cursor-and-frame pair it receives, it calls `_sse` to format one event and yields the resulting bytes outward.
+
+**Call relations**: `stream` calls this when it needs to keep an HTTP response open for live updates. `_events` depends on `SurfaceContext.tail` for the actual live data and passes each frame through `_sse` so the browser receives standard SSE messages.
+
+*Call graph*: calls 2 internal fn (tail, _sse); called by 1 (stream).
+
+
+##### `_sse`  (lines 150–170)
+
+```
+def _sse(cursor: str, frame: LiveFrame) -> bytes
+```
+
+**Purpose**: Formats one live frame as a Server-Sent Events message. It labels the event by frame type, includes the raw JSON payload, and optionally includes a resume cursor.
+
+**Data flow**: It receives a cursor and one live frame. If the cursor is not empty, it writes it as the event ID. It then checks what kind of frame it is, such as terminal output, parked state, cost update, tool call, skill load, or text delta. It serializes the frame to JSON and returns the complete SSE message as bytes. If it sees an unknown frame type, it raises an error instead of silently sending a misleading event.
+
+**Call relations**: `_events` calls this for every live frame it receives from the context. This function is the final formatting step before the bytes are sent by the streaming HTTP response opened in `stream`.
+
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
+
+
+##### `_uuid_param`  (lines 173–177)
+
+```
+def _uuid_param(request: Request, name: str) -> UUID | None
+```
+
+**Purpose**: Safely reads a UUID from a path parameter. It gives the route handlers a simple way to reject malformed IDs before asking the context for data.
+
+**Data flow**: It takes an HTTP request and a parameter name, looks up that name in the request path parameters, and tries to convert the string into a UUID object. If conversion works, it returns the UUID. If the string is not a valid UUID, it returns `None`.
+
+**Call relations**: Many route handlers call this before looking up conversations, turns, files, or compaction records. By centralizing this check, those handlers can all follow the same pattern: invalid ID becomes a 404 response, valid ID is passed to the appropriate `SurfaceContext` read method.
+
+*Call graph*: called by 8 (compaction_record, conversation_compactions, conversation_transcript, conversation_turns, stream, turn, workspace_file, workspace_files); 1 external calls (UUID).
+
+
+### `extensions/sites/ufo_ext_sites/surface.py`
 
 `domain_logic` · `request handling`
 
-An artifact is a file produced during a conversation and then shared so it can be reused or downloaded later. This file is the bridge between those stored shared-file records and the general object system that users can browse with actions like list, get, status, and delete.
+A hosted site link is not a secret key that grants access forever. It is more like an address on an envelope: it says which workspace, conversation, and site name to look up. This file turns that address into a real browser page, but it still checks permissions every time someone opens it.
 
-The key idea is identity. A shared file is treated as one object per conversation plus filename. If the same conversation shares report.txt three times, that is one artifact with three versions, and the newest version is what users see. If another conversation shares a file with the same name, it is a different artifact. The visible object name combines a short conversation ID prefix with a cleaned-up filename, like a folder label that keeps one conversation’s files grouped together.
+The flow starts by reading and verifying the site token in the URL. If the token is fake or malformed, the visitor gets the same plain 404 response as they would for a missing site. That matters because the page should not reveal whether a private site exists. If the token is valid, the file looks up the site record, checks the visitor’s session cookie, and applies the site’s visibility rule: public means anyone can view, workspace means signed-in workspace members can view, and private means only the creator can view.
 
-When listing artifacts, the file reads visible shared_artifact database rows, groups them by conversation and filename, and summarizes the latest version. Getting an artifact returns its metadata and a link back to the conversation where it was created. Asking for status does more: if the file is small enough, it fetches the stored bytes and writes them into the current workspace under artifacts/<artifact-name>/<filename>, so a later turn can reuse the file. It can also create a temporary download link. Delete removes every stored version and then deletes their bytes from the blob store. Create and update are deliberately refused, because artifacts must come from sharing an actual workspace file.
+The site’s actual files are not served here. Instead, this page creates a frame around the site and embeds it with an iframe from the site ingress origin. That separation is important: the embedded site cannot read the app’s session cookie or take over the surrounding page. If the creator is viewing, the frame also includes a small form for changing visibility. That form uses a CSRF token, which is a signed proof tied to the current browser session, so another website cannot secretly submit the change.
 
 #### Function details
 
-##### `artifact_object_names`  (lines 67–87)
+##### `site_token`  (lines 95–104)
 
 ```
-def artifact_object_names(shares: Iterable[tuple[UUID, str]]) -> dict[tuple[UUID, str], str]
+def site_token(workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Builds stable, human-readable object names for shared files. It keeps files from different conversations separate even when they have the same filename, and adds a short safety suffix only when names would otherwise collide.
+**Purpose**: Creates the permanent signed token that identifies one hosted site. The token names the workspace, conversation, and site name, so the public link can later be resolved without relying on a logged-in user.
 
-**Data flow**: It receives many pairs of conversation ID and filename. It turns each filename into a safe short slug, prefixes it with the first part of the conversation ID, counts duplicate names, and for any collision adds a short hash made from the full identity. It returns a mapping from each original pair to the final object name.
+**Data flow**: It receives a workspace ID, conversation ID, and site name. It turns those values into token claims and asks the surface-token system to sign them for the sites surface. It returns the resulting token string.
 
-**Call relations**: ArtifactObjects._groups calls this after it has gathered shared files from the database. artifact_object_names relies on _slug to make filenames safe for object names and on _identity_digest when two different identities still produce the same visible name.
+**Call relations**: This is the token-making helper used by site_url when a shareable hosted-site link is created. It hands the actual signing work to the shared surface-token utility.
 
-*Call graph*: calls 2 internal fn (_identity_digest, _slug); called by 1 (_groups); 1 external calls (Counter).
-
-
-##### `_slug`  (lines 90–92)
-
-```
-def _slug(filename: str) -> str
-```
-
-**Purpose**: Turns a filename into a short, safe piece of an object name. This keeps messy names with spaces, punctuation, or uppercase letters from becoming awkward or unsafe labels.
-
-**Data flow**: It takes one filename, lowercases it, replaces runs of non-letter-or-number characters with dashes, trims extra dashes, and limits the result to a fixed length. If nothing useful remains, it returns the fallback word artifact.
-
-**Call relations**: artifact_object_names calls _slug while constructing the visible artifact name. It is the small cleanup step that makes names predictable before collision checking happens.
-
-*Call graph*: called by 1 (artifact_object_names).
+*Call graph*: called by 1 (site_url); 1 external calls (mint_surface_token).
 
 
-##### `_identity_digest`  (lines 95–97)
+##### `site_url`  (lines 107–117)
 
 ```
-def _identity_digest(identity: tuple[UUID, str]) -> str
+def site_url(public_base_url: str | None, workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Creates a shortable fingerprint for a specific conversation-and-filename pair. This is used only when two different artifacts would otherwise get the same object name.
+**Purpose**: Builds the full browser URL for opening a hosted site. It refuses to guess if the deployment has no public base URL, because a broken or empty link would mislead callers.
 
-**Data flow**: It receives a conversation ID and filename, joins them into a string, and runs that through SHA-256, a standard one-way hashing method that produces a fixed-looking digest. It returns the full hexadecimal digest so the caller can take the needed prefix.
+**Data flow**: It receives the deployment’s public base URL plus the site’s workspace ID, conversation ID, and name. If the base URL is missing, it raises SiteHostingUnconfigured. Otherwise it creates a site token and appends it to the frame path, returning a complete URL.
 
-**Call relations**: artifact_object_names calls this when duplicate visible names are detected. The digest lets the system keep names unique without exposing a long or complicated full identity.
+**Call relations**: This is the link producer for hosted sites. It calls site_token to create the address part of the link, then formats that token into the public frame route.
 
-*Call graph*: called by 1 (artifact_object_names); 1 external calls (sha256).
-
-
-##### `ArtifactObjects.list`  (lines 115–127)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Shows the artifacts that the current user context is allowed to see. It produces a page of object rows with a name, a short summary, and a couple of searchable fields.
-
-**Data flow**: It receives a tool context and a list query. It asks _groups for the visible artifact groups, turns each group into an ObjectRow using the latest share for fields like filename and subject, then passes the rows and query to object_page so paging and filtering rules are applied. It returns an ObjectPage.
-
-**Call relations**: The object system calls this when someone lists artifact objects. It depends on _groups to do the database reading and grouping, and on _summary to make each row readable.
-
-*Call graph*: calls 2 internal fn (_groups, _summary); 2 external calls (__init__, object_page).
+*Call graph*: calls 1 internal fn (site_token); 1 external calls (__init__).
 
 
-##### `ArtifactObjects.get`  (lines 129–148)
+##### `site_address`  (lines 120–131)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None
+def site_address(token: str) -> SiteAddress | None
 ```
 
-**Purpose**: Returns the main details for one artifact without copying its bytes into the workspace. It tells the caller what the latest shared file is and which conversation created it.
+**Purpose**: Reads a site token and turns it back into the site address it claims to represent. If the token cannot be trusted or does not contain the expected fields, it returns nothing.
 
-**Data flow**: It receives a context and artifact name. It uses _find to locate the matching group of versions. If none exists, it returns None. Otherwise it takes the newest share as the current version, builds an ArtifactSpec from its filename, media type, and subject, sets created and updated times from the oldest and newest versions, and adds a link to the creating conversation.
+**Data flow**: It receives a token string. It verifies the token signature and checks that it belongs to the sites surface. Then it extracts the workspace ID, conversation ID, and site name, converting the IDs into UUID objects. It returns a SiteAddress when all of that succeeds, or None when anything is wrong.
 
-**Call relations**: The object system calls this for object_get-style detail lookup. It hands off name lookup to _find, then packages the result into the standard ObjectDetail shape used by the wider object framework.
+**Call relations**: This is the shared token-decoding step used before the system looks up a site. resolve_workspace uses it to choose the workspace for the request, and _resolve uses it to find the exact site record.
 
-*Call graph*: calls 1 internal fn (_find); 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `ArtifactObjects.status`  (lines 150–192)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Reports live status for an artifact and, when possible, copies the latest file bytes back into the workspace for reuse. It can also create a fresh temporary download link.
-
-**Data flow**: It receives a context, artifact name, and an optional expected generation value. It finds the artifact, fetches the latest blob bytes if the file is below the materialization size limit, verifies in the database that the sharing conversation is still visible to this context, writes the bytes into the sandbox workspace if available, and optionally mints a time-limited download URL. It returns a dictionary containing size, share time, turn ID, version count, download URL, and workspace path.
-
-**Call relations**: The object seam calls status as part of fetching an object when it needs side-effect information. status uses _find to locate the artifact, _unchanged_visible to make sure the object did not disappear from view, the blob store to read bytes, the sandbox to write a workspace copy, and mint_artifact_token to make a download link.
-
-*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 4 external calls (__init__, now, mint_artifact_token, workspace_tx).
+*Call graph*: called by 2 (_resolve, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
 
 
-##### `ArtifactObjects.apply`  (lines 194–203)
+##### `resolve_workspace`  (lines 134–139)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: ArtifactSpec, old: ArtifactSpec | None, *, expected_generation: UUID | None) -> None
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
 ```
 
-**Purpose**: Refuses attempts to create or update artifacts through the object interface. This protects the rule that artifacts only exist after a real workspace file has been shared with share_file.
+**Purpose**: Figures out which workspace a site-link request belongs to before reading any site data. This is needed because public visitors may have no session cookie to identify a workspace.
 
-**Data flow**: It receives the requested artifact name, desired spec, old spec, context, and optional generation check. It does not inspect or change stored data. It immediately raises VerbNotSupported with a message telling the caller to use sharing instead.
+**Data flow**: It reads the site token from the request path. If the token is valid, it returns the workspace ID inside it. If not, it returns the same 404-style response used for missing sites.
 
-**Call relations**: The object framework may call apply for create or update operations, but this artifact store is read/delete only. Its only handoff is to the standard VerbNotSupported error so callers get a clear explanation.
+**Call relations**: The surface framework calls this early while routing the request. It relies on site_address to decode the token and uses _not_found when the token cannot be trusted.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ArtifactObjects.delete`  (lines 205–229)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Deletes an artifact completely, including every version of that conversation-and-filename share. After this, database records are gone and already-created download links no longer work because the stored bytes are deleted too.
-
-**Data flow**: It receives a context, artifact name, and optional expected generation value. It finds all versions for the artifact, opens a workspace database transaction, locks and rechecks that the latest version is still visible, deletes all matching shared_artifact rows for the current workspace, and verifies the expected number of rows was removed. After the database work, it deletes each corresponding blob from storage.
-
-**Call relations**: The object system calls this when a user deletes an artifact. It relies on _find to gather the versions and _unchanged_visible to avoid deleting something that changed or became invisible during the operation. It then uses the database and blob store together so both the records and bytes are removed.
-
-*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 3 external calls (delete, workspace_tx, ws_current).
+*Call graph*: calls 2 internal fn (_not_found, site_address).
 
 
-##### `ArtifactObjects._unchanged_visible`  (lines 231–238)
+##### `frame`  (lines 142–158)
 
 ```
-def _unchanged_visible(self, ctx: ToolContext, latest: sa.Row) -> sa.Select
+async def frame(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds the database check used to confirm that an artifact’s conversation is still visible to the current request. This prevents acting on an artifact after permissions or audience visibility have changed.
+**Purpose**: Renders the page a visitor sees when they open a hosted-site link. It enforces the site’s visibility rule, prepares the embedded site URL, and returns the surrounding HTML frame.
 
-**Data flow**: It receives the current context and the latest shared-artifact row. It creates a database select query that looks for the conversation in the current workspace, owned by the selected agent, matching the artifact’s audience, and included in the caller’s readable subjects. It returns the query for the caller to execute.
+**Data flow**: It receives the surface context and the web request. It resolves the site, identifies the viewer from the session cookie if possible, checks whether that viewer may enter, and returns either a 404, a sign-in page, or the full frame page. If the viewer is the creator, it also creates a CSRF token for the visibility form.
 
-**Call relations**: status and delete use this as a safety check after finding an artifact. The helper does not run the query itself; it prepares the exact visibility test so those operations can run it inside their own transaction.
+**Call relations**: This is the GET route handler for hosted site links. It calls _resolve to find the site, _viewer to identify the browser session, ctx.ingress_url to create the embedded site address, _session_digest to bind a form token to the session, and _frame_page or _page to produce the final HTML.
 
-*Call graph*: called by 2 (delete, status); 3 external calls (select, object_agent_id, ws_current).
-
-
-##### `ArtifactObjects._find`  (lines 240–242)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> tuple[sa.Row, ...] | None
-```
-
-**Purpose**: Looks up one artifact by its object name. It hides the details of grouping and naming so higher-level methods can simply ask for the named artifact.
-
-**Data flow**: It receives a context and a name. It calls _groups to get all visible artifact groups, searches for the group whose generated name matches the requested name, and returns that group’s sorted versions. If no group matches, it returns None.
-
-**Call relations**: get, status, and delete call _find before doing their specific work. _find in turn calls _groups, so every named operation uses the same visibility, grouping, and naming rules as list.
-
-*Call graph*: calls 1 internal fn (_groups); called by 3 (delete, get, status).
+*Call graph*: calls 7 internal fn (ingress_url, _frame_page, _not_found, _page, _resolve, _session_digest, _viewer); 2 external calls (HTMLResponse, mint_surface_token).
 
 
-##### `ArtifactObjects._groups`  (lines 244–285)
+##### `set_visibility`  (lines 161–179)
 
 ```
-async def _groups(self, ctx: ToolContext) -> Sequence[tuple[str, tuple[sa.Row, ...]]]
+async def set_visibility(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Reads visible shared-file records from the database and organizes them into artifact objects. This is the core collector that turns raw share rows into the versioned objects users see.
+**Purpose**: Changes who can view a hosted site, but only when the site creator submits the form from their own valid session. It protects the setting from both unauthorized users and forged form submissions.
 
-**Data flow**: It receives a context. It opens a workspace database transaction, selects shared_artifact rows joined to their turns and conversations, and filters them to the current workspace, selected agent, and readable audiences. It groups rows by conversation ID and filename, asks artifact_object_names to assign each group a visible name, sorts versions newest first inside each group, sorts groups by name, and returns the ordered groups.
+**Data flow**: It receives the surface context and a POST request. It resolves the site, identifies the viewer, rejects anyone who is not the creator, reads the submitted form, checks the CSRF token, validates the requested visibility value, updates the stored site visibility, and redirects back to the frame page.
 
-**Call relations**: list calls _groups to show every artifact, and _find calls it to locate one artifact by name. _groups is where database rows become the higher-level artifact concept used by the rest of this file.
+**Call relations**: This is the POST route handler for the visibility form shown in frame. It uses _resolve and _viewer for permission checks, _csrf_holds for form safety, _sites to write the change, and RedirectResponse to send the creator back to the site page.
 
-*Call graph*: calls 1 internal fn (artifact_object_names); called by 2 (_find, list); 4 external calls (select, workspace_tx, object_agent_id, ws_current).
+*Call graph*: calls 5 internal fn (_csrf_holds, _not_found, _resolve, _sites, _viewer); 4 external calls (PlainTextResponse, RedirectResponse, form, visibility_level).
 
 
-##### `_summary`  (lines 288–294)
+##### `_resolve`  (lines 182–186)
 
 ```
-def _summary(shares: tuple[sa.Row, ...]) -> str
+async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None
 ```
 
-**Purpose**: Creates the short text shown for an artifact in listings. It gives a quick human-readable snapshot of the latest version.
+**Purpose**: Finds the hosted-site database record named by the URL token. It is the common lookup step used by both viewing and visibility-changing requests.
 
-**Data flow**: It receives the sorted versions for one artifact. It looks at the newest share, formats the filename, media type, byte size, share date, and version count if there is more than one version, then trims the text to the maximum summary length. It returns that summary string.
+**Data flow**: It reads the token from the request path and passes it to site_address. If the token is invalid, it returns None. If valid, it opens the hosted-sites store for the current workspace and reads the site by conversation ID and name.
 
-**Call relations**: ArtifactObjects.list calls _summary while building each ObjectRow. The summary is only display text; the actual artifact details still come from the grouped rows and ArtifactSpec.
+**Call relations**: frame calls this before showing a site, and set_visibility calls it before changing a site. It combines site_address with _sites so the rest of the file can work with a HostedSite object instead of raw URL data.
 
-*Call graph*: called by 1 (list).
+*Call graph*: calls 2 internal fn (_sites, site_address); called by 2 (frame, set_visibility).
 
 
-### `core/src/ufo/conversations.py`
+##### `_sites`  (lines 189–190)
 
-`domain_logic` · `request handling`
+```
+def _sites(ctx: SurfaceContext) -> HostedSites
+```
 
-A conversation in this system is not something users create through the object API. It is created by a chat surface, like the place where the conversation happened, and later may be removed by retention rules. This file gives the rest of the object system a safe way to look up those conversations without allowing anyone to edit them.
+**Purpose**: Creates the store object used to read or update hosted-site records for the current workspace. Think of it as choosing the correct filing cabinet before looking up a site.
 
-The main idea is similar to a library reference card: you can search for a record, read its catalog information, and request a copy of the text if you are allowed to see it, but you cannot rewrite the original book. The file defines the small public shape of a conversation, `ConversationSpec`, which says which surface it came from and what audience may see it. `ConversationObjects` then implements the read actions: list visible conversations, get one by id, and produce status information from its transcript.
+**Data flow**: It receives the surface context, reads the workspace ID and active transaction from it, and returns a HostedSites store bound to those values.
 
-Visibility is important. Every database query is limited to the current workspace, the selected agent, and the audiences the caller is allowed to read. When `status` reads the transcript from blob storage, it checks again that the conversation is still visible before writing a text copy into the workspace. This avoids exposing a transcript if permissions changed while the operation was running. Create, update, and delete are all refused with a clear message because conversations belong to surfaces, not this object API.
+**Call relations**: _resolve uses this to read site records, and set_visibility uses it to save a new visibility setting. It delegates the actual storage behavior to the HostedSites class.
+
+*Call graph*: called by 2 (_resolve, set_visibility); 1 external calls (__init__).
+
+
+##### `_viewer`  (lines 193–203)
+
+```
+async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None
+```
+
+**Purpose**: Identifies which workspace member, if any, is visiting with the current browser session. A missing or invalid session simply means there is no authenticated viewer.
+
+**Data flow**: It reads the ufo_session cookie from the request. If the cookie is absent or the bearer token does not verify for this workspace, it returns None. If it verifies to an email address, it finds an already linked member for that email or creates the link, then returns the member ID.
+
+**Call relations**: frame uses this to decide whether the visitor may see a non-public site and whether to show creator controls. set_visibility uses it to ensure only the creator can change visibility. It relies on verify_token for cookie verification and the surface context for member linking.
+
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (frame, set_visibility); 1 external calls (verify_token).
+
+
+##### `_csrf_holds`  (lines 206–208)
+
+```
+def _csrf_holds(request: Request, submitted: str) -> bool
+```
+
+**Purpose**: Checks whether a submitted visibility form token matches the current browser session. This prevents another website from tricking the creator’s browser into changing a site’s visibility.
+
+**Data flow**: It receives the request and the submitted CSRF token. It verifies the token, reads the CSRF claim inside it, compares that claim with a digest of the current session cookie, and returns true only when they match.
+
+**Call relations**: set_visibility calls this after confirming the viewer is the creator but before accepting the form. It uses _session_digest to compare against the session-bound value and the surface-token verifier to reject forged tokens.
+
+*Call graph*: calls 1 internal fn (_session_digest); called by 1 (set_visibility); 1 external calls (verify_surface_token).
+
+
+##### `_session_digest`  (lines 211–215)
+
+```
+def _session_digest(request: Request) -> str
+```
+
+**Purpose**: Creates a safe fingerprint of the current session cookie for CSRF protection. It avoids putting the raw cookie value into the form token.
+
+**Data flow**: It reads the ufo_session cookie from the request, converts it to bytes, hashes it with SHA-256, and returns the hexadecimal hash string. If there is no cookie, it hashes an empty string.
+
+**Call relations**: frame uses this when minting a CSRF token for the creator’s visibility form. _csrf_holds uses it later to check that the submitted token belongs to the same session.
+
+*Call graph*: called by 2 (_csrf_holds, frame); 1 external calls (sha256).
+
+
+##### `_not_found`  (lines 218–219)
+
+```
+def _not_found() -> Response
+```
+
+**Purpose**: Returns the standard missing-site response. The same response is used for unknown, invalid, and unauthorized private-site cases so the page does not reveal what exists.
+
+**Data flow**: It takes no input. It creates a plain-text response with the body 'no such site' and HTTP status 404, then returns it.
+
+**Call relations**: resolve_workspace uses this for bad tokens, frame uses it when a site cannot be shown, and set_visibility uses it when a visibility change is not allowed.
+
+*Call graph*: called by 3 (frame, resolve_workspace, set_visibility); 1 external calls (PlainTextResponse).
+
+
+##### `_page`  (lines 222–227)
+
+```
+def _page(title: str, style: str, body: str) -> str
+```
+
+**Purpose**: Wraps a title, CSS style text, and body HTML into a complete basic HTML document. It keeps the small pages in this file consistent.
+
+**Data flow**: It receives a page title, style block contents, and body HTML. It combines them with the document header, character encoding, viewport setting, and title tag, then returns one HTML string.
+
+**Call relations**: frame uses this for the sign-in-needed page. _frame_page uses it for the full hosted-site frame page.
+
+*Call graph*: called by 2 (_frame_page, frame).
+
+
+##### `_frame_page`  (lines 230–256)
+
+```
+def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str) -> str
+```
+
+**Purpose**: Builds the full HTML shell around the hosted site. It shows the site name, either a visibility badge or creator controls, and the iframe that displays the actual site.
+
+**Data flow**: It receives the site record, the freshly created embedded-site URL if one exists, the current frame path, and a CSRF token if the viewer is the creator. It escapes user-visible values for safe HTML, builds either a visibility selector or badge, builds either an iframe or an unconfigured-hosting message, and returns the complete page.
+
+**Call relations**: frame calls this after all access checks pass. It calls _selector when creator controls should be shown, uses html.escape to avoid unsafe HTML injection, and calls _page to wrap the final markup.
+
+*Call graph*: calls 2 internal fn (_page, _selector); called by 1 (frame); 1 external calls (escape).
+
+
+##### `_selector`  (lines 259–269)
+
+```
+def _selector(current: Visibility, frame_path: str, csrf: str) -> str
+```
+
+**Purpose**: Creates the small form that lets the site creator choose the site’s visibility level. It includes the CSRF token needed for the server to trust the submission.
+
+**Data flow**: It receives the current visibility level, the frame path to post back to, and the CSRF token. It builds select options for private, workspace, and public visibility, marks the current one as selected, escapes the path and token for HTML safety, and returns the form HTML.
+
+**Call relations**: _frame_page calls this only when a valid creator CSRF token is available. The form it creates posts to the visibility route, where set_visibility checks the token and saves the selected level.
+
+*Call graph*: called by 1 (_frame_page); 1 external calls (escape).
+
+
+### Conversation channel surfaces
+Slack, CLI, and web portal ingress handlers authenticate users or providers, translate requests into conversation turns, and stream results back to clients.
+
+### `extensions/slack/ufo_ext_slack/surface.py`
+
+`io_transport` · `Slack install, request handling, live turn updates, and reply delivery`
+
+This file makes Slack behave like one of ufo’s conversation “surfaces,” meaning a place where users can talk to the agent. Without it, Slack events would be untrusted raw web requests, Slack threads would not map to ufo conversations, files would not move in or out, and users would not see replies or progress. The file first proves that an incoming request really came from Slack, using Slack’s signing secret. It then decides whether the agent was addressed: direct messages always count, and channel messages count when they mention the bot or are replies in a thread where the bot is already participating. It resolves the Slack user to a ufo member when possible, gathers a small amount of surrounding Slack context for a new thread, downloads attached files into the workspace, and admits the message as a ufo turn. While the turn runs, background tasks update Slack’s thread status and, for very long turns, post occasional progress messages. When the turn finishes, this file formats the final answer using Slack Block Kit, including question buttons or connection buttons when needed, uploads shared files, and falls back to links for files too large for Slack. It also owns Slack installation: OAuth for the built-in app, or a bring-your-own Slack app path using stored credentials.
 
 #### Function details
 
-##### `ConversationObjects.list`  (lines 54–63)
+##### `_env_signing_secret`  (lines 151–155)
 
 ```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+def _env_signing_secret() -> str | None
 ```
 
-**Purpose**: Shows the caller a paged list of conversations they are allowed to see. Each item includes the conversation id as its name, a short human-readable summary, and the surface it came from.
+**Purpose**: Reads the deploy-wide Slack signing secret from the process environment. This is the fallback secret used when a workspace has not stored its own Slack signing secret.
 
-**Data flow**: It receives a tool context, which includes the caller's readable audiences, and a list query, which describes paging or filtering needs. It asks `_visible_rows` for matching database rows, turns each row into a lightweight object row, and passes those rows through the shared paging helper. The result is an `ObjectPage` ready for the object API to return.
+**Data flow**: It takes no input, looks up the configured environment variable, treats an empty value as missing, and returns either the secret text or None.
 
-**Call relations**: This is the public list action for the conversation object kind. It relies on `_visible_rows` to do the permission-aware database lookup, then hands the finished rows to `object_page` so conversation listing behaves like other object listings in the system.
+**Call relations**: Workspace-specific secret lookup helpers call this when their own credential slot is unset, so Slack request verification can still work for OAuth-installed workspaces.
 
-*Call graph*: calls 1 internal fn (_visible_rows); 2 external calls (__init__, object_page).
-
-
-##### `ConversationObjects.get`  (lines 65–76)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None
-```
-
-**Purpose**: Fetches the basic details for one conversation, if the caller is allowed to see it. It returns the surface, audience, and timestamps, but not the transcript text.
-
-**Data flow**: It receives the caller context and a name, where the name should be the conversation's UUID text. It uses `_find` to turn that name into a visible database row. If no row is found, it returns `None`; otherwise it wraps the row's surface and audience in `ConversationSpec` and returns an `ObjectDetail` with creation and update times.
-
-**Call relations**: This is the public get action. It delegates all lookup and visibility checks to `_find`, then formats the answer in the standard object-detail shape used by the broader object system.
-
-*Call graph*: calls 1 internal fn (_find); 2 external calls (__init__, __init__).
+*Call graph*: called by 2 (_auth_signing_secret, _ctx_signing_secret).
 
 
-##### `ConversationObjects.status`  (lines 78–96)
+##### `_ctx_signing_secret`  (lines 158–165)
 
 ```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
+async def _ctx_signing_secret(ctx: SurfaceContext) -> str | None
 ```
 
-**Purpose**: Reports transcript-related status for a conversation and, when the transcript is small enough, writes a plain text copy into the workspace. This gives callers a safe way to inspect the visible exchange without changing the conversation.
+**Purpose**: Finds the signing secret to use after a request has already been tied to a workspace. It prefers the workspace’s private stored secret and falls back to the deploy-wide secret.
 
-**Data flow**: It receives the caller context, a conversation name, and an expected generation value that is accepted for API consistency but not used here. It finds the visible conversation, reads and formats its transcript through `_exchange`, checks that the same conversation is still visible through `_unchanged_visible`, and then counts the messages and bytes. If there is text and it is under the materialization size limit, it writes a `.txt` transcript file into the workspace and returns the message count, byte size, and file path; if the conversation is missing it returns `None`.
+**Data flow**: It receives a surface context, asks it for the Slack signing-secret credential, and if that slot is unset returns the environment secret instead.
 
-**Call relations**: This is the public status action. It first calls `_find` for the row, then `_exchange` to read the transcript from blob storage, and finally `_unchanged_visible` as a last permission check before writing anything. If that final check fails, it raises `UnknownObject` so the caller does not receive data they should no longer see.
+**Call relations**: The event and interactive routes use this before accepting Slack traffic, so every bound request is checked against the right workspace’s secret.
 
-*Call graph*: calls 3 internal fn (_exchange, _find, _unchanged_visible); 1 external calls (__init__).
-
-
-##### `ConversationObjects.apply`  (lines 98–107)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: ConversationSpec, old: ConversationSpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Rejects attempts to create or change a conversation through the object API. Conversations are made by surfaces, so editing them here would break the ownership rules of the system.
-
-**Data flow**: It receives the usual apply inputs: context, name, desired spec, old spec, and expected generation. It does not read or write any conversation data. It immediately raises `VerbNotSupported` with an explanation that conversations are surface-made.
-
-**Call relations**: This is the mutation path the object system would call for create or update requests. Instead of handing work to storage, it stops the flow right away so all conversation changes must come from the surface layer that owns them.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (credential, _env_signing_secret); called by 2 (ingest, interactive).
 
 
-##### `ConversationObjects.delete`  (lines 109–116)
+##### `_auth_signing_secret`  (lines 168–176)
 
 ```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+async def _auth_signing_secret(auth: SurfaceAuth, workspace_id: UUID) -> str | None
 ```
 
-**Purpose**: Rejects attempts to delete a conversation through the object API. Removal is controlled elsewhere, such as by retention policy, not by callers treating conversations as editable objects.
+**Purpose**: Finds the signing secret during the earlier phase where the system is still figuring out which workspace a Slack request belongs to. It safely returns None when the workspace is unknown.
 
-**Data flow**: It receives the caller context, conversation name, and expected generation. It performs no lookup and makes no database or blob changes. It immediately raises `VerbNotSupported` with the shared explanation.
+**Data flow**: It receives a shared authentication helper and a workspace id, tries to read that workspace’s Slack signing-secret credential, falls back to the environment secret, and returns None for unknown workspaces.
 
-**Call relations**: This is the delete path the object system would call for removal requests. It deliberately ends the request before any lower-level storage code is reached, preserving the rule that conversations are not authored or removed through this object kind.
+**Call relations**: Workspace resolution uses this after Slack’s team id points to a possible workspace, before the core system fully binds the request to that workspace.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ConversationObjects._exchange`  (lines 118–138)
-
-```
-async def _exchange(self, ctx: ToolContext, conversation_id: UUID) -> tuple[str, ...]
-```
-
-**Purpose**: Reads a conversation transcript and turns it into simple text lines like `role: message`. It is used when `status` needs a human-readable copy of the exchange.
-
-**Data flow**: It receives the caller context and a conversation id. It builds the transcript blob key, reads the blob, and decodes it into transcript messages. If the blob is missing, it returns an empty exchange; if the blob exists but cannot be decoded, it raises an error. For each message, it keeps plain string content or extracts text blocks from richer message content, then returns the collected lines as a tuple.
-
-**Call relations**: This helper is called by `ConversationObjects.status` after the database row has been found. It hands back clean text lines, leaving `status` to decide whether those lines should be written into the workspace and summarized for the caller.
-
-*Call graph*: called by 1 (status); 2 external calls (decode, transcript_key).
+*Call graph*: calls 2 internal fn (credential, _env_signing_secret); called by 1 (resolve_workspace).
 
 
-##### `ConversationObjects._unchanged_visible`  (lines 140–153)
+##### `slack_client_id`  (lines 179–183)
 
 ```
-async def _unchanged_visible(self, ctx: ToolContext, row: sa.Row) -> bool
+def slack_client_id() -> str
 ```
 
-**Purpose**: Checks that a conversation is still visible to the caller after its transcript has been read. This is a safety check against permission or audience changes during the status operation.
+**Purpose**: Returns the Slack OAuth client id for the deploy’s Slack app. It fails loudly if the deploy was not configured for OAuth installs.
 
-**Data flow**: It receives the caller context and the database row found earlier. It opens a workspace database transaction and asks whether a row still exists in the visible conversation query with the same id and audience. It returns `true` if the row is still visible and unchanged in the relevant way, otherwise `false`.
+**Data flow**: It reads one environment variable and either returns its value or raises a runtime error explaining what is missing.
 
-**Call relations**: This helper is called by `ConversationObjects.status` just before any transcript text is materialized into the workspace. It uses `_visible` to apply the same workspace, agent, and audience limits as the original lookup, giving `status` a final yes-or-no answer.
+**Call relations**: The OAuth code-exchange step calls this when presenting the app’s identity to Slack.
 
-*Call graph*: calls 1 internal fn (_visible); called by 1 (status); 3 external calls (exists, select, workspace_tx).
-
-
-##### `ConversationObjects._find`  (lines 155–165)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> sa.Row | None
-```
-
-**Purpose**: Looks up one conversation by name while enforcing visibility rules. The name must be a valid UUID, which is the standard text form used for conversation ids.
-
-**Data flow**: It receives the caller context and a name string. It first tries to parse the name as a UUID; if that fails, it returns `None`. If parsing succeeds, it opens a workspace database transaction, runs the visible-conversations query filtered to that id, and returns the one matching row or `None` if there is no visible match.
-
-**Call relations**: `get` and `status` both call this helper at the start of their work. It centralizes the rule that callers can only address conversations in the current workspace, for the selected agent, and within their readable audiences.
-
-*Call graph*: calls 1 internal fn (_visible); called by 2 (get, status); 2 external calls (workspace_tx, UUID).
+*Call graph*: called by 1 (slack_oauth_exchange).
 
 
-##### `ConversationObjects._visible_rows`  (lines 167–170)
+##### `slack_client_secret`  (lines 186–190)
 
 ```
-async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]
+def slack_client_secret() -> str
 ```
 
-**Purpose**: Fetches all conversation rows the caller is allowed to list. It is the database-reading helper behind the public list action.
+**Purpose**: Returns the Slack OAuth client secret for the deploy’s Slack app. This secret is needed to exchange an install code for a bot token.
 
-**Data flow**: It receives the caller context, opens a workspace database transaction, and runs the shared `_visible` query. It gathers all returned rows and converts them to an immutable tuple before returning them.
+**Data flow**: It reads one environment variable and either returns its value or raises a runtime error if it is absent.
 
-**Call relations**: `ConversationObjects.list` calls this helper before turning rows into list entries. `_visible_rows` depends on `_visible` so listing uses the same permission and workspace rules as individual lookup.
+**Call relations**: The OAuth exchange helper uses this together with the client id when Slack redirects back after an owner clicks install.
 
-*Call graph*: calls 1 internal fn (_visible); called by 1 (list); 1 external calls (workspace_tx).
+*Call graph*: called by 1 (slack_oauth_exchange).
 
 
-##### `ConversationObjects._visible`  (lines 172–183)
+##### `slack_oauth_redirect_uri`  (lines 193–195)
 
 ```
-def _visible(self, ctx: ToolContext) -> sa.Select
+def slack_oauth_redirect_uri(public_base_url: str) -> str
 ```
 
-**Purpose**: Builds the database query that defines which conversations are visible to the current caller. This is the central permission filter for this file.
+**Purpose**: Builds the exact callback URL Slack should redirect to after an OAuth install. It keeps the URL consistent between the install link and the exchange step.
 
-**Data flow**: It reads the current workspace id, the selected object agent id, and the caller's readable audiences from the context. It builds a SQL query selecting the conversation id, surface, audience, and timestamps, limited to matching workspace, matching agent, and allowed audiences. It returns the query object; it does not run the query itself.
+**Data flow**: It receives the public base URL of the deploy, trims any trailing slash, appends the Slack surface OAuth path, and returns the full URL.
 
-**Call relations**: _find, `_visible_rows`, and `_unchanged_visible` all call this helper before touching conversation rows. Because they all share this one query builder, list, get, and status apply the same visibility rules instead of each inventing their own version.
+**Call relations**: The OAuth callback uses this when exchanging Slack’s temporary code, and install-link builders can use the same shape when sending a user to Slack.
 
-*Call graph*: called by 3 (_find, _unchanged_visible, _visible_rows); 3 external calls (select, object_agent_id, ws_current).
+*Call graph*: called by 1 (oauth_callback).
 
 
-### `core/src/ufo/credential_kind.py`
+##### `slack_authorize_url`  (lines 198–210)
 
-`domain_logic` · `request handling`
+```
+def slack_authorize_url(client_id: str, redirect_uri: str, state: str) -> str
+```
 
-This file is the public “object view” of BYOK credentials, meaning “bring your own key” or secret values that a workspace supplies for an extension. An extension declares that it needs a credential slot, such as an API key. This file turns those declarations into readable workspace objects: each slot appears in lists and detail views whether or not a secret has been stored for it.
+**Purpose**: Creates the “Add to Slack” URL that an owner clicks to install the deploy’s Slack app. The URL includes the permissions the bot needs and a sealed state value tying the install to the right workspace.
 
-The important safety rule is that the secret itself is never read or returned here. Think of it like a locker label on a wall: you can see that locker number 12 exists and whether it is occupied, but you cannot see what is inside. The database row only proves that a value is stored and records timestamps. If there is no row, the slot is still listed, but marked empty, because the slot comes from the extension manifest rather than from the database.
+**Data flow**: It receives a client id, redirect URL, and state token, URL-encodes them with the requested Slack scopes, and returns a Slack authorization URL.
 
-`CredentialObjects` provides the object operations. Listing builds stable object names for slots and marks them filled or empty. Getting one object returns the slot declaration, description, extension name, possible host information, and timestamps if filled. Status returns a small filled/empty answer and, when possible, the resolved host. Applying changes is blocked because filling or rotating a secret must use `request_credentials`, which is a private handoff. Deleting is allowed only for workspace admins and clears the stored value while leaving the declared slot visible.
+**Call relations**: This is the start of the OAuth install path; Slack later sends the browser back to the callback with the same state.
+
+*Call graph*: 1 external calls (urlencode).
+
+
+##### `SlackIdentityError.__init__`  (lines 214–216)
+
+```
+def __init__(self, error: str)
+```
+
+**Purpose**: Creates an error that carries Slack identity-proving failures in a simple, readable form. It preserves Slack’s or this file’s explanation on the error object.
+
+**Data flow**: It receives an error message, stores it on the instance, and initializes the normal runtime error text with the same message.
+
+**Call relations**: Identity proof and OAuth exchange raise this when Slack responses are bad, malformed, or do not identify a valid team and bot user.
+
+*Call graph*: called by 2 (_prove, slack_oauth_exchange).
+
+
+##### `identity_blob_key`  (lines 230–231)
+
+```
+def identity_blob_key(workspace_id: UUID) -> str
+```
+
+**Purpose**: Builds the storage path for a workspace’s Slack identity record. The identity record says which Slack team and bot user belong to the stored bot token.
+
+**Data flow**: It receives a workspace id and returns a namespaced blob-store key under that workspace.
+
+**Call relations**: Identity readers, identity writers, and the OAuth callback all use this so they agree on where the Slack identity is stored.
+
+*Call graph*: called by 3 (resolve, oauth_callback, read_identity).
+
+
+##### `bot_token_fingerprint`  (lines 234–235)
+
+```
+def bot_token_fingerprint(bot_token: str) -> str
+```
+
+**Purpose**: Creates a non-reversible fingerprint of a Slack bot token. This lets the code tell whether a stored identity belongs to the current token without storing the token inside the identity record.
+
+**Data flow**: It receives the bot token string, hashes it with SHA-256, and returns the hex digest.
+
+**Call relations**: Identity reading, OAuth install, and bring-your-own-app proof use this to reject stale identity records after a token changes.
+
+*Call graph*: called by 3 (_prove, oauth_callback, read_identity); 1 external calls (sha256).
+
+
+##### `read_identity`  (lines 238–252)
+
+```
+async def read_identity(blob: BlobStore, workspace_id: UUID, bot_token: str) -> SlackIdentity | None
+```
+
+**Purpose**: Reads the stored Slack identity for a workspace only if it still matches the current bot token. This prevents old team or bot ids from being trusted after reinstall.
+
+**Data flow**: It receives a blob store, workspace id, and bot token; looks for the identity blob; parses it; compares its token fingerprint; and returns a SlackIdentity or None.
+
+**Call relations**: Both the normal request path and the identity resolver call this before deciding whether they need to prove or rewrite identity.
+
+*Call graph*: calls 4 internal fn (exists, get, bot_token_fingerprint, identity_blob_key); called by 3 (resolve, _identity, resolve_self_user_id).
+
+
+##### `resolve_self_user_id`  (lines 255–261)
+
+```
+async def resolve_self_user_id(ctx: SurfaceIdentityContext) -> str | None
+```
+
+**Purpose**: Returns the Slack bot user id for this workspace, if the Slack surface is installed and its identity record is valid. Other parts of the system can use this to recognize the bot itself.
+
+**Data flow**: It reads the Slack bot token from the identity context, loads the matching identity from blob storage, and returns the bot user id or None.
+
+**Call relations**: This is a small identity lookup hook for the wider surface system; it depends on the same stored identity used by inbound Slack events.
+
+*Call graph*: calls 1 internal fn (read_identity); 1 external calls (credential).
+
+
+##### `_identity`  (lines 264–269)
+
+```
+async def _identity(ctx: SurfaceContext) -> SlackIdentity | None
+```
+
+**Purpose**: Loads the current workspace’s Slack identity during request handling. If the bot token is missing or the identity record is stale, it returns None.
+
+**Data flow**: It reads the bot token credential from the surface context, then asks read_identity to validate and parse the stored identity.
+
+**Call relations**: The event and interactive routes call this before trusting Slack team ids or bot-user ids in incoming payloads.
+
+*Call graph*: calls 2 internal fn (credential, read_identity); called by 2 (ingest, interactive).
+
+
+##### `SlackIdentityResolver.resolve`  (lines 283–291)
+
+```
+async def resolve(self) -> SlackIdentity
+```
+
+**Purpose**: Gets or creates the Slack identity record for a bring-your-own Slack app. It avoids another Slack API call when a valid identity is already stored.
+
+**Data flow**: It checks blob storage for a matching identity; if absent, it proves the token with Slack, writes the resulting identity blob, and returns it.
+
+**Call relations**: The background identity-proof task and setup flows use this when a workspace supplied its own bot token instead of going through OAuth.
+
+*Call graph*: calls 3 internal fn (_prove, identity_blob_key, read_identity).
+
+
+##### `SlackIdentityResolver._prove`  (lines 293–318)
+
+```
+async def _prove(self) -> SlackIdentity
+```
+
+**Purpose**: Asks Slack to prove what team and bot user a pasted bot token belongs to. It turns Slack’s auth.test response into a validated identity record.
+
+**Data flow**: It sends the bot token to Slack, checks for a successful response, validates the team id and bot user id shapes, fingerprints the token, and returns a SlackIdentity.
+
+**Call relations**: SlackIdentityResolver.resolve calls this only when stored identity is missing or stale; failures become SlackIdentityError so setup can explain them.
+
+*Call graph*: calls 2 internal fn (__init__, bot_token_fingerprint); called by 1 (resolve); 3 external calls (__init__, AsyncClient, match).
+
+
+##### `_prove_identity_in_background`  (lines 324–337)
+
+```
+def _prove_identity_in_background(ctx: SurfaceContext) -> None
+```
+
+**Purpose**: Starts a one-per-workspace background job to prove Slack identity without blocking the current request. This helps a manifest-installed workspace recover when credentials were filled but identity was never derived.
+
+**Data flow**: It receives a surface context, checks whether a task is already running for that workspace, creates one if not, and registers cleanup when it finishes.
+
+**Call relations**: The event and interactive routes use this when they cannot yet load identity, returning a retryable response while proof runs.
+
+*Call graph*: calls 1 internal fn (_run_identity_proof); called by 2 (ingest, interactive); 1 external calls (create_task).
+
+
+##### `_prove_identity_in_background._untrack`  (lines 333–335)
+
+```
+def _untrack(done: asyncio.Task[None]) -> None
+```
+
+**Purpose**: Removes a finished background identity-proof task from the in-process tracking table. This lets a future attempt run if proof failed or credentials changed.
+
+**Data flow**: It receives the completed task, compares it with the task still recorded for the workspace, and deletes that record only if it is the same task.
+
+**Call relations**: It is attached as the done callback by _prove_identity_in_background, so task bookkeeping is cleaned automatically.
+
+
+##### `_run_identity_proof`  (lines 340–347)
+
+```
+async def _run_identity_proof(ctx: SurfaceContext) -> None
+```
+
+**Purpose**: Performs the actual background identity proof for a workspace. It logs failures instead of letting them crash request handling.
+
+**Data flow**: It reads the bot token credential, creates a SlackIdentityResolver, asks it to resolve identity, and logs either known identity errors or unexpected exceptions.
+
+**Call relations**: _prove_identity_in_background launches this task when inbound Slack traffic arrives before the identity record is ready.
+
+*Call graph*: calls 1 internal fn (credential); called by 1 (_prove_identity_in_background); 1 external calls (__init__).
+
+
+##### `url_verified_blob_key`  (lines 350–356)
+
+```
+def url_verified_blob_key(workspace_id: UUID) -> str
+```
+
+**Purpose**: Builds the storage path for the marker saying Slack successfully reached this workspace’s request URL with a valid signature. That marker helps setup know the Slack app is connected.
+
+**Data flow**: It receives a workspace id and returns the blob-store key for the URL verification marker.
+
+**Call relations**: _mark_url_verified uses this whenever a verified Slack request should update the setup signal.
+
+*Call graph*: called by 1 (_mark_url_verified).
+
+
+##### `signing_secret_fingerprint`  (lines 359–362)
+
+```
+def signing_secret_fingerprint(signing_secret: str) -> str
+```
+
+**Purpose**: Creates a non-reversible fingerprint of a Slack signing secret. This lets setup tell whether a verification marker matches the current secret after rotation.
+
+**Data flow**: It receives the signing secret, hashes it with SHA-256, and returns the hex digest.
+
+**Call relations**: _mark_url_verified stores this fingerprint with the verification marker rather than storing the secret itself.
+
+*Call graph*: called by 1 (_mark_url_verified); 1 external calls (sha256).
+
+
+##### `slack_oauth_exchange`  (lines 376–403)
+
+```
+async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall
+```
+
+**Purpose**: Trades Slack’s temporary OAuth code for the workspace’s bot token and identity details. It rejects malformed or unsuccessful Slack responses before anything is stored.
+
+**Data flow**: It receives an authorization code and redirect URI, sends them with the deploy’s client credentials to Slack, validates the access token, team id, and bot user id, and returns a SlackInstall.
+
+**Call relations**: oauth_callback calls this after validating the sealed install state; the result is then written into credentials, installation bindings, and identity storage.
+
+*Call graph*: calls 4 internal fn (__init__, _slack_ok, slack_client_id, slack_client_secret); called by 1 (oauth_callback); 3 external calls (__init__, AsyncClient, match).
+
+
+##### `SlackConversationSearch.run`  (lines 483–497)
+
+```
+async def run(self) -> SlackConversationMatches
+```
+
+**Purpose**: Searches Slack conversations visible to the bot and returns the ones matching a text query. It includes DMs by resolving who is in them, not just channel names.
+
+**Data flow**: It trims and lowercases the query, lists conversations, resolves people for DMs and group DMs, builds normalized conversation records, filters by searchable text, and returns matches plus a truncation flag.
+
+**Call relations**: This is the public entry of the conversation-search helper; its private helpers do the listing, pagination, people lookup, and record shaping.
+
+*Call graph*: calls 3 internal fn (_conversation, _list, _people); 2 external calls (__init__, AsyncClient).
+
+
+##### `SlackConversationSearch._list`  (lines 499–518)
+
+```
+async def _list(self, client: httpx.AsyncClient) -> tuple[list[object], bool]
+```
+
+**Purpose**: Fetches pages of Slack conversations up to a fixed limit. The fixed limit prevents a large or strange workspace from making the search run forever.
+
+**Data flow**: It repeatedly calls Slack conversations.list with the current cursor, adds any returned channels to a list, follows the next cursor, and reports whether more pages were left unseen.
+
+**Call relations**: run calls this first, then uses the listed raw conversations for people resolution and filtering.
+
+*Call graph*: calls 3 internal fn (_next_cursor, _params, _slack_ok); called by 1 (run); 1 external calls (get).
+
+
+##### `SlackConversationSearch._params`  (lines 520–528)
+
+```
+def _params(self, cursor: str) -> dict[str, str]
+```
+
+**Purpose**: Builds the query parameters for one Slack conversations.list request. It asks Slack for active public channels, private channels, group DMs, and DMs.
+
+**Data flow**: It receives a cursor string, creates the type, archived, and page-size parameters, adds the cursor when present, and returns the dictionary.
+
+**Call relations**: _list calls this for each page so every Slack list request uses the same bounds and conversation types.
+
+*Call graph*: called by 1 (_list).
+
+
+##### `SlackConversationSearch._next_cursor`  (lines 530–533)
+
+```
+def _next_cursor(self, payload: dict[str, object]) -> str
+```
+
+**Purpose**: Extracts the pagination cursor from a Slack response. If Slack does not provide a usable cursor, it treats pagination as finished.
+
+**Data flow**: It receives a Slack payload dictionary, looks inside response metadata for next_cursor, and returns that string or an empty string.
+
+**Call relations**: _list uses this after each page to decide whether to fetch another page.
+
+*Call graph*: called by 1 (_list).
+
+
+##### `SlackConversationSearch._people`  (lines 535–563)
+
+```
+async def _people(self, client: httpx.AsyncClient, listed: list[object]) -> tuple[dict[str, tuple[str, ...]], bool]
+```
+
+**Purpose**: Builds display labels for the people in DMs and group DMs, excluding the bot. This makes searches like “Alice” work even when the Slack conversation has no channel name.
+
+**Data flow**: It scans listed conversations, collects member ids for a bounded number of DMs, fetches each unique user once, converts users to labels, and returns labels by conversation plus a capped flag.
+
+**Call relations**: run uses these labels when constructing searchable SlackConversation records.
+
+*Call graph*: calls 4 internal fn (_kind, _label, _members, _slack_user); called by 1 (run).
+
+
+##### `SlackConversationSearch._kind`  (lines 565–572)
+
+```
+def _kind(self, raw: dict[str, object]) -> SlackConversationKind
+```
+
+**Purpose**: Classifies a raw Slack conversation as a public channel, private channel, group DM, or one-to-one DM. This gives the rest of the search code one simple category value.
+
+**Data flow**: It receives a raw Slack conversation dictionary, checks Slack’s boolean flags, and returns the matching kind string.
+
+**Call relations**: People resolution, member lookup, and conversation shaping all call this to make consistent decisions about Slack conversation types.
+
+*Call graph*: called by 3 (_conversation, _members, _people).
+
+
+##### `SlackConversationSearch._members`  (lines 574–588)
+
+```
+async def _members(self, client: httpx.AsyncClient, raw: dict[str, object], convo_id: str) -> tuple[str, ...]
+```
+
+**Purpose**: Finds the Slack user ids inside one DM or group DM. One-to-one DMs already carry the user id; group DMs need a Slack API call.
+
+**Data flow**: It receives an HTTP client, raw conversation, and conversation id; for a DM it reads the embedded user field, and for a group DM it asks Slack for members and returns valid member ids.
+
+**Call relations**: _people calls this while building the map from conversations to human-readable people labels.
+
+*Call graph*: calls 2 internal fn (_kind, _slack_ok); called by 1 (_people); 1 external calls (get).
+
+
+##### `SlackConversationSearch._label`  (lines 590–595)
+
+```
+def _label(self, user: SlackUser | None, user_id: str) -> str
+```
+
+**Purpose**: Turns a Slack user lookup into a readable label for search results. It prefers useful human information but falls back to the raw Slack id.
+
+**Data flow**: It receives a SlackUser or None and a user id, then returns “name (email)”, name, email, or the id depending on what is available.
+
+**Call relations**: _people uses this after user lookups so DMs can be matched and displayed by recognizable people.
+
+*Call graph*: called by 1 (_people).
+
+
+##### `SlackConversationSearch._conversation`  (lines 597–614)
+
+```
+def _conversation(self, raw: object, people: dict[str, tuple[str, ...]]) -> SlackConversation | None
+```
+
+**Purpose**: Converts one raw Slack conversation object into the smaller, safer record used by search. Invalid or incomplete raw objects are skipped.
+
+**Data flow**: It checks that the raw value is a dictionary with a string id, extracts name, purpose, topic, kind, membership, and people labels, and returns a SlackConversation.
+
+**Call relations**: run calls this for each listed raw conversation before checking whether it matches the user’s query.
+
+*Call graph*: calls 2 internal fn (_kind, _nested_value); called by 1 (run); 1 external calls (__init__).
+
+
+##### `SlackConversationSearch._nested_value`  (lines 616–618)
+
+```
+def _nested_value(self, field: object) -> str
+```
+
+**Purpose**: Safely reads Slack’s nested purpose or topic text field. Missing or malformed fields become an empty string.
+
+**Data flow**: It receives a possible nested object, reads its value field when it is a dictionary, and returns that value only if it is a string.
+
+**Call relations**: _conversation uses this to normalize Slack’s purpose and topic shapes.
+
+*Call graph*: called by 1 (_conversation); 1 external calls (get).
+
+
+##### `verify_slack_signature`  (lines 753–768)
+
+```
+def verify_slack_signature(headers: Mapping[str, str], body: bytes, signing_secret: str, now: float | None=None) -> None
+```
+
+**Purpose**: Proves that a request body was signed by Slack recently using the expected signing secret. This blocks forged requests and old replayed requests.
+
+**Data flow**: It receives headers, raw body bytes, a signing secret, and optional current time; checks timestamp and signature headers; rebuilds Slack’s HMAC signature; and raises an error if anything does not match.
+
+**Call relations**: Workspace resolution, event ingest, and interactivity ingest call this before trusting Slack payloads.
+
+*Call graph*: called by 3 (ingest, interactive, resolve_workspace); 4 external calls (__init__, compare_digest, new, time).
+
+
+##### `_slack_request_body`  (lines 775–794)
+
+```
+async def _slack_request_body(request: Request) -> bytes
+```
+
+**Purpose**: Reads and caches the raw HTTP request body while enforcing a maximum size. The raw bytes are needed for Slack signature verification.
+
+**Data flow**: It receives a request, returns a cached body if already read, otherwise streams chunks, counts bytes, stores the body in request state, and raises if the body is too large.
+
+**Call relations**: All Slack routes and workspace resolution use this so the same raw bytes can be verified and later parsed without rereading the stream.
+
+*Call graph*: called by 3 (ingest, interactive, resolve_workspace); 1 external calls (stream).
+
+
+##### `url_verification_challenge`  (lines 797–806)
+
+```
+def url_verification_challenge(body: bytes) -> str | None
+```
+
+**Purpose**: Detects Slack’s URL verification handshake and extracts the challenge text Slack expects back. This is how Slack confirms the endpoint exists.
+
+**Data flow**: It receives raw body bytes, tries to parse JSON, checks for type url_verification, and returns the challenge string, an empty string, or None for normal events.
+
+**Call relations**: Workspace resolution and ingest use this to answer Slack setup probes without admitting any user message.
+
+*Call graph*: called by 2 (ingest, resolve_workspace); 1 external calls (loads).
+
+
+##### `slack_team_hint`  (lines 809–826)
+
+```
+def slack_team_hint(body: bytes) -> str | None
+```
+
+**Purpose**: Pulls a Slack team id out of an untrusted event or interactive payload before the workspace is bound. It only returns ids that match Slack’s expected team-id shape.
+
+**Data flow**: It receives raw body bytes, parses either JSON or form-encoded interactive payload JSON, looks for team_id or team.id, validates it, and returns it or None.
+
+**Call relations**: resolve_workspace uses this hint to choose which stored Slack installation might own the request, then verifies the signature before trusting it.
+
+*Call graph*: called by 1 (resolve_workspace); 3 external calls (loads, fullmatch, parse_qs).
+
+
+##### `slack_installation_id`  (lines 829–830)
+
+```
+def slack_installation_id(team_id: str) -> str
+```
+
+**Purpose**: Creates the stable installation key used to bind a Slack team to a ufo workspace. It names installations by Slack team id.
+
+**Data flow**: It receives a Slack team id and returns a string prefixed with team:.
+
+**Call relations**: Workspace resolution looks up this key, and OAuth installation writes the same key after a successful install.
+
+*Call graph*: called by 2 (oauth_callback, resolve_workspace).
+
+
+##### `resolve_workspace`  (lines 833–871)
+
+```
+async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | Response | None
+```
+
+**Purpose**: Decides which ufo workspace a Slack request belongs to before normal request handling begins. It handles OAuth callbacks, Slack setup challenges, and signed Slack POSTs.
+
+**Data flow**: It receives a request and shared auth helper; for GET callbacks it opens sealed state, for URL verification it may answer directly, and for POSTs it extracts a team hint, finds the installation, verifies the signature, and returns a workspace id or rejection-like result.
+
+**Call relations**: This is the pre-routing guard for Slack routes, ensuring the core system binds a tenant only after the right trust check.
+
+*Call graph*: calls 9 internal fn (open_credential_authorization, workspace, _auth_signing_secret, _is_install_state, _slack_request_body, slack_installation_id, slack_team_hint, url_verification_challenge, verify_slack_signature); 1 external calls (JSONResponse).
+
+
+##### `_is_install_state`  (lines 874–877)
+
+```
+def _is_install_state(claims: CredentialRequestState) -> bool
+```
+
+**Purpose**: Checks whether a sealed credential state belongs to Slack OAuth installation. This prevents a token or state for another purpose from being accepted on the Slack callback.
+
+**Data flow**: It receives credential-state claims and returns true only when the payload marker and requested slot match Slack’s bot-token install.
+
+**Call relations**: Both resolve_workspace and oauth_callback use this while interpreting browser callback state.
+
+*Call graph*: called by 2 (oauth_callback, resolve_workspace).
+
+
+##### `slack_thread_key`  (lines 880–885)
+
+```
+def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str
+```
+
+**Purpose**: Builds the ufo conversation key for a Slack message. DMs are keyed by channel, while channel conversations are keyed by the thread root.
+
+**Data flow**: It receives a channel id, root timestamp, and DM flag, then returns either the channel id or channel:root_ts.
+
+**Call relations**: _to_inbound uses this so every Slack reply in the same thread maps to the same ufo conversation.
+
+*Call graph*: called by 1 (_to_inbound).
+
+
+##### `slack_message_addressed`  (lines 888–895)
+
+```
+def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm: bool) -> bool
+```
+
+**Purpose**: Decides whether a Slack message directly addresses the agent. Direct messages always do, and channel messages do when Slack marks an app mention or the text contains the bot mention.
+
+**Data flow**: It receives the event, bot user id, and DM flag, checks event type and text, and returns a boolean.
+
+**Call relations**: _to_inbound uses this as the first gate before admitting channel traffic; unaddressed messages only enter if the bot is already participating in that thread.
+
+*Call graph*: called by 1 (_to_inbound).
+
+
+##### `slack_reply_body`  (lines 898–948)
+
+```
+def slack_reply_body(channel: str, thread_ts: str | None, text: str, metadata: str | None, blocks: bool=True, actions: list[dict[str, object]] | None=None, sections: bool=False) -> bytes
+```
+
+**Purpose**: Builds the JSON body for a Slack chat.postMessage call. It tries to use Slack blocks for rich formatting and safely falls back to text-only when the message would exceed Slack limits.
+
+**Data flow**: It receives channel, optional thread timestamp, text, optional metadata, and optional action blocks; splits long text into bounded blocks, appends actions and metadata when possible, encodes JSON, and returns bytes or raises if too large.
+
+**Call relations**: Final reply posting and long-running progress posts use this so Slack messages are consistently sized and formatted.
+
+*Call graph*: called by 2 (_post, post); 1 external calls (dumps).
+
+
+##### `_mrkdwn_section`  (lines 951–952)
+
+```
+def _mrkdwn_section(text: str) -> dict[str, object]
+```
+
+**Purpose**: Creates a Slack section block containing Markdown-style text. It trims the text to Slack’s section limit.
+
+**Data flow**: It receives text and returns a small dictionary shaped like a Slack Block Kit section.
+
+**Call relations**: slack_ask_blocks uses this while rendering question prompts and option lists.
+
+*Call graph*: called by 1 (slack_ask_blocks).
+
+
+##### `slack_ask_blocks`  (lines 955–1007)
+
+```
+def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None
+```
+
+**Purpose**: Renders an agent question into Slack Block Kit. Simple single-choice questions become buttons; richer questions are shown as text so the user can answer in the thread.
+
+**Data flow**: It receives an optional question object, builds title and question blocks, adds button rows when safe and supported, and returns the block list or None.
+
+**Call relations**: post calls this when a completed turn asks the user a question, and the interactive route later understands clicks from these button blocks.
+
+*Call graph*: calls 1 internal fn (_mrkdwn_section); called by 1 (post).
+
+
+##### `slack_connect_blocks`  (lines 1010–1031)
+
+```
+def slack_connect_blocks(request: ConnectRequest | None, turn_id: UUID) -> list[dict[str, object]] | None
+```
+
+**Purpose**: Renders a private connection handoff button for a turn that needs an OAuth-style connection. The button carries the turn id so the click can request a private link.
+
+**Data flow**: It receives an optional connect request and turn id; if present, it returns a Slack actions block with one connect button, otherwise None.
+
+**Call relations**: post includes these blocks in a terminal reply, and interactive handles clicks on the connect button.
+
+*Call graph*: called by 1 (post).
+
+
+##### `_string_field`  (lines 1034–1038)
+
+```
+def _string_field(event: Mapping[str, object], field: str) -> str
+```
+
+**Purpose**: Reads a required non-empty string field from a Slack payload. It gives a clear error if Slack’s payload is missing something this code cannot continue without.
+
+**Data flow**: It receives a mapping and field name, checks that the value is a non-empty string, and returns it or raises ValueError.
+
+**Call relations**: Inbound event parsing and interactive click parsing use this for required Slack ids and timestamps.
+
+*Call graph*: called by 2 (_to_click, _to_inbound).
+
+
+##### `_inbound_files`  (lines 1041–1053)
+
+```
+def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]
+```
+
+**Purpose**: Extracts usable file attachments from a Slack message event. It skips hidden or tombstoned files and caps how many files are considered.
+
+**Data flow**: It receives a Slack event mapping, scans the files list, keeps entries with a name and private download URL, and returns InboundFile records.
+
+**Call relations**: _to_inbound uses this for event-provided files, and _declared_files uses it after fetching a more complete Slack message copy.
+
+*Call graph*: called by 2 (_declared_files, _to_inbound); 1 external calls (__init__).
+
+
+##### `_declared_files`  (lines 1056–1087)
+
+```
+async def _declared_files(bot_token: str, channel: str, ts: str, root_ts: str | None) -> tuple[InboundFile, ...]
+```
+
+**Purpose**: Looks up files for a Slack message when the incoming event may not include them directly. This is especially useful for app mention events where Slack can omit file details.
+
+**Data flow**: It receives bot token, channel, message timestamp, and optional root timestamp; asks Slack for the exact message in its thread range; extracts files from the matching message; and returns them or an empty tuple on failure.
+
+**Call relations**: _to_inbound calls this when it needs to supplement an inbound mention with declared attachments.
+
+*Call graph*: calls 2 internal fn (_inbound_files, _slack_ok); called by 1 (_to_inbound); 1 external calls (AsyncClient).
+
+
+##### `oauth_callback`  (lines 1090–1134)
+
+```
+async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Completes the Slack OAuth install after Slack redirects the owner back. It stores the bot token, binds the Slack team to the workspace, and records the bot identity.
+
+**Data flow**: It reads error, state, and code from the request; validates the sealed state; exchanges the code with Slack; binds the team; stores the token credential; writes identity metadata; and returns a small HTML success or error page.
+
+**Call relations**: This is the second half of the install flow that starts with an Add to Slack link.
+
+*Call graph*: calls 10 internal fn (bind_installation, fulfill_credential_request, open_credential_authorization, _install_page, _is_install_state, bot_token_fingerprint, identity_blob_key, slack_installation_id, slack_oauth_exchange, slack_oauth_redirect_uri); 1 external calls (__init__).
+
+
+##### `_install_page`  (lines 1137–1144)
+
+```
+def _install_page(message: str, status: int) -> Response
+```
+
+**Purpose**: Builds a simple HTML page for Slack install success or failure. It keeps browser-facing install responses small and safe.
+
+**Data flow**: It receives a message and HTTP status, HTML-escapes the message, wraps it in a minimal page, and returns a Response.
+
+**Call relations**: oauth_callback uses this for every user-visible outcome of the OAuth install.
+
+*Call graph*: called by 1 (oauth_callback); 2 external calls (escape, Response).
+
+
+##### `_mark_url_verified`  (lines 1150–1164)
+
+```
+async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None
+```
+
+**Purpose**: Records that Slack successfully reached this deploy with a request signed by the current secret. This helps setup show that a manifest-created app is really connected.
+
+**Data flow**: It fingerprints the signing secret, skips the write if this process already wrote the same fingerprint, stores a marker with the fingerprint and time, and updates the local cache.
+
+**Call relations**: ingest and interactive call this after verified Slack requests; failures are logged but do not break the Slack request.
+
+*Call graph*: calls 2 internal fn (signing_secret_fingerprint, url_verified_blob_key); called by 2 (ingest, interactive); 2 external calls (dumps, time).
+
+
+##### `ingest`  (lines 1167–1233)
+
+```
+async def ingest(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Handles Slack Events API requests and turns valid Slack messages into ufo turns. It is the main inbound message path from Slack.
+
+**Data flow**: It reads the raw body, finds and verifies the signing secret, handles Slack URL verification, loads identity, filters and converts the event to an inbound message, gathers sender/context/permalink, resolves the member, downloads files, admits the turn, starts status and maybe progress tasks, and returns an ok response.
+
+**Call relations**: Slack calls this route for events; it hands admitted turns to the core surface context and starts the live Slack feedback helpers.
+
+*Call graph*: calls 20 internal fn (admit, conversation_for, credential, _ambient_context, _ctx_signing_secret, _download_files, _identity, _mark_url_verified, _prove_identity_in_background, _resolve_member (+10 more)); 7 external calls (gather, loads, conversation_audience, JSONResponse, Response, fence_member_message, mint_marker).
+
+
+##### `_author_is_foreign`  (lines 1236–1243)
+
+```
+def _author_is_foreign(event: Mapping[str, object], team_id: str) -> bool
+```
+
+**Purpose**: Detects messages written by users from another Slack organization in shared channels. Those users are skipped because the app cannot reliably resolve them as members.
+
+**Data flow**: It receives an event and the bound team id, compares source_team or user_team with the bound team, and returns true only when they differ.
+
+**Call relations**: _to_inbound uses this early to avoid admitting Slack Connect bystander messages.
+
+*Call graph*: called by 1 (_to_inbound).
+
+
+##### `_room_audience`  (lines 1246–1276)
+
+```
+async def _room_audience(ctx: SurfaceContext, payload: Mapping[str, object], event: Mapping[str, object], channel: str, audience_known: bool) -> Audience | None
+```
+
+**Purpose**: Chooses who should be allowed to see a Slack conversation in ufo’s audience model. Public channels, private rooms, DMs, and externally shared channels get different audience scopes.
+
+**Data flow**: It receives context, payload, event, channel id, and whether an existing audience is already known; uses event hints and sometimes Slack channel info to return an Audience, None for DM, or raise when uncertain.
+
+**Call relations**: _to_inbound asks this while shaping a Slack event into a ufo inbound turn, so conversation visibility is set before admission.
+
+*Call graph*: calls 2 internal fn (credential, _channel_info); called by 1 (_to_inbound); 3 external calls (conversation_audience, foreign_room_audience, room_audience).
+
+
+##### `_to_inbound`  (lines 1279–1326)
+
+```
+async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object], identity: SlackIdentity) -> Inbound | None
+```
+
+**Purpose**: Filters a raw Slack event and converts it into the compact Inbound record needed by admission. This is where Slack noise is separated from messages the agent should answer.
+
+**Data flow**: It checks event type, subtype, bot/self messages, foreign authors, addressing, thread participation, required ids, audience, text, files, and conversation id; then returns Inbound or None.
+
+**Call relations**: ingest calls this after signature and identity verification; a None result means the event is acknowledged but ignored.
+
+*Call graph*: calls 9 internal fn (credential, _author_is_foreign, _declared_files, _inbound_files, _participating_conversation, _room_audience, _string_field, slack_message_addressed, slack_thread_key); called by 1 (ingest); 2 external calls (__init__, gather).
+
+
+##### `_participating_conversation`  (lines 1329–1340)
+
+```
+async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UUID | None
+```
+
+**Purpose**: Checks whether a Slack thread already has an admitted ufo turn. This lets unmentioned replies join only threads where the agent is truly participating.
+
+**Data flow**: It receives a queue key, finds the conversation row, then confirms there is a latest turn before returning the conversation id.
+
+**Call relations**: _to_inbound uses this to gate unaddressed channel replies and to avoid racing ahead of the first mention.
+
+*Call graph*: calls 2 internal fn (find_conversation, latest_turn); called by 1 (_to_inbound).
+
+
+##### `_slack_user`  (lines 1343–1373)
+
+```
+async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None
+```
+
+**Purpose**: Fetches basic Slack user information for context and member resolution. It treats unconfirmed email as no email, because email is used as identity proof.
+
+**Data flow**: It receives a bot token and Slack user id, calls Slack users.info with a short timeout, extracts name, confirmed email, and timezone, and returns SlackUser or None on failure.
+
+**Call relations**: ingest, interactive, and conversation search use this when they need human-readable user facts.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 3 (_people, ingest, interactive); 2 external calls (__init__, AsyncClient).
+
+
+##### `_slack_permalink`  (lines 1376–1396)
+
+```
+async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None
+```
+
+**Purpose**: Fetches Slack’s official permalink for a message. This gives ufo a reliable source link for an inbound message or button answer.
+
+**Data flow**: It receives bot token, channel, and timestamp, calls Slack chat.getPermalink, and returns the permalink string or None if unavailable.
+
+**Call relations**: ingest and interactive include the resulting link in the TurnContext passed to core admission.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (ingest, interactive); 1 external calls (AsyncClient).
+
+
+##### `_turn_context`  (lines 1399–1414)
+
+```
+def _turn_context(sender: SlackUser | None, source: str | None) -> TurnContext
+```
+
+**Purpose**: Builds the ufo turn context from Slack sender facts and a source link. It includes sender name/email and timezone when valid.
+
+**Data flow**: It receives an optional SlackUser and optional source URL, formats a sender label, tries to create a TurnContext with timezone, and drops invalid timezone values.
+
+**Call relations**: ingest calls this just before admitting the Slack message as a ufo turn.
+
+*Call graph*: called by 1 (ingest); 1 external calls (__init__).
+
+
+##### `_resolve_member`  (lines 1417–1435)
+
+```
+async def _resolve_member(ctx: SurfaceContext, slack_user_id: str, is_dm: bool, sender: SlackUser | None) -> UUID | None
+```
+
+**Purpose**: Maps a Slack user to a ufo member when possible. Existing links win; otherwise a Slack-confirmed email can link or join the person.
+
+**Data flow**: It receives context, Slack user id, DM flag, and optional sender facts; checks for an existing linked member, uses confirmed email to join if available, returns a member id or None, and raises for unresolved DMs when user info is unavailable.
+
+**Call relations**: ingest and interactive use this before admission so turns can be attributed to a member.
+
+*Call graph*: calls 2 internal fn (join_member, linked_member); called by 2 (ingest, interactive); 1 external calls (__init__).
+
+
+##### `_ambient_context`  (lines 1438–1485)
+
+```
+async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity, marker: str) -> str
+```
+
+**Purpose**: Fetches a bounded digest of nearby Slack messages for a new conversation-starting mention. This gives the agent background that is not yet in the ufo transcript.
+
+**Data flow**: It receives context, bot token, inbound record, identity, and a marker; skips DMs and existing conversations; fetches either recent channel history or earlier thread replies; and returns formatted ambient context or an empty string.
+
+**Call relations**: ingest combines this with the member’s message before admitting the first turn in a Slack thread.
+
+*Call graph*: calls 2 internal fn (_slack_ok, ambient_digest); called by 1 (ingest); 1 external calls (AsyncClient).
+
+
+##### `ambient_digest`  (lines 1488–1540)
+
+```
+def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: str) -> str
+```
+
+**Purpose**: Formats fetched Slack messages as safe background text for the model. It drops bot messages, bot-addressing messages, empty messages, and escapes the context boundary by using a fresh marker.
+
+**Data flow**: It receives raw Slack messages, bot user id, note text, and marker; filters and time-sorts member messages, trims each line and the whole digest, keeps the oldest anchor plus newest fitting lines when too long, and returns a tagged context block.
+
+**Call relations**: _ambient_context calls this after fetching Slack history.
+
+*Call graph*: called by 1 (_ambient_context); 1 external calls (fromtimestamp).
+
+
+##### `_slack_download_host_ok`  (lines 1543–1545)
+
+```
+def _slack_download_host_ok(url: str) -> bool
+```
+
+**Purpose**: Checks that a file download URL belongs to Slack before attaching the bot token to the request. This avoids leaking the token to another host.
+
+**Data flow**: It receives a URL, parses its hostname, lowercases it, and returns true only for slack.com or a Slack subdomain.
+
+**Call relations**: _stream_download calls this before starting any private Slack file download.
+
+*Call graph*: called by 1 (_stream_download); 1 external calls (urlparse).
+
+
+##### `_stream_download`  (lines 1548–1566)
+
+```
+async def _stream_download(bot_token: str, url: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams an inbound Slack file into chunks without loading the whole file into memory. It also enforces a maximum file size.
+
+**Data flow**: It receives bot token and file URL, validates the host, opens an authenticated streaming GET request, yields chunks, and raises if the total exceeds the inbound limit.
+
+**Call relations**: _download_files passes this stream directly to workspace file writing, so files move from Slack to storage piece by piece.
+
+*Call graph*: calls 1 internal fn (_slack_download_host_ok); called by 1 (_download_files); 2 external calls (__init__, AsyncClient).
+
+
+##### `_download_files`  (lines 1578–1594)
+
+```
+async def _download_files(ctx: SurfaceContext, conversation_id: UUID, bot_token: str, files: tuple[InboundFile, ...]) -> DownloadedFiles
+```
+
+**Purpose**: Downloads Slack attachments into the ufo workspace for the conversation. Oversized files are skipped instead of leaving partial files behind.
+
+**Data flow**: It receives context, conversation id, bot token, and inbound files; chooses safe unique inbox filenames, streams each download into workspace storage, records delivered and skipped files, and returns a DownloadedFiles summary.
+
+**Call relations**: ingest calls this before admission so the user’s turn can mention where attachments were saved.
+
+*Call graph*: calls 3 internal fn (write_workspace_file, _inbox_name, _stream_download); called by 1 (ingest); 1 external calls (__init__).
+
+
+##### `_inbox_name`  (lines 1597–1607)
+
+```
+def _inbox_name(raw: str, used: set[str]) -> str
+```
+
+**Purpose**: Turns a Slack filename into a safe, unique filename for the workspace inbox folder. It prevents path-like names and duplicate names from colliding.
+
+**Data flow**: It receives the raw filename and a set of already-used names, keeps only the leaf name, substitutes a default when empty or dangerous, adds numeric suffixes until unique, records the chosen name, and returns it.
+
+**Call relations**: _download_files uses this for each inbound attachment.
+
+*Call graph*: called by 1 (_download_files).
+
+
+##### `files_note`  (lines 1610–1619)
+
+```
+def files_note(downloaded: DownloadedFiles) -> str
+```
+
+**Purpose**: Creates the plain-text note telling the agent which Slack files were saved and which were skipped. This keeps the model aware of attachment outcomes.
+
+**Data flow**: It receives a DownloadedFiles summary, builds sentences for delivered workspace paths and skipped large files, and returns them joined by newlines.
+
+**Call relations**: ingest appends this note to the fenced member message before admitting the turn.
+
+*Call graph*: called by 1 (ingest).
+
+
+##### `ThreadStatus.run`  (lines 1658–1677)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the live Slack thread-status updater for one turn. It shows “Thinking…” first, follows turn activity, and clears the status when the turn ends.
+
+**Data flow**: It reads the bot token, opens an HTTP client, writes the initial status, follows hub frames into later statuses, handles cancellation or failure, and clears the Slack status at normal end.
+
+**Call relations**: _run_status calls this in a background task created by _track_status.
+
+*Call graph*: calls 2 internal fn (_follow, _set); called by 1 (_run_status); 2 external calls (AsyncClient, log).
+
+
+##### `ThreadStatus._set`  (lines 1679–1722)
+
+```
+async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> bool
+```
+
+**Purpose**: Writes one status string to Slack’s assistant thread status API. It refuses to write if this turn is no longer the newest writer for the thread.
+
+**Data flow**: It receives an HTTP client, bot token, and status text; checks the thread-writer table, builds Slack’s status body, sends it, logs success or failure, and returns whether Slack accepted it.
+
+**Call relations**: ThreadStatus.run and ThreadStatus._follow use this for initial, updated, refreshed, and clear statuses.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (_follow, run); 3 external calls (post, dumps, log).
+
+
+##### `ThreadStatus._follow`  (lines 1724–1765)
+
+```
+async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None
+```
+
+**Purpose**: Watches live turn frames and translates them into short Slack status messages. It refreshes quiet statuses and skips overly rapid updates.
+
+**Data flow**: It receives an HTTP client, bot token, and last shown status; tails the turn stream, maps tool calls, skill loads, and text deltas to status text, writes changed statuses at safe intervals, refreshes stale ones, and stops on terminal frames.
+
+**Call relations**: ThreadStatus.run calls this after the initial status write.
+
+*Call graph*: calls 1 internal fn (_set); called by 1 (run); 4 external calls (ensure_future, gather, wait, monotonic).
+
+
+##### `_track_status`  (lines 1772–1787)
+
+```
+def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None
+```
+
+**Purpose**: Starts one Slack status task for an admitted turn and marks it as the current writer for its Slack thread. Duplicate deliveries for the same turn do not create duplicate status followers.
+
+**Data flow**: It receives context, turn id, queue key, and message timestamp; derives channel and thread timestamp, records the writer, creates a ThreadStatus task, and stores it by turn id.
+
+**Call relations**: ingest and interactive call this immediately after admitting a turn.
+
+*Call graph*: calls 1 internal fn (_run_status); called by 2 (ingest, interactive); 2 external calls (__init__, create_task).
+
+
+##### `_run_status`  (lines 1790–1807)
+
+```
+async def _run_status(status: ThreadStatus) -> None
+```
+
+**Purpose**: Wraps a ThreadStatus task so unexpected failures are logged and tracking tables are cleaned up. It keeps a failed status updater from crashing the process.
+
+**Data flow**: It receives a ThreadStatus, awaits its run method, logs any exception, removes the task entry, and clears the thread-writer entry if it still belongs to that turn.
+
+**Call relations**: _track_status launches this as the background task body.
+
+*Call graph*: calls 1 internal fn (run); called by 1 (_track_status); 1 external calls (log).
+
+
+##### `ProgressCadence.__post_init__`  (lines 1819–1823)
+
+```
+def __post_init__(self) -> None
+```
+
+**Purpose**: Validates the progress-post schedule. It prevents impossible schedules like zero-length waits or a cap smaller than the first wait.
+
+**Data flow**: It reads the dataclass’s base and cap values after creation and raises ValueError if they are invalid.
+
+**Call relations**: _track_progress creates ProgressCadence before starting a ThreadProgress reporter.
+
+
+##### `ProgressCadence.intervals`  (lines 1825–1836)
+
+```
+def intervals(self) -> Iterator[float]
+```
+
+**Purpose**: Generates the wait times between long-running progress posts. The waits double with elapsed time until they reach a fixed cap.
+
+**Data flow**: It starts with base_seconds, yields each wait, adds it to elapsed time, and then yields the smaller of elapsed time and cap_seconds forever.
+
+**Call relations**: ThreadProgress._follow uses this schedule to decide when to post interim updates.
+
+
+##### `TurnActivity.tool`  (lines 1856–1863)
+
+```
+def tool(self, tool: str, description: str) -> None
+```
+
+**Purpose**: Records that the turn started a tool call and chooses a human-readable current activity. It uses the model’s description when available and falls back to a cleaned-up tool name.
+
+**Data flow**: It closes any streamed narration, normalizes the tool description or slug, stores it as current activity, and adds it to the interval’s step list if not already present.
+
+**Call relations**: ThreadProgress._follow calls this when the live tail emits a ToolCall frame.
+
+*Call graph*: calls 1 internal fn (_close_narration).
+
+
+##### `TurnActivity.skill`  (lines 1865–1867)
+
+```
+def skill(self, skill: str) -> None
+```
+
+**Purpose**: Records that the turn is loading a skill. This gives long-running progress posts something understandable to say during skill setup.
+
+**Data flow**: It closes any streamed narration and sets the current activity to a bounded “loading the skill” line.
+
+**Call relations**: ThreadProgress._follow calls this when the live tail emits a SkillLoad frame.
+
+*Call graph*: calls 1 internal fn (_close_narration).
+
+
+##### `TurnActivity.stream`  (lines 1869–1870)
+
+```
+def stream(self, text: str) -> None
+```
+
+**Purpose**: Records text currently streaming from the model without exposing that unfinished text in progress posts. The post later reports only the amount of writing.
+
+**Data flow**: It receives a text chunk and appends it to the in-progress streaming buffer.
+
+**Call relations**: ThreadProgress._follow calls this for TextDelta frames; report and current_step later interpret the buffered text.
+
+
+##### `TurnActivity.checkpoint`  (lines 1872–1873)
+
+```
+def checkpoint(self) -> None
+```
+
+**Purpose**: Marks that a progress update has been posted and clears the list of completed steps for the next interval. It keeps future summaries focused on new work.
+
+**Data flow**: It clears the steps list and leaves current narration, activity, and streaming state otherwise intact.
+
+**Call relations**: ThreadProgress._follow calls this after each progress checkpoint is attempted.
+
+
+##### `TurnActivity.current_step`  (lines 1875–1884)
+
+```
+def current_step(self) -> str
+```
+
+**Purpose**: Returns the best short description of what the turn is doing now. If text is streaming, it reports writing progress by character count instead of quoting unfinished content.
+
+**Data flow**: It sums the buffered streaming text length; if nonzero, returns a writing-status line, otherwise returns the last recorded activity.
+
+**Call relations**: TurnActivity.report calls this while building the message posted to Slack.
+
+*Call graph*: called by 1 (report).
+
+
+##### `TurnActivity._close_narration`  (lines 1886–1890)
+
+```
+def _close_narration(self) -> None
+```
+
+**Purpose**: Turns completed streamed text into the latest narration snippet for progress posts. It runs when the turn moves from writing into another activity.
+
+**Data flow**: It joins and trims buffered text, clears the buffer, and if text exists stores a bounded copy as narration.
+
+**Call relations**: TurnActivity.tool and TurnActivity.skill call this before recording a new non-writing activity.
+
+*Call graph*: called by 2 (skill, tool).
+
+
+##### `TurnActivity.report`  (lines 1892–1922)
+
+```
+def report(self, elapsed_seconds: float) -> str | None
+```
+
+**Purpose**: Builds one human-readable progress message for Slack, or skips it when there has been no signal at all. It summarizes current work and recent completed steps.
+
+**Data flow**: It receives elapsed seconds, computes a friendly elapsed time, asks for the current step, combines narration, current activity, quiet/writing notes, and step summaries, and returns text or None.
+
+**Call relations**: ThreadProgress._post calls this at each scheduled checkpoint.
+
+*Call graph*: calls 1 internal fn (current_step); called by 1 (_post).
+
+
+##### `ThreadProgress.run`  (lines 1948–1951)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the long-turn progress reporter for one turn. It prepares the bot token and HTTP client, then follows the turn stream.
+
+**Data flow**: It reads the Slack bot token from context, opens an HTTP client, and delegates to _follow.
+
+**Call relations**: _run_progress calls this inside a background task started by _track_progress.
+
+*Call graph*: calls 1 internal fn (_follow); called by 1 (_run_progress); 1 external calls (AsyncClient).
+
+
+##### `ThreadProgress._follow`  (lines 1953–1989)
+
+```
+async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None
+```
+
+**Purpose**: Waits on both the turn’s live frames and the progress schedule. When a scheduled checkpoint arrives, it posts what activity has been seen so far.
+
+**Data flow**: It starts a timer, creates a cadence iterator and TurnActivity, tails frames, updates activity from tool/skill/text frames, posts at deadlines unless the turn is terminal, advances the deadline, and stops at terminal or parked frames.
+
+**Call relations**: ThreadProgress.run calls this; it hands individual Slack posts to ThreadProgress._post.
+
+*Call graph*: calls 1 internal fn (_post); called by 1 (run); 5 external calls (__init__, ensure_future, gather, wait, monotonic).
+
+
+##### `ThreadProgress._post`  (lines 1991–2037)
+
+```
+async def _post(self, client: httpx.AsyncClient, bot_token: str, activity: TurnActivity, elapsed_seconds: float) -> None
+```
+
+**Purpose**: Posts one interim progress message into the Slack conversation. If there is nothing meaningful to say or Slack rejects the post, the reporter keeps running.
+
+**Data flow**: It asks TurnActivity for report text, logs and returns if none, derives channel and thread from the queue key, builds a Slack message body, sends it, and logs success or failure.
+
+**Call relations**: ThreadProgress._follow calls this at each scheduled checkpoint.
+
+*Call graph*: calls 3 internal fn (report, _slack_ok, slack_reply_body); called by 1 (_follow); 2 external calls (post, log).
+
+
+##### `_track_progress`  (lines 2043–2061)
+
+```
+def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None
+```
+
+**Purpose**: Starts one long-turn progress reporter for a turn run. It relies on admission’s opened_run decision so retries or duplicate Slack deliveries do not create duplicate progress messages.
+
+**Data flow**: It receives context, turn id, and queue key; skips if a reporter is already tracked locally; creates cadence and ThreadProgress objects; starts a background task; and stores it by turn id.
+
+**Call relations**: ingest and interactive call this only when admission says this delivery opened the run.
+
+*Call graph*: calls 1 internal fn (_run_progress); called by 2 (ingest, interactive); 3 external calls (__init__, __init__, create_task).
+
+
+##### `_run_progress`  (lines 2064–2079)
+
+```
+async def _run_progress(progress: ThreadProgress) -> None
+```
+
+**Purpose**: Wraps a ThreadProgress reporter with logging and cleanup. It catches failures that escape individual post handling.
+
+**Data flow**: It receives a ThreadProgress, awaits its run method, logs any exception as abandoned progress, and removes the task from the tracking table.
+
+**Call relations**: _track_progress launches this as the background task body.
+
+*Call graph*: calls 1 internal fn (run); called by 1 (_track_progress); 1 external calls (log).
+
+
+##### `interactive`  (lines 2113–2196)
+
+```
+async def interactive(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Handles Slack button clicks from question prompts and connection prompts. It verifies the click, admits answer clicks as turns, and responds privately to connect clicks.
+
+**Data flow**: It reads and verifies the raw form body, loads identity, parses the click, resolves the member, then either posts a private connect link or admits the button answer with an idempotency key, starts status/progress tasks, and schedules a message rewrite when the click won.
+
+**Call relations**: Slack calls this route for Block Kit interactions created by post through slack_ask_blocks or slack_connect_blocks.
+
+*Call graph*: calls 21 internal fn (admit, admitted_body, connect_url, conversation_for, credential, find_conversation, linked_member, _ctx_signing_secret, _ephemeral_in_background, _identity (+11 more)); 7 external calls (__init__, gather, conversation_audience, JSONResponse, Response, fence_member_message, mint_marker).
+
+
+##### `_rewrite_in_background`  (lines 2202–2205)
+
+```
+def _rewrite_in_background(bot_token: str, click: AnswerClick) -> None
+```
+
+**Purpose**: Starts a background task to rewrite a Slack question message after a winning answer click. This lets the interactive route acknowledge Slack quickly.
+
+**Data flow**: It receives the bot token and click, creates a task for _run_rewrite, stores a strong reference, and removes it when done.
+
+**Call relations**: interactive calls this only when the admitted answer body matches the winning click.
+
+*Call graph*: calls 1 internal fn (_run_rewrite); called by 1 (interactive); 1 external calls (create_task).
+
+
+##### `_run_rewrite`  (lines 2208–2212)
+
+```
+async def _run_rewrite(bot_token: str, click: AnswerClick) -> None
+```
+
+**Purpose**: Runs the answer-message rewrite and logs failure. A failed rewrite does not undo the admitted answer.
+
+**Data flow**: It receives bot token and click, calls _replace_buttons_with_answer, and logs any exception with the message timestamp.
+
+**Call relations**: _rewrite_in_background launches this as a background task.
+
+*Call graph*: calls 1 internal fn (_replace_buttons_with_answer); called by 1 (_rewrite_in_background).
+
+
+##### `_ephemeral_in_background`  (lines 2215–2218)
+
+```
+def _ephemeral_in_background(ctx: SurfaceContext, click: ConnectClick, text: str) -> None
+```
+
+**Purpose**: Starts a background task to send a private Slack response for a connect button click. This keeps the interactive acknowledgement fast.
+
+**Data flow**: It receives context, click, and text, creates a _post_ephemeral task, stores it, and removes it when done.
+
+**Call relations**: interactive uses this after deciding what private connect message the clicking member should see.
+
+*Call graph*: calls 1 internal fn (_post_ephemeral); called by 1 (interactive); 1 external calls (create_task).
+
+
+##### `_post_ephemeral`  (lines 2221–2246)
+
+```
+async def _post_ephemeral(ctx: SurfaceContext, click: ConnectClick, text: str) -> None
+```
+
+**Purpose**: Sends a Slack ephemeral message visible only to the member who clicked a connect button. It posts in the same thread when possible.
+
+**Data flow**: It reads the bot token, builds a chat.postEphemeral request with channel, user, text, and optional thread timestamp, sends it to Slack, and logs failures.
+
+**Call relations**: _ephemeral_in_background launches this for connect-click responses.
+
+*Call graph*: calls 2 internal fn (credential, _slack_ok); called by 1 (_ephemeral_in_background); 2 external calls (AsyncClient, dumps).
+
+
+##### `_to_click`  (lines 2249–2304)
+
+```
+def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick | None
+```
+
+**Purpose**: Parses a verified Slack interactive payload into either an answer click or a connect click. It ignores unsupported actions and clicks from the wrong Slack team.
+
+**Data flow**: It receives raw form bytes and identity, decodes the payload JSON, checks block action type and team id, reads the first action, then returns a ConnectClick for connect buttons, an AnswerClick for ask buttons, or None.
+
+**Call relations**: interactive calls this after signature verification and before deciding which click flow to run.
+
+*Call graph*: calls 2 internal fn (_dict_field, _string_field); called by 1 (interactive); 5 external calls (__init__, __init__, loads, parse_qs, UUID).
+
+
+##### `_dict_field`  (lines 2307–2311)
+
+```
+def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]
+```
+
+**Purpose**: Reads a required dictionary field from a Slack interactive payload. It gives a clear error when Slack’s structure is not what the parser needs.
+
+**Data flow**: It receives a mapping and field name, checks the value is a dictionary, and returns it or raises ValueError.
+
+**Call relations**: _to_click uses this for nested user, channel, and message objects.
+
+*Call graph*: called by 1 (_to_click).
+
+
+##### `_replace_buttons_with_answer`  (lines 2314–2356)
+
+```
+async def _replace_buttons_with_answer(bot_token: str, click: AnswerClick) -> None
+```
+
+**Purpose**: Updates a Slack question message so the clicked button row becomes a line showing the selected answer and who answered. Other already-delivered blocks are preserved.
+
+**Data flow**: It receives bot token and AnswerClick, builds an answered context block, copies the message’s existing blocks or makes a fallback block, replaces the clicked block when found, and sends chat.update to Slack.
+
+**Call relations**: _run_rewrite calls this after interactive confirms that this click is the one admitted as the answer.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (_run_rewrite); 2 external calls (AsyncClient, dumps).
+
+
+##### `_reply_text`  (lines 2359–2369)
+
+```
+def _reply_text(writeback: Writeback) -> str
+```
+
+**Purpose**: Chooses the main text for a finished turn. It gives clear fallback messages for failed, cancelled, or empty replies.
+
+**Data flow**: It receives a Writeback, checks its status, and returns failure text, cancellation reason or default cancellation text, normal reply text, or an empty-reply placeholder.
+
+**Call relations**: _reply_with_oversize_links calls this before adding credential hints or large-file links.
+
+*Call graph*: called by 1 (_reply_with_oversize_links).
+
+
+##### `_reply_with_oversize_links`  (lines 2372–2387)
+
+```
+def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str
+```
+
+**Purpose**: Builds the final reply text plus extra delivery notes. It adds a terminal credential hint when secrets are needed and link lines for artifacts too large to upload to Slack.
+
+**Data flow**: It receives context and writeback, starts with _reply_text, appends credential instructions if present, finds oversized artifacts, converts them to link lines, and returns the combined text.
+
+**Call relations**: post uses this before constructing the Slack message body.
+
+*Call graph*: calls 2 internal fn (_oversize_link_line, _reply_text); called by 1 (post).
+
+
+##### `_oversize_link_line`  (lines 2390–2393)
+
+```
+def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str
+```
+
+**Purpose**: Formats one too-large artifact as a Slack-readable link line. If no link is available, it still names the file.
+
+**Data flow**: It receives context and artifact, asks context for a temporary artifact link, formats the filename and byte size, and returns one bullet line.
+
+**Call relations**: _reply_with_oversize_links calls this for every artifact over Slack’s upload limit.
+
+*Call graph*: calls 1 internal fn (artifact_link); called by 1 (_reply_with_oversize_links).
+
+
+##### `_debug_link`  (lines 2396–2408)
+
+```
+async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None
+```
+
+**Purpose**: Builds an operator-only debug URL for the delivered turn when the deploy has a public base URL. The link points to the debug surface’s view of the conversation and turn.
+
+**Data flow**: It receives context and writeback, returns None without a public URL or conversation id, otherwise combines base URL, workspace id, conversation id, and turn id into a URL.
+
+**Call relations**: post may include this in the accounting footer for operator workspaces and internal channels.
+
+*Call graph*: calls 1 internal fn (find_conversation); called by 1 (post).
+
+
+##### `_channel_info`  (lines 2411–2425)
+
+```
+async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | None
+```
+
+**Purpose**: Fetches Slack metadata for a channel. It is used when event hints are not enough to decide audience or external sharing.
+
+**Data flow**: It receives bot token and channel id, calls Slack conversations.info with a short timeout, and returns the channel dictionary or None on failure.
+
+**Call relations**: _room_audience and _channel_is_externally_shared call this when they need channel privacy or sharing facts.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (_channel_is_externally_shared, _room_audience); 1 external calls (AsyncClient).
+
+
+##### `_channel_is_externally_shared`  (lines 2428–2441)
+
+```
+async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool
+```
+
+**Purpose**: Decides whether a Slack channel may include people outside the bound workspace. If Slack metadata cannot be read, it fails closed and treats the channel as externally shared.
+
+**Data flow**: It receives bot token and channel id, fetches channel info, checks Slack shared-channel flags, and returns true for shared or unknown channels.
+
+**Call relations**: post uses this to avoid exposing operator accounting or debug links in externally shared conversations.
+
+*Call graph*: calls 1 internal fn (_channel_info); called by 1 (post).
+
+
+##### `post`  (lines 2444–2500)
+
+```
+async def post(ctx: SurfaceContext, writeback: Writeback) -> str
+```
+
+**Purpose**: Posts the terminal ufo reply into the correct Slack channel or thread and returns Slack’s message reference. It also adds buttons, metadata, and safe fallbacks.
+
+**Data flow**: It receives context and writeback, derives channel/thread, reads the bot token, builds reply text and optional action blocks, maybe builds an operator metadata footer, sends chat.postMessage, retries once with conservative blocks if Slack rejects block formatting, validates Slack’s timestamp, and returns channel:ts.
+
+**Call relations**: This is the main outbound delivery function used by the surface poller after a turn finishes.
+
+*Call graph*: calls 9 internal fn (credential, is_operator_workspace, _channel_is_externally_shared, _chat_post, _debug_link, _reply_with_oversize_links, slack_ask_blocks, slack_connect_blocks, slack_reply_body); 2 external calls (__init__, AsyncClient).
+
+
+##### `_chat_post`  (lines 2503–2543)
+
+```
+async def _chat_post(client: httpx.AsyncClient, bot_token: str, body: bytes) -> Mapping[str, object]
+```
+
+**Purpose**: Sends one chat.postMessage request and parses Slack’s response without immediately requiring ok:true. This lets the caller handle recoverable Slack errors like invalid blocks.
+
+**Data flow**: It receives an HTTP client, bot token, and encoded body, posts to Slack, converts HTTP errors into SurfaceDeliveryError with retry-after when available, and returns the parsed JSON payload.
+
+**Call relations**: post calls this for the initial reply and the conservative retry.
+
+*Call graph*: calls 1 internal fn (__init__); called by 1 (post); 1 external calls (post).
+
+
+##### `attach`  (lines 2546–2565)
+
+```
+async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None
+```
+
+**Purpose**: Uploads shared ufo artifacts to Slack after the reply is posted. Files too large for Slack are not uploaded here because their links were already included in the reply text.
+
+**Data flow**: It receives context, writeback, and reply reference; filters artifacts under Slack’s upload limit, derives channel/thread from the queue key, reads the bot token, uploads files concurrently, and logs per-file failures.
+
+**Call relations**: The outbound delivery flow calls this after post so attachments appear alongside the terminal answer.
+
+*Call graph*: calls 2 internal fn (credential, _upload_artifact); 1 external calls (gather).
+
+
+##### `_upload_artifact`  (lines 2568–2614)
+
+```
+async def _upload_artifact(ctx: SurfaceContext, bot_token: str, channel: str, thread_ts: str | None, artifact: SharedArtifact) -> None
+```
+
+**Purpose**: Streams one artifact from ufo storage into Slack using Slack’s external upload flow. The file is never fully buffered in memory.
+
+**Data flow**: It receives context, bot token, destination channel/thread, and artifact; reserves an upload URL with Slack, streams blob bytes to that URL, then completes the upload into the channel or thread with a title.
+
+**Call relations**: attach runs this concurrently for each uploadable artifact.
+
+*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (attach); 4 external calls (__init__, AsyncClient, Timeout, dumps).
+
+
+##### `_slack_ok`  (lines 2617–2626)
+
+```
+async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]
+```
+
+**Purpose**: Checks a Slack Web API response for both HTTP success and Slack’s ok:true flag. It turns Slack API failures into a consistent SlackApiError.
+
+**Data flow**: It awaits an HTTP request, raises for HTTP errors, parses JSON, checks ok, includes Slack metadata messages when present, and returns the payload dictionary on success.
+
+**Call relations**: Most Slack API helpers use this small gate so their callers can assume a successful Slack payload or catch one common error type.
+
+*Call graph*: called by 13 (_list, _members, _post, _set, _ambient_context, _channel_info, _declared_files, _post_ephemeral, _replace_buttons_with_answer, _slack_permalink (+3 more)); 1 external calls (__init__).
+
+
+### `extensions/ufo/ufo_ext_ufo/surface.py`
+
+`io_transport` · `request handling`
+
+The `ufo` shell is a thin client: it does not decide what to show by itself. This file decides each screen and sends it as plain tab-separated directive lines, such as “show this text,” “ask for input,” “show status,” or “poll again soon.” Think of it like a teleprompter script for the terminal.
+
+A user authenticates with a bearer token, which is a signed piece of text proving their workspace and email. When a request arrives, the file checks that token, links the email to a member if needed, finds the conversation for the requested channel, and either admits a new message or resumes watching the latest turn. It then tails live frames from the core system: text as it is generated, tool activity, skill loading, cost updates, credential prompts, connection links, and final turn status.
+
+The stream is intentionally held open for only a limited time. If the answer is not finished before that, the server sends a `poll` directive so the shell reconnects cleanly instead of being cut off by the client timeout. The file also treats secrets specially: credential values sent by the user are stored through a privileged context and never become normal chat messages.
 
 #### Function details
 
-##### `_slug`  (lines 67–68)
+##### `directive`  (lines 55–63)
 
 ```
-def _slug(raw: str) -> str
+def directive(verb: str, *fields: str) -> bytes
 ```
 
-**Purpose**: Turns a raw credential slot name into a simple, URL-like object name. It makes names lowercase, replaces non-letter-or-number runs with dashes, and trims extra dashes from the ends.
+**Purpose**: Builds one line of terminal instructions for the shell client. It makes sure fields cannot accidentally break the line format by escaping tabs, newlines, and backslashes.
 
-**Data flow**: It receives a raw text name. It lowercases the text, uses a regular expression to replace characters outside `a-z` and `0-9` with `-`, then removes leading and trailing dashes. It returns the cleaned-up name string.
+**Data flow**: It receives a directive name, such as `txt` or `ask`, plus optional text fields. It cleans each field so special characters are safe, joins everything with tabs, adds a newline, and returns bytes ready to send over HTTP.
 
-**Call relations**: When `CredentialObjects._named` needs stable object names for declared slots, it calls `_slug` first. `_slug` does only the basic cleanup; `_named` adds extra disambiguation if two slots would otherwise get the same cleaned name.
+**Call relations**: This is the common printer for the whole file. Higher-level functions call it whenever they need to tell the shell to show text, ask for input, report status, request polling, exit, or report the result of storing a secret.
 
-*Call graph*: called by 1 (_named); 1 external calls (sub).
-
-
-##### `CredentialObjects.list`  (lines 80–93)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Builds the list view for credential slots in a workspace. It shows every declared slot and says, in the summary, whether that slot currently has a stored secret.
-
-**Data flow**: It receives the tool context and a list query, such as paging information. It asks `_named` for the user-facing names of all declared slots, asks `_filled_slots` which slots have database rows, then creates one object row per slot with a readable summary. It returns an object page containing the matching rows.
-
-**Call relations**: This is called when the object system needs to show credential objects. It relies on `_named` to turn extension declarations into stable names, then on `_filled_slots` to compare those declarations with what is actually stored in the workspace. Finally it hands the rows to `object_page` so the common object-list machinery can format and page the result.
-
-*Call graph*: calls 2 internal fn (_filled_slots, _named); 2 external calls (__init__, object_page).
+*Call graph*: called by 6 (_answer, _fulfill_secret, _say_lines, channel, directives_for, stream_directives).
 
 
-##### `CredentialObjects.get`  (lines 95–119)
+##### `resolve_workspace`  (lines 66–73)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[CredentialSpec] | None
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None
 ```
 
-**Purpose**: Returns the detail view for one credential slot, without exposing the secret value. It tells the caller what the slot is for, which extension declared it, what host information applies, and when it was filled if it has been filled.
+**Purpose**: Finds which workspace a request belongs to before the main request logic runs. If the request does not carry a usable bearer token, it returns nothing so the request can be rejected.
 
-**Data flow**: It receives the tool context and an object name. It looks up that name among the declared slots; if no slot matches, it returns `None`. If the slot exists, it opens a workspace database transaction, searches for a credential row for the current workspace and slot, and reads only the creation and update timestamps. It returns an object detail whose specification describes the declaration and whose timestamps are present only when a stored value exists.
+**Data flow**: It reads the `Authorization` header, checks that it starts with `Bearer`, and extracts the token. It asks the bearer-token code for the workspace claim inside that signed token, then returns the workspace ID or `None`.
 
-**Call relations**: This is used by the object system when someone reads a single credential object. It starts with `_named` because the outside name may be a cleaned or disambiguated version of the real slot name. It then uses the current workspace and a database query to learn whether a row exists, and wraps the safe, non-secret information in `ObjectDetail`.
+**Call relations**: The shared surface routing system calls this early to scope the request. Later, `channel` checks the same token again for the user’s email, so workspace and identity both come from the same signed proof.
 
-*Call graph*: calls 1 internal fn (_named); 5 external calls (__init__, __init__, select, workspace_tx, ws_current).
-
-
-##### `CredentialObjects.status`  (lines 121–145)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Returns a small machine-readable status for one credential slot. The main answer is whether the slot is filled, and it may also include the resolved host where the credential will be injected.
-
-**Data flow**: It receives the tool context, an object name, and an optional expected generation value. It resolves the object name to a declared slot; if there is no match, it returns `None`. It checks the workspace database for a row for that slot and sets `filled` to true or false. If the slot has host information and a credential store is available, it asks `credential_host` to resolve the actual host and includes that in the result.
-
-**Call relations**: This is called when the object system needs a lightweight state check rather than full details. Like `get`, it begins with `_named` and checks the current workspace database. If host selection is involved, it hands off to `credential_host`, which knows how to turn the slot’s host declaration into the real host answer.
-
-*Call graph*: calls 1 internal fn (_named); 4 external calls (select, credential_host, workspace_tx, ws_current).
+*Call graph*: 1 external calls (workspace_claim).
 
 
-##### `CredentialObjects.apply`  (lines 147–156)
+##### `directives_for`  (lines 76–100)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: CredentialSpec, old: CredentialSpec | None, *, expected_generation: UUID | None) -> None
+def directives_for(frame: LiveFrame, streamed: bool, collect: tuple[CredentialPrompt, ...]=(), connect_message: str | None=None) -> tuple[bytes, ...]
 ```
 
-**Purpose**: Refuses normal create or update attempts for credential objects. This protects secrets by forcing filling and rotation through `request_credentials`, the dedicated private handoff flow.
+**Purpose**: Translates one live frame from the core conversation system into one or more terminal directives. This is where internal events become user-visible terminal output.
 
-**Data flow**: It receives the proposed object name, new credential specification, optional old specification, and optional generation check. It does not inspect or store the proposed data. Instead, it raises `VerbNotSupported` with an explanation that credential filling or rotation must happen elsewhere.
+**Data flow**: It receives a live frame, a flag saying whether answer text has already been streamed, optional credential prompts still needing answers, and an optional connection message. It inspects the frame type and returns directive bytes such as text deltas, activity notes, cost status, final answer lines, secret prompts, or a new input prompt.
 
-**Call relations**: The object system would call this for create or update-style operations. This implementation is intentionally a dead end: it hands back a clear refusal instead of touching the database, so secret changes cannot accidentally pass through ordinary object editing paths.
+**Call relations**: `stream_directives` calls this for each frame it receives from the conversation tail. This function delegates tool descriptions to `_activity`, final turn rendering to `_answer`, and uses `directive` to produce the actual wire lines.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `CredentialObjects.delete`  (lines 158–174)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Clears the stored value for a credential slot, while leaving the slot itself declared and visible. Only a workspace admin is allowed to do this.
-
-**Data flow**: It receives the tool context, object name, and optional generation check. It first asks the context whether the speaker is a workspace admin. If not, it raises `AdminRequired`. If allowed, it resolves the object name to its declared slot, opens a workspace database transaction, and deletes the credential row for the current workspace and that slot. The output is no returned value; the lasting effect is that the slot becomes empty.
-
-**Call relations**: This is called when someone deletes a credential object. It uses the tool context for the permission check, `_named` to map the public object name back to the real slot name, and the workspace database to remove the stored row. After this, list and status calls will still show the slot, but as empty.
-
-*Call graph*: calls 2 internal fn (_named, speaker_is_admin); 4 external calls (__init__, delete, workspace_tx, ws_current).
+*Call graph*: calls 3 internal fn (_activity, _answer, directive); called by 1 (stream_directives).
 
 
-##### `CredentialObjects._named`  (lines 176–188)
+##### `_activity`  (lines 103–105)
 
 ```
-def _named(self) -> dict[str, DeclaredSlot]
+def _activity(frame: ToolCall) -> str
 ```
 
-**Purpose**: Creates stable public object names for all declared credential slots. It also prevents name collisions when two slots clean up to the same simple name.
+**Purpose**: Creates a short human-readable note for a tool call. It tells the terminal user what tool is running and, when available, what it is doing.
 
-**Data flow**: It reads the `slots` stored on the `CredentialObjects` instance. For each slot, it uses `_slug` to make a plain name and groups slots with the same plain name. If a group has one slot, that name is used directly. If several slots collide, it appends a short hash made from the extension and slot name, producing distinct names. It returns a dictionary from public name to declared slot.
+**Data flow**: It receives a tool-call frame. It chooses the best available detail text from the frame, combines it with the tool name, and returns a sentence like “running search: looking up …”.
 
-**Call relations**: This helper sits underneath list, get, status, and delete. Those operations all receive or display public object names, while the actual credential table uses the original declared slot name. `_named` is the bridge between those two worlds.
+**Call relations**: `directives_for` calls this when it sees a tool-call frame. The returned sentence is then wrapped in a `note` directive for the shell to display.
 
-*Call graph*: calls 1 internal fn (_slug); called by 4 (delete, get, list, status); 1 external calls (sha256).
+*Call graph*: called by 1 (directives_for).
 
 
-##### `CredentialObjects._filled_slots`  (lines 190–199)
+##### `_answer`  (lines 108–141)
 
 ```
-async def _filled_slots(self) -> frozenset[str]
+def _answer(terminal: Terminal, streamed: bool, collect: tuple[CredentialPrompt, ...]=(), connect_message: str | None=None) -> tuple[bytes, ...]
 ```
 
-**Purpose**: Finds which credential slots currently have stored values in the current workspace. It does not read the secret values themselves.
+**Purpose**: Writes the closing instructions for a finished, failed, or cancelled turn. It decides what the user should see next and whether the shell should keep asking for input or exit.
 
-**Data flow**: It opens a workspace database transaction and selects only the slot names from credential rows belonging to the current workspace. It collects those names into an immutable set. The returned set lets callers test whether each declared slot is filled.
+**Data flow**: It receives a terminal frame, whether text was already streamed, any credential prompts that still need private values, and an optional connection message. For a completed turn, it may output final answer text, secret-entry requests, a connection link, and a prompt. For a failed turn, it outputs either a safe credential-related error or a generic failure message. For a cancelled turn, it outputs a cancellation message and an exit directive.
 
-**Call relations**: This helper is called by `CredentialObjects.list` when building the overview page. The list operation already knows all declared slots from `_named`; `_filled_slots` supplies the database-backed filled/empty information needed for each summary.
+**Call relations**: `directives_for` calls this whenever a terminal frame arrives. `_answer` uses `_say_lines` when it needs to turn answer text into display lines, and `directive` when it needs exact shell commands such as `secret`, `ask`, or `exit`.
 
-*Call graph*: called by 1 (list); 3 external calls (select, workspace_tx, ws_current).
+*Call graph*: calls 2 internal fn (_say_lines, directive); called by 1 (directives_for).
 
 
-### `core/src/ufo/members.py`
+##### `_say_lines`  (lines 144–145)
 
-`domain_logic` · `request handling`
+```
+def _say_lines(text: str) -> tuple[bytes, ...]
+```
 
-A workspace needs a safe way to expose its members to tools and agents. This file provides that “member” object. It is not used for inviting or removing people; members join through verified chat surfaces, and deletion is blocked here. Its main job is to let the main agent list members, inspect one member, check simple status, and change the member’s admin flag when allowed.
+**Purpose**: Turns a block of display text into one `say` directive per line. This lets multi-line answers appear cleanly in the terminal.
 
-The file treats a member like an object with a small editable spec: whether the person is an admin. Listing and reading are visibility-aware. If the speaker is not an admin, or is not using the main agent, they can only see their own member record. Admins using the main agent can see everyone.
+**Data flow**: It receives text, splits it into lines, and converts each line into a `say` directive. If the text has no lines, it still produces one `say` directive so something explicit is sent.
 
-Changing admin status is deliberately stricter. The speaker must be a real workspace member, must be using the main agent, and must currently be an admin. The code also locks the workspace row during the change, like putting a “do not touch” sign on the record while checking and updating it, so two changes do not accidentally violate safety rules at the same time. It refuses to remove the final admin, and also refuses to remove the final seated admin, meaning the workspace must always keep at least one active admin who has actually taken a seat.
+**Call relations**: `_answer` uses this when final or error text must be shown as normal terminal output. `_say_lines` relies on `directive` for the safe wire format.
+
+*Call graph*: calls 1 internal fn (directive); called by 1 (_answer).
+
+
+##### `stream_directives`  (lines 148–208)
+
+```
+async def stream_directives(frames: AsyncIterator[tuple[str, LiveFrame]], hold_seconds: float, pending: Callable[[str, str], Awaitable[bool]] | None=None, connect: Callable[[], Awaitable[str]] | None=
+```
+
+**Purpose**: Streams live conversation updates to the shell for one held request. It keeps the connection open only up to a deadline, then tells the shell to reconnect if the turn is still running.
+
+**Data flow**: It receives an async stream of live frames, a hold time, and optional callbacks for checking pending credential prompts and creating connection URLs. It reads frames until the turn ends, the frame stream ends, or time runs out. Each frame is converted into directives and yielded to the HTTP response. If the turn did not reach a natural ending, it yields a `poll` directive so the client reconnects.
+
+**Call relations**: `channel` uses this as the body of its streaming HTTP response. Inside the loop, it uses `_next` so end-of-stream is easy to detect, calls `directives_for` to render frames, checks credential prompt status through the supplied callback, and asks the supplied connection callback for a URL when the turn requests one.
+
+*Call graph*: calls 3 internal fn (_next, directive, directives_for); called by 1 (channel); 2 external calls (get_running_loop, wait_for).
+
+
+##### `_next`  (lines 211–217)
+
+```
+async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, LiveFrame] | None
+```
+
+**Purpose**: Reads the next item from an async frame stream and turns normal end-of-stream into `None`. This keeps timeout logic simpler and cleaner.
+
+**Data flow**: It receives an async iterator of cursor-and-frame pairs. It returns the next pair if one exists; if the iterator is finished, it returns `None` instead of letting the stop signal escape.
+
+**Call relations**: `stream_directives` calls this inside a timeout wrapper. That lets `stream_directives` treat “no more frames” and “time ran out” as ordinary control-flow choices.
+
+*Call graph*: called by 1 (stream_directives).
+
+
+##### `_authenticated_email`  (lines 220–224)
+
+```
+def _authenticated_email(request: Request, workspace_id: UUID) -> str | None
+```
+
+**Purpose**: Checks the request’s bearer token and extracts the authenticated email address. If the token is missing, malformed, or invalid for the workspace, it returns nothing.
+
+**Data flow**: It reads the `Authorization` header, confirms the bearer-token shape, and passes the token plus workspace ID to the token verification code. The result is the email identity from the signed token, or `None` if verification fails.
+
+**Call relations**: `channel` calls this at the start of request processing. A missing result immediately becomes an unauthorized response, so all later conversation and secret actions are tied to a verified email.
+
+*Call graph*: called by 1 (channel); 1 external calls (verify_token).
+
+
+##### `channel`  (lines 227–265)
+
+```
+async def channel(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Processes one command-line channel request from a user. It authenticates the user, finds or creates the right conversation, admits a new message when present, or resumes streaming the latest turn when the body is empty.
+
+**Data flow**: It receives the surface context and HTTP request. It verifies the user email, links that email to a member record, diverts secret-submission requests to `_fulfill_secret`, builds a conversation key from email and channel, reads the request body, and either rejects oversized input, admits the message as a new turn, or finds the latest existing turn. It returns either a plain error/prompt response or a streaming response of terminal directives.
+
+**Call relations**: This is the main request function registered in `ROUTES`. It calls `_authenticated_email` first, uses the privileged `SurfaceContext` to link members, find conversations, admit turns, fetch the latest turn, and tail live frames, then hands that tail to `stream_directives` for terminal rendering. When the secret header is present, it calls `_fulfill_secret` instead of admitting a chat message.
+
+*Call graph*: calls 10 internal fn (admit, conversation_for, latest_turn, link_member, linked_member, tail, _authenticated_email, _fulfill_secret, directive, stream_directives); 6 external calls (__init__, partial, conversation_audience, PlainTextResponse, body, StreamingResponse).
+
+
+##### `_fulfill_secret`  (lines 268–287)
+
+```
+async def _fulfill_secret(ctx: SurfaceContext, request: Request, member_id: UUID | None, sealed: str) -> Response
+```
+
+**Purpose**: Stores one private credential value entered by the user. It prevents secrets from being treated as conversation messages and reports only a short storage result back to the shell.
+
+**Data flow**: It receives the surface context, request, member ID, and sealed credential-request token. It reads the credential slot from a header and the secret value from the body, rejects empty or oversized values, then asks the privileged context to verify the request and store the value. It returns a plain-text directive saying whether the value was stored or why it was not.
+
+**Call relations**: `channel` calls this when the request includes the secret header. `_fulfill_secret` uses `SurfaceContext.fulfill_credential_request` for the actual verified storage step and uses `directive` to format the shell-facing success or failure message.
+
+*Call graph*: calls 2 internal fn (fulfill_credential_request, directive); called by 1 (channel); 2 external calls (PlainTextResponse, body).
+
+
+### `extensions/web/ufo_ext_web/surface.py`
+
+`io_transport` · `request handling`
+
+This file is the web doorway into the UFO system. It solves the practical problem of turning a signed member token into a safe browser session, then letting that member see and use only the agents, conversations, files, memory, credentials, usage data, and admin information they are allowed to access. Without it, the web UI would have no trusted way to open sessions, admit chat messages, list conversations, stream live replies, or show the panels beside the chat workspace.
+
+The file works like a front desk. First it serves the built portal page and its CSS or JavaScript assets. Then `resolve_workspace` and `_authenticate` check the signed bearer token stored in the `ufo_session` cookie. A bearer token is a signed proof of who the user is and which workspace they belong to. Once the user is known, `_audience_for` builds their web audience: the set of agents and admin powers they may use.
+
+Most route functions follow the same pattern: authenticate, check the requested agent or object, ask the privileged `SurfaceContext` for core data, and return a small JSON shape for the browser. Chat is the main write path. A POST can open a new conversation, save uploaded files into a per-conversation inbox, admit the message to the durable turn queue, and return the new turn id. Live progress is sent through SSE, Server-Sent Events, which is a browser-friendly stream of small events. The file is careful about limits, malformed forms, unsafe filenames, and not leaking private workspace data.
 
 #### Function details
 
-##### `MemberObjects.list`  (lines 40–55)
+##### `load_assets`  (lines 107–117)
 
 ```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]
 ```
 
-**Purpose**: Shows the workspace members that the current speaker is allowed to see. It turns database rows into short object-list entries with each member’s id, email, admin/member role, and whether they are seated.
+**Purpose**: Loads the already-built frontend files that this web surface is willing to serve. It only includes file types with an explicitly declared media type, so accidental build leftovers are not published.
 
-**Data flow**: It receives the current tool context and a list query, asks for the visible member rows, then converts each row into a simple display item. It returns a paged object list, so callers can browse members in the same style as other object kinds.
+**Data flow**: It receives a directory path, scans the files inside it, reads the bytes for approved suffixes such as CSS and JavaScript, and returns a lookup table from request name to file bytes and content type.
 
-**Call relations**: When something asks to list member objects, this function starts by calling MemberObjects._visible_rows to enforce who may see what. It then builds ObjectRow entries and hands them to object_page so the general object system can return a normal paginated result.
+**Call relations**: It runs during module setup to build the static asset table. Later `_static_response` uses that table instead of reading arbitrary paths from disk.
 
-*Call graph*: calls 1 internal fn (_visible_rows); 2 external calls (__init__, object_page).
+*Call graph*: 1 external calls (glob).
 
 
-##### `MemberObjects.get`  (lines 57–65)
+##### `resolve_workspace`  (lines 128–162)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemberSpec] | None
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
 ```
 
-**Purpose**: Fetches one member object by its stable member id, if the current speaker is allowed to see it. It returns the editable part of the member record, which is only the admin flag, plus timestamps.
+**Purpose**: Finds which workspace an incoming web request belongs to before the route handler runs. It reads the signed token from the session cookie, or from the one login form POST that creates the cookie.
 
-**Data flow**: It receives the current context and a member name, where the name is expected to be the member id as text. It looks for a visible row with that id. If none is found, it returns nothing; if found, it builds a MemberSpec from the row’s admin value and returns it with creation and update times.
+**Data flow**: It reads cookies, method, headers, and sometimes a small URL-encoded form body. It tries to extract a workspace id from the token; if that fails for a portal GET, it may return the public portal page or static asset response. It returns a workspace id, a response explaining refusal, or nothing when the request cannot be scoped.
 
-**Call relations**: The object system calls this when it needs the detailed view of one member. This function relies on MemberObjects._visible_row for the permission-filtered lookup, then wraps the result in ObjectDetail so it matches the shared object interface.
+**Call relations**: The shared surface framework calls this before normal handlers. It uses `_framed_length` and `_form` only for the login form, and hands unauthenticated page or asset requests to `_portal_response` and `_static_response`.
 
-*Call graph*: calls 1 internal fn (_visible_row); 2 external calls (__init__, __init__).
+*Call graph*: calls 4 internal fn (_form, _framed_length, _portal_response, _static_response); 1 external calls (workspace_claim).
 
 
-##### `MemberObjects.status`  (lines 67–82)
+##### `_portal_response`  (lines 165–171)
 
 ```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
+def _portal_response() -> Response
 ```
 
-**Purpose**: Returns a small live status summary for one visible member. This is separate from the editable spec and tells callers the member’s email and whether they are seated.
+**Purpose**: Returns the built web portal HTML page. If the frontend has not been built, it raises a clear error telling the operator which build command is missing.
 
-**Data flow**: It receives the context, member name, and an optional expected generation value. It looks up the visible member row. If there is no visible matching member, it returns nothing; otherwise it returns a small dictionary containing the email and a true-or-false seated value.
+**Data flow**: It reads the already-loaded `PORTAL_HTML` value. If present, it wraps that HTML in an HTTP response; if absent, it raises an error instead of serving a broken page.
 
-**Call relations**: When the object system asks for status, this function again uses MemberObjects._visible_row so it never reveals a hidden member. It does not pass work on to database code directly; the helper has already gathered the rows it may inspect.
+**Call relations**: Both `portal_page` and `resolve_workspace` call it when the browser asks for the portal shell.
 
-*Call graph*: calls 1 internal fn (_visible_row).
+*Call graph*: called by 2 (portal_page, resolve_workspace); 1 external calls (HTMLResponse).
 
 
-##### `MemberObjects.apply`  (lines 84–156)
+##### `_static_response`  (lines 174–188)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: MemberSpec, old: MemberSpec | None, *, expected_generation: UUID | None) -> None
+def _static_response(request: Request) -> Response | None
 ```
 
-**Purpose**: Changes an existing member’s admin role, but only under strict safety rules. It is the gatekeeper that prevents unauthorized role changes and prevents a workspace from being left without an active admin.
+**Purpose**: Returns a built CSS or JavaScript asset for the portal. It also supports browser revalidation with an ETag, a content fingerprint that avoids resending unchanged files.
 
-**Data flow**: It receives the context, the member id as text, the desired MemberSpec, the old spec if one exists, and an optional expected generation value. First it checks that the request comes from the main agent and from a speaking workspace member. It refuses creation, because new members cannot be made through this object. It converts the name to a UUID, opens a workspace database transaction, locks the workspace record, confirms the speaker is still an admin, loads the target member, checks whether the change is needed, and then applies the update if all rules pass. If the request is invalid, it raises a clear error instead of changing the database.
+**Data flow**: It reads the request path, looks up the asset in the preloaded table, compares the request's `if-none-match` header to the stored hash, and returns either the file bytes, a 304 unchanged response, or nothing if the asset is unknown.
 
-**Call relations**: This is called when the object system applies a desired member spec. It calls ToolContext.agent_is_main to confirm the trusted route, uses workspace_tx for a database transaction, asks member_is_admin to verify the speaker’s authority, and uses SQL queries and updates to read and change the member table. It raises AdminRequired, VerbNotSupported, or UnknownObject when the request should not continue.
+**Call relations**: `resolve_workspace` uses it for unauthenticated asset loads, and `static_asset` uses it after a session has resolved.
 
-*Call graph*: calls 1 internal fn (agent_is_main); 9 external calls (__init__, __init__, __init__, select, update, workspace_tx, member_is_admin, ws_current, UUID).
+*Call graph*: called by 2 (resolve_workspace, static_asset); 1 external calls (Response).
 
 
-##### `MemberObjects.delete`  (lines 158–165)
+##### `portal_page`  (lines 191–194)
 
 ```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+async def portal_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Rejects attempts to delete workspace members through the object interface. This keeps member removal out of this path, because membership is controlled elsewhere.
+**Purpose**: Serves the main portal page for browser navigation. The same page is served whether the user is signed in or still needs to enter a token.
 
-**Data flow**: It receives the context, member name, and optional expected generation value, but it does not read or change any member data. It immediately raises an error explaining that workspace members cannot be deleted through objects.
+**Data flow**: It receives the surface context and request, ignores workspace data, and returns the HTML response from `_portal_response`.
 
-**Call relations**: The object system may call this when someone tries a delete action on a member object. Instead of delegating anywhere else, it stops the flow by raising VerbNotSupported with the file’s fixed explanation.
+**Call relations**: It is the GET route for the portal root and is a thin wrapper around `_portal_response`.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_portal_response).
 
 
-##### `MemberObjects._visible_rows`  (lines 167–185)
+##### `_authenticate`  (lines 197–208)
 
 ```
-async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]
+async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None
 ```
 
-**Purpose**: Finds the member rows the current speaker is allowed to see. It is the shared visibility filter used before listing or looking up members.
+**Purpose**: Checks the session cookie and turns it into the member id and email used by the web portal. If this email has not been linked to a member record yet, it creates that link.
 
-**Data flow**: It starts with a database query for members in the current workspace, ordered by email. If the speaker is not an admin or is not using the main agent, it narrows the query to only the speaker’s own member id; if there is no speaker member id, it returns an empty result. It then runs the query in a workspace transaction and returns the matching rows.
+**Data flow**: It reads the `ufo_session` cookie, verifies the token for the current workspace, asks the core context for the linked member or creates one, and returns `(member_id, email)` or `None`.
 
-**Call relations**: MemberObjects.list calls this to build the visible member list, and MemberObjects._visible_row calls it before selecting one member from that list. Inside, it checks ToolContext.speaker_is_admin and ToolContext.agent_is_main, uses ws_current to know which workspace is active, and uses workspace_tx to read from the database.
+**Call relations**: `_audience_for` calls it for most portal routes. `fulfill_credential` calls it directly because credential submission needs authentication but not an agent audience.
 
-*Call graph*: calls 2 internal fn (agent_is_main, speaker_is_admin); called by 2 (_visible_row, list); 3 external calls (select, workspace_tx, ws_current).
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (_audience_for, fulfill_credential); 1 external calls (verify_token).
 
 
-##### `MemberObjects._visible_row`  (lines 187–191)
+##### `static_asset`  (lines 211–215)
 
 ```
-async def _visible_row(self, ctx: ToolContext, name: str) -> sa.Row | None
+async def static_asset(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Finds one visible member row by id text. It is a small helper that keeps single-member lookups consistent with the same visibility rules used for listing.
+**Purpose**: Serves portal static files after the request has already passed workspace resolution. It returns a 404-style response if the named asset is not one of the built files.
 
-**Data flow**: It receives the current context and a member name. It first gets all rows visible to the speaker, then searches that set for a row whose id matches the given name as text. It returns the matching row or nothing.
+**Data flow**: It passes the request to `_static_response`. If that helper finds an asset, its response is returned; otherwise a simple `no such asset` response is produced.
 
-**Call relations**: MemberObjects.get and MemberObjects.status call this when they need one member. Rather than running its own permission logic, it delegates to MemberObjects._visible_rows, so one rule decides what members can be seen everywhere.
+**Call relations**: It is the authenticated route for `static/{asset:path}` and reuses the same static-serving helper used by `resolve_workspace`.
 
-*Call graph*: calls 1 internal fn (_visible_rows); called by 2 (get, status).
+*Call graph*: calls 1 internal fn (_static_response); 1 external calls (Response).
 
 
-### Extension object types
-Extension-backed objects add connected accounts, memories, synced pages, and saved content sources to the shared workspace object model.
+##### `open_session`  (lines 218–243)
 
-### `extensions/connectors/ufo_ext_connectors/objects.py`
-
-`domain_logic` · `request handling`
-
-A provider connection, such as an account linked through a third-party service, is not created like an ordinary workspace object. It requires outside consent, so this file refuses normal “create” or “apply” attempts and points users toward the proper connect_account flow. Once a connection exists, this file exposes it in two useful views: a connection object for the member-owned account link, and a connector_grant object for one agent’s access to that link.
-
-Think of the connection as the house key, and a connector grant as permission for a specific helper to use that key. Deleting a connection disconnects the account from every agent. Deleting a grant only removes one agent’s access. Changing a grant can only flip whether it is shared or private; it cannot secretly switch to a different provider or account.
-
-The file also builds stable, human-readable names for these objects from the provider and account ID, with a short hash added to avoid name collisions. It uses summaries from the grants system as the source of truth, then wraps them in the generic workspace object system. Permission rules are written into the object classes: owners and admins can disconnect or revoke, while sharing has stricter limits.
-
-#### Function details
-
-##### `_AccountSummary.provider`  (lines 45–45)
-
-```
-def provider(self) -> str
-```
-
-**Purpose**: This describes the provider name that any account summary must expose, such as the service or platform the account belongs to. It is part of a lightweight contract used by helper code that can work with both connections and grants.
-
-**Data flow**: The helper code receives a summary-like object → it reads this provider value → it can include the provider in names, labels, and identity checks.
-
-**Call relations**: The naming helper _named relies on summaries having this property so it can create consistent object names without caring whether the summary came from connection_summaries or grant_summaries.
-
-
-##### `_AccountSummary.account_id`  (lines 48–48)
-
-```
-def account_id(self) -> str
-```
-
-**Purpose**: This describes the account identifier that any account summary must expose. Together with the provider, it tells the system which outside account is being referred to.
-
-**Data flow**: The helper code receives a summary-like object → it reads this account ID → it combines it with the provider to form a stable object identity and display name.
-
-**Call relations**: The _named helper uses this property alongside provider when naming both connection objects and connector grant objects.
-
-
-##### `_slug`  (lines 51–52)
-
-```
-def _slug(raw: str) -> str
-```
-
-**Purpose**: This turns a provider name or account ID into a safer, cleaner piece of an object name. It lowercases the text and replaces groups of non-letter-or-number characters with dashes.
-
-**Data flow**: Raw text goes in → punctuation, spaces, and unusual characters are simplified into dashes → a trimmed lowercase name fragment comes out.
-
-**Call relations**: _named calls this twice for each summary, once for the provider and once for the account ID. It uses the cleaned fragments as the readable part of generated object names.
-
-*Call graph*: called by 1 (_named); 1 external calls (sub).
-
-
-##### `_named`  (lines 55–61)
-
-```
-def _named(rows: tuple[SummaryT, ...]) -> dict[str, SummaryT]
-```
-
-**Purpose**: This gives each connection or grant summary a stable object name that humans can read and the system can safely distinguish. The name includes a cleaned provider, a cleaned account ID, and a short fingerprint to avoid collisions.
-
-**Data flow**: A group of account summaries goes in → for each one, the function combines provider and account ID, hashes that identity, and builds a name → a dictionary comes out mapping each generated name to its original summary row.
-
-**Call relations**: ConnectionObjects._owned_rows and ConnectorGrantObjects._owned_rows call this when they need to turn raw grant-system summaries into workspace object rows. It delegates the readable cleanup step to _slug and uses a hash to make the final names unique enough even when cleaned text overlaps.
-
-*Call graph*: calls 1 internal fn (_slug); called by 2 (_owned_rows, _owned_rows); 1 external calls (sha256).
-
-
-##### `ConnectionObjects._owned_rows`  (lines 72–84)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
-```
-
-**Purpose**: This lists all connected provider accounts as member-owned workspace objects. It is what lets the object system show existing account connections in a consistent object list.
-
-**Data flow**: The current tool context comes in, though the account data is read from connection_summaries → each summary is given a generated name and wrapped with owner information, a short summary, and its generation ID → a tuple of owned object rows comes out.
-
-**Call relations**: The member-owned object framework calls this when it needs the available connection objects. It asks connection_summaries for the raw connection records, passes them through _named for stable names, and returns rows the broader object system can display and authorize.
-
-*Call graph*: calls 1 internal fn (_named); 3 external calls (__init__, __init__, connection_summaries).
-
-
-##### `ConnectionObjects._detail`  (lines 86–99)
-
-```
-async def _detail(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> ObjectDetail[ConnectionSpec] | None
-```
-
-**Purpose**: This returns the editable-looking details for one connection object, mainly its provider and account ID plus timestamps. It does not expose secrets; it gives enough information to understand what account is connected.
-
-**Data flow**: A context, object name, and stored owner marker go in → the function looks up the matching connection summary by its generation ID → if found, it returns an ObjectDetail containing a ConnectionSpec and creation/update times; if missing, it returns nothing.
-
-**Call relations**: The object framework calls this when someone asks to inspect a specific connection. It reads from connection_summaries and packages the result as a ConnectionSpec so the generic object system can present it consistently.
-
-*Call graph*: 3 external calls (__init__, __init__, connection_summaries).
-
-
-##### `ConnectionObjects._status`  (lines 101–114)
-
-```
-async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This provides live status information for a connection, such as who owns it, what host it belongs to, and which agents currently have access. It answers the question, “What is this connection doing right now?”
-
-**Data flow**: A context, name, and owner marker go in → the matching connection summary is found by generation ID → a plain JSON-like dictionary comes out with owner, host, and agent information, or nothing if the record has disappeared.
-
-**Call relations**: The object framework calls this when it needs status beyond the basic spec. It uses connection_summaries as the source of truth and returns simple values that can be shown to users or tools.
-
-*Call graph*: 1 external calls (connection_summaries).
-
-
-##### `ConnectionObjects._apply_owned`  (lines 116–124)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: ConnectionSpec, old: ConnectionSpec | None, owner: GeneratedObjectOwner | None) -> None
-```
-
-**Purpose**: This deliberately refuses to create or change a connection through the normal object apply path. Connecting an account requires a third-party consent flow, so users must use connect_account instead.
-
-**Data flow**: A requested connection spec and any existing object information go in → the function ignores the requested change and raises a clear “not supported” error → no connection is created or changed.
-
-**Call relations**: The object framework calls this when someone tries to apply a connection object. Instead of handing off to the grants system, it stops the action immediately with VerbNotSupported so the caller is directed to the proper connection flow.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ConnectionObjects._delete_owned`  (lines 126–136)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
-```
-
-**Purpose**: This disconnects a provider account when an allowed user deletes the connection object. Deleting here is broad: it removes the account connection and therefore cuts off every agent grant attached to it.
-
-**Data flow**: A context, object name, and owner marker go in → the function checks that the grants service exists and that there is a speaking member acting on the request → it asks the grants service to disconnect the stored connection generation → if the record changed underneath it, it raises an error instead of pretending success.
-
-**Call relations**: The object framework calls this after the ownership and admin rules allow a delete. It hands the real work to ctx.grants.disconnect, using the speaker member as the actor, so the grants layer can enforce and record the actual disconnection.
-
-
-##### `ConnectorGrantObjects._admin_can_apply`  (lines 147–148)
-
-```
-def _admin_can_apply(self, old: ConnectorGrantSpec, spec: ConnectorGrantSpec) -> bool
-```
-
-**Purpose**: This answers a narrow permission question: may an admin apply this grant change? The only admin edit it allows is turning an already shared grant back to private without changing anything else.
-
-**Data flow**: The old grant spec and requested new spec go in → the function compares them while imagining only the shared flag changed to false → it returns true only for that exact “make private” case.
-
-**Call relations**: The member-owned object framework uses this as part of deciding whether an admin is allowed to apply a connector grant change. It supports the file’s rule that admins may reduce sharing, but not share someone else’s connection or rewrite the account details.
-
-*Call graph*: 1 external calls (model_copy).
-
-
-##### `ConnectorGrantObjects._owned_rows`  (lines 150–165)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]
-```
-
-**Purpose**: This lists the current agent-access grants as workspace objects. Each row represents one agent’s permission to use a connected provider account.
-
-**Data flow**: The tool context comes in, while grant data is read from grant_summaries → each grant is given a stable generated name and labeled as shared or private → a tuple of owned rows comes out with owner, sharing state, and generation ID attached.
-
-**Call relations**: The object framework calls this when it needs to show connector_grant objects. It gets raw grant summaries from grant_summaries, uses _named to build object names, and returns rows that the generic object system can display and protect with ownership rules.
-
-*Call graph*: calls 1 internal fn (_named); 3 external calls (__init__, __init__, grant_summaries).
-
-
-##### `ConnectorGrantObjects._detail`  (lines 167–184)
-
-```
-async def _detail(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> ObjectDetail[ConnectorGrantSpec] | None
-```
-
-**Purpose**: This returns the main details for a single connector grant: which provider account it points to and whether it is shared. It lets users inspect an agent’s access without exposing credentials.
-
-**Data flow**: A context, object name, and owner marker go in → the function searches grant_summaries for the matching generation ID → if found, it builds a ConnectorGrantSpec and wraps it with grant and update timestamps; if not found, it returns nothing.
-
-**Call relations**: The object framework calls this when someone inspects a connector_grant object. It translates grant-system summary data into the object system’s standard detail shape.
-
-*Call graph*: 3 external calls (__init__, __init__, grant_summaries).
-
-
-##### `ConnectorGrantObjects._status`  (lines 186–200)
-
-```
-async def _status(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This reports live status for a connector grant, including owner, host, agent, and whether the grant is shared. It gives the operational view of who can currently use the connected account.
-
-**Data flow**: A context, object name, and owner marker go in → the matching grant summary is found by generation ID → a plain dictionary comes out with owner, host, agent, and shared state, or nothing if the grant no longer exists.
-
-**Call relations**: The object framework calls this when it needs status for a connector_grant. It reads from grant_summaries and returns simple JSON-like values that can be shown or consumed by tools.
-
-*Call graph*: 1 external calls (grant_summaries).
-
-
-##### `ConnectorGrantObjects._apply_owned`  (lines 202–237)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: ConnectorGrantSpec, old: ConnectorGrantSpec | None, owner: GeneratedObjectOwner | None) -> None
-```
-
-**Purpose**: This changes only the sharing flag on an existing connector grant. It refuses attempts to create a grant here or to alter which provider account the grant refers to, because those actions must go through the account connection flow.
-
-**Data flow**: The context, object name, desired spec, old spec, and owner marker go in → the function rejects missing existing data, missing grants support, or no acting member → it reloads the current grant, checks that provider and account ID have not changed, and compares the desired shared value → if the shared value changed, it asks the grants service to update it; otherwise it does nothing.
-
-**Call relations**: The object framework calls this when someone applies a change to a connector_grant object. It uses grant_summaries to check the latest state, raises VerbNotSupported for changes that belong to connect_account, and hands the allowed shared/private flip to ctx.grants.set_shared.
-
-*Call graph*: 4 external calls (__init__, __init__, model_copy, grant_summaries).
-
-
-##### `ConnectorGrantObjects._delete_owned`  (lines 239–249)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None
-```
-
-**Purpose**: This revokes one agent’s access to a connected provider account. Unlike deleting a connection, it leaves the underlying account connection and other agents’ grants intact.
-
-**Data flow**: A context, object name, and owner marker go in → the function checks that the grants service is available and that an acting member is present → it asks the grants service to revoke the grant generation → if the grant changed or disappeared during the operation, it raises an error.
-
-**Call relations**: The object framework calls this after delete permissions are satisfied for a connector_grant. It delegates the actual revocation to ctx.grants.revoke so the grants system can remove just this agent’s access edge.
-
-
-### `extensions/memory/ufo_ext_memory/objects.py`
-
-`domain_logic` · `request handling`
-
-The memory extension stores remembered facts, events, decisions, and similar notes in database rows. This file is the bridge between those rows and the project’s general object system, so a memory found by search can later be opened like a normal object.
-
-The important safety rule is visibility. A memory belongs to a subject, which is the audience or room allowed to see it. Both listing and reading check the caller’s allowed subjects before returning anything. If a memory was created from a page, the code also checks that the page is still the same revision and still belongs to the same subject. This prevents an old derived memory from leaking across rooms or surviving after its source no longer matches.
-
-Listing shows only live memories: rows that have not been replaced by a newer consolidated memory. Reading by id is more forgiving: it can return a superseded memory too, but includes a link to the replacement. That is like finding an old note in a filing cabinet with a sticky note saying, “use this newer version instead.”
-
-The file also defines the shape of a memory object, including its text, kind, confidence, source note, and date. Writes are deliberately blocked here. New or changed memories must go through the separate memory_update path, and old memories end by being superseded, not deleted.
-
-#### Function details
-
-##### `_require_ext`  (lines 57–60)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: This small guard makes sure the memory object code was called with its extension context. The extension context is the object that gives access to the memory store, transactions, workspace id, and page state checks.
-
-**Data flow**: It receives a tool context. If that context contains an extension context, it returns it unchanged. If the extension context is missing, it stops immediately with a runtime error, because the rest of this file cannot safely read memory data without it.
-
-**Call relations**: MemoryObjects.list and MemoryObjects.get call this before touching storage. It acts as the front-door check that ensures those read operations have the extension-specific information they need.
-
-*Call graph*: called by 2 (get, list).
-
-
-##### `MemoryObjects.list`  (lines 69–122)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns a page of current memory items the caller is allowed to see. It is used for browsing live memories, not for semantic recall; search is still the main way to find relevant memories.
-
-**Data flow**: It takes the caller context and a list query. First it gets the extension context, then reads the caller’s allowed subjects. It queries the memory table for rows in the current workspace, limited to those subjects, and skips rows that have been superseded. For memories derived from pages, it checks that each source page still has the expected subject and revision. It turns the surviving rows into short object rows with an id, a body preview, and simple fields such as subject and memory kind, then wraps them in an object page for the caller.
-
-**Call relations**: The object framework calls this when someone lists memory objects. Inside, it relies on _require_ext for extension access, uses SQLAlchemy to ask the database for matching rows, builds ObjectRow entries for display, and hands the final collection to object_page so it follows the system’s normal paging shape.
-
-*Call graph*: calls 1 internal fn (_require_ext); 3 external calls (__init__, select, object_page).
-
-
-##### `MemoryObjects.get`  (lines 124–186)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemorySpec] | None
-```
-
-**Purpose**: This opens one memory by id and returns its full readable details, if the caller is allowed to see it. It can also open an old superseded memory so stale references still have a recovery path to the newer replacement.
-
-**Data flow**: It receives a context and a name string. It first tries to read the name as a UUID, which is the id format used for memory rows; if that fails, it returns nothing. It then queries the memory table for that id in the current workspace and among the caller’s allowed subjects. If the row came from a page, it checks that the page still matches the remembered subject and revision. If everything is visible, it builds a MemorySpec containing the body and recall metadata, adds links to the source page and/or replacement memory when present, and returns an ObjectDetail. If any check fails, it returns nothing.
-
-**Call relations**: The object framework calls this when a memory reference is opened. It starts with _require_ext, uses UUID parsing to validate the requested id, uses SQLAlchemy to fetch the row, then builds ObjectRef and ObjectLink values so callers can follow provenance or supersession links. Finally it wraps the MemorySpec in ObjectDetail for the object system.
-
-*Call graph*: calls 1 internal fn (_require_ext); 6 external calls (__init__, __init__, __init__, __init__, select, UUID).
-
-
-##### `MemoryObjects.status`  (lines 188–195)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This reports that memory objects have no separate status information through this object interface. It exists to satisfy the object store contract.
-
-**Data flow**: It receives the context, object name, and an optional expected generation value. It does not inspect them or change anything. It always returns null, meaning there is no status payload to show.
-
-**Call relations**: This is part of the same object interface as list, get, apply, and delete. No internal caller is shown here; when the wider object system asks a memory object for status, this method simply declines to provide any extra state.
-
-
-##### `MemoryObjects.apply`  (lines 197–206)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: MemorySpec, old: MemorySpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This blocks attempts to create or edit memory objects through the generic object apply operation. The project requires memory writes to go through memory_update instead, so the proper validation and indexing flow is used.
-
-**Data flow**: It receives the context, name, proposed memory spec, optional old spec, and optional expected generation. Instead of saving anything, it raises a clear “not supported” error explaining that memories are recorded through memory_update and never applied here.
-
-**Call relations**: This method is present because the object system may try to apply changes to any object kind. For memory objects, it immediately hands back a VerbNotSupported error rather than passing data to the database, protecting the memory store from the wrong write path.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `MemoryObjects.delete`  (lines 208–215)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This blocks attempts to delete memory objects through the generic object delete operation. Memories are retired by being superseded during consolidation, not erased one at a time.
-
-**Data flow**: It receives the context, memory name, and optional expected generation. It does not look up or remove a row. It raises a “not supported” error explaining that memory deletion is not available and that supersession is the intended ending path.
-
-**Call relations**: This method is invoked through the object interface when deletion is requested. Rather than calling storage code, it returns a VerbNotSupported error, keeping memory lifecycle rules consistent with the rest of the extension.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `extensions/sources/ufo_ext_sources/pages.py`
-
-`domain_logic` · `request handling`
-
-A “page” here means one document brought in from an outside content source, such as an issue, pull request, or other provider record. This file turns those synced database rows into workspace objects that tools can browse. Without it, synced pages would exist internally, but users and tools would not have a safe, consistent way to list them, inspect them, or remove one from the workspace.
-
-The file draws a clear boundary: pages are produced by the sync driver, not authored by users. So list and get are allowed, create and update are rejected, and delete means “forget this synced page” rather than editing the original outside service. Delete is guarded so only a workspace admin can do it.
-
-The main public shape is `PageSpec`, which describes what a page looks like to callers: source, stream, title, timestamps, visibility subject, digest, blob reference, and a bounded body. The private `_Page` class is the internal wrapper around a synced row. It knows how to turn that row into display fields, a short summary, links back to the source binding, and the final object spec.
-
-`PageObjects` is the object-store adapter. It asks the extension context for pages the current caller is allowed to see, reads page bodies from the blob store when needed, trims very large bodies to a safe size, and closes the stream afterward. Think of it as a library front desk: it can show the catalog, fetch a readable copy, or let an authorized librarian remove an item from circulation.
-
-#### Function details
-
-##### `_require_ext`  (lines 61–64)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: This helper makes sure the tool request has an extension context attached. The extension context is the object that gives this file access to source pages and page-forgetting operations.
-
-**Data flow**: It receives a tool context. If the context contains an extension context, it returns it unchanged. If not, it stops the request with a runtime error, because this page object cannot work without that connection.
-
-**Call relations**: The page listing path uses this before reading synced pages, and the delete path uses it before forgetting a page. It acts like a safety check at the door before any extension-specific work happens.
-
-*Call graph*: called by 2 (_pages, delete).
-
-
-##### `_page_timestamp`  (lines 67–77)
-
-```
-def _page_timestamp(provider_value: str | None, row_value: datetime) -> str
-```
-
-**Purpose**: This helper turns page timestamps into one standard UTC text format. It accepts either a timestamp supplied by the original provider or, if that is missing, the workspace row timestamp.
-
-**Data flow**: It takes an optional provider timestamp string and a database timestamp. If the provider value is absent, it uses the row value and assumes UTC when needed. If the provider value is present, it parses it, requires it to include a timezone, converts it to UTC, and returns a precise ISO-formatted string.
-
-**Call relations**: The `_Page.spec` and `_Page.fields` methods call this whenever they expose created or updated times. This keeps list results and detailed reads speaking the same time language.
-
-*Call graph*: called by 2 (fields, spec); 2 external calls (fromisoformat, replace).
-
-
-##### `_Page.name`  (lines 97–98)
-
-```
-def name(self) -> str
-```
-
-**Purpose**: This property gives the workspace object name for a page. For synced pages, the name is simply the page row’s unique ID written as text.
-
-**Data flow**: It reads the page’s UUID value and converts it to a string. Nothing else is changed.
-
-**Call relations**: Other methods and object handlers use this name when listing pages or matching a user’s requested page name. It is the bridge between an internal row ID and the public object name.
-
-
-##### `_Page.links`  (lines 100–108)
-
-```
-def links(self) -> tuple[ObjectLink, ...]
-```
-
-**Purpose**: This method describes the page’s connection back to the source binding that synced it. If the source binding can be named, the page reports that it was “synced_by” that source.
-
-**Data flow**: It reads the stored source name. If there is no source name, it returns no links. If there is one, it builds a link pointing to the source object with that name.
-
-**Call relations**: Detailed page reads include these links so a caller can move from a page to the source that produced it. This gives useful context without duplicating all source details inside the page itself.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `_Page.spec`  (lines 110–123)
-
-```
-def spec(self, body: str, body_truncated: bool) -> PageSpec
-```
-
-**Purpose**: This method builds the full public description of a page, including its metadata and the body text that was read from blob storage. It is used when someone asks for one specific page.
-
-**Data flow**: It receives the already-read body text and a flag saying whether the body had to be shortened. It combines those with the page’s stored metadata, normalizes the timestamps, and returns a `PageSpec` object for the caller.
-
-**Call relations**: The get operation reads the body first, then asks `_Page.spec` to package the body together with the page metadata. `_Page.spec` relies on `_page_timestamp` so the timestamps are consistent and validated.
-
-*Call graph*: calls 1 internal fn (_page_timestamp); 1 external calls (__init__).
-
-
-##### `_Page.summary`  (lines 125–126)
-
-```
-def summary(self) -> str
-```
-
-**Purpose**: This method creates a short, human-readable label for a page in list views. It shows the title, the source provider and stream, and who can see the page.
-
-**Data flow**: It reads the page title, backend, stream, and subject, formats them into one sentence-like string, and cuts it to a fixed maximum length. It does not change the page.
-
-**Call relations**: The list operation uses this summary for each row it returns. It helps callers scan many pages without opening every page in detail.
-
-
-##### `_Page.fields`  (lines 128–136)
-
-```
-def fields(self) -> dict[str, JsonValue]
-```
-
-**Purpose**: This method picks the searchable and sortable metadata fields that should appear in page lists. These are the fields callers can filter or order by.
-
-**Data flow**: It reads the page’s source ID, provider, stream, title, and timestamps. It normalizes the timestamps and returns the values in a simple dictionary.
-
-**Call relations**: The list operation attaches these fields to each returned row. `_Page.fields` calls `_page_timestamp` so list metadata matches the detailed page representation.
-
-*Call graph*: calls 1 internal fn (_page_timestamp).
-
-
-##### `PageObjects.list`  (lines 147–152)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This method returns a paged list of synced pages the current caller is allowed to see. It gives each page a name, a short summary, and filterable fields.
-
-**Data flow**: It receives the tool context and a list query. It loads visible pages, turns each one into an object row, and passes those rows plus the query into the paging helper, which applies the requested listing behavior and returns an `ObjectPage`.
-
-**Call relations**: This is the main entry for object-list requests for the `page` kind. It depends on `_pages` to collect page records and on each `_Page` to format display data.
-
-*Call graph*: calls 1 internal fn (_pages); 2 external calls (__init__, object_page).
-
-
-##### `PageObjects.get`  (lines 154–184)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[PageSpec] | None
-```
-
-**Purpose**: This method returns the full details for one synced page, including a safely bounded copy of the page body. It prevents very large bodies from being returned all at once.
-
-**Data flow**: It receives the tool context and requested page name. It finds the matching page, opens the body blob stream, reads up to one byte beyond the maximum limit so it can tell whether truncation happened, decodes the bytes as UTF-8 text, and returns an object detail with the spec, timestamps, and links. If the page does not exist, it returns nothing.
-
-**Call relations**: Object-get requests for pages come here. It asks `_find` for the page metadata, reads the body through the context’s blob capability, then asks `_Page.spec` and `_Page.links` to build the final response.
-
-*Call graph*: calls 1 internal fn (_find); 1 external calls (__init__).
-
-
-##### `PageObjects.status`  (lines 186–193)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This method reports no separate status for page objects. Pages are read-only synced records, so there is no ongoing apply operation to track here.
-
-**Data flow**: It receives the usual status inputs, including context, name, and expected generation, but ignores them and returns `None`. It changes nothing.
-
-**Call relations**: The object framework may ask any object kind for status. For pages, this method is the simple answer: there is no extra status surface beyond listing and reading the page.
-
-
-##### `PageObjects.apply`  (lines 195–204)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: PageSpec, old: PageSpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This method rejects attempts to create or update a page. Pages must come from the content sync driver, so user-authored changes are not allowed through this object interface.
-
-**Data flow**: It receives the requested name, new spec, optional old spec, and expected generation. Instead of storing anything, it raises a `VerbNotSupported` error with an explanation that pages are synced, not authored.
-
-**Call relations**: When the object framework routes a create or update request for the `page` kind, it reaches this method. The method deliberately ends the flow so callers register or sync sources instead of trying to edit pages directly.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `PageObjects.delete`  (lines 206–218)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This method forgets one synced page, but only if the speaker is a workspace admin. Forgetting tombstones the page so the existing cleanup pipeline can remove derived index data too.
-
-**Data flow**: It receives the tool context and page name. It first checks whether the speaker is an admin. If not, it raises an admin-required error. If the speaker is allowed, it finds the page, fails if no such page exists, then asks the extension context to forget that page ID.
-
-**Call relations**: Delete requests for page objects come here. The method uses `_find` to turn the public name into an internal page, uses `_require_ext` to reach extension operations, and then hands the actual forgetting work to the extension context.
-
-*Call graph*: calls 3 internal fn (speaker_is_admin, _find, _require_ext); 1 external calls (__init__).
-
-
-##### `PageObjects._find`  (lines 220–221)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> _Page | None
-```
-
-**Purpose**: This helper looks up one visible page by its object name. It keeps get and delete from duplicating the same search logic.
-
-**Data flow**: It receives the context and desired page name. It loads the visible pages, compares each page’s name with the requested name, and returns the first match. If none match, it returns `None`.
-
-**Call relations**: Both `PageObjects.get` and `PageObjects.delete` call this before acting on a single page. It relies on `_pages`, so it only finds pages that the current caller is allowed to see.
-
-*Call graph*: calls 1 internal fn (_pages); called by 2 (delete, get).
-
-
-##### `PageObjects._pages`  (lines 223–250)
-
-```
-async def _pages(self, ctx: ToolContext) -> tuple[_Page, ...]
-```
-
-**Purpose**: This helper gathers all live synced pages visible to the current caller and wraps them in `_Page` objects. It also attaches source information so pages can show where they came from.
-
-**Data flow**: It receives the tool context, gets the extension context, loads registered sources, builds lookup tables for provider names and source object names, then asks for source pages matching the caller’s readable subjects. Each raw page record is converted into a `_Page` with metadata, blob reference, timestamps, and optional source link name.
-
-**Call relations**: The list path calls this to build all rows, and `_find` calls it before searching for one page. It is the central gathering step that connects the object interface to the extension’s source and page storage.
-
-*Call graph*: calls 1 internal fn (_require_ext); called by 2 (_find, list); 3 external calls (__init__, model_validate, binding_name).
-
-
-### `extensions/sources/ufo_ext_sources/tools.py`
-
-`domain_logic` · `object requests and page-change hook`
-
-A source is like a standing order to regularly bring content from an outside system into UFO. This file teaches the object system how to list, inspect, create, update, delete, and subscribe to those source bindings. A binding is identified by the provider, account, and tenant URL, so the object name is derived from those facts rather than chosen freely. That prevents two names from pointing at the same real connection.
-
-When someone applies a source manifest, the code checks that the provider exists, the requested streams are valid, the tenant URL is safe and has the expected shape, and the caller has the right account or workspace credential. It then registers one source row per stream. Sources are private by default, but can be shared with the workspace when created or later by the registering member. Other changes, like changing streams, must be done by deleting and recreating the source.
-
-The special field is subscribers. Any member who can see a source may add or remove only their own conversation id. When synced pages change, the hook groups changes by source, filters out private pages, writes a change log into each subscribed conversation’s files, and invokes that conversation with a clear alert message.
-
-#### Function details
-
-##### `_Binding.name`  (lines 155–156)
-
-```
-def name(self) -> str
-```
-
-**Purpose**: Builds the official object name for a source binding. The name comes from the provider, account, and base URL, so users cannot accidentally invent a second name for the same connection.
-
-**Data flow**: It reads the binding’s provider, account, and base URL → passes them to the shared name-building helper → returns the derived source object name.
-
-**Call relations**: Other parts of this file use binding names when listing, finding, deleting, subscribing, and sending alerts. It relies on the registry helper so source names stay consistent across the extension.
-
-*Call graph*: 1 external calls (binding_name).
-
-
-##### `_Binding.created_at`  (lines 159–160)
-
-```
-def created_at(self) -> datetime
-```
-
-**Purpose**: Reports when the binding first came into existence. Because one binding can contain several streams, it uses the oldest stream creation time.
-
-**Data flow**: It reads all stream creation timestamps in the binding → picks the earliest one → returns that timestamp.
-
-**Call relations**: This is used when object detail is built, so a reader sees one sensible creation time for the whole binding rather than separate times for each stream.
-
-
-##### `_Binding.updated_at`  (lines 163–164)
-
-```
-def updated_at(self) -> datetime
-```
-
-**Purpose**: Reports the most recent update time for the whole binding. If any stream changed recently, the binding should look recently updated.
-
-**Data flow**: It reads all stream update timestamps → picks the latest one → returns that timestamp.
-
-**Call relations**: This feeds object detail, giving the object system a single “last changed” time for a multi-stream source.
-
-
-##### `_Binding.spec`  (lines 166–174)
-
-```
-def spec(self, subscribers: tuple[str, ...]=()) -> SourceSpec
-```
-
-**Purpose**: Turns the internal binding record back into the public source manifest shape. This is what object_get can show to a user or agent.
-
-**Data flow**: It reads provider, stream names, account, base URL, sharing state, and optional subscribers → converts internal values such as the direct-account marker into user-facing fields → returns a SourceSpec.
-
-**Call relations**: Detail and apply logic use this to compare what already exists with what the caller requested. It calls SourceSpec to produce the same model users submit.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_Binding.summary`  (lines 176–178)
-
-```
-def summary(self) -> str
-```
-
-**Purpose**: Creates a short human-readable label for a binding. It helps lists and alerts show what the source is without dumping the full configuration.
-
-**Data flow**: It joins the stream names, combines them with provider and account → trims the text to the summary length limit → returns the short string.
-
-**Call relations**: Object listing uses this through owned rows, and alert messages call it so subscribers can quickly recognize the changed source.
-
-*Call graph*: called by 1 (_alert_message).
-
-
-##### `_require_ext`  (lines 187–190)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-**Purpose**: Makes sure the current tool call has the extension context it needs. The extension context is the gateway to registered sources, storage, credentials, and files.
-
-**Data flow**: It receives a tool context → checks whether its extension context is present → returns it, or raises an error if this object was dispatched incorrectly.
-
-**Call relations**: Many SourceObjects methods call this before touching source rows, credentials, or subscriber storage. It is a guardrail that catches wiring mistakes early.
-
-*Call graph*: called by 7 (_apply_owned, _bindings, _delete_owned, _detail, _edit_subscribers, _resolved_account, _status).
-
-
-##### `_require_connectors`  (lines 193–196)
-
-```
-def _require_connectors(ctx: ToolContext) -> ConnectorRegistry
-```
-
-**Purpose**: Makes sure the current tool call has the connector registry it needs. The connector registry knows which outside-account connection paths are available.
-
-**Data flow**: It receives a tool context → checks whether the connector registry is present → returns it, or raises an error if the runtime failed to provide it.
-
-**Call relations**: SourceObjects._resolved_account calls this while deciding whether a source should use a connected account or a direct workspace credential.
-
-*Call graph*: called by 1 (_resolved_account).
-
-
-##### `_bindings_from_ext`  (lines 199–228)
-
-```
-async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]
-```
-
-**Purpose**: Reconstructs source objects from the lower-level source rows stored by the extension. Several rows, one per stream, are grouped into one user-visible binding.
-
-**Data flow**: It asks the extension context for all source records → ignores records for providers this extension does not know → validates each record’s saved config → groups rows by provider, account, and base URL → returns sorted _Binding objects with their streams.
-
-**Call relations**: SourceObjects._bindings uses it for normal object operations, and on_page_change uses it to match changed pages back to their source binding.
-
-*Call graph*: calls 1 internal fn (sources); called by 2 (_bindings, on_page_change); 3 external calls (__init__, __init__, model_validate).
-
-
-##### `_subscribers_map`  (lines 231–243)
-
-```
-async def _subscribers_map(ext: ExtensionContext, name: str) -> dict[str, str]
-```
-
-**Purpose**: Reads the saved subscriber list for one source. It returns which conversations are subscribed and which agent should be invoked for each conversation.
-
-**Data flow**: It reads a value from the extension store under the source’s subscriber key → accepts a well-formed conversation-to-agent dictionary or an empty value → returns a plain dictionary, or raises an error if the stored data is malformed.
-
-**Call relations**: Object detail and status use it to show subscribers, subscription edits use it before writing changes, and the page-change hook uses it to know who to alert.
-
-*Call graph*: called by 4 (_detail, _edit_subscribers, _status, on_page_change).
-
-
-##### `_store_subscribers`  (lines 246–252)
-
-```
-async def _store_subscribers(ext: ExtensionContext, name: str, mapping: dict[str, str]) -> None
-```
-
-**Purpose**: Saves or clears the subscriber list for one source. Empty lists are deleted instead of stored as empty records.
-
-**Data flow**: It receives a source name and a conversation-to-agent mapping → writes the mapping to extension storage if it has entries → otherwise deletes the storage key → returns nothing.
-
-**Call relations**: Subscription edits call it after changing the caller’s entry, and deletion calls it to remove stale subscribers when a source is removed.
-
-*Call graph*: called by 2 (_delete_owned, _edit_subscribers).
-
-
-##### `_binding_identity`  (lines 255–256)
-
-```
-def _binding_identity(spec: SourceSpec) -> tuple[str, tuple[str, ...], str, str, bool]
-```
-
-**Purpose**: Extracts the parts of a source spec that define the binding itself. Subscribers are deliberately left out because they are an alert preference, not the source connection.
-
-**Data flow**: It receives a SourceSpec → sorts the stream names and collects provider, account id, base URL, and sharing flag → returns that identity tuple.
-
-**Call relations**: SourceObjects.apply uses it to detect when an apply is only changing subscribers. That lets subscription edits bypass the stricter owner-only mutation path.
-
-*Call graph*: called by 1 (apply).
-
-
-##### `_self_only_change`  (lines 259–266)
-
-```
-def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -> None
-```
-
-**Purpose**: Enforces the rule that a conversation may only subscribe or unsubscribe itself. This prevents one conversation from silently changing another conversation’s alerts.
-
-**Data flow**: It receives the old subscriber ids, new subscriber ids, and the caller’s id → compares what changed → returns normally if only the caller changed, or raises a clear error if any other id changed.
-
-**Call relations**: SourceObjects.apply calls this before editing subscribers. It is the small safety check that makes subscriber edits visibility-based without becoming a way to control other users.
-
-*Call graph*: called by 1 (apply).
-
-
-##### `SourceObjects.apply`  (lines 290–313)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Handles object_apply for source objects, with a special fast path for subscription-only changes. It lets visible users toggle their own alerts while leaving real source changes under the normal ownership rules.
-
-**Data flow**: It receives the requested object name, new spec, old visible spec, and generation information → compares binding identity → if only subscribers changed, checks the caller may only edit their own id and saves that change → otherwise hands off to the base object apply flow.
-
-**Call relations**: The object system calls this when a source is applied. It calls _binding_identity, _self_only_change, and _edit_subscribers for subscription edits; for actual create/update work it delegates upward to the member-owned object framework.
-
-*Call graph*: calls 3 internal fn (_edit_subscribers, _binding_identity, _self_only_change); 1 external calls (__init__).
-
-
-##### `SourceObjects._edit_subscribers`  (lines 315–337)
-
-```
-async def _edit_subscribers(self, ctx: ToolContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID) -> None
-```
-
-**Purpose**: Adds or removes the current conversation from a source’s subscriber map. It also stores the current agent id so future alerts re-enter the same conversation with the same agent.
-
-**Data flow**: It receives the source name, desired subscriber tuple, caller conversation id, and agent id → reads the existing subscriber map → adds or removes only the caller → stores the updated map → rechecks that the source still exists, clearing the map and raising an unknown-object error if it disappeared.
-
-**Call relations**: SourceObjects.apply calls this after proving the subscriber edit is allowed. It uses _subscribers_map and _store_subscribers for storage, _require_ext for extension access, and _find to guard against writes racing with deletion.
-
-*Call graph*: calls 4 internal fn (_find, _require_ext, _store_subscribers, _subscribers_map); called by 1 (apply); 1 external calls (__init__).
-
-
-##### `SourceObjects._owned_rows`  (lines 339–350)
-
-```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]
-```
-
-**Purpose**: Builds the compact rows used when listing source objects. Each row says the source name, a short summary, and who owns or shares it.
-
-**Data flow**: It loads all reconstructed bindings → for each one, derives its name and summary and builds an owner record from its subject and owner member id → returns the tuple of list rows.
-
-**Call relations**: The member-owned object framework calls this when it needs to list or filter sources by visibility. It depends on _bindings to reconstruct user-visible source bindings first.
-
-*Call graph*: calls 1 internal fn (_bindings); 2 external calls (__init__, __init__).
-
-
-##### `SourceObjects._detail`  (lines 352–363)
-
-```
-async def _detail(self, ctx: ToolContext, name: str, _owner: ObjectOwner) -> ObjectDetail[SourceSpec] | None
-```
-
-**Purpose**: Builds the full object detail for one source. This is what lets object_get show the exact manifest, timestamps, and subscriber ids.
-
-**Data flow**: It receives a source name → finds the binding → if missing, returns none → otherwise reads the subscriber map, turns the binding into a SourceSpec, and returns that spec with created and updated times.
-
-**Call relations**: The object framework calls this after visibility has been checked. It uses _find for the source, _subscribers_map for alert subscriptions, and ObjectDetail to package the answer.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _subscribers_map); 1 external calls (__init__).
-
-
-##### `SourceObjects._status`  (lines 365–388)
-
-```
-async def _status(self, ctx: ToolContext, name: str, _owner: ObjectOwner) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Builds live status information for one source. It tells the caller whether the source is shared, whether this conversation is subscribed, and how each stream is doing.
-
-**Data flow**: It receives a source name → finds the binding → reads subscribers → creates a dictionary with sharing state, the caller’s subscriber id, subscribed yes/no, and per-stream next sync time and error count → includes the private owner id when relevant → returns the status dictionary.
-
-**Call relations**: The object framework calls this for object status output. It uses the same binding lookup and subscriber storage as detail, but returns operational state rather than the source manifest.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _subscribers_map).
-
-
-##### `SourceObjects._apply_owned`  (lines 390–465)
-
-```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: SourceSpec, old: SourceSpec | None, owner: ObjectOwner | None) -> None
-```
-
-**Purpose**: Creates a new source binding or performs the one allowed ownership-protected change: making a private source shared. It is the main validation and registration path for real source configuration.
-
-**Data flow**: It receives the requested name, source spec, previous spec, and owner information → checks a speaking member exists → rejects initial subscribers → validates provider, streams, base URL, account, and derived name → if the binding exists, refuses identity changes, allows private-to-shared, or no-ops identical specs → if it does not exist, registers one source row per stream with the right subject and account connection.
-
-**Call relations**: The base apply flow calls this after ownership rules are satisfied. It calls _resolved_account to choose authentication, _validated_base_url to make tenant URLs safe, _find to detect existing bindings, and extension methods to register or share source rows.
-
-*Call graph*: calls 4 internal fn (_find, _resolved_account, _require_ext, _validated_base_url); 6 external calls (__init__, __init__, __init__, member_subject, get, binding_name).
-
-
-##### `SourceObjects._delete_owned`  (lines 467–474)
-
-```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None
-```
-
-**Purpose**: Deletes a whole source binding. Since a binding may contain several stream rows, it removes each stream and then clears the subscriber list.
-
-**Data flow**: It receives a source name and owner information → finds the binding → raises an unknown-object error if it is gone → removes every stream’s source row from the extension → deletes the saved subscriber map.
-
-**Call relations**: The member-owned object framework calls this after checking that the caller is the registrar or an admin. It uses _find, _require_ext, and _store_subscribers to remove both sync rows and alert state.
-
-*Call graph*: calls 3 internal fn (_find, _require_ext, _store_subscribers); 1 external calls (__init__).
-
-
-##### `SourceObjects._resolved_account`  (lines 476–539)
-
-```
-async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> _ResolvedAccount
-```
-
-**Purpose**: Decides which credential a source will use to authenticate with the outside provider. It chooses between a connected account and a direct workspace credential, and explains what the user must do if neither is ready.
-
-**Data flow**: It receives the tool context and requested source spec → inspects the connector registry, available connected accounts, declared credentials, and requested account_id → validates ownership of connected accounts → returns the chosen account handle plus connection id, or raises a helpful error.
-
-**Call relations**: SourceObjects._apply_owned calls this before registering source rows. It calls connector account and connection methods on the tool context, and uses extension credentials when falling back to direct authentication.
-
-*Call graph*: calls 4 internal fn (connector_accounts, connector_connection, _require_connectors, _require_ext); called by 1 (_apply_owned); 1 external calls (__init__).
-
-
-##### `SourceObjects._find`  (lines 541–544)
-
-```
-async def _find(self, ctx: ToolContext, name: str) -> _Binding | None
-```
-
-**Purpose**: Looks up one source binding by its derived name. It provides a simple single-object view over the reconstructed binding list.
-
-**Data flow**: It receives a source name → loads all bindings → returns the first binding whose name matches, or none if there is no match.
-
-**Call relations**: Detail, status, apply, delete, and subscriber editing all call this when they need to confirm a source exists or inspect its current rows. It delegates the actual reconstruction to _bindings.
-
-*Call graph*: calls 1 internal fn (_bindings); called by 5 (_apply_owned, _delete_owned, _detail, _edit_subscribers, _status).
-
-
-##### `SourceObjects._bindings`  (lines 546–547)
-
-```
-async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]
-```
-
-**Purpose**: Loads all source bindings visible to this object handler from the extension context. It is the class-level wrapper around the shared reconstruction helper.
-
-**Data flow**: It receives the tool context → extracts the extension context → asks _bindings_from_ext to group source rows into bindings → returns those bindings.
-
-**Call relations**: SourceObjects._find and _owned_rows call this during object lookup and listing. It centralizes the requirement that source object operations must have an extension context.
-
-*Call graph*: calls 2 internal fn (_bindings_from_ext, _require_ext); called by 2 (_find, _owned_rows).
-
-
-##### `on_page_change`  (lines 550–593)
-
-```
-async def on_page_change(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Sends alerts when synced pages change for sources that conversations have subscribed to. It makes sure only shared page changes are announced, so private synced content does not leak.
-
-**Data flow**: It receives a hook context with a batch of page changes → rebuilds source bindings and matches each changed source row to a binding → groups changes by binding → reads subscribers → filters to shared changes → writes a change log per subscribed conversation → invokes that conversation with an alert message and an idempotency key to avoid duplicate alerts → returns no special hook outcome.
-
-**Call relations**: The manifest hook system calls this when page changes are produced by sync. It uses _bindings_from_ext, _subscribers_map, _write_change_log, and _alert_message to turn raw page changes into useful subscriber notifications.
-
-*Call graph*: calls 4 internal fn (_alert_message, _bindings_from_ext, _subscribers_map, _write_change_log); 1 external calls (UUID).
-
-
-##### `_write_change_log`  (lines 596–629)
-
-```
-async def _write_change_log(ext: ExtensionContext, conversation_id: UUID, binding: _Binding, latest: str, changes: list[PageChange]) -> str | None
-```
-
-**Purpose**: Writes the full list of changed pages into a subscribed conversation’s workspace files. This keeps alert messages short while still giving the agent a file it can inspect for details.
-
-**Data flow**: It receives the extension context, conversation id, binding, latest timestamp, and changes → if file storage is unavailable, returns none → otherwise writes one JSON line per changed page with page reference, stream, title, change type, and timestamp → prunes older files in that directory → returns the written path.
-
-**Call relations**: on_page_change calls this before invoking each subscriber. It calls _disposition to label each change as added, updated, or removed, and uses JSON encoding so the file is easy for tools like jq or grep to search.
-
-*Call graph*: calls 1 internal fn (_disposition); called by 1 (on_page_change); 1 external calls (dumps).
-
-
-##### `_disposition`  (lines 632–638)
-
-```
-def _disposition(change: PageChange) -> str
-```
-
-**Purpose**: Classifies a page change as added, updated, or removed. This gives alerts and logs plain words instead of raw timestamp and tombstone details.
-
-**Data flow**: It receives a PageChange → if it is a tombstone, returns removed → otherwise compares creation time to change time → returns added when they match, or updated when they differ.
-
-**Call relations**: _write_change_log uses this for each JSON log line, and _stream_counts uses it to summarize changes in alert text.
-
-*Call graph*: called by 2 (_stream_counts, _write_change_log).
-
-
-##### `_stream_counts`  (lines 641–655)
-
-```
-def _stream_counts(changes: list[PageChange]) -> str
-```
-
-**Purpose**: Summarizes how many pages changed in each stream. This gives subscribers the headline before they inspect individual pages.
-
-**Data flow**: It receives a list of page changes → counts added, updated, and removed items per stream → formats those counts into a readable sentence fragment → returns that text.
-
-**Call relations**: _alert_message calls this while building the notification. It relies on _disposition so the summary uses the same labels as the change log.
-
-*Call graph*: calls 1 internal fn (_disposition); called by 1 (_alert_message); 1 external calls (defaultdict).
-
-
-##### `_alert_message`  (lines 658–677)
-
-```
-def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str | None) -> str
-```
-
-**Purpose**: Builds the message sent to a subscribed conversation when a source changes. It gives the agent enough context to decide what to read next and what to tell the member.
-
-**Data flow**: It receives the binding, changed pages, and optional change-log path → chooses a detail style: name every page for small batches, point to the log for larger batches, or suggest listing pages if no log exists → combines that with the source summary and per-stream counts → returns the final alert text.
-
-**Call relations**: on_page_change calls this right before invoking each subscribed conversation. It uses _stream_counts for the headline, _page_reference for small batches, and _Binding.summary to make the source recognizable.
-
-*Call graph*: calls 3 internal fn (summary, _page_reference, _stream_counts); called by 1 (on_page_change).
-
-
-##### `_page_reference`  (lines 680–684)
-
-```
-def _page_reference(change: PageChange) -> str
-```
-
-**Purpose**: Formats one changed page as an object reference an agent can fetch. It includes a short title so the reference is understandable to a human.
-
-**Data flow**: It receives a PageChange → trims the title to the alert label limit or uses a fallback for untitled pages → returns text like a page object id plus label.
-
-**Call relations**: _alert_message calls this when there are only a few changed pages, so the alert can name them directly instead of sending the reader to a log file.
-
-*Call graph*: called by 1 (_alert_message).
-
-
-##### `_validated_base_url`  (lines 687–721)
-
-```
-def _validated_base_url(provider: str, base_url: str | None) -> str | None
-```
-
-**Purpose**: Checks and normalizes tenant API URLs for providers that need them. This protects the sync system from unsafe or unexpected URLs while giving users provider-specific examples.
-
-**Data flow**: It receives a provider and optional base URL → checks whether that connector has a fixed host or needs a tenant URL → parses the URL → rejects usernames, passwords, ports, queries, fragments, non-HTTPS schemes, and hosts or paths outside the provider’s allowed pattern → returns a normalized HTTPS URL or none.
-
-**Call relations**: SourceObjects._apply_owned calls this before registering a source. It uses the provider rules in this file and urlsplit to make sure tenant-specific connectors only sync from safe, expected API locations.
-
-*Call graph*: called by 1 (_apply_owned); 1 external calls (urlsplit).
-
-
-### Object system foundation
-The shared object registry and scoped ownership helper provide consistent validation, permissions, and audited object handling for all object kinds.
-
-### `core/src/ufo/objects.py`
-
-`domain_logic` · `startup and request handling`
-
-A workspace object is like a labeled card in a shared filing cabinet: it has a kind, a name, and a spec, which is the saved content. Different extensions can add new kinds of cards, but this file enforces the common rules before any extension code runs. Without it, each extension would need its own naming rules, validation, permission checks, list paging, and tool wiring, which would make objects inconsistent and unsafe.
-
-The file has three main jobs. First, it defines the shapes of object identities, links, list rows, pages, ownership records, and registered object kinds. Second, it validates a deployment’s object registry at startup, rejecting duplicate kind names, loose spec models that allow unknown keys, specs that cannot be represented as JSON, and secret fields that would be unsafe to echo back. Third, it exposes five user-facing tool verbs through ObjectVerbs: list, get, explain, apply, and delete.
-
-There is also a reusable MemberOwnedObjects base class for object kinds whose rows belong to workspace members. It centralizes visibility and edit rules so every subclass gets the same guardrails. A generation value can act like a numbered ticket: if the row changes between reading and writing, the write is refused instead of silently overwriting newer data.
-
-#### Function details
-
-##### `ObjectRef.validate_kind`  (lines 80–83)
-
-```
-def validate_kind(cls, value: str) -> str
-```
-
-**Purpose**: Checks that an object reference uses a valid kind name. This prevents malformed or surprising kind labels from entering the system.
-
-**Data flow**: It receives a kind string, compares it with the allowed snake_case-style pattern, and either returns the same string unchanged or raises an error explaining the rule.
-
-**Call relations**: Pydantic calls this automatically when an ObjectRef is built, so every stored or returned object reference passes the same kind-name gate.
-
-
-##### `ObjectRef.validate_name`  (lines 87–93)
-
-```
-def validate_name(cls, value: str) -> str
-```
-
-**Purpose**: Checks that an object reference uses a valid object name. Names must be short, lowercase, and hyphen-friendly so they are stable and easy to read.
-
-**Data flow**: It receives a name string, checks its length and pattern, and returns it unchanged if valid. If not, it raises an error that includes the allowed format.
-
-**Call relations**: Pydantic runs this during ObjectRef creation, making sure links and references cannot carry names that the rest of the object system would reject.
-
-
-##### `ObjectRef.__str__`  (lines 95–96)
-
-```
-def __str__(self) -> str
-```
-
-**Purpose**: Turns an object reference into the compact human-readable form `kind/name`.
-
-**Data flow**: It reads the reference’s kind and name fields and joins them with a slash. It does not change the object.
-
-**Call relations**: This is used whenever Python needs a string form of ObjectRef, for example in logs, messages, or debugging output.
-
-
-##### `_ObjectCursor.validate_rank`  (lines 197–202)
-
-```
-def validate_rank(self) -> '_ObjectCursor'
-```
-
-**Purpose**: Checks that a list cursor’s saved sort value matches the kind of value its rank claims to be. This keeps paging tokens from being corrupted or mismatched.
-
-**Data flow**: It reads the cursor’s rank and value, verifies that rank 0 means an empty placeholder, rank 1 means a boolean stored as an integer, rank 2 means a number, and rank 3 means a string. It returns the cursor if valid or raises an error if not.
-
-**Call relations**: Pydantic calls this when a cursor is decoded inside object_page, so bad continuation tokens are rejected before they affect list paging.
-
-
-##### `object_page`  (lines 205–284)
-
-```
-def object_page(rows: tuple[ObjectRow, ...], query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Applies the shared rules for searching, filtering, sorting, and paging a list of lightweight object rows. Object kinds can provide simple rows and rely on this function for consistent list behavior.
-
-**Data flow**: It receives rows and a query. It checks that row fields are declared and do not collide with reserved names, filters rows by search text and exact field matches, sorts them, applies any cursor boundary, and returns one page plus an optional next cursor.
-
-**Call relations**: MemberOwnedObjects.list calls this after filtering rows by visibility. Inside, it uses object_page.value to read a field from a row, _sortable to turn values into comparable sort keys, and _ObjectCursor to decode or create paging tokens.
-
-*Call graph*: calls 1 internal fn (_sortable); called by 1 (list); 2 external calls (__init__, __init__).
-
-
-##### `object_page.value`  (lines 229–234)
-
-```
-def value(row: ObjectRow, name: str) -> JsonValue
-```
-
-**Purpose**: Reads one named value from a list row in the same way for built-in and custom fields.
-
-**Data flow**: It receives a row and a field name. If the field is `name` or `summary`, it returns that built-in value; otherwise it looks in the row’s extra fields.
-
-**Call relations**: This helper lives inside object_page and is used while searching, filtering, sorting, and building cursor boundaries.
-
-
-##### `_sortable`  (lines 287–300)
-
-```
-def _sortable(value: JsonValue, field_name: str) -> tuple[_SortRank, str | int | float]
-```
-
-**Purpose**: Converts a list field value into a safe sort key. It defines one predictable ordering for empty values, booleans, numbers, and strings.
-
-**Data flow**: It receives a JSON-like value and the field name it came from. It returns a pair containing a type rank and the value to sort by, or raises an error if the value is a list, object, or other non-scalar value that cannot be ordered cleanly.
-
-**Call relations**: object_page calls this when ordering rows and when comparing rows against a cursor boundary.
-
-*Call graph*: called by 1 (object_page).
-
-
-##### `ObjectStore.list`  (lines 315–315)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Defines the required listing operation for every object kind’s storage layer. A concrete store implements it to return one page of lightweight rows.
-
-**Data flow**: It receives a tool context and a list query, then the implementing store reads its own backing data and returns an ObjectPage. This protocol method itself only states the contract.
-
-**Call relations**: ObjectVerbs._list eventually calls a registered kind’s implementation of this method after resolving the kind and preparing the correct context.
-
-
-##### `ObjectStore.get`  (lines 317–317)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None
-```
-
-**Purpose**: Defines how an object kind reads one full object by name. A concrete store implements it to return the saved spec and related metadata.
-
-**Data flow**: It receives a tool context and object name. The implementing store looks up that object and returns ObjectDetail if found, or None if absent.
-
-**Call relations**: ObjectVerbs._get, ObjectVerbs._apply, and ObjectVerbs._delete use this contract to read the current object before showing, updating, or deleting it.
-
-
-##### `ObjectStore.status`  (lines 319–325)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Defines how an object kind reports live status beside the saved spec. Status is separate because it may be computed from current system state rather than stored YAML.
-
-**Data flow**: It receives a context, name, and optional expected generation. The concrete store checks the object and returns a JSON-like status mapping, or None if the object is gone.
-
-**Call relations**: ObjectVerbs._get calls this after get so the user sees both the saved configuration and the current live state.
-
-
-##### `ObjectStore.apply`  (lines 327–335)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Defines how an object kind creates or updates an object after the common envelope and spec have already been validated.
-
-**Data flow**: It receives a context, object name, validated spec, previous spec if any, and optional expected generation. The concrete store writes the change or raises a clear refusal.
-
-**Call relations**: ObjectVerbs._apply calls this as the final mutation step after parsing YAML, validating the name and spec, and checking cross-agent rules.
-
-
-##### `ObjectStore.delete`  (lines 337–343)
-
 ```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+async def open_session(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines how an object kind deletes an object by name.
+**Purpose**: Accepts a posted bearer token and stores it as the browser session cookie. This is the portal's login POST, and it keeps the token out of URLs.
 
-**Data flow**: It receives a context, name, and optional expected generation. The concrete store removes the object or raises a refusal if deletion is not allowed.
+**Data flow**: It first checks the form body size, parses the form, validates that the token field exists and has a safe token shape, then returns a redirect response with the session cookie set.
 
-**Call relations**: ObjectVerbs._delete calls this after first reading the object so it can verify existence and later echo the deleted spec.
+**Call relations**: It is the POST route at the portal root. It relies on `_framed_length` and `_form`, then uses the HTTP cookie helper to start future authenticated requests.
 
+*Call graph*: calls 2 internal fn (_form, _framed_length); 3 external calls (JSONResponse, RedirectResponse, set_session_cookie).
 
-##### `MemberOwnedObjects.list`  (lines 399–407)
 
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Lists only the member-owned rows that the current actor is allowed to see. It keeps private rows out of list results.
-
-**Data flow**: It reads whether the speaker is an admin, the acting member id, and all rows supplied by the subclass. It keeps rows that are shared, owned by the actor, or admin-visible, converts them to lightweight ObjectRow values, and returns a paged result.
-
-**Call relations**: This is the reusable implementation of ObjectStore.list for member-owned kinds. It asks the subclass for _owned_rows, checks each row with _visible, and hands the visible rows to object_page.
-
-*Call graph*: calls 4 internal fn (_owned_rows, _visible, object_page, speaker_is_admin); 1 external calls (__init__).
-
-
-##### `MemberOwnedObjects.get`  (lines 409–420)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None
-```
-
-**Purpose**: Reads one member-owned object only if the current actor is allowed to see it.
-
-**Data flow**: It looks up the row owner, checks visibility, and returns None if the row is missing or hidden. If visible, it asks the subclass for full detail and attaches the owner generation when the row is generation-tracked.
-
-**Call relations**: This implements the common read gate for member-owned ObjectStore.get methods. It relies on _owner, _visible, speaker_is_admin, and _detail.
-
-*Call graph*: calls 4 internal fn (_detail, _owner, _visible, speaker_is_admin); 1 external calls (replace).
-
-
-##### `MemberOwnedObjects.status`  (lines 422–442)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Returns live status for a visible member-owned object while guarding against stale reads. It refuses to show status if the object changed since the earlier read.
-
-**Data flow**: It looks up the owner, checks the expected generation, verifies visibility, asks the subclass for status, then checks the owner and generation again before returning the status. If the object is gone or hidden, it returns None or raises not-found as appropriate.
-
-**Call relations**: ObjectVerbs._get uses this through the ObjectStore.status contract after reading object detail. The method uses _owner, _require_current_generation, _visible, and the subclass’s _status hook.
-
-*Call graph*: calls 5 internal fn (_owner, _require_current_generation, _status, _visible, speaker_is_admin); 1 external calls (__init__).
-
-
-##### `MemberOwnedObjects.apply`  (lines 444–470)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Creates or updates a member-owned object while enforcing ownership, admin, speaker, and stale-change rules. It is the main edit gate for member-owned kinds.
-
-**Data flow**: It receives the validated new spec and the previous spec if one existed. It checks whether the row exists, whether the actor can see and edit it, whether an admin exception is allowed, whether a live speaker is required, and whether the generation still matches, then passes the write to _apply_owned.
-
-**Call relations**: This implements the common ObjectStore.apply path for subclasses. ObjectVerbs._apply reaches it through the store interface after parsing and validating the manifest.
-
-*Call graph*: calls 7 internal fn (_admin_can_apply, _apply_owned, _owned, _owner, _require_current_generation, _visible, speaker_is_admin); 2 external calls (__init__, __init__).
-
-
-##### `MemberOwnedObjects.delete`  (lines 472–490)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Deletes a member-owned object only when the actor is allowed to delete that row.
-
-**Data flow**: It finds the owner, checks the expected generation, rejects missing or hidden rows as not found, checks owner/admin permission and any live-speaker requirement, then asks the subclass to delete the row.
-
-**Call relations**: ObjectVerbs._delete reaches this through the store interface. The method uses _owner, _require_current_generation, _visible, _owned, and the subclass’s _delete_owned hook.
-
-*Call graph*: calls 6 internal fn (_delete_owned, _owned, _owner, _require_current_generation, _visible, speaker_is_admin); 2 external calls (__init__, __init__).
-
-
-##### `MemberOwnedObjects._owned`  (lines 492–496)
-
-```
-def _owned(self, owner: OwnerT, acting: UUID | None) -> bool
-```
-
-**Purpose**: Checks whether the acting member is the actual member-owner of a row.
-
-**Data flow**: It receives an owner record and an acting member id. It returns true only when the row has a member owner and that id matches; admin-only rows with no member id are never treated as member-owned.
-
-**Call relations**: _visible uses this to decide read access, while apply and delete use it to decide whether non-admin edits are allowed.
-
-*Call graph*: called by 3 (_visible, apply, delete).
-
-
-##### `MemberOwnedObjects._visible`  (lines 498–499)
-
-```
-def _visible(self, owner: OwnerT, acting: UUID | None, is_admin: bool) -> bool
-```
-
-**Purpose**: Decides whether a row should be visible to the current actor.
-
-**Data flow**: It receives the row owner, acting member id, and admin flag. It returns true if the row is shared, owned by the actor, or the speaker is an admin.
-
-**Call relations**: The list, get, status, apply, and delete paths all call this so hidden rows are consistently omitted or treated as not found.
-
-*Call graph*: calls 1 internal fn (_owned); called by 5 (apply, delete, get, list, status).
-
-
-##### `MemberOwnedObjects._admin_can_apply`  (lines 501–502)
-
-```
-def _admin_can_apply(self, old: SpecT, spec: SpecT) -> bool
-```
-
-**Purpose**: Allows a subclass to make a narrow exception for admin edits to someone else’s row. The default is conservative and allows no such update.
-
-**Data flow**: It receives the old and new specs and returns false by default. A subclass can override it to return true for safe admin-approved changes.
-
-**Call relations**: MemberOwnedObjects.apply calls this only when an admin is trying to edit a visible row that they do not own.
+##### `_agent_param`  (lines 246–250)
 
-*Call graph*: called by 1 (apply).
-
-
-##### `MemberOwnedObjects._require_current_generation`  (lines 504–521)
-
 ```
-def _require_current_generation(self, name: str, owner: OwnerT | None, expected_generation: UUID | None, action: str) -> None
+def _agent_param(request: Request) -> UUID | None
 ```
 
-**Purpose**: Prevents an operation from continuing when a generation-tracked row changed after it was read. This avoids acting on stale information.
+**Purpose**: Reads an agent id from the route path and makes sure it is a valid UUID, which is the standard unique id format used here.
 
-**Data flow**: It receives the object name, current owner, expected generation, and action word. It compares the current generation with the expected one and raises an error if they differ.
+**Data flow**: It takes the request path parameter named `agent_id`, tries to parse it as a UUID, and returns the UUID or `None` if the path value is malformed.
 
-**Call relations**: MemberOwnedObjects.apply, delete, and status call this before mutating or revealing live state.
+**Call relations**: `chat`, `transcript`, and `_panel_gate` use it before allowing any agent-specific action.
 
-*Call graph*: called by 3 (apply, delete, status).
+*Call graph*: called by 3 (_panel_gate, chat, transcript); 1 external calls (UUID).
 
 
-##### `MemberOwnedObjects._owner`  (lines 523–524)
+##### `_chat_row_key`  (lines 253–254)
 
 ```
-async def _owner(self, ctx: ToolContext, name: str) -> OwnerT | None
+def _chat_row_key(conversation_id: UUID) -> str
 ```
 
-**Purpose**: Finds the owner record for one named row.
+**Purpose**: Builds the storage key for the web-specific record attached to a conversation. That record stores the chosen agent, owner email, and rail title.
 
-**Data flow**: It asks the subclass for all owned rows, searches for the requested name, and returns that row’s owner or None if not found.
+**Data flow**: It receives a conversation id and returns a string key under the `chat/` prefix.
 
-**Call relations**: The get, status, apply, and delete gates call this before deciding visibility, permissions, or stale-generation checks.
+**Call relations**: `_open_conversation`, `_own_chat`, and `chats_index` use this key to write, read, and bulk-fetch web chat records.
 
-*Call graph*: calls 1 internal fn (_owned_rows); called by 4 (apply, delete, get, status).
+*Call graph*: called by 3 (_open_conversation, _own_chat, chats_index).
 
 
-##### `MemberOwnedObjects._owned_rows`  (lines 526–527)
+##### `_chat_title`  (lines 263–281)
 
 ```
-async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[OwnerT], ...]
+def _chat_title(text: str, paths: tuple[str, ...]) -> str
 ```
 
-**Purpose**: Subclasses implement this to provide the list of rows and ownership data for their object kind.
+**Purpose**: Creates the short title shown in the conversation rail. It uses the first message when possible, or uploaded file names when the message is only attachments.
 
-**Data flow**: It receives the tool context and should return owned row summaries. In this base class it raises NotImplementedError, meaning it is a required hook.
+**Data flow**: It receives message text and saved upload paths, collapses whitespace, cuts the result to a safe length near a word boundary, trims weak ending words or punctuation, and returns the title string.
 
-**Call relations**: MemberOwnedObjects.list calls it to build visible listings, and _owner calls it to find a specific row’s owner.
+**Call relations**: `_open_conversation` calls it before creating the conversation record.
 
-*Call graph*: called by 2 (_owner, list).
+*Call graph*: called by 1 (_open_conversation).
 
 
-##### `MemberOwnedObjects._detail`  (lines 529–532)
+##### `_open_conversation`  (lines 294–323)
 
 ```
-async def _detail(self, ctx: ToolContext, name: str, owner: OwnerT) -> ObjectDetail[SpecT] | None
+async def _open_conversation(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, queue_key: str, text: str, paths: tuple[str, ...]) -> tuple[UUID, str]
 ```
 
-**Purpose**: Subclasses implement this to load the full saved detail for a visible row.
+**Purpose**: Creates a new web chat conversation and its web-side metadata row. It writes the row first so the rail can later show the conversation title and ownership.
 
-**Data flow**: It receives the context, object name, and already-known owner, then should return ObjectDetail or None. The base class only marks it as required.
+**Data flow**: It receives the context, store, agent, member, email, queue key, text, and upload paths. It mints a conversation id, stores a `ChatRecord`, asks core to create or find the conversation for the queue key, cleans up if another request won the race, and returns the conversation id and title.
 
-**Call relations**: MemberOwnedObjects.get calls this after the shared visibility check succeeds.
+**Call relations**: `chat` calls it when the browser sends the first message for a new conversation. It uses `_chat_title`, `_chat_row_key`, `_own_chat`, and the core `conversation_for` call.
 
-*Call graph*: called by 1 (get).
+*Call graph*: calls 6 internal fn (delete, put, conversation_for, _chat_row_key, _chat_title, _own_chat); called by 1 (chat); 3 external calls (__init__, conversation_audience, uuid4).
 
 
-##### `MemberOwnedObjects._status`  (lines 534–537)
+##### `_own_chat`  (lines 326–338)
 
 ```
-async def _status(self, ctx: ToolContext, name: str, owner: OwnerT) -> dict[str, JsonValue] | None
+async def _own_chat(store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID) -> ChatRecord | None
 ```
 
-**Purpose**: Subclasses implement this to compute live status for a visible row.
+**Purpose**: Checks whether a conversation is a web chat owned by this email and bound to this agent. It is the main guard against reading or writing someone else's chat.
 
-**Data flow**: It receives the context, object name, and owner, then should return a JSON-like status mapping or None. The base class only marks it as required.
+**Data flow**: It reads the stored chat row for a conversation id, validates it as a `ChatRecord`, compares the stored agent id and email to the requested ones, and returns the record or `None`.
 
-**Call relations**: MemberOwnedObjects.status calls this between two generation and visibility checks.
+**Call relations**: `chat`, `transcript`, `_resolve_chat`, and `_open_conversation` call it before trusting a conversation id.
 
-*Call graph*: called by 1 (status).
+*Call graph*: calls 2 internal fn (get, _chat_row_key); called by 4 (_open_conversation, _resolve_chat, chat, transcript).
 
 
-##### `MemberOwnedObjects._apply_owned`  (lines 539–547)
+##### `_chat_source`  (lines 341–349)
 
 ```
-async def _apply_owned(self, ctx: ToolContext, name: str, spec: SpecT, old: SpecT | None, owner: OwnerT | None) -> None
+def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str
 ```
 
-**Purpose**: Subclasses implement this to perform the actual create or update after the shared permission gate has approved it.
+**Purpose**: Builds a human-readable source label for a message admitted from the web portal. This label helps downstream work know where the request came from and who asked it.
 
-**Data flow**: It receives the context, name, validated new spec, previous spec if any, and owner if the row already existed. It should write the change; the base class raises NotImplementedError.
+**Data flow**: It receives the public base URL, conversation id, and email. If the base URL exists, it returns a portal link with the conversation fragment and email; otherwise it returns a simpler web-and-email label.
 
-**Call relations**: MemberOwnedObjects.apply calls this as the final step once ownership, admin, speaker, and generation checks pass.
+**Call relations**: `chat` puts this value into the `TurnContext` when admitting a user message.
 
-*Call graph*: called by 1 (apply).
+*Call graph*: called by 1 (chat).
 
 
-##### `MemberOwnedObjects._delete_owned`  (lines 549–550)
+##### `_audience_for`  (lines 352–359)
 
 ```
-async def _delete_owned(self, ctx: ToolContext, name: str, owner: OwnerT) -> None
+async def _audience_for(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience] | Response
 ```
 
-**Purpose**: Subclasses implement this to perform the actual deletion after the shared permission gate has approved it.
+**Purpose**: Combines authentication with authorization information for the web portal. It returns the member, their email, and the set of agents and admin powers they may use.
 
-**Data flow**: It receives the context, name, and owner of the row to delete. It should remove the row; the base class raises NotImplementedError.
+**Data flow**: It calls `_authenticate`; if no valid session exists, it returns a 401 response. Otherwise it asks the web audience layer for the user's audience and returns all three pieces.
 
-**Call relations**: MemberOwnedObjects.delete calls this only after existence, visibility, permission, speaker, and generation checks pass.
+**Call relations**: Most route handlers call it directly, while agent-specific panel routes usually call it through `_panel_gate`.
 
-*Call graph*: called by 1 (delete).
+*Call graph*: calls 1 internal fn (_authenticate); called by 14 (_panel_gate, admin_index, agents_index, chat, chats_index, stream, transcript, workspace_artifacts, workspace_credentials, workspace_memory (+4 more)); 3 external calls (Response, web_audience, web_extension).
 
 
-##### `object_registry`  (lines 581–604)
+##### `agents_index`  (lines 362–378)
 
 ```
-def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]
+async def agents_index(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds the lookup table of registered object kinds and rejects unsafe or conflicting registrations at startup.
+**Purpose**: Returns the signed-in member and the agents visible to them in the web portal. This is the browser's first API read after loading the shell.
 
-**Data flow**: It receives bound object kinds from core and extensions. It checks each kind name, detects duplicates, validates cross-agent verb declarations, validates each spec model, and returns a dictionary keyed by kind name.
+**Data flow**: It authenticates through `_audience_for`, then converts the member email, admin flag, and each visible agent's id, name, main flag, and model into JSON.
 
-**Call relations**: This is the boot-time gate before ObjectVerbs can serve requests. It delegates detailed spec checks to _validate_spec_model.
+**Call relations**: The frontend uses this route to decide whether the user is signed in and which agents to show.
 
-*Call graph*: calls 1 internal fn (_validate_spec_model).
+*Call graph*: calls 1 internal fn (_audience_for); 1 external calls (JSONResponse).
 
 
-##### `_validate_spec_model`  (lines 607–630)
+##### `_framed_length`  (lines 381–394)
 
 ```
-def _validate_spec_model(owner: str, kind: ObjectKind) -> None
+def _framed_length(request: Request, limit: int) -> Response | None
 ```
 
-**Purpose**: Checks that an object kind’s spec model is safe to store, render, and echo back to users.
+**Purpose**: Refuses whole-body form parsing unless the request declares a trustworthy size under a limit. This prevents large or chunked form bodies from being buffered unexpectedly.
 
-**Data flow**: It receives the registering owner label and object kind. It verifies list fields are real spec fields, every reachable model forbids unknown keys, no field is a secret type, and Pydantic can produce a JSON schema for the spec.
+**Data flow**: It reads transfer and content length headers. It returns a 411 response if a length is missing or chunked, a 413 if too large, or `None` if the body is acceptable to parse.
 
-**Call relations**: object_registry calls this for each registered kind. It uses _reachable_models to inspect nested models and _annotation_types to look through type annotations.
+**Call relations**: `resolve_workspace`, `open_session`, `_parse_inbound`, and `fulfill_credential` call it before parsing forms.
 
-*Call graph*: calls 2 internal fn (_annotation_types, _reachable_models); called by 1 (object_registry).
+*Call graph*: called by 4 (_parse_inbound, fulfill_credential, open_session, resolve_workspace); 1 external calls (Response).
 
 
-##### `_reachable_models`  (lines 633–647)
+##### `_form`  (lines 397–404)
 
 ```
-def _reachable_models(model: type[BaseModel]) -> tuple[type[BaseModel], ...]
+async def _form(request: Request) -> FormData | Response
 ```
 
-**Purpose**: Finds the Pydantic models nested inside a spec model. This lets validation rules apply to the whole spec tree, not just the top level.
+**Purpose**: Parses a submitted form and turns malformed form bodies into a clean client error. It prevents parser exceptions from leaking out as server failures.
 
-**Data flow**: It starts with one model, walks through its field annotations, follows any nested BaseModel types it finds, avoids repeats, and returns all discovered models.
+**Data flow**: It calls the request's form parser. On success it returns form data; on a form parsing error it returns a 400 response.
 
-**Call relations**: _validate_spec_model calls this before checking each model’s configuration and fields. It uses _annotation_types to unpack nested type hints.
+**Call relations**: Login, token resolution, chat uploads, and credential fulfillment all call it after size checks.
 
-*Call graph*: calls 1 internal fn (_annotation_types); called by 1 (_validate_spec_model).
+*Call graph*: called by 4 (_parse_inbound, fulfill_credential, open_session, resolve_workspace); 2 external calls (form, Response).
 
 
-##### `_annotation_types`  (lines 650–657)
+##### `_bounded_body`  (lines 407–415)
 
 ```
-def _annotation_types(annotation: object) -> tuple[object, ...]
+async def _bounded_body(request: Request, limit: int) -> bytes | Response
 ```
 
-**Purpose**: Flattens a type annotation into the concrete pieces inside it. This helps the validator notice nested models or secret types even when they are wrapped in containers or unions.
+**Purpose**: Reads a non-form request body while enforcing a hard byte limit based on actual bytes received. This protects plain text chat messages from oversized uploads.
 
-**Data flow**: It receives a type annotation, asks Python for its type arguments, and recursively returns the annotation itself or all nested arguments.
+**Data flow**: It streams chunks from the request, appends them until the limit is exceeded or the stream ends, and returns either the collected bytes or a 413 response.
 
-**Call relations**: _reachable_models and _validate_spec_model use this helper while inspecting spec model fields.
+**Call relations**: `_parse_inbound` uses it for plain, non-multipart chat messages.
 
-*Call graph*: called by 2 (_reachable_models, _validate_spec_model); 1 external calls (get_args).
+*Call graph*: called by 1 (_parse_inbound); 2 external calls (stream, Response).
 
 
-##### `ObjectVerbs.tools`  (lines 723–791)
+##### `_parse_inbound`  (lines 418–454)
 
 ```
-def tools(self) -> tuple[ToolDef, ...]
+async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]] | Response
 ```
 
-**Purpose**: Creates the five tool definitions that expose the object system to the rest of the application: list, get, explain, apply, and delete.
+**Purpose**: Extracts the user's chat text and optional uploaded files from a chat POST. It accepts plain text bodies and multipart forms, but rejects unsupported or malformed shapes.
 
-**Data flow**: It reads the ObjectVerbs instance and returns ToolDef objects with names, descriptions, input models, handler methods, and safety flags.
+**Data flow**: It reads the content type, either reads a bounded UTF-8 body or parses a bounded multipart form, collects the `message` field and file parts, and returns `(text, uploads)` or an error response.
 
-**Call relations**: The tool registry calls this when wiring available tools. Each ToolDef points back to one of ObjectVerbs._list, _get, _explain, _apply, or _delete.
+**Call relations**: `chat` calls it before deciding whether the message is empty, too large, or ready to admit.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (_bounded_body, _form, _framed_length); called by 1 (chat); 1 external calls (Response).
 
 
-##### `ObjectVerbs._list`  (lines 793–825)
+##### `_inbox_paths`  (lines 457–461)
 
 ```
-async def _list(self, ctx: ToolContext, args: ObjectListInput) -> ToolResult
+def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]
 ```
 
-**Purpose**: Implements the object_list tool. It either lists all registered kinds or lists visible instances of one kind.
+**Purpose**: Chooses safe workspace paths for uploaded chat files. All files are placed under the web inbox directory.
 
-**Data flow**: It receives a tool context and list input. With no kind, it returns kind names and descriptions. With a kind, it resolves the kind, checks any agent target, builds an ObjectListQuery, calls the store’s list method, and returns JSON containing rows and maybe a next cursor.
+**Data flow**: It receives upload objects, derives each safe unique filename with `_inbox_name`, prefixes it with `web-inbox/`, and returns the tuple of paths.
 
-**Call relations**: This is called by the object_list ToolDef. It uses _resolve, _target, _bound_ctx, object_agent, and _json_result to route the request correctly.
+**Call relations**: `chat` calls it after parsing uploads and before saving files or mentioning them in the admitted message.
 
-*Call graph*: calls 4 internal fn (_bound_ctx, _resolve, _target, _json_result); 2 external calls (__init__, object_agent).
+*Call graph*: calls 1 internal fn (_inbox_name); called by 1 (chat).
 
 
-##### `ObjectVerbs._get`  (lines 827–863)
+##### `_deliver_uploads`  (lines 464–473)
 
 ```
-async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult
+async def _deliver_uploads(ctx: SurfaceContext, conversation_id: UUID, uploads: tuple[UploadFile, ...], paths: tuple[str, ...]) -> None
 ```
 
-**Purpose**: Implements the object_get tool. It reads one object’s saved spec, live status, links, and timestamps.
+**Purpose**: Saves uploaded files into the conversation workspace before the agent turn runs. This lets the agent see the files at the paths mentioned in the user message.
 
-**Data flow**: It receives a context and get input, resolves the kind, prepares the extension-bound context, checks any agent target, reads detail from the store, asks for status using the observed generation, formats links and timestamps, and returns YAML text.
+**Data flow**: It receives the conversation id, upload objects, and target paths. For each upload/path pair, it streams chunks from `_upload_chunks` into `write_workspace_file`.
 
-**Call relations**: This is called by the object_get ToolDef. It uses _resolve, _bound_ctx, _target, and object_agent before calling the store’s get and status methods.
+**Call relations**: `chat` calls it immediately before admitting the turn to the core queue.
 
-*Call graph*: calls 3 internal fn (_bound_ctx, _resolve, _target); 5 external calls (__init__, __init__, __init__, object_agent, safe_dump).
+*Call graph*: calls 2 internal fn (write_workspace_file, _upload_chunks); called by 1 (chat).
 
 
-##### `ObjectVerbs._explain`  (lines 865–878)
+##### `_files_note`  (lines 476–479)
 
 ```
-async def _explain(self, ctx: ToolContext, args: ObjectExplainInput) -> ToolResult
+def _files_note(text: str, paths: tuple[str, ...]) -> str
 ```
 
-**Purpose**: Implements the object_explain tool. It tells a caller how to author objects of a given kind.
+**Purpose**: Adds a short note to the admitted message naming where uploaded files were saved. This gives the agent concrete file paths to inspect.
 
-**Data flow**: It receives a kind name, resolves it, and returns JSON containing the kind description, guidance text, allowed cross-agent verbs, name rule, and generated JSON schema for the spec.
+**Data flow**: It receives the original text and saved paths, builds an attachment note, and either appends it after the text or returns just the note when there is no text.
 
-**Call relations**: This is called by the object_explain ToolDef. It relies on _resolve and _json_result.
+**Call relations**: `chat` calls it when uploads are present.
 
-*Call graph*: calls 2 internal fn (_resolve, _json_result).
+*Call graph*: called by 1 (chat).
 
 
-##### `ObjectVerbs._apply`  (lines 880–922)
+##### `_inbox_name`  (lines 482–496)
 
 ```
-async def _apply(self, ctx: ToolContext, args: ObjectApplyInput) -> ToolResult
+def _inbox_name(raw: str, used: set[str]) -> str
 ```
 
-**Purpose**: Implements the object_apply tool. It creates or updates an object from a strict YAML manifest.
+**Purpose**: Turns a browser-provided filename into a safe file leaf name. It strips path parts, replaces unsafe characters, limits length, and avoids duplicate names.
 
-**Data flow**: It receives the manifest text, parses the required kind/name/spec envelope, resolves the kind, checks agent targeting, validates the object name and spec model, reads any existing object to decide create versus update, enforces cross-agent operation support, calls the store’s apply method, and returns a JSON result.
+**Data flow**: It receives the raw filename and a set of names already used in this upload batch. It sanitizes the filename, falls back to `file` if needed, adds a numeric suffix for duplicates, records the chosen name, and returns it.
 
-**Call relations**: This is called by the object_apply ToolDef. It coordinates _parse_envelope, _resolve, _target, _validate_name, _bound_ctx, object_agent, the store’s get/apply methods, and _json_result.
+**Call relations**: `_inbox_paths` calls it for each uploaded file.
 
-*Call graph*: calls 6 internal fn (_bound_ctx, _resolve, _target, _json_result, _parse_envelope, _validate_name); 3 external calls (__init__, __init__, object_agent).
+*Call graph*: called by 1 (_inbox_paths).
 
 
-##### `ObjectVerbs._delete`  (lines 924–945)
+##### `_upload_chunks`  (lines 499–501)
 
 ```
-async def _delete(self, ctx: ToolContext, args: ObjectDeleteInput) -> ToolResult
+async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]
 ```
 
-**Purpose**: Implements the object_delete tool. It removes one object and returns enough information to understand or potentially restore what was deleted.
+**Purpose**: Streams an uploaded file in fixed-size chunks. This avoids reading the whole file into memory at once.
 
-**Data flow**: It receives kind and name, resolves the kind, prepares context, checks any agent target, reads the existing object, refuses if missing, calls the store’s delete method with the observed generation, and returns JSON with the deleted spec when visible.
+**Data flow**: It receives an upload object, repeatedly reads up to the chunk size, and yields each non-empty byte chunk until the file ends.
 
-**Call relations**: This is called by the object_delete ToolDef. It uses _resolve, _bound_ctx, _target, object_agent, the store’s get/delete methods, and _json_result.
+**Call relations**: `_deliver_uploads` passes this async stream into the core workspace file writer.
 
-*Call graph*: calls 4 internal fn (_bound_ctx, _resolve, _target, _json_result); 2 external calls (__init__, object_agent).
+*Call graph*: called by 1 (_deliver_uploads); 1 external calls (read).
 
 
-##### `ObjectVerbs._resolve`  (lines 947–952)
+##### `_answer_headers`  (lines 504–516)
 
 ```
-def _resolve(self, kind: str) -> BoundKind
+def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response
 ```
 
-**Purpose**: Looks up a registered object kind by name and gives a clear error if it does not exist.
+**Purpose**: Reads special headers used when the user answers a question the agent asked. It validates them before any new chat work is created.
 
-**Data flow**: It receives a kind string, checks the registry mapping, and returns the matching BoundKind. If missing, it raises UnknownKind with the list of registered kinds.
+**Data flow**: It looks for the answer turn header and question index header. If absent, it returns `None`; if present and valid, it returns the turn id and question index; if malformed, it returns a 400 response.
 
-**Call relations**: All five object verb handlers call this before they can dispatch work to a kind’s store.
+**Call relations**: `chat` uses the result to build an idempotency key, so double-clicking an answer joins the same admitted turn.
 
-*Call graph*: called by 5 (_apply, _delete, _explain, _get, _list); 1 external calls (__init__).
+*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
 
 
-##### `ObjectVerbs._bound_ctx`  (lines 954–955)
+##### `chat`  (lines 519–581)
 
 ```
-def _bound_ctx(self, ctx: ToolContext, bound: BoundKind) -> ToolContext
+async def chat(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Rebinds a tool context so an object kind’s store runs under the extension context that owns that kind.
+**Purpose**: Accepts one user message for an agent, opening a new conversation if requested or continuing an existing one. It is the main write path from the web portal into the agent system.
 
-**Data flow**: It receives the current ToolContext and BoundKind, copies the context with the bound extension context inserted, and returns the new context.
+**Data flow**: It authenticates the user, checks agent access, parses text and uploads, validates conversation choice, opens or verifies the conversation, saves uploads, admits the message to core with sender and source context, and returns turn id, conversation id, title, and sometimes the admitted answer body.
 
-**Call relations**: The list, get, apply, and delete handlers call this before invoking store methods, so extension-owned objects see the right extension environment.
+**Call relations**: It is the POST chat route. It coordinates helpers such as `_parse_inbound`, `_open_conversation`, `_own_chat`, `_deliver_uploads`, and `_chat_source`, then hands the actual work to `ctx.admit`.
 
-*Call graph*: called by 4 (_apply, _delete, _get, _list); 1 external calls (replace).
+*Call graph*: calls 12 internal fn (admit, admitted_body, _agent_param, _answer_headers, _audience_for, _chat_source, _deliver_uploads, _files_note, _inbox_paths, _open_conversation (+2 more)); 6 external calls (__init__, JSONResponse, Response, web_extension, UUID, uuid4).
 
 
-##### `ObjectVerbs._target`  (lines 957–1003)
+##### `_rendered_text`  (lines 584–594)
 
 ```
-async def _target(self, ctx: ToolContext, bound: BoundKind, name: str, verbs: frozenset[AgentTargetVerb]) -> ObjectAgent | None
+def _rendered_text(message: Message) -> str
 ```
 
-**Purpose**: Checks and resolves an optional target agent for agent-scoped object operations. It enforces that only the main agent, on a live member-requested call, can target another agent.
+**Purpose**: Extracts displayable text from a stored transcript message. It hides internal context framing from user messages and skips non-text content.
 
-**Data flow**: It receives the current context, bound kind, requested agent name, and allowed verbs. If no name is given it returns None. Otherwise it checks the kind’s declared support, reads the current and target agents from the workspace database, enforces main-agent and speaker rules, and returns an ObjectAgent for the target.
+**Data flow**: It receives a `Message`, reads either a plain string or text blocks, strips the leading `<context>` wrapper for user messages, trims whitespace, and returns the text.
 
-**Call relations**: ObjectVerbs._list, _get, _apply, and _delete call this before entering the object_agent scope that tells downstream store code which agent is being targeted.
+**Call relations**: `transcript` calls it while building the browser-friendly transcript projection.
 
-*Call graph*: called by 4 (_apply, _delete, _get, _list); 3 external calls (__init__, select, workspace_tx).
+*Call graph*: called by 1 (transcript).
 
 
-##### `_parse_envelope`  (lines 1006–1024)
+##### `transcript`  (lines 597–632)
 
 ```
-def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]
+async def transcript(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Parses and validates the YAML wrapper used by object_apply. It makes sure every create or update starts from exactly `kind`, `name`, and `spec`.
+**Purpose**: Returns the text transcript for one of the member's own web chats with an agent. It also includes any still-open handoffs from the latest turn, such as questions, credential prompts, or files.
 
-**Data flow**: It receives manifest text, rejects oversized input, parses YAML, checks that the result is a mapping with exactly the three required keys, confirms kind and name are strings and spec is a mapping, and returns those three pieces.
+**Data flow**: It authenticates, checks the agent and conversation ownership, reads the durable transcript, converts messages with `_rendered_text`, checks the latest turn, adds `_open_handoffs` data when present, and returns JSON.
 
-**Call relations**: ObjectVerbs._apply calls this before resolving the kind or validating the spec model.
+**Call relations**: It is the conversation load route used by the portal. It shares the same `_own_chat` gate as `chat`.
 
-*Call graph*: called by 1 (_apply); 2 external calls (__init__, safe_load).
+*Call graph*: calls 7 internal fn (latest_turn, read_transcript, _agent_param, _audience_for, _open_handoffs, _own_chat, _rendered_text); 4 external calls (JSONResponse, Response, web_extension, UUID).
 
 
-##### `_validate_name`  (lines 1027–1032)
+##### `_open_handoffs`  (lines 635–656)
 
 ```
-def _validate_name(name: str) -> None
+async def _open_handoffs(ctx: SurfaceContext, turn_id: UUID) -> dict[str, object]
 ```
 
-**Purpose**: Checks that a new or updated object name follows the shared object-name rule.
+**Purpose**: Finds things the latest turn is still asking the member to do. This lets a page reload show the same question, credential prompts, or shared files that appeared in the live stream.
 
-**Data flow**: It receives a name string, checks length and pattern, and either returns nothing on success or raises InvalidName on failure.
+**Data flow**: It reads turn detail, checks the terminal turn state, gathers a question, pending credential prompts, and shared files where present, and returns a small dictionary.
 
-**Call relations**: ObjectVerbs._apply calls this after parsing the manifest and before any store mutation can happen.
+**Call relations**: `transcript` calls it after loading the latest turn. It delegates credential checks to `_pending_prompts` and file listing to `_turn_files`.
 
-*Call graph*: called by 1 (_apply); 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (turn_detail, _pending_prompts, _turn_files); called by 1 (transcript).
 
 
-##### `_json_result`  (lines 1035–1036)
+##### `chats_index`  (lines 659–696)
 
 ```
-def _json_result(payload: Mapping[str, object]) -> ToolResult
+async def chats_index(ctx: SurfaceContext, request: Request) -> Response
 ```
-
-**Purpose**: Wraps a Python mapping as a JSON tool result. It is the small shared formatter for object tools that return JSON.
-
-**Data flow**: It receives a payload mapping, serializes it with json.dumps, places the text in TextContent, and returns a ToolResult.
-
-**Call relations**: ObjectVerbs._list, _explain, _apply, and _delete call this when returning structured JSON responses.
-
-*Call graph*: called by 4 (_apply, _delete, _explain, _list); 3 external calls (__init__, __init__, dumps).
-
-
-### `core/src/ufo/object_scope.py`
-
-`util` · `cross-cutting during audited object handling`
-
-Some parts of the system need to work on behalf of a very specific agent chosen by object dispatch. This file provides a small private “name tag” mechanism for that. Normally, code can ask for the current agent and get the agent attached to the wider running context. But while an audited object handler is processing a particular object, the system may need to say, “for this block of work, use this exact agent instead.”
-
-It does that with a ContextVar, which is like a per-task storage slot. In an asynchronous program, many tasks can run at the same time, so a normal global variable would be unsafe. A ContextVar keeps each task’s value separate, like each worker carrying their own clipboard.
 
-The ObjectAgent data class is the small record stored in that slot: it contains the agent’s unique UUID and human-readable name. The object_agent context manager temporarily puts an ObjectAgent into the slot for the duration of a with block, then restores the previous value afterward. If no target is given, it leaves things alone. The object_agent_id function is the reader: it returns the temporary object agent’s id if one is set, otherwise it falls back to the regular current agent from agent_scope.
+**Purpose**: Returns the conversation rail for the web portal. It lists this member's web chats across the agents they can currently reach, newest activity first.
 
-#### Function details
+**Data flow**: It authenticates, optionally resolves one requested conversation, otherwise lists recent web conversations per visible agent, fetches matching chat records from the web store, formats title and time fields, sorts the rows, and returns JSON.
 
-##### `object_agent`  (lines 24–32)
+**Call relations**: The frontend calls it to fill or refresh the chat rail. For direct links to old conversations, it hands off to `_resolve_chat`.
 
-```
-def object_agent(target: ObjectAgent | None) -> Iterator[None]
-```
-
-**Purpose**: Temporarily marks the current task as acting for a specific object-selected agent. Code uses it around a block of work so anything inside that block can discover the intended agent, and the setting is automatically undone afterward.
-
-**Data flow**: It receives either an ObjectAgent or None. If it gets None, it simply lets the wrapped code run without changing anything. If it gets an ObjectAgent, it stores that agent in the task-local slot, runs the wrapped code, and then restores the old slot value when the block exits, even if an error happens.
+*Call graph*: calls 5 internal fn (list_agent_conversations, _audience_for, _chat_row_key, _iso, _resolve_chat); 2 external calls (JSONResponse, web_extension).
 
-**Call relations**: This function is used by object-dispatch or audited-handler code when it needs to set a temporary agent target. Later, code inside that protected block can call object_agent_id to read the chosen agent id without needing the agent passed through every function call.
 
+##### `_resolve_chat`  (lines 699–737)
 
-##### `object_agent_id`  (lines 35–37)
-
 ```
-def object_agent_id() -> UUID
+async def _resolve_chat(ctx: SurfaceContext, store: ScopedStore, audience: WebAudience, email: str, requested: str) -> Response
 ```
-
-**Purpose**: Returns the agent id that object-handling code should use right now. It prefers the temporary object-specific agent if one was set, and otherwise uses the normal current agent.
-
-**Data flow**: It reads the task-local object-agent slot. If that slot contains an ObjectAgent, it returns that object agent’s UUID. If the slot is empty, it calls ufo.agent_scope.agent_current to get the broader current agent and returns that agent’s id.
-
-**Call relations**: This is the lookup point used by code that needs an agent id during audited object work. It depends on object_agent when a temporary target has been set, and otherwise hands off to ufo.agent_scope.agent_current so normal agent tracking still works outside object-specific dispatch.
 
-*Call graph*: 1 external calls (agent_current).
+**Purpose**: Resolves a single conversation id into one rail row when a direct link names a chat that may be older than the normal rail limit.
 
+**Data flow**: It parses the requested id, checks each visible agent for an owned chat row, reads the latest turn and its detail, and returns either one formatted chat row or an empty chat list.
 
-### Agent and member access
-Audience, agent-scope, and seat policies determine which members an agent may serve and which users can access agents through the web portal.
+**Call relations**: `chats_index` calls it when the request includes a specific `conversation` query parameter.
 
-### `extensions/web/ufo_ext_web/audience.py`
+*Call graph*: calls 4 internal fn (latest_turn, turn_detail, _iso, _own_chat); called by 1 (chats_index); 2 external calls (JSONResponse, UUID).
 
-`domain_logic` · `request handling and admin tool use`
 
-The web portal needs a simple answer to a sensitive question: when a person signs in, which agents should they be allowed to reach? This file makes the web surface the authority for that decision. Access is stored as small records in the web extension’s own storage, one record for each pair of agent and member email address. Think of it like a guest list for each agent: admins can enter every room, while non-admin members only enter rooms where their email is on the list.
+##### `_panel_gate`  (lines 740–753)
 
-The main flow is `web_audience`. It normalizes the member’s email, checks the workspace seat list to see whether that person is an admin, asks the surface for all agents, and then either returns all agents for admins or only the specifically granted agents for everyone else.
-
-The file also defines two chat tools: `grant_web_access` and `revoke_web_access`. Before either tool changes anything, `_gate` checks that the request comes from a real speaking member, that the speaker is a workspace admin, that an email was provided, and that the email belongs to an existing workspace member. If those checks pass, `_grant` writes a grant record and `_revoke` deletes it. Without this file, the web portal would not have a clear, consistent rule for agent visibility, and admins would not have a safe built-in way to change that visibility.
-
-#### Function details
-
-##### `web_extension`  (lines 25–32)
-
 ```
-def web_extension() -> ExtensionContext
+async def _panel_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience, UUID] | Response
 ```
 
-**Purpose**: Builds the web extension’s own access handle so code running from the web surface can read and write the web audience records. This matters because the audience list lives in the extension’s private storage area, not in a global shared table.
+**Purpose**: Performs the common authorization step for agent panel routes. It confirms the user is signed in and that the path's agent is inside their web audience.
 
-**Data flow**: It takes no input. It creates a scoped store for the web extension and an empty credential access object, then combines them into an extension context. The result is an `ExtensionContext` that other web code can use to open transactions and reach the web extension’s stored rows.
+**Data flow**: It calls `_audience_for`, parses the path agent id with `_agent_param`, checks audience permission, and returns member id, email, audience, and agent id or a response error.
 
-**Call relations**: When a surface-side handler needs to consult or change the audience list, this helper gives it the right extension context. Internally it constructs the store and credential objects that the rest of this file expects.
+**Call relations**: Panel-style routes such as `tasks`, `skills`, `usage`, `connections`, `conversations`, `overview`, `intents`, and `_readable_conversation` use it.
 
-*Call graph*: 3 external calls (__init__, __init__, __init__).
+*Call graph*: calls 2 internal fn (_agent_param, _audience_for); called by 8 (_readable_conversation, connections, conversations, intents, overview, skills, tasks, usage); 1 external calls (Response).
 
 
-##### `_grant_key`  (lines 35–36)
+##### `_iso`  (lines 756–757)
 
 ```
-def _grant_key(agent_id: UUID, email: str) -> str
+def _iso(moment: datetime | None) -> str | None
 ```
 
-**Purpose**: Creates the storage key used for one access grant: one agent plus one member email address. It keeps keys consistent so granting and revoking refer to exactly the same stored record.
+**Purpose**: Converts optional datetime values into JSON-friendly ISO strings. If the time is missing, it keeps it as `null`.
 
-**Data flow**: It receives an agent ID and an email address. It trims spaces from the email, lowercases it, and joins it with the audience prefix and agent ID into one string key. The output is the exact key used in the extension store.
+**Data flow**: It receives a datetime or `None` and returns `moment.isoformat()` or `None`.
 
-**Call relations**: `_grant` calls this before writing a grant, and `_revoke` calls it before deleting a grant. Because both use the same helper, a revoke can find the same record that a grant created.
+**Call relations**: Many response builders call it when formatting dates for JSON, including chat, task, memory, conversation, file, and artifact views.
 
-*Call graph*: called by 2 (_grant, _revoke).
+*Call graph*: called by 8 (_memory_rows, _resolve_chat, _turn_row, chats_index, conversation_files, conversations, tasks, workspace_artifacts); 1 external calls (isoformat).
 
 
-##### `granted_emails`  (lines 39–46)
+##### `_window_param`  (lines 760–772)
 
 ```
-async def granted_emails(store: ScopedStore) -> dict[UUID, tuple[str, ...]]
+def _window_param(request: Request) -> int | Response
 ```
 
-**Purpose**: Builds an administrator-friendly view of all web access grants, grouped by agent. Someone would use this to show which email addresses currently have access to each agent.
+**Purpose**: Reads and validates the time window used by usage and spending reports. It prevents nonsensical or overly large windows.
 
-**Data flow**: It receives a scoped store. It lists every stored item whose key starts with the audience prefix, pulls the agent ID and email address out of each key, groups emails under their agent, sorts each email list, and returns a dictionary from agent ID to a tuple of emails.
+**Data flow**: It reads `window_seconds` from the query string or uses the default, parses it as an integer, checks it is between one second and the maximum, and returns the number or a 400 response.
 
-**Call relations**: This reads the same stored rows that `_grant` writes and `_revoke` deletes. It does not change the store; it is the read-side companion to the admin tools.
+**Call relations**: `usage` and `workspace_usage` call it before asking core for spend data.
 
-*Call graph*: calls 1 internal fn (list); 1 external calls (UUID).
+*Call graph*: called by 2 (usage, workspace_usage); 1 external calls (Response).
 
 
-##### `_granted_agent_ids`  (lines 49–56)
+##### `tasks`  (lines 775–803)
 
 ```
-async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]
+async def tasks(ctx: SurfaceContext, request: Request) -> Response
 ```
-
-**Purpose**: Finds the set of agents that one email address has been explicitly allowed to reach. This is the core lookup for non-admin web users.
-
-**Data flow**: It receives a scoped store and an email address. It trims and lowercases the email, lists all audience grant records, and keeps only the agent IDs whose stored email matches. It returns a frozen set of matching agent IDs, meaning the caller receives a fixed collection that should not be changed.
-
-**Call relations**: `web_audience` calls this after it has learned that the member is not an admin. The returned agent IDs are then used to filter the full agent list down to only the agents that member may see.
-
-*Call graph*: calls 1 internal fn (list); called by 1 (web_audience); 1 external calls (UUID).
 
+**Purpose**: Returns the selected agent's scheduled tasks as visible to the current member. It also returns the schema the frontend uses to render task create or edit forms.
 
-##### `WebAudience.allows`  (lines 67–68)
+**Data flow**: It gates the request with `_panel_gate`, asks core for tasks using the member and admin flag, formats task fields and dates, adds the scheduled task spec schema, and returns JSON.
 
-```
-def allows(self, agent_id: UUID) -> bool
-```
-
-**Purpose**: Answers the simple question: does this already-computed audience include a particular agent? It is a convenient permission check for later web code.
-
-**Data flow**: It receives an agent ID. It looks through the `agents` stored inside this `WebAudience` object and checks whether any agent has that ID. It returns `true` if the agent is included and `false` otherwise.
+**Call relations**: It is the agent tasks panel route and relies on core to apply the creator/admin visibility rules.
 
-**Call relations**: This method is used after `web_audience` has built a member’s visible agent list. Instead of recalculating permissions, other code can ask the `WebAudience` object whether a specific agent is allowed.
+*Call graph*: calls 4 internal fn (list_agent_tasks, object_spec_schema, _iso, _panel_gate); 1 external calls (JSONResponse).
 
 
-##### `web_audience`  (lines 71–84)
+##### `skills`  (lines 806–821)
 
 ```
-async def web_audience(surface: SurfaceContext, extension: ExtensionContext, email: str) -> WebAudience
+async def skills(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Computes one signed-in member’s view of the web portal: whether they are an admin and which agents they can reach. This is the main decision point for web agent visibility.
+**Purpose**: Returns the skills available to the selected agent. Skills are reusable capabilities that can be loaded by an agent.
 
-**Data flow**: It receives the surface context, the web extension context, and the member’s email address. It normalizes the email, opens a transaction to read the workspace seat snapshot, checks whether the matching member is an admin, and asks the surface for all agents. If the member is an admin, it returns all agents. Otherwise, it reads that email’s grant records and returns only the agents whose IDs are granted.
+**Data flow**: It gates the request, asks core for the agent's skills, formats each skill's name, description, and origin, and returns JSON.
 
-**Call relations**: Web request code calls this when it needs to know what a member can see. It relies on the seat system to identify admins, the surface to list available agents, and `_granted_agent_ids` to apply the guest-list rule for non-admins. It returns a `WebAudience` object that later checks can reuse.
+**Call relations**: It is the agent skills panel route and uses `_panel_gate` for access control.
 
-*Call graph*: calls 3 internal fn (transaction, list_agents, _granted_agent_ids); 2 external calls (__init__, __init__).
+*Call graph*: calls 2 internal fn (agent_skills, _panel_gate); 1 external calls (JSONResponse).
 
 
-##### `_refusal`  (lines 95–96)
+##### `workspace_memory`  (lines 824–889)
 
 ```
-def _refusal(text: str) -> ToolResult
+async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Creates a standard error result for an admin tool that must refuse a request. It keeps refusal messages in the same tool-result shape as successful tool replies.
+**Purpose**: Shows or searches memory available to the member across all agents they can reach. Memory here means stored facts or source snippets the system can recall later.
 
-**Data flow**: It receives plain text explaining why the request is refused. It wraps that text in a text content object and then in a tool result marked as an error. The output is a `ToolResult` that can be returned directly to the caller.
+**Data flow**: It authenticates, checks whether memory is available, then either lists recent memory with optional kind and cursor filters or searches each visible agent in parallel, deduplicates matches, limits the result, formats rows, and returns JSON.
 
-**Call relations**: `_gate` calls this whenever one of its safety checks fails. `_grant` and `_revoke` then return that refusal without changing any access records.
+**Call relations**: The workspace memory panel calls this route. It uses `_memory_rows` for formatting and asks core separately for recent listings or search results.
 
-*Call graph*: called by 1 (_gate); 2 external calls (__init__, __init__).
+*Call graph*: calls 5 internal fn (recent_memory, search_memory, decode, _audience_for, _memory_rows); 6 external calls (__init__, gather, audience_subjects, conversation_audience, JSONResponse, Response).
 
 
-##### `_gate`  (lines 99–117)
+##### `_memory_rows`  (lines 892–901)
 
 ```
-async def _gate(ctx: ToolContext, extension: ExtensionContext, args: WebAccessInput) -> ToolResult | None
+def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]
 ```
 
-**Purpose**: Performs the safety checks that must pass before web access can be granted or revoked. It prevents non-admins, anonymous/non-speaking contexts, blank emails, and unknown workspace members from changing access.
+**Purpose**: Turns memory matches into the small JSON rows the browser displays.
 
-**Data flow**: It receives the tool context, the extension context, and the requested email input. It first checks that there is a speaking member, then asks whether that speaker is an admin, then checks that the email is not blank. It opens a transaction to read the workspace members and confirms that the email belongs to an existing member. If anything fails, it returns an error tool result; if everything passes, it returns `None` to mean the change may continue.
+**Data flow**: It receives memory match objects and returns dictionaries containing kind, text, optional reference, and creation time.
 
-**Call relations**: Both `_grant` and `_revoke` call `_gate` before touching the store. `_gate` uses `_refusal` to format failure messages and uses the seat snapshot to verify that the target email is a real workspace member.
+**Call relations**: `workspace_memory` calls it for both recent memory listings and search results.
 
-*Call graph*: calls 3 internal fn (transaction, speaker_is_admin, _refusal); called by 2 (_grant, _revoke); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_memory).
 
 
-##### `_grant`  (lines 120–136)
+##### `usage`  (lines 904–940)
 
 ```
-async def _grant(ctx: ToolContext, args: WebAccessInput) -> ToolResult
+async def usage(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Implements the `grant_web_access` tool by adding one member email to the current agent’s web guest list. It is the write operation that lets admins make an agent visible to a non-admin member.
+**Purpose**: Returns spending information and caps for one selected agent. It is only shown when the agent was explicitly granted to the viewer or the viewer is an admin.
 
-**Data flow**: It receives the tool context and the input containing an email and user-facing description. It first requires an extension context, then calls `_gate` to make sure the request is allowed. If refused, it returns that refusal. If allowed, it writes a grant record under the key for the current agent and target email, storing who granted it, and returns a success message naming the normalized email.
+**Data flow**: It gates the agent request, checks the grant condition, validates the time window, asks core for agent spend, formats totals, per-dimension lines, and caps, and returns JSON.
 
-**Call relations**: This function is registered as the handler for the `grant_web_access` tool. It depends on `_gate` for permission checks and `_grant_key` for the exact storage location. The records it writes are later read by `web_audience`, `_granted_agent_ids`, and `granted_emails`.
+**Call relations**: It is the per-agent usage panel route and uses `_window_param` for the report window.
 
-*Call graph*: calls 2 internal fn (_gate, _grant_key); 2 external calls (__init__, __init__).
+*Call graph*: calls 3 internal fn (agent_spend, _panel_gate, _window_param); 2 external calls (JSONResponse, Response).
 
 
-##### `_revoke`  (lines 139–152)
+##### `connections`  (lines 943–952)
 
 ```
-async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult
+async def connections(ctx: SurfaceContext, request: Request) -> Response
 ```
-
-**Purpose**: Implements the `revoke_web_access` tool by removing one member email from the current agent’s web guest list. It lets admins take away a non-admin member’s portal access to that agent.
-
-**Data flow**: It receives the tool context and the input containing an email and user-facing description. It first requires an extension context, then calls `_gate` to make sure the request is allowed. If refused, it returns that refusal. If allowed, it deletes the grant record for the current agent and target email, then returns a success message naming the normalized email.
-
-**Call relations**: This function is registered as the handler for the `revoke_web_access` tool. It shares the same safety gate as `_grant` and uses `_grant_key` so it deletes exactly the kind of record that `_grant` creates. Once deleted, future `web_audience` checks will no longer include that agent for the member unless they are an admin.
-
-*Call graph*: calls 2 internal fn (_gate, _grant_key); 2 external calls (__init__, __init__).
 
+**Purpose**: Returns connector accounts visible for the selected agent. These can include the member's own private connections, shared agent connections, or all edges for an admin.
 
-### `core/src/ufo/agent_scope.py`
+**Data flow**: It gates the request, asks core for agent connections using member id and admin flag, serializes each entry, and returns JSON.
 
-`domain_logic` · `cross-cutting`
+**Call relations**: It is the agent connections panel route and relies on core for visibility rules.
 
-Some actions in this system belong to a specific agent, and that agent also belongs inside a specific workspace. This file provides a small “current agent” marker that travels with the running task, much like a name badge worn while entering a restricted room. Code that needs to know “which agent am I acting as?” can ask here, instead of passing the agent ID through every function call.
+*Call graph*: calls 2 internal fn (list_agent_connections, _panel_gate); 1 external calls (JSONResponse).
 
-The key idea is an agent scope: a pair of IDs saying “this agent is bound inside this workspace.” The `agent` context manager creates that scope using the currently active workspace, stores it in a `ContextVar` (task-local storage, so separate async tasks do not overwrite each other), and removes it when the `with` block ends.
 
-The file is deliberately strict. If code tries to switch to a different agent while one is already bound, it raises an error. If code asks for the current agent when none is bound, it raises `AgentUnbound` with a helpful message. It also checks that the current workspace still matches the workspace captured when the agent was bound. That prevents a dangerous mix-up where an agent identity leaks across workspace boundaries.
+##### `conversations`  (lines 955–984)
 
-#### Function details
-
-##### `agent`  (lines 28–38)
-
 ```
-def agent(agent_id: UUID) -> Iterator[AgentScope]
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: This function creates a temporary agent boundary for a block of code. Someone uses it as `with agent(agent_id):` when the following work should be treated as being done by that specific agent in the current workspace.
+**Purpose**: Returns conversations visible in the selected agent's conversation panel. It tells the frontend which conversations are readable and which an admin could disclose to themselves.
 
-**Data flow**: It takes an agent ID as input and reads the current workspace ID from `ws_current()`. It combines those into an `AgentScope`, stores that scope as the current agent, lets the caller’s block run, and then restores the previous value afterward. If a different agent is already bound, it stops immediately with an error instead of allowing an in-place identity switch.
+**Data flow**: It gates the request, asks core to list agent conversations for the member/admin role, formats ids, surface, member email, counts, timestamps, and read/disclose flags, and returns JSON.
 
-**Call relations**: This is the entry point for setting the ambient agent identity. It calls `ws_current()` to tie the agent to the workspace that is active at the moment the scope begins, then builds an `AgentScope`. Later, code inside the block can call `agent_current` to retrieve the same scope safely.
+**Call relations**: It is the agent conversations panel route. Deeper transcript/file reads use `_readable_conversation` for the stricter content gate.
 
-*Call graph*: 2 external calls (__init__, ws_current).
+*Call graph*: calls 3 internal fn (list_agent_conversations, _iso, _panel_gate); 1 external calls (JSONResponse).
 
 
-##### `agent_current`  (lines 41–48)
+##### `_readable_conversation`  (lines 987–1006)
 
 ```
-def agent_current() -> AgentScope
+async def _readable_conversation(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response
 ```
-
-**Purpose**: This function returns the agent scope that is currently bound. It is used by agent-scoped code that needs to know which agent and workspace it is allowed to act under.
-
-**Data flow**: It reads the current stored agent scope. If there is none, it raises `AgentUnbound` to explain that the caller forgot to wrap the work in `with agent(agent_id):`. If there is a scope, it also reads the current workspace through `ws_current()` and checks that it still matches the scope’s workspace. When everything is consistent, it returns the `AgentScope`.
-
-**Call relations**: This is the companion to `agent`. After `agent` has placed an agent identity into the task-local context, `agent_current` is how other code retrieves it. It also calls `ws_current()` so it can catch cases where the workspace changed while the agent binding was still active.
-
-*Call graph*: 2 external calls (__init__, ws_current).
-
-
-### `core/src/ufo/seats.py`
 
-`domain_logic` · `request handling and cross-cutting admission checks`
+**Purpose**: Checks whether the current user may read the contents of a specific conversation. It returns not-found for all unauthorized or malformed cases to avoid revealing private conversation existence.
 
-A “seat” is permission for a workspace member to talk to the agent. This file is the central rulebook for those permissions. Without it, one part of the product might let a person speak while another part refuses them, or billing-related limits could be skipped by accident.
+**Data flow**: It gates the agent, parses the conversation id path parameter, asks core whether that conversation is readable for this member and agent, and returns `(agent_id, conversation_id)` or a 404 response.
 
-The main idea is simple: a workspace may have no seat limits, in which case everyone is admitted. If limits are set, only members with a recorded seat are admitted. New members are still created even when no seat is available, because the system still needs to remember who they are. They just receive a refusal message until an admin grants them a seat.
+**Call relations**: `conversation_turns`, `conversation_files`, and `conversation_file` all use this shared gate so their access decisions match.
 
-The `Seats` class represents the seat state for one workspace. It can check whether the workspace is gated, decide whether a member is admitted, create a snapshot for reporting, grant or revoke seats, set limits, and automatically seat new members while the included allowance is not full. It uses database locks when counting seats, like taking a numbered ticket at a counter, so two simultaneous grants cannot both think the last seat is free.
+*Call graph*: calls 2 internal fn (readable_conversation, _panel_gate); called by 3 (conversation_file, conversation_files, conversation_turns); 2 external calls (Response, UUID).
 
-A few safety rules matter. The last seated admin cannot be unseated, because seat management happens through chat and someone must remain able to fix things. The file also keeps a short-lived memory of workspaces with no seat limit, so the common unlimited case avoids extra database checks.
 
-#### Function details
+##### `_turn_row`  (lines 1009–1022)
 
-##### `gate_member`  (lines 44–58)
-
-```
-def gate_member(speaker_member_id: UUID | None, admission_source: TurnAdmissionSource, on_behalf_of_member_id: UUID | None) -> UUID | None
-```
-
-**Purpose**: Chooses which member a turn should be checked against for seat permission. Usually this is the speaker, but for a scheduled task it is the member the task is acting for.
-
-**Data flow**: It receives a possible speaker member ID, the source of the turn, and a possible “on behalf of” member ID. It returns the speaker when there is one, otherwise returns the creator for scheduled work, otherwise returns nothing for internal turns that are not tied to a member.
-
-**Call relations**: This is the shared definition of “who is being gated.” Admission, scheduled work, resumed turns, and per-round checks can all use the same answer instead of each inventing their own version.
-
-
-##### `seat_gate_absent`  (lines 61–67)
-
 ```
-def seat_gate_absent(workspace_id: UUID) -> bool
+def _turn_row(turn: Turn) -> dict[str, object]
 ```
 
-**Purpose**: Quickly answers whether the system recently learned that a workspace has no seat gate at all. This saves a database lookup for the common case where seats are unlimited.
+**Purpose**: Formats one turn for the conversation transcript panel. It extracts the member's visible message text and key outcome/status fields.
 
-**Data flow**: It takes a workspace ID and looks in a small in-memory cache for an unexpired note saying that this workspace had no seat limit or included-seat rule. It returns true only if that note still has time left.
+**Data flow**: It receives a `Turn`, converts ids and times to strings, extracts member-facing inbound text, includes parent/subagent information and terminal outcome details, and returns a dictionary.
 
-**Call relations**: Per-round enforcement can ask this before going to the database. The cache entries it reads are written by `_note_absent_limit` after `Seats.gated` or `Seats.admits` confirms the workspace is unlimited.
+**Call relations**: `conversation_turns` calls it for both normal turns and subagent turns.
 
-*Call graph*: 1 external calls (monotonic).
+*Call graph*: calls 1 internal fn (_iso); called by 1 (conversation_turns); 1 external calls (member_message_text).
 
 
-##### `_note_absent_limit`  (lines 70–75)
+##### `conversation_turns`  (lines 1025–1040)
 
 ```
-def _note_absent_limit(workspace_id: UUID) -> None
+async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response
 ```
-
-**Purpose**: Records, for a few seconds, that a workspace has no seat-related limits. This is a small performance shortcut, not the source of truth.
-
-**Data flow**: It receives a workspace ID, checks the current clock, clears out expired cache entries if the cache is full, and stores a new expiry time for that workspace. It changes only the in-memory cache.
-
-**Call relations**: `Seats.gated` and `Seats.admits` call this after reading the database and finding both seat settings empty. Later, `seat_gate_absent` uses that note to skip a repeated database trip.
 
-*Call graph*: called by 2 (admits, gated); 1 external calls (monotonic).
-
-
-##### `SeatSnapshot.seated`  (lines 104–105)
-
-```
-def seated(self) -> int
-```
+**Purpose**: Returns the turns in a readable conversation, plus turns spawned in subagent conversations. This lets the portal display nested work under the parent conversation.
 
-**Purpose**: Counts how many members in a seat snapshot currently have seats. It is a convenience property for reports or tools that show seat usage.
+**Data flow**: It checks read permission with `_readable_conversation`, reads regular turns and subagent turns from core, formats both sets with `_turn_row`, and returns JSON.
 
-**Data flow**: It reads the snapshot’s member list, counts entries marked as seated, and returns that number. It does not change the snapshot.
+**Call relations**: It is the conversation turns panel route and shares its authorization with file reads.
 
-**Call relations**: `Seats.snapshot` builds the `SeatSnapshot`; callers can then ask this property for the total seated count without re-counting by hand.
+*Call graph*: calls 4 internal fn (conversation_subagent_turns, list_turns, _readable_conversation, _turn_row); 1 external calls (JSONResponse).
 
 
-##### `Seats.gated`  (lines 116–130)
+##### `conversation_files`  (lines 1043–1062)
 
 ```
-async def gated(self, connection: AsyncConnection) -> bool
+async def conversation_files(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Checks whether this workspace enforces seats at all. If both the hard limit and included-seat allowance are unset, the workspace is treated as unlimited.
+**Purpose**: Lists the live workspace files for a readable conversation. These are files in the sandbox workspace associated with that conversation.
 
-**Data flow**: It takes a database connection, reads the workspace’s seat settings, and returns false when both settings are empty. In that unlimited case it also writes a short-lived cache note; otherwise it returns true.
+**Data flow**: It checks read permission, asks core for workspace files, formats path, size, and modified time for each, and returns JSON.
 
-**Call relations**: This is used when code only needs to know whether seat rules apply. It hands off to `_note_absent_limit` to support the fast path used by later checks.
+**Call relations**: It is the file list route for a conversation, and `conversation_file` uses the same gate to download one file.
 
-*Call graph*: calls 1 internal fn (_note_absent_limit); 2 external calls (execute, select).
+*Call graph*: calls 3 internal fn (list_workspace_files, _iso, _readable_conversation); 1 external calls (JSONResponse).
 
 
-##### `Seats.admits`  (lines 132–159)
+##### `conversation_file`  (lines 1065–1079)
 
 ```
-async def admits(self, connection: AsyncConnection, member_id: UUID) -> bool
+async def conversation_file(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Decides whether a specific member is allowed to be answered by the agent in this workspace. Unlimited workspaces admit everyone who matches a member row; limited workspaces require that the member is seated.
+**Purpose**: Streams the bytes of one workspace file from a readable conversation. It returns not-found if the path is invalid or the file is gone.
 
-**Data flow**: It receives a database connection and a member ID. It looks up that member together with the workspace’s seat settings. If no such member exists, it returns false. If the workspace is unlimited, it records the cache shortcut and returns true. Otherwise it returns whether the member has a seat timestamp.
+**Data flow**: It checks read permission, asks core for a stream for the requested path, catches invalid paths, and returns either a binary streaming response or a 404 response.
 
-**Call relations**: Admission checks call this when a member tries to speak or when a running turn is checked again. It uses `_note_absent_limit` when it discovers the unlimited case.
+**Call relations**: It is the individual file download route and uses `_readable_conversation`, like the file list route.
 
-*Call graph*: calls 1 internal fn (_note_absent_limit); 2 external calls (execute, select).
+*Call graph*: calls 2 internal fn (read_workspace_file, _readable_conversation); 2 external calls (Response, StreamingResponse).
 
 
-##### `Seats.snapshot`  (lines 161–191)
+##### `workspace_credentials`  (lines 1082–1090)
 
 ```
-async def snapshot(self, connection: AsyncConnection) -> SeatSnapshot
+async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds a read-only picture of the current seat state for a workspace. This is useful for admin views, billing tools, or reports.
+**Purpose**: Lists credential slots that a member may fill, without exposing any stored secret values. A credential slot is a named place where a user can provide their own key or token.
 
-**Data flow**: It reads the workspace’s limit settings, then reads all members in creation order with their email, seat status, and admin flag. It packages that information into `SeatEntry` records inside a `SeatSnapshot`.
+**Data flow**: It authenticates the session, asks core for credential slot status, serializes the slots, and returns JSON.
 
-**Call relations**: This is the reporting side of the seat system. Unlike grant or revoke, it does not change anything; it gives other code a clear summary to show or inspect.
+**Call relations**: The workspace credentials panel calls this route. Actual secret submission goes through `fulfill_credential`.
 
-*Call graph*: 4 external calls (__init__, __init__, execute, select).
+*Call graph*: calls 2 internal fn (list_credential_slots, _audience_for); 1 external calls (JSONResponse).
 
 
-##### `Seats.grant`  (lines 193–205)
+##### `workspace_team`  (lines 1093–1114)
 
 ```
-async def grant(self, connection: AsyncConnection, email: str) -> None
+async def workspace_team(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Gives a seat to the member with the given email address. It refuses if the workspace has a hard seat limit and all seats are already taken.
+**Purpose**: Returns the workspace member roster and seat state. It also tells the browser whether the current user can add members and what email domain is expected.
 
-**Data flow**: It receives a database connection and an email. It locks the workspace’s seat settings, finds the matching member, returns immediately if they already have a seat, checks the seated count against the limit, and then writes a seat timestamp if allowed. If there is no room, it raises `SeatLimitReached`.
+**Data flow**: It authenticates, reads the audience admin flag, asks core for members and workspace domain, formats member email/admin/seated fields, and returns JSON.
 
-**Call relations**: Admin tools or billing extensions call this when an explicit seat grant is approved. It relies on `_locked_limits`, `_member_by_email`, `_seated_count`, and `_seat` so the same counting and writing rules are reused.
+**Call relations**: It is the workspace team panel route and uses `_audience_for` for the current member's admin status.
 
-*Call graph*: calls 4 internal fn (_locked_limits, _member_by_email, _seat, _seated_count); 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (list_members, workspace_domain, _audience_for); 1 external calls (JSONResponse).
 
 
-##### `Seats.revoke`  (lines 207–222)
+##### `workspace_sources`  (lines 1117–1128)
 
 ```
-async def revoke(self, connection: AsyncConnection, email: str) -> None
+async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Removes a seat from the member with the given email address. It is careful not to remove the last seated admin, because admins need chat access to manage seats.
+**Purpose**: Lists source bindings visible to the current member. Sources are connected information locations that may be private to a member or shared.
 
-**Data flow**: It receives a database connection and an email. It locks the workspace limits, finds the member, returns if they are already unseated, checks whether they are the only seated admin, and either raises `LastAdminSeatRevocation` or clears their seat timestamp in the database.
+**Data flow**: It authenticates, asks core to list sources using member id and admin flag, serializes each entry, and returns JSON.
 
-**Call relations**: Admin tools call this to free a seat. Running conversations are not directly edited here; later admission or per-round enforcement sees the revoked seat and refuses or parks the turn.
+**Call relations**: It is the workspace sources panel route and relies on core for owner/shared/admin visibility.
 
-*Call graph*: calls 3 internal fn (_locked_limits, _member_by_email, _seated_admin_count); 3 external calls (__init__, execute, update).
+*Call graph*: calls 2 internal fn (list_sources, _audience_for); 1 external calls (JSONResponse).
 
 
-##### `Seats.ensure_limit`  (lines 224–236)
+##### `workspace_artifacts`  (lines 1131–1166)
 
 ```
-async def ensure_limit(self, connection: AsyncConnection, limit: int) -> None
+async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Sets the workspace’s hard seat limit once, but only if it has not already been set. This prevents a repeated setup task from overwriting a deliberate operator change.
+**Purpose**: Lists shared artifacts visible to the member, with temporary download links when artifact delivery is configured. Artifacts are files produced and shared by turns.
 
-**Data flow**: It receives a database connection and a positive limit. If the limit is less than one, it raises an error. Otherwise it updates the workspace row only where the existing seat limit is still empty.
+**Data flow**: It authenticates, decodes an optional pagination cursor, asks core for one page of artifacts, formats metadata and links, includes older/newer cursors, and returns JSON or a cursor error.
 
-**Call relations**: Setup code or a billing extension can call this when a seat limit becomes known. It does not call other local helpers because it is a direct one-time database write.
+**Call relations**: The workspace artifacts panel calls this route. It uses `_iso` for timestamps and core's `artifact_link` for download URLs.
 
-*Call graph*: 2 external calls (execute, update).
+*Call graph*: calls 5 internal fn (artifact_link, list_artifacts, decode, _audience_for, _iso); 2 external calls (JSONResponse, Response).
 
 
-##### `Seats.ensure_included`  (lines 238–250)
+##### `workspace_usage`  (lines 1169–1225)
 
 ```
-async def ensure_included(self, connection: AsyncConnection, included: int) -> None
+async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Sets the number of seats that can be handed out automatically, but only if that value is not already set. This represents the plan’s included allowance.
+**Purpose**: Returns the current member's usage and spending caps, and for admins also returns the workspace-wide rollup. This keeps billing visibility scoped to the viewer's authority.
 
-**Data flow**: It receives a database connection and a positive included-seat count. If the count is less than one, it raises an error. Otherwise it writes the value only when the workspace’s included-seat field is still empty.
+**Data flow**: It authenticates, validates the usage window, reads member spend, builds the base payload, and if the user is an admin also reads and adds workspace totals by dimension, member, and agent.
 
-**Call relations**: Billing or setup code uses this when establishing a plan allowance. `Seats.auto_seat` later uses this value to decide whether a new member can be silently seated.
+**Call relations**: It is the workspace usage panel route and shares `_window_param` validation with per-agent `usage`.
 
-*Call graph*: 2 external calls (execute, update).
+*Call graph*: calls 4 internal fn (member_spend, spend_rollup, _audience_for, _window_param); 1 external calls (JSONResponse).
 
 
-##### `Seats.auto_seat`  (lines 252–261)
+##### `workspace_sites`  (lines 1228–1244)
 
 ```
-async def auto_seat(self, connection: AsyncConnection, member_id: UUID) -> None
+async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Automatically gives a new member a seat if the free included allowance is not full. If the allowance is full, it leaves the member unseated instead of blocking member creation.
+**Purpose**: Lists hosted sites visible to the current member, or reports that sites are unavailable if the deployment has no sites extension.
 
-**Data flow**: It receives a database connection and member ID. It locks and reads the workspace’s limit values, chooses the included allowance if present or the hard limit otherwise, checks how many members are already seated, and seats the new member only if there is room or no bound applies.
+**Data flow**: It authenticates, asks core for member-visible objects of kind `site`, and returns either `available: false` with an empty list or site names and summaries.
 
-**Call relations**: `create_member` calls this right after a new member row is inserted. It uses `_locked_limits`, `_seated_count`, and `_seat` so automatic seating follows the same safe counting rules as manual grants.
+**Call relations**: It is the workspace sites panel route and uses core object visibility rules.
 
-*Call graph*: calls 3 internal fn (_locked_limits, _seat, _seated_count).
+*Call graph*: calls 2 internal fn (list_member_objects, _audience_for); 1 external calls (JSONResponse).
 
 
-##### `Seats._locked_limits`  (lines 263–271)
+##### `stream`  (lines 1247–1270)
 
 ```
-async def _locked_limits(self, connection: AsyncConnection) -> tuple[int | None, int | None]
+async def stream(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Reads the workspace’s seat limit values while locking the workspace row. The lock makes concurrent seat changes line up instead of racing each other.
+**Purpose**: Opens a live event stream for one turn. It lets the browser watch agent progress, tool calls, costs, questions, credential prompts, files, and final output as they happen.
 
-**Data flow**: It receives a database connection, selects the workspace’s hard limit and included-seat allowance with a database row lock, and returns those two values.
+**Data flow**: It authenticates, parses the turn id, checks that the turn belongs to the member, verifies the turn's agent is still allowed, reads the browser's last event id for resume, and returns a Server-Sent Events stream from `_events`.
 
-**Call relations**: `Seats.grant`, `Seats.revoke`, and `Seats.auto_seat` call this before making decisions that depend on current seat counts. It is the guardrail that keeps those decisions consistent under simultaneous requests.
+**Call relations**: It is the GET stream route for a turn. `_events` performs the actual frame-by-frame conversion.
 
-*Call graph*: called by 3 (auto_seat, grant, revoke); 2 external calls (execute, select).
+*Call graph*: calls 4 internal fn (turn_detail, turn_owner, _audience_for, _events); 3 external calls (Response, StreamingResponse, UUID).
 
 
-##### `Seats._member_by_email`  (lines 273–290)
+##### `_event`  (lines 1273–1274)
 
 ```
-async def _member_by_email(self, connection: AsyncConnection, email: str) -> tuple[UUID, datetime | None, bool]
+def _event(name: str, payload: dict[str, object]) -> bytes
 ```
 
-**Purpose**: Finds a workspace member by email address and returns the details needed for seat changes. It treats email comparison case-insensitively after trimming the input.
+**Purpose**: Builds a simple named Server-Sent Event from a JSON payload. Server-Sent Events are text messages browsers can receive over a long-lived HTTP response.
 
-**Data flow**: It receives a database connection and email address, searches this workspace’s member table for a matching email, and returns the member ID, current seat timestamp, and admin flag. If no member matches, it raises `UnknownMember`.
+**Data flow**: It receives an event name and payload dictionary, JSON-encodes the payload, and returns the bytes in SSE format.
 
-**Call relations**: `Seats.grant` and `Seats.revoke` call this before changing a member’s seat. It centralizes the lookup so both actions use the same email matching behavior and error.
+**Call relations**: `_events` uses it for extra web-specific events such as connect URLs, credential prompts, and shared files.
 
-*Call graph*: called by 2 (grant, revoke); 3 external calls (__init__, execute, select).
+*Call graph*: called by 1 (_events); 1 external calls (dumps).
 
 
-##### `Seats._seated_count`  (lines 292–300)
+##### `_pending_prompts`  (lines 1277–1290)
 
 ```
-async def _seated_count(self, connection: AsyncConnection) -> int
+async def _pending_prompts(ctx: SurfaceContext, request_: CredentialRequest) -> dict[str, object] | None
 ```
 
-**Purpose**: Counts how many members in this workspace currently have seats. This is used before adding another seat.
+**Purpose**: Filters a credential request down to prompts that are still awaiting a value. This prevents fulfilled or expired prompts from reappearing after reconnects or reloads.
 
-**Data flow**: It receives a database connection, counts member rows for this workspace where the seat timestamp is present, and returns that number.
+**Data flow**: It receives a credential request, checks each prompt with core using the request seal and slot, and returns prompt data with the reason and seal, or `None` if nothing is pending.
 
-**Call relations**: `Seats.grant` uses this to enforce the hard limit. `Seats.auto_seat` uses it to decide whether the automatic allowance still has space.
+**Call relations**: `_events` calls it during live terminal frames, and `_open_handoffs` calls it when rebuilding open handoffs for a transcript reload.
 
-*Call graph*: called by 2 (auto_seat, grant); 2 external calls (execute, select).
+*Call graph*: calls 1 internal fn (credential_prompt_pending); called by 2 (_events, _open_handoffs).
 
 
-##### `Seats._seated_admin_count`  (lines 302–311)
+##### `_turn_files`  (lines 1293–1302)
 
 ```
-async def _seated_admin_count(self, connection: AsyncConnection) -> int
+async def _turn_files(ctx: SurfaceContext, turn_id: UUID) -> list[dict[str, object]]
 ```
 
-**Purpose**: Counts how many seated admins remain in a workspace. This protects the system from leaving a workspace with no seated admin.
+**Purpose**: Lists files shared by a turn in the compact shape the portal displays. It includes download links when available.
 
-**Data flow**: It receives a database connection, counts members in this workspace who are both seated and marked as admins, and returns that number.
+**Data flow**: It receives a turn id, asks core for shared artifacts, builds rows with filename, subject, size, and link, and returns the list.
 
-**Call relations**: `Seats.revoke` calls this only when the target member is an admin. If the count is one, revocation is refused so someone can still manage seats through chat.
+**Call relations**: `_events` uses it when a live turn finishes, and `_open_handoffs` uses it when restoring the latest turn state.
 
-*Call graph*: called by 1 (revoke); 2 external calls (execute, select).
+*Call graph*: calls 2 internal fn (artifact_link, shared_artifacts); called by 2 (_events, _open_handoffs).
 
 
-##### `Seats._seat`  (lines 313–318)
+##### `_events`  (lines 1305–1327)
 
 ```
-async def _seat(self, connection: AsyncConnection, member_id: UUID) -> None
+async def _events(ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str) -> AsyncIterator[bytes]
 ```
 
-**Purpose**: Marks a member as seated in the database. It is the shared low-level write used by both manual grants and automatic seating.
+**Purpose**: Converts core live frames for a turn into browser Server-Sent Events. It also inserts web-only events for connection handoffs, credential prompts, and shared files.
 
-**Data flow**: It receives a database connection and member ID, then updates that member row with the current time for `seated_at` and `updated_at`. It does not return a value.
+**Data flow**: It tails core frames from the given turn and resume cursor. For terminal frames, it may request a connect URL, check credential prompts, and list files, yielding named events for those; then it yields the original frame converted by `_sse`.
 
-**Call relations**: `Seats.grant` calls this after an admin-approved grant passes the limit check. `Seats.auto_seat` calls it when a newly created member fits within the automatic allowance.
+**Call relations**: `stream` returns this async iterator as the response body. It calls `_event`, `_pending_prompts`, `_turn_files`, and `_sse` while reading `ctx.tail`.
 
-*Call graph*: called by 2 (auto_seat, grant); 2 external calls (execute, update).
+*Call graph*: calls 6 internal fn (connect_url, tail, _event, _pending_prompts, _sse, _turn_files); called by 1 (stream).
 
 
-##### `member_is_admin`  (lines 321–331)
+##### `fulfill_credential`  (lines 1330–1358)
 
 ```
-async def member_is_admin(connection: AsyncConnection, workspace_id: UUID, member_id: UUID) -> bool
+async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Checks whether a particular member is an admin of a particular workspace. This is a small permission helper.
+**Purpose**: Stores one secret value entered by the member for a pending credential prompt. The secret is submitted privately and is not added to chat history.
 
-**Data flow**: It receives a database connection, workspace ID, and member ID. It reads the member’s admin flag for that workspace and returns true or false; if no row is found, the result is false.
+**Data flow**: It authenticates, checks and parses a small form, reads sealed request id, slot, and value, enforces a secret size limit, asks core to fulfill the credential request for this member, and returns success or an error response.
 
-**Call relations**: Other permission checks can call this before allowing admin-only seat actions or workspace-level operations. It does not change any data.
+**Call relations**: It is the POST route for credential handoffs. Live and transcript views show pending prompts through `_pending_prompts`; this route completes one.
 
-*Call graph*: 2 external calls (execute, select).
+*Call graph*: calls 4 internal fn (fulfill_credential_request, _authenticate, _form, _framed_length); 2 external calls (JSONResponse, Response).
 
 
-##### `create_member`  (lines 334–374)
+##### `admin_index`  (lines 1361–1415)
 
 ```
-async def create_member(connection: AsyncConnection, workspace_id: UUID, email: str, *, is_admin: bool=False) -> UUID
+async def admin_index(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Creates a workspace member row in the one approved way, then applies the seat rule immediately. This ensures every path that adds members uses the same automatic seating behavior.
+**Purpose**: Returns the administration dashboard data for workspace admins. It includes agents, installations, web grants, members, seats, models, reasoning levels, spend caps, and deployment shape.
 
-**Data flow**: It receives a database connection, workspace ID, email, and optional admin flag. It tries to insert a new member with a fresh UUID. If the insert succeeds, it calls `Seats.auto_seat` and returns the new ID. If another request already created the same workspace/email member, it reads and returns the existing member ID instead.
+**Data flow**: It authenticates and rejects non-admins as not found. For admins, it reads installations, web grants, seat snapshot, spend caps, deployment settings, and agent/member data, then returns one JSON snapshot.
 
-**Call relations**: Onboarding, verified teammate joins, and future member-creation paths should call this instead of inserting directly. It constructs `Seats(workspace_id)` so new members are seated or left unseated according to the shared policy.
+**Call relations**: It is the admin panel route. It calls `_audience_for` for admin status, reads web extension data, and uses the seats helper inside an extension transaction.
 
-*Call graph*: 4 external calls (__init__, execute, select, uuid4).
+*Call graph*: calls 3 internal fn (list_installations, spend_caps, _audience_for); 6 external calls (__init__, JSONResponse, Response, granted_emails, web_extension, reasoning_levels).
 
 
-##### `admin_conversation`  (lines 377–408)
+##### `_sse`  (lines 1418–1435)
 
 ```
-async def admin_conversation(connection: AsyncConnection, workspace_id: UUID) -> tuple[UUID, UUID] | None
+def _sse(cursor: str, frame: LiveFrame) -> bytes
 ```
 
-**Purpose**: Finds the best chat conversation to contact a seated workspace admin. This is used when the system needs to ask an admin to grant a seat or handle a workspace-level issue.
+**Purpose**: Converts one core live frame into a Server-Sent Event. It includes an event id when a cursor is available so the browser can resume after a dropped connection.
 
-**Data flow**: It receives a database connection and workspace ID. It searches private conversations for seated admins on the main agent, orders them by most recently updated, and returns the conversation ID plus agent ID. If no such conversation exists, it returns nothing.
+**Data flow**: It receives a cursor and a live frame, chooses the SSE event type based on the frame class, serializes the frame to JSON bytes, and returns the formatted SSE bytes.
 
-**Call relations**: Seat-refusal or billing-related flows can use this to route an admin request. It only reads data; it does not create a conversation if none exists.
+**Call relations**: `_events` calls it for every core frame after adding any web-specific side events.
 
-*Call graph*: 2 external calls (execute, select).
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
 
 
-##### `member_workspaces`  (lines 411–419)
+##### `intents`  (lines 1438–1443)
 
 ```
-def member_workspaces() -> WorkspaceCandidates
+async def intents(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds a candidate list of workspaces that have at least one member. This is useful for background jobs that report or check seat state across workspaces.
+**Purpose**: Submits a prepared intent for the selected agent. An intent is a panel-driven action that is still admitted through the same member and agent gate as other agent operations.
 
-**Data flow**: It creates a small query function that selects distinct workspace IDs from the member table, then wraps it as `WorkspaceCandidates`, the project’s way of describing which workspaces a job should run for.
+**Data flow**: It gates the request with `_panel_gate`, then passes the context, request, agent id, member id, and email to `submit_intent`, returning whatever that helper returns.
 
-**Call relations**: Extensions or scheduled jobs can declare these candidates without knowing the details of the member table. Inside, it hands the query builder to `owner_candidates`.
+**Call relations**: It is the POST route for agent intents and delegates the actual intent behavior to `ufo_ext_web.panels.submit_intent`.
 
-*Call graph*: 1 external calls (owner_candidates).
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (submit_intent).
 
 
-##### `member_workspaces.with_a_member`  (lines 416–417)
+##### `overview`  (lines 1446–1454)
 
 ```
-def with_a_member() -> sa.Select[tuple[UUID]]
+async def overview(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the actual database query used by `member_workspaces`: every workspace ID that appears in the member table, with duplicates removed.
+**Purpose**: Returns the selected agent's overview information for the portal. This includes configuration-style data, with admin-only details controlled by the viewer's admin flag.
 
-**Data flow**: It takes no direct input. When called, it builds and returns a SQL select statement for distinct member workspace IDs; it does not execute the query itself.
+**Data flow**: It gates the request, extracts the agent id and admin flag, calls `agent_overview`, and returns that response.
 
-**Call relations**: `member_workspaces` passes this inner function to `owner_candidates`, which can later use it as the candidate source for a workspace-level job.
+**Call relations**: It is the agent overview panel route and delegates the detailed response construction to `ufo_ext_web.panels.agent_overview`.
 
-*Call graph*: 1 external calls (select).
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (agent_overview).
 
 ## 📊 State Registers Touched
 
-- `reg-database-schema` — The shared database layout and migration version that define which long-term records the system can store.
-- `reg-workspace-boundary` — The current workspace or tenant boundary used to keep each customer’s data and actions separate.
-- `reg-extension-store` — Per-workspace saved extension data that add-ons use to remember their own small pieces of state.
-- `reg-credential-store` — The encrypted store of API keys, service secrets, and owner-provided credentials.
-- `reg-auth-session` — The signed login and identity state that proves which member or operator is using the system.
-- `reg-workspace-objects` — The shared records for workspaces, agents, members, conversations, artifacts, memories, sources, and other workspace objects.
-- `reg-membership-and-seats` — The shared membership, admin role, paid seat, and seat-limit state for a workspace.
-- `reg-agent-identity` — The saved identity and settings of each agent, including its main workspace role and whether it may use the internet.
-- `reg-audience-policy` — The saved visibility rules that decide which people may see or use a conversation or agent.
-- `reg-conversation-state` — The durable conversation record that ties a surface, agent, audience, sandbox handle, and message history together.
-- `reg-skill-store` — The shared set of built-in, extension-provided, and user-created skills available to agents.
-- `reg-connector-connections` — The saved external accounts, OAuth connections, and agent grants that let tools use outside services safely.
-- `reg-source-sync-state` — The saved state of external sources, synced pages, deletion markers, cursors, and retry backoff.
-- `reg-memory-store` — The long-term memory store of remembered facts and recall results used to inform later responses.
-- `reg-artifact-storage` — The shared file and blob storage for generated artifacts, plus the signed download state used to protect them.
-- `reg-onboarding-claims` — The hosted signup state for email claims, invitations, company-domain workspace mapping, and temporary access tokens.
-- `reg-acting-principal-scope` — The current acting principal context—member, agent, on-behalf-of member, and object/agent scope—used to authorize actions, attribute turns, choose grants, and keep tool work tied to the right actor.
-- `reg-secret-handoff-state` — Short-lived private handoff state used to bind sensitive credential or connection setup payloads to the right actor before secrets are accepted and stored.
+- `reg-workspace-tenant-state` — The saved customer workspace boundary, including its owners, admins, limits, main agent, and tenant separation rules.
+- `reg-identity-auth-state` — The current proof of who is calling, such as member identity, cookies, bearer tokens, operator sessions, and signed access tokens.
+- `reg-conversation-state` — The durable record of each conversation, including its workspace, surface, audience, agent, sandbox link, and object identity.
+- `reg-transcript-state` — The shared conversation notebook containing saved messages, model events, summaries, and compaction records.
+- `reg-inbound-message-state` — The durable inbox of incoming messages and surface events waiting to be admitted into a conversation turn.
+- `reg-browser-session-state` — The live browser-control session state used to click, read pages, download files, recover sessions, and route sandbox browser links.
+- `reg-live-update-hub` — The short-lived stream of progress updates, tool activity, costs, final answers, and Redis fan-out frames for live viewers.
+- `reg-hosted-site-state` — The durable records for generated hosted sites, including names, ports, owners, conversations, sharing, and viewing permissions.
+- `reg-surface-delivery-state` — The surface installation keys, outbound delivery/writeback queue, and acknowledgement state used to send completed replies back to external surfaces.
+- `reg-security-audit-log` — The durable audit records for sensitive access and administrative/security-relevant actions, distinct from operational traces.
+- `reg-member-seat-state` — The durable workspace membership and seat-assignment state used to decide who belongs, who is an admin, and whether a member may admit or run work.

@@ -1,279 +1,389 @@
-# Turn setup, context assembly, and prompt preparation  `stage-8`
+# Turn Admission, Queueing, Claiming, and Recovery  `stage-8`
 
-This stage happens just before the agent starts working on a user’s next message. It takes a waiting turn from the queue, gathers everything needed, and turns it into a ready-to-run job. The queue code is the coordinator. It safely claims one queued turn, loads model settings, credentials, sandbox access, tool choices, member context, and subagent options, then either runs the turn or records a controlled failure if setup cannot finish.
+This stage is the handoff point between “a user or schedule wants something done” and “an agent turn is safely ready to run.” A turn is one unit of conversation work, like one job ticket in a workshop. The admission file is the front desk. It receives new messages, resumed work, or folded-together conversation events, then checks whether the request is allowed: enough seats, spending limits, no duplicate delivery, and the right agent attached. Once approved, it passes the turn into the queue.
 
-The transcript and prompt part prepares the words the model will read. If the conversation is too long, it summarizes older parts while keeping recent messages exact. It also adds recalled memories and renders the final prompt from templates.
-
-The skill and toolbox part prepares what the agent can do. It copies needed skill files into the safe workspace, builds the catalog of callable tools, and gives extensions a restricted way to act. Together, these pieces act like packing a workbench before a repair: instructions, tools, workspace, and permissions are all ready before the first model call.
-
-## Sub-stages
-
-- [Transcript compaction and prompt construction](stage-8.1.md) `stage-8.1` — 3 files
-- [Skill and toolbox preparation](stage-8.2.md) `stage-8.2` — 7 files
+The queue file is the job board and safety net. It records the turn durably so it is not lost if the process crashes. It attaches the correct workspace, conversation, parent turn, sandbox, and credentials, so the runner has the right environment and permissions. It also lets a worker claim a turn for execution, finds turns abandoned by dead workers, and puts them back on track. If setup fails before the agent really starts, it still writes a final success or failure result, so every admitted turn reaches a clear ending.
 
 ## Files in this stage
 
-### Turn setup, context assembly, and prompt preparation
-### `core/src/ufo/loop/queue.py`
+### Turn Admission and Execution Queue
+Admits incoming conversation work through shared policy checks, then durably queues, claims, recovers, and finalizes the resulting agent turn.
 
-`orchestration` · `queued turn execution`
+### `core/src/ufo/surfaces/admission.py`
 
-A “turn” is one unit of conversation work: a user or system message comes in, and the agent must think, call tools if needed, write to the transcript, and finish with a status. This file is the traffic controller for that work. It uses DBOS, a durable workflow system, so that if the process crashes halfway through, the turn can be replayed safely instead of being lost or run twice in a harmful way.
+`domain_logic` · `request handling and scheduled task admission`
 
-The file keeps a single process-wide Runtime object. That object is like the toolbox for turn execution: database access, model registry, blob storage, sandbox manager, connector registry, credentials, search, memory, and more. When DBOS starts the turn workflow, the code binds the correct workspace, finds the agent for the turn, claims the turn, loads its database record, opens or attaches to the conversation sandbox, prepares tools and skills, and builds a TurnEngine. The TurnEngine then does the actual model-and-tool loop.
+A “turn” is one unit of conversation work that the agent will answer. This file decides whether a new inbound message should create a new turn, join an already-live turn, resume a paused turn, wait because spending is capped, or be cancelled with a clear reason. It is like a receptionist for the conversation engine: every message must check in here before it can reach the worker queue.
 
-A key safety feature is the failure backstop. If something goes wrong before or outside the engine, this file still writes a terminal “failed” result and publishes it, so anyone waiting for the turn is not left hanging forever. It also carefully avoids putting real secrets into the sandbox. Instead it passes short sentinel values that a proxy can swap for real credentials only when allowed.
+The central rule is that a conversation stays tied to its chosen agent. Member messages do not choose an agent, and internal callers may only assert the agent already bound to the conversation. The file also protects against duplicate deliveries by using idempotency keys, meaning the same delivered message can be recognized and attached to the same turn instead of creating another one.
+
+When a conversation already has a live turn, later messages are usually stored in an inbound-message queue for that turn rather than starting a separate run. This lets one agent reply cover all messages that arrived during the run. The file also checks seat eligibility and spending limits before queueing work. If the turn is allowed, it is inserted into the database and possibly placed on the DBOS durable workflow queue. If the surface needs durable writeback, a writeback row is created at the same time so replies are not lost.
 
 #### Function details
 
-##### `init_runtime`  (lines 113–117)
+##### `Admission.admit_member`  (lines 92–117)
+
+```
+async def admit_member(self, workspace_id: UUID, conversation_id: UUID, body: str, speaker_member_id: UUID | None, idempotency_key: str | None=None, context: TurnContext | None=None, intent: ToolInten
+```
+
+**Purpose**: Accepts a message spoken by a workspace member and asks the shared admission path to decide what should happen to it. It also validates prepared tool intents so the recorded message body exactly matches the intent envelope.
+
+**Data flow**: It receives a workspace, conversation, message body, optional speaker, optional duplicate-delivery key, optional context, and optional intent. It checks that an intent has a real speaker and that the message body matches the serialized intent. Then it passes the message into the main admission routine with a marker saying this member message may consume a pending one-time pause, and it returns the resulting admitted turn information.
+
+**Call relations**: Surfaces use this member-facing entry point when a person sends a message. After its small validation step, it hands everything to Admission._admit, which performs the database locking, duplicate checks, seat checks, spending decision, and queueing.
+
+*Call graph*: calls 1 internal fn (_admit); 2 external calls (__init__, model_dump_json).
+
+
+##### `Admission.invoke`  (lines 119–139)
+
+```
+async def invoke(self, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None) -> UUID
+```
+
+**Purpose**: Starts a turn from inside the system, such as from a job or extension, while requiring the caller to name the agent it believes owns the conversation. This prevents internal work from silently switching a conversation to a different agent.
+
+**Data flow**: It receives the workspace, conversation, asserted agent, message, optional idempotency key, and optional context. It forwards these to the shared admission routine without a speaking member and without permission to consume a member pause. It returns only the admitted turn id.
+
+**Call relations**: Internal callers use this simpler method instead of member admission. It delegates to Admission._admit, and the shared routine verifies the asserted agent against the conversation’s stored binding before admitting anything.
+
+*Call graph*: calls 1 internal fn (_admit).
+
+
+##### `Admission.invoke_scheduled`  (lines 141–182)
+
+```
+async def invoke_scheduled(self, workspace_id: UUID, task: ScheduledTask, runtime_instruction: str | None=None) -> UUID | None
+```
+
+**Purpose**: Turns a claimed scheduled task into an inbound conversation turn. It formats recurring scheduled work with timing information, refuses invalid schedule states, and returns no turn if another worker has already superseded the claimed task.
+
+**Data flow**: It receives a workspace, a scheduled task, and an optional runtime instruction. It checks that the task is claimed, rejects runtime instructions for one-time pause resumptions, builds the message text, and creates a stable firing key for duplicate protection. It then calls the shared admission routine and returns the admitted turn id, or returns null if the scheduled invocation was no longer valid.
+
+**Call relations**: The scheduler calls this after claiming a task. This method prepares schedule-specific input, then relies on Admission._admit to link one-time pauses, verify the claim under lock, decide whether to queue or park the turn, and handle duplicate firings.
+
+*Call graph*: calls 1 internal fn (_admit); 1 external calls (firing_key).
+
+
+##### `Admission._admit`  (lines 184–731)
+
+```
+async def _admit(self, workspace_id: UUID, conversation_id: UUID, asserted_agent_id: UUID | None, body: str, speaker_member_id: UUID | None, idempotency_key: str | None, context: TurnContext | None, p
+```
+
+**Purpose**: This is the main admission decision-maker. It safely decides, under a database lock, whether an inbound message creates a new turn, joins a live turn, takes over a queued pause-resume turn, parks because of spending limits, cancels because of seat or spend refusal, or gets enqueued for execution.
+
+**Data flow**: It receives all facts about the attempted admission: workspace, conversation, optional asserted agent, message body, speaker, idempotency key, context, pause behavior, scheduled task, member on whose behalf the task runs, and optional intent. It locks the conversation row, reads conversation and task state, checks duplicate keys, checks live turns and queued inbound messages, applies seat rules and spending rules, writes or updates turn, inbound-message, scheduled-task, and writeback rows, then exits the transaction. After the database state is safely committed, it enqueues the turn if it is ready to run and returns an Admitted result saying which turn was accepted and whether a new run was opened.
+
+**Call relations**: Admission.admit_member, Admission.invoke, and Admission.invoke_scheduled all funnel into this function so no caller can bypass the same boundary checks. When it decides a queued turn should run now, or a parked turn has been resumed by a folded message, it hands the final queueing step to Admission._enqueue.
+
+*Call graph*: calls 1 internal fn (_enqueue); called by 3 (admit_member, invoke, invoke_scheduled); 16 external calls (__init__, __init__, __init__, __init__, model_dump, model_validate, delete, exists, insert, select (+6 more)).
+
+
+##### `Admission._enqueue`  (lines 733–773)
+
+```
+async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID, workflow_id: str | None=None) -> None
+```
+
+**Purpose**: Places an admitted queued turn onto the DBOS workflow queue, which is the durable work queue used by workers. It also repairs the database marker if enqueueing is cancelled or fails, so another attempt can try again later.
+
+**Data flow**: It receives the workspace, conversation, turn id, and optionally a workflow id. It builds queue options including the queue name, workflow name, workflow id, partition key, and app version, then asks DBOS to enqueue the workflow. If enqueueing is cancelled or errors, it clears the turn’s dispatch timestamp in the database; on ordinary errors it also logs that enqueueing was deferred.
+
+**Call relations**: Admission._admit calls this only after it has committed the database changes that say the turn exists and is queued. This split matters because the durable database record is the source of truth, while enqueueing is the handoff to background workers.
+
+*Call graph*: called by 1 (_admit); 3 external calls (update, workspace_tx, log).
+
+
+##### `AdmissionInvoker.invoke`  (lines 784–799)
+
+```
+async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None) -> UUID
+```
+
+**Purpose**: Provides a workspace-bound internal invocation helper. Callers using it do not need to repeat the workspace id, and they cannot accidentally use the member-admission path that consumes pending member pauses.
+
+**Data flow**: It receives a conversation, agent, message, optional idempotency key, and optional context. It adds the stored workspace id from the AdmissionInvoker object and forwards the request to Admission.invoke. The result is the admitted turn id from the shared admission system.
+
+**Call relations**: Jobs and extension workflows receive this limited helper as their capability. It tells Admission.invoke to admit internal work, which then flows into Admission._admit for the real checks and queue decision.
+
+
+##### `AdmissionInvoker.invoke_scheduled`  (lines 801–804)
+
+```
+async def invoke_scheduled(self, task: ScheduledTask, runtime_instruction: str | None=None) -> UUID | None
+```
+
+**Purpose**: Provides a workspace-bound helper for invoking scheduled tasks. It keeps scheduled internal work on the internal path rather than the member-message path.
+
+**Data flow**: It receives a scheduled task and optional runtime instruction. It adds the stored workspace id and forwards both to Admission.invoke_scheduled. The result is either the admitted turn id or null if the scheduled firing was superseded.
+
+**Call relations**: Schedulers or worker code can use this helper without holding the full Admission object directly. It passes the request to Admission.invoke_scheduled, which prepares the scheduled message and then relies on the shared admission routine.
+
+
+##### `MemberAdmission.admit`  (lines 815–833)
+
+```
+async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None) -> Adm
+```
+
+**Purpose**: Provides a workspace-bound member-message helper for surfaces. It makes sure surface-delivered messages use the member admission route, including the behavior that can consume a pending one-time pause.
+
+**Data flow**: It receives a conversation, message, optional idempotency key, optional context, required speaker member id, and optional intent. It adds the stored workspace id and forwards the request to Admission.admit_member. It returns the Admitted result, which tells the surface which turn accepted the message and whether a new run started.
+
+**Call relations**: User-facing surfaces receive this limited helper instead of the full admission object. It routes their messages to Admission.admit_member, which validates member-specific intent details and then hands the decision to Admission._admit.
+
+
+### `core/src/ufo/loop/queue.py`
+
+`orchestration` · `turn workflow execution`
+
+This file is the traffic controller for agent turns. A turn is a single piece of work in a conversation, such as answering a user, using tools, or delegating to a subagent. The file connects the database, the durable DBOS workflow system, the sandbox where tools run, credentials, model selection, transcript storage, and live status updates.
+
+The big idea is reliability. A turn is put on a partitioned queue, keyed by conversation, so turns from the same conversation do not step on each other. When the workflow starts, it binds all work to the correct workspace, claims the turn, loads its agent and audience, prepares tools and skills, opens or reuses a sandbox, then builds a TurnEngine to do the actual model-and-tool loop.
+
+It also protects secrets. The sandbox receives signed tokens and harmless “sentinel” values instead of real credentials. A proxy later swaps those sentinels for real secrets when allowed. This is like giving a valet ticket instead of the car keys.
+
+If anything goes wrong before the engine can write a final status, this file writes a failed terminal message itself and publishes it to waiting clients. Without this file, turns would not be safely serialized, recovered, scoped to workspaces, or reliably finished.
+
+#### Function details
+
+##### `init_runtime`  (lines 115–119)
 
 ```
 def init_runtime(runtime: Runtime) -> None
 ```
 
-**Purpose**: Installs the process-wide Runtime object that turn execution needs. This is done once when the service is set up, so later workflow runs can find shared services such as the database client, sandbox manager, model registry, and credential store.
+**Purpose**: Installs the process-wide runtime object that turn execution needs. This runtime is the bundle of shared services, such as the database workflow client, model registry, sandbox provider, blob store, credential store, and tool registries.
 
-**Data flow**: A fully built Runtime goes in. The function checks whether one is already installed; if not, it saves it in the module-level runtime slot. Nothing is returned, but future turn workflows can read that saved runtime.
+**Data flow**: It receives a Runtime object → checks whether one is already installed → stores it in the module-level runtime slot. If a runtime already exists, it raises an error instead of silently replacing it.
 
-**Call relations**: This is the setup step before turns can run. Later, _execute_turn reads the installed runtime; without this earlier call, turn execution stops immediately with a clear error.
+**Call relations**: This is called during server setup before any turn workflow runs. Later, _execute_turn reads this installed runtime so it can start real work without rebuilding all shared services for every turn.
 
 
-##### `reset_runtime`  (lines 120–125)
+##### `reset_runtime`  (lines 122–127)
 
 ```
 def reset_runtime() -> None
 ```
 
-**Purpose**: Clears the saved Runtime so another one can be installed. This is mainly a testing seam: normal serving installs the runtime once, but tests often need to swap in a fake or fresh runtime.
+**Purpose**: Clears the installed runtime so another one can be installed. This is mainly a testing seam, because production setup is expected to initialize the runtime once and keep it.
 
-**Data flow**: No input is needed. The saved runtime slot is set back to empty. Nothing is returned.
+**Data flow**: It takes no input → sets the module-level runtime slot back to empty → returns nothing. The only changed state is the stored runtime reference.
 
-**Call relations**: This sits outside the normal turn path. It exists so tests can call reset_runtime, then init_runtime again, without breaking the one-runtime safety check.
+**Call relations**: Tests can call this before init_runtime to swap in a fake or temporary runtime. Normal turn execution depends on the runtime being present, so this function is not part of the usual production turn path.
 
 
-##### `_execute_turn`  (lines 128–162)
+##### `_execute_turn`  (lines 130–164)
 
 ```
 async def _execute_turn(workspace_id: str, turn_id: str) -> str
 ```
 
-**Purpose**: Runs the outer shell of a turn workflow. It chooses the correct workspace and agent context, then delegates the real turn work to _run_turn, while making sure unexpected failures still become a visible failed terminal result.
+**Purpose**: Starts one turn inside the correct workspace and agent scope. It is the outer safety wrapper around the real turn runner.
 
-**Data flow**: It receives workspace_id and turn_id as strings from the durable workflow. It turns them into UUIDs, looks up the agent for the turn in the database, enters the workspace and agent scopes, and calls _run_turn. It returns a status string such as completed, failed, parked, or superseded; if an error happens, it records failure first.
+**Data flow**: It receives workspace and turn IDs as strings → converts them to UUIDs → enters the workspace context → reads the turn’s agent ID from the database → enters that agent scope → calls _run_turn. If setup or running fails, it commits a failed terminal update so clients are not left waiting forever.
 
-**Call relations**: turn_workflow calls this when DBOS starts or replays a queued turn. _execute_turn sets the correct workspace boundary with ws and database transaction helpers, then hands off to _run_turn. If _run_turn or setup fails unexpectedly, it calls _commit_failed_terminal so waiting clients get a final answer.
+**Call relations**: turn_workflow calls this when DBOS starts a queued workflow. It hands the actual work to _run_turn, but if anything escapes that lower layer, it calls _commit_failed_terminal as the final backstop.
 
 *Call graph*: calls 2 internal fn (_commit_failed_terminal, _run_turn); called by 1 (turn_workflow); 5 external calls (select, agent, workspace_tx, ws, UUID).
 
 
-##### `_enqueue_handoff`  (lines 165–200)
+##### `_enqueue_handoff`  (lines 167–202)
 
 ```
 async def _enqueue_handoff(client: DBOSClient, workspace_id: UUID, turn_id: UUID, conversation_id: UUID, workflow_id: str) -> None
 ```
 
-**Purpose**: Queues a follow-up turn for the same conversation partition when the current claim discovers that another turn should take over next. This keeps conversation turns ordered, like keeping all jobs for one customer in the same checkout lane.
+**Purpose**: Queues another turn that should take over after the current turn claims work. This supports safe handoff without letting two turns for the same conversation run at once.
 
-**Data flow**: It receives the DBOS client, workspace ID, turn ID, conversation ID, and desired workflow ID. It builds queue options that target the turn workflow and partition by conversation ID, then asks DBOS to enqueue the work. If enqueueing is cancelled or fails, it clears the turn’s dispatch marker in the database so it can be retried later.
+**Data flow**: It receives the DBOS client, workspace ID, turn ID, conversation ID, and workflow ID → builds queue options that partition by conversation → asks DBOS to enqueue the workflow. If enqueueing is cancelled or fails, it clears the turn’s dispatch marker in the database so the turn can be retried or picked up later.
 
-**Call relations**: _run_turn calls this after claiming a turn when the claim process reports a handoff. It hands the next piece of work to DBOS. On failure it logs or resets database state rather than pretending the handoff was successfully queued.
+**Call relations**: _run_turn calls this after claiming a turn when the claim operation reports a handoff. It talks to DBOS to schedule the next workflow and uses the database to undo the queued marker if scheduling did not succeed.
 
 *Call graph*: called by 1 (_run_turn); 4 external calls (enqueue_async, update, workspace_tx, log).
 
 
-##### `_run_turn`  (lines 203–379)
+##### `_run_turn`  (lines 205–385)
 
 ```
 async def _run_turn(runtime: Runtime, turn_id: str) -> str
 ```
 
-**Purpose**: Builds everything needed for one agent turn and runs the TurnEngine. This is the main orchestration function: it claims the turn, loads records, prepares tools, skills, prompts, sandbox access, credentials, subagents, compaction, and model clients.
+**Purpose**: Builds everything needed to execute a turn and then runs the TurnEngine. This is the main assembly line for a turn: claim it, load it, prepare tools and prompts, open the sandbox, and start the model loop.
 
-**Data flow**: It receives the Runtime and turn_id. It claims the turn so only the right workflow attempt runs it, repairs transcript state if the turn was superseded, optionally enqueues a handoff, loads the turn and agent, prepares subagent support, filters tools, builds the system prompt, opens the sandbox with safe environment variables, mounts preload skills, creates a TurnEngine, and awaits engine.run. It returns the resulting terminal status, or parked/superseded/failed when special conditions occur.
+**Data flow**: It receives the shared Runtime and a turn ID → claims the turn so duplicate workers do not run it → optionally enqueues a handoff → loads the turn, agent, and audience → builds subagent access, tools, hooks, skills, prompts, model client, credentials, grants, sandbox session, and compaction support → creates TurnEngine → runs either the normal flow or intent-admission flow → returns a status such as completed, failed, parked, or superseded. It may also mount preloaded skills into the sandbox and may write a failed terminal if an unexpected error occurs.
 
-**Call relations**: _execute_turn calls this inside the proper workspace and agent scope. _run_turn calls helpers in this file for loading the turn, opening the sandbox, enqueueing handoffs, and committing backstop failures. It then hands the prepared world to TurnEngine, which performs the actual model rounds and tool dispatch.
+**Call relations**: _execute_turn calls this after binding the workspace and agent. This function coordinates many subsystems, then delegates the actual conversation/tool loop to TurnEngine. It also calls _load_turn, _open_sandbox, _enqueue_handoff, and _commit_failed_terminal at the right moments.
 
 *Call graph*: calls 4 internal fn (_commit_failed_terminal, _enqueue_handoff, _load_turn, _open_sandbox); called by 1 (_execute_turn); 24 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+14 more)).
 
 
-##### `_run_turn.subagents_for`  (lines 231–235)
+##### `_run_turn.subagents_for`  (lines 233–237)
 
 ```
 def subagents_for(acting_member_id: UUID | None) -> tuple[Spawn, Subagents]
 ```
 
-**Purpose**: Creates an authorized subagent view for a specific acting member. It lets the main turn give subagent spawning rights that match who is acting, instead of using one blanket permission set.
+**Purpose**: Creates a member-specific view of subagent abilities. It lets a turn ask, “if this member is acting, what subagents may they spawn?”
 
-**Data flow**: It receives an optional acting_member_id. It asks the Subagents object to authorize that member, then returns both the spawn function and the authorized Subagents wrapper. Nothing is written directly; it packages a permission-filtered interface.
+**Data flow**: It receives an optional acting member ID → asks the Subagents object to authorize that member → returns both the spawn function and the authorized Subagents view. It does not change the database itself.
 
-**Call relations**: This helper is defined inside _run_turn because it depends on the Subagents object built for that specific turn. _run_turn passes it into TurnEngine, so the engine can ask for member-specific subagent access when a tool or subagent flow needs it.
+**Call relations**: _run_turn defines this helper while building the TurnEngine. The engine can later use it when tool calls or delegated work need member-aware subagent permissions.
 
 
-##### `_commit_failed_terminal`  (lines 382–414)
+##### `_commit_failed_terminal`  (lines 388–446)
 
 ```
 async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None
 ```
 
-**Purpose**: Records a final failed result for a turn and publishes it to listeners, even if the normal engine path did not get far enough to do so. This prevents clients from waiting forever after a crash or setup error.
+**Purpose**: Writes and publishes a final failed status when a turn breaks outside the normal engine failure path. Its job is to make sure callers waiting for the turn always get an ending.
 
-**Data flow**: It receives a Hub, a turn ID, and the error that occurred. It creates a TerminalFrame containing the error type and a shortened message, updates the database if the turn is still queued or running, then publishes a terminal event. If this fails, it waits and retries with a growing delay until it succeeds.
+**Data flow**: It receives the hub, turn ID, and exception → creates a terminal failure frame containing the error class and a shortened message → repeatedly tries to update the turn row from queued/running to failed → emits a metric and logs the stack only if that update actually changed the turn → publishes the terminal frame to the hub → returns. If the database or publishing path fails, it waits and retries with increasing delay.
 
-**Call relations**: _execute_turn and _run_turn call this as a backstop when unexpected exceptions escape. It uses workspace_tx for the database write and Hub.publish to notify watchers that the turn has ended.
+**Call relations**: _execute_turn and _run_turn both call this as a safety net. The TurnEngine may already have recorded its own failure; in that case this update will not match a live row, which prevents double-counting and duplicate error logs.
 
-*Call graph*: calls 1 internal fn (publish); called by 2 (_execute_turn, _run_turn); 6 external calls (__init__, __init__, sleep, update, workspace_tx, log).
+*Call graph*: calls 1 internal fn (publish); called by 2 (_execute_turn, _run_turn); 10 external calls (__init__, __init__, sleep, update, workspace_tx, emit_metric, formatted_stack, log, log_error, turn_profile).
 
 
-##### `turn_workflow`  (lines 418–419)
+##### `turn_workflow`  (lines 450–451)
 
 ```
 async def turn_workflow(workspace_id: str, turn_id: str) -> str
 ```
 
-**Purpose**: Exposes turn execution as a DBOS workflow. A workflow is durable work that DBOS can queue, run, and replay after failures.
+**Purpose**: Defines the DBOS durable workflow entry for a turn. DBOS is the workflow system that can replay or resume work after crashes.
 
-**Data flow**: It receives workspace_id and turn_id from DBOS. It immediately passes both to _execute_turn and returns the status string that _execute_turn produces.
+**Data flow**: It receives workspace and turn IDs as strings from the queued workflow → passes them to _execute_turn → returns the status string produced by that execution.
 
-**Call relations**: DBOS calls this function when an item from the turn queue is ready to run. It is intentionally thin: all real setup, context binding, and failure handling live in _execute_turn.
+**Call relations**: DBOS invokes this when a queued turn workflow is ready to run. It is intentionally thin: it hands off immediately to _execute_turn, which performs workspace binding, safety wrapping, and the real orchestration.
 
 *Call graph*: calls 1 internal fn (_execute_turn).
 
 
-##### `_load_turn`  (lines 422–479)
+##### `_load_turn`  (lines 454–518)
 
 ```
 async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]
 ```
 
-**Purpose**: Loads the database information needed to run a turn and converts it into typed application objects. It also derives the conversation audience, which controls who the agent is speaking to and which shared permissions may apply.
+**Purpose**: Reads the database records needed to run a turn and turns them into in-memory objects. It also derives the audience, meaning who the agent is speaking or acting for.
 
-**Data flow**: It receives a turn UUID. It queries the turn, its agent, and its conversation in one database read. It turns raw database columns into a Turn object, an Agent object, and an Audience object, validating stored context and terminal data if present. It returns those three objects.
+**Data flow**: It receives a turn UUID → queries the turn, its agent, and its conversation in one database read → builds a Turn object, an Agent object, and an Audience object → returns those three. JSON-like stored fields such as context and terminal are validated into structured objects when present.
 
-**Call relations**: _run_turn calls this after claiming a turn, and also when a turn was not claimed so transcript repair can still use the correct conversation details. It relies on workspace_tx for the database read and parse_audience to interpret the stored audience value.
+**Call relations**: _run_turn calls this after a turn is claimed, and also when a turn was not claimed but may need transcript repair. The returned objects become the base inputs for prompts, model selection, tools, sandbox setup, and subagent behavior.
 
 *Call graph*: called by 1 (_run_turn); 7 external calls (__init__, __init__, model_validate, model_validate, select, parse_audience, workspace_tx).
 
 
-##### `_open_sandbox`  (lines 482–515)
+##### `_open_sandbox`  (lines 521–571)
 
 ```
 async def _open_sandbox(sandboxes: ConversationSandbox, run_tokens: RunTokenCodec, turn: Turn, grants: GrantStore | None, clis: Mapping[str, CliCredential], credentials: CredentialStore | None, slots:
 ```
 
-**Purpose**: Opens the conversation sandbox for this turn with the right run token and safe environment variables. The sandbox is where tools and code run, but real secrets are not placed inside it.
+**Purpose**: Opens or reuses the sandbox container where the turn’s tool and CLI work will run. It prepares safe environment variables so the sandbox can identify the turn and use approved credentials without receiving raw secrets.
 
-**Data flow**: It receives the sandbox service, run-token encoder, turn, optional grant store, connector CLI declarations, optional credential store, and credential slots. It creates a signed run token for this turn, builds environment variables for Git, connector CLI grants, and keyed providers, then asks ConversationSandbox.open for a SandboxHandle. The result is a handle to the sandbox session.
+**Data flow**: It receives the sandbox provider, token codec, turn, optional grants, connector CLI declarations, optional credential store, and credential slots → creates a signed run token for the turn → builds environment variables for conversation identity, Git proxy configuration, connector CLI grants, and keyed provider credentials → asks ConversationSandbox.open to open the sandbox for the owning conversation → returns a SandboxHandle.
 
-**Call relations**: _run_turn calls this before creating the SandboxSession and TurnEngine. _open_sandbox delegates environment construction to _git_config_env, _git_credential_config, _grant_cli_env, and _keyed_provider_env, then hands the final token and environment to the sandbox layer.
+**Call relations**: _run_turn calls this before creating the SandboxSession and TurnEngine. It relies on _git_config_env, _git_credential_config, _grant_cli_env, and _keyed_provider_env to prepare the sandbox environment.
 
 *Call graph*: calls 6 internal fn (_git_config_env, _git_credential_config, _grant_cli_env, _keyed_provider_env, open, encode); called by 1 (_run_turn); 1 external calls (__init__).
 
 
-##### `_git_config_env`  (lines 518–525)
+##### `_git_config_env`  (lines 574–581)
 
 ```
 def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]
 ```
 
-**Purpose**: Turns Git configuration settings into environment variables that Git understands. This lets the turn configure Git behavior without writing a Git config file inside the sandbox.
+**Purpose**: Converts Git configuration settings into environment variables that Git understands. This lets the sandbox influence Git behavior without writing a Git config file.
 
-**Data flow**: It receives a tuple of key/value Git settings. It creates GIT_CONFIG_COUNT plus numbered GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n variables. It returns the environment dictionary.
+**Data flow**: It receives a tuple of Git key/value settings → creates GIT_CONFIG_COUNT and numbered GIT_CONFIG_KEY_N / GIT_CONFIG_VALUE_N variables → returns them as a dictionary.
 
-**Call relations**: _open_sandbox calls this after collecting base Git proxy settings and any credential-related Git headers. Its output becomes part of the environment passed into ConversationSandbox.open.
+**Call relations**: _open_sandbox calls this while preparing the sandbox environment. The output lets Git send proxy authentication and any credential headers correctly when commands like clone or push run inside the sandbox.
 
 *Call graph*: called by 1 (_open_sandbox).
 
 
-##### `_git_credential_config`  (lines 528–563)
+##### `_git_credential_config`  (lines 584–619)
 
 ```
 async def _git_credential_config(credentials: CredentialStore | None, slots: tuple[CredentialSlot, ...], workspace_id: UUID) -> tuple[tuple[str, str], ...]
 ```
 
-**Purpose**: Builds Git-specific authentication headers for credential slots that are actually filled. It uses sentinel values, not real secrets, so the sandbox can ask for access while a proxy performs the safe secret swap later.
+**Purpose**: Builds Git HTTP header settings for credential slots that are actually filled. It exports only sentinel values, not real secrets.
 
-**Data flow**: It receives the credential store, declared credential slots, and workspace ID. For each slot that supports Git basic authentication, it checks whether the workspace has a stored value, resolves the host, and adds a Git extraheader setting containing the slot’s sentinel. Missing credentials, invalid host choices, or lookup errors produce warnings and are skipped. It returns a tuple of Git config key/value pairs.
+**Data flow**: It receives an optional credential store, credential slot declarations, and workspace ID → skips all work if credentials are unavailable → for each Git-capable slot, checks whether the workspace has a stored value → resolves the allowed host → adds a Git extraheader setting containing the declared header and sentinel. If a slot check or host lookup fails, it logs a warning and skips that slot.
 
-**Call relations**: _open_sandbox calls this while preparing sandbox startup environment. It uses credential_host and slot_is_set from the credential system, and its returned settings are converted to environment variables by _git_config_env.
+**Call relations**: _open_sandbox calls this before _git_config_env. Its settings are folded into Git’s environment so Git traffic can be recognized and authorized by the proxy without exposing the secret inside the sandbox.
 
 *Call graph*: called by 1 (_open_sandbox); 3 external calls (credential_host, slot_is_set, warn).
 
 
-##### `_keyed_provider_env`  (lines 566–608)
+##### `_keyed_provider_env`  (lines 622–664)
 
 ```
 async def _keyed_provider_env(credentials: CredentialStore | None, slots: tuple[CredentialSlot, ...], workspace_id: UUID) -> dict[str, str]
 ```
 
-**Purpose**: Exports environment variables for provider credentials that are selected by key, while still avoiding real secret exposure. The sandbox sees sentinel values and resolved host names, not the credential itself.
+**Purpose**: Creates environment variables for external providers that need API keys or host choices. It gives the sandbox safe sentinel values and resolved host names, never the real stored keys.
 
-**Data flow**: It receives the credential store, credential slots, and workspace ID. It scans slots with environment-variable or host-variable injection, checks that a secret is stored, resolves the chosen host, and writes the declared variable names into an environment dictionary. If a slot is unset, broken, or has no available host, it is skipped and may log a warning. The environment dictionary is returned.
+**Data flow**: It receives an optional credential store, credential slot declarations, and workspace ID → skips work if credentials are unavailable → checks each slot to see whether it is filled → resolves the selected host → writes the provider’s declared environment variable to the sentinel and, when needed, writes a host environment variable to the resolved host. Missing or invalid credentials are warned about and skipped.
 
-**Call relations**: _open_sandbox calls this when constructing the sandbox environment. It works alongside _git_credential_config and _grant_cli_env: all three contribute different kinds of safe credential hints for processes inside the sandbox.
+**Call relations**: _open_sandbox calls this while building the sandbox’s startup environment. The TurnEngine’s tools or agent-written code can then see normal-looking environment variables, while the proxy keeps control of real credential use.
 
 *Call graph*: called by 1 (_open_sandbox); 3 external calls (credential_host, slot_is_set, warn).
 
 
-##### `SandboxAuthorizer.authorize`  (lines 619–631)
+##### `SandboxAuthorizer.authorize`  (lines 675–687)
 
 ```
 async def authorize(self, acting_member_id: UUID | None) -> SandboxSession
 ```
 
-**Purpose**: Creates a member-specific authorized view of an existing sandbox session. This is used when work inside a turn needs to act as a particular member, with that member’s run token and allowed connector CLI grants.
+**Purpose**: Re-authorizes an existing sandbox session for a specific acting member. This is needed when different users or subagents may act through the same sandbox but should receive different permissions.
 
-**Data flow**: It receives an optional acting_member_id. It encodes a new run token containing the workspace, turn, and acting member, gathers grant-backed CLI environment variables for that member, and calls sandbox.authorize. It returns a SandboxSession that carries those updated authorization details.
+**Data flow**: It receives an optional acting member ID → creates a new signed run token naming the workspace, turn, and acting member → asks _grant_cli_env for the connector CLI variables allowed for that member → calls the sandbox session’s authorize method with the new token, the CLI environment names to replace, and the new grant variables → returns the re-authorized SandboxSession.
 
-**Call relations**: _run_turn creates a SandboxAuthorizer and passes its authorize method into TurnEngine as sandbox_for. When the engine needs sandbox access for a specific actor, this method refreshes the run token and grant environment; it uses _grant_cli_env to decide which CLI credentials may be exposed.
+**Call relations**: _run_turn gives this method to TurnEngine as the sandbox authorization callback for normal turns. When the engine needs sandbox access on behalf of a particular member, this method refreshes the session’s token and CLI grant environment.
 
 *Call graph*: calls 1 internal fn (_grant_cli_env); 1 external calls (__init__).
 
 
-##### `_grant_cli_env`  (lines 634–673)
+##### `_grant_cli_env`  (lines 690–729)
 
 ```
 async def _grant_cli_env(grants: GrantStore | None, clis: Mapping[str, CliCredential], acting_member_id: UUID | None, turn_id: UUID) -> dict[str, str]
 ```
 
-**Purpose**: Chooses connector CLI environment variables based on active account grants. It prefers a member’s private grant, falls back to shared grants, and avoids guessing when more than one account could match.
+**Purpose**: Builds environment variables that let command-line connector tools authenticate through approved grants. A grant is permission for a member or audience to use a connected account.
 
-**Data flow**: It receives an optional GrantStore, connector CLI declarations, an optional acting member ID, and the turn ID for logging. It reads active grants, groups them by connector provider, chooses either one private account or one shared account, and sets the CLI’s environment variable to a grant sentinel. If multiple accounts are possible, it logs an ambiguity and exports nothing for that provider. It returns the environment dictionary.
+**Data flow**: It receives an optional GrantStore, connector CLI declarations, optional acting member ID, and turn ID → returns an empty environment if grants or CLIs are absent → loads active grants → for each provider, prefers a private grant owned by the acting member, otherwise uses shared grants → if exactly one account is available, sets the CLI’s environment variable to a sentinel for that account. If multiple accounts would be ambiguous, it logs the ambiguity and exports nothing for that provider.
 
-**Call relations**: _open_sandbox calls this when the sandbox is first opened, and SandboxAuthorizer.authorize calls it again when creating member-specific sandbox access. It reads grants from GrantStore.active_grants and turns selected account IDs into sentinel values using grant_sentinel.
+**Call relations**: _open_sandbox calls this for the initial sandbox environment, and SandboxAuthorizer.authorize calls it again when a member-specific sandbox session is needed. The result lets CLI tools authenticate through the proxy without choosing the wrong account silently.
 
 *Call graph*: calls 1 internal fn (active_grants); called by 2 (authorize, _open_sandbox); 2 external calls (grant_sentinel, log).
 
 ## 📊 State Registers Touched
 
-- `reg-workspace-boundary` — The current workspace or tenant boundary used to keep each customer’s data and actions separate.
-- `reg-effective-configuration` — The chosen runtime settings that tell the service how this deployment should behave.
-- `reg-pack-selection` — The selected product pack that decides which bundle of extensions, skills, and infrastructure is enabled.
-- `reg-extension-inventory` — The installed extension set and their declared capabilities, such as tools, routes, jobs, skills, and storage.
-- `reg-model-catalog` — The shared list of available AI models, their limits, features, provider names, and calling rules.
-- `reg-model-provider-adapters` — The shared provider clients that translate internal model requests into Anthropic, OpenAI, OpenRouter, or similar APIs.
-- `reg-pricing-table` — The shared price list used to turn model and service usage into cost records.
-- `reg-credential-store` — The encrypted store of API keys, service secrets, and owner-provided credentials.
-- `reg-auth-session` — The signed login and identity state that proves which member or operator is using the system.
-- `reg-workspace-objects` — The shared records for workspaces, agents, members, conversations, artifacts, memories, sources, and other workspace objects.
-- `reg-agent-identity` — The saved identity and settings of each agent, including its main workspace role and whether it may use the internet.
-- `reg-audience-policy` — The saved visibility rules that decide which people may see or use a conversation or agent.
-- `reg-conversation-state` — The durable conversation record that ties a surface, agent, audience, sandbox handle, and message history together.
-- `reg-turn-queue` — The durable queue of conversation turns waiting to be claimed, run, completed, cancelled, or retried.
-- `reg-inbound-message-state` — The saved incoming messages and surface-provided context waiting to be admitted into a conversation turn.
-- `reg-transcript-state` — The stored conversation transcript, including exact recent messages and compact summaries of older content.
-- `reg-tool-catalog` — The shared catalog of tools the model is allowed to see and call during a turn.
-- `reg-skill-store` — The shared set of built-in, extension-provided, and user-created skills available to agents.
-- `reg-sandbox-session` — The saved or live sandbox workspace where an agent can run commands and keep files across tool calls.
-- `reg-egress-policy` — The network access rules that decide which outside sites sandboxed work may contact and which secrets may be injected.
-- `reg-connector-connections` — The saved external accounts, OAuth connections, and agent grants that let tools use outside services safely.
-- `reg-search-index` — The shared searchable index and chunk store built from synced or fetched content.
-- `reg-memory-store` — The long-term memory store of remembered facts and recall results used to inform later responses.
-- `reg-fleet-presence` — The shared record of live runtime processes used for supervision, cancellation, and recovery after crashes.
-- `reg-accounting-ledger` — The shared usage ledger that records tokens, egress, sandbox usage, billing exports, and spend-limit checks.
-- `reg-observability-context` — The shared logging, metrics, tracing, and trace-link state used to understand work across requests and subagents.
-- `reg-proposal-governance` — The saved proposals and safety checks used to govern prompt or system improvements before applying them.
-- `reg-subagent-delegation-state` — The parent-child turn and conversation links plus in-flight child-task tracking used to coordinate delegated subagents, cancellation, and result collection.
-- `reg-prompt-template-state` — The canonical prompt and instruction templates, versions, and digests used to assemble model prompts and guard prompt-improvement proposals against stale edits.
-- `reg-acting-principal-scope` — The current acting principal context—member, agent, on-behalf-of member, and object/agent scope—used to authorize actions, attribute turns, choose grants, and keep tool work tied to the right actor.
-- `reg-model-token-budget` — The per-turn model budget state derived from model context/output limits and spend policy, used while assembling prompts, truncating or summarizing context, and tracking remaining usage during model calls.
+- `reg-workspace-tenant-state` — The saved customer workspace boundary, including its owners, admins, limits, main agent, and tenant separation rules.
+- `reg-agent-profile` — The saved assistant setup for each workspace, including model choice, audience, internet access, skills, and control settings.
+- `reg-conversation-state` — The durable record of each conversation, including its workspace, surface, audience, agent, sandbox link, and object identity.
+- `reg-transcript-state` — The shared conversation notebook containing saved messages, model events, summaries, and compaction records.
+- `reg-inbound-message-state` — The durable inbox of incoming messages and surface events waiting to be admitted into a conversation turn.
+- `reg-turn-run-state` — The durable job ticket for each agent turn, including admission source, queue status, claim owner, parent turn, and final result.
+- `reg-cancellation-state` — The shared stop signal and cancellation record used to safely halt turns, child turns, jobs, and cleanup work.
+- `reg-runtime-fleet-state` — The live fleet heartbeat table that says which runtime processes are alive and what stranded work they may own.
+- `reg-usage-accounting-ledger` — The spending ledger that records model usage, egress usage, prices, caps, billing exports, and payment-related state.
+- `reg-credential-secret-store` — The encrypted store of workspace and connector secrets, plus the requests that say which secrets a tool or proxy may reveal.
+- `reg-sandbox-workspace-state` — The remembered sandbox workspace for a conversation, including its backend handle, files, runtime folder, and cleanup ownership.
+- `reg-subagent-workflow-state` — The shared parent-child workflow state used when an agent delegates work to helper agents and waits for or cancels them.
+- `reg-scheduled-task-state` — The durable timers and recurring jobs that remember what should run later, whether it is paused, expired, claimed, or rescheduled.
+- `reg-observability-trace-state` — The shared logging, metrics, trace IDs, trace parents, and redaction context used to follow work across processes without leaking secrets.
+- `reg-member-seat-state` — The durable workspace membership and seat-assignment state used to decide who belongs, who is an admin, and whether a member may admit or run work.
+- `reg-user-question-state` — The pending human-question/answer state created when an agent asks the user for information and later resumed when the surface delivers a reply.
+- `reg-turn-execution-budget-state` — The per-turn live execution limits and counters for context size, tokens, reasoning, tool iterations, cost checks, and stop conditions that gate the model loop before final ledger recording.
+- `reg-page-alert-subscription-state` — The saved routing/subscription state that decides which conversations or agents should be alerted when synced source pages change.

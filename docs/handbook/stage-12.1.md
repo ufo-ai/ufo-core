@@ -1,490 +1,942 @@
-# Search indexing and default index backend  `stage-12.1`
+# Egress Proxy and Credential Injection  `stage-12.1`
 
-This stage is shared behind-the-scenes support for search. It is used when the system needs to make text searchable, keep the search data up to date, or answer a user’s search later. The core indexing file sets the common rules. It takes long text and cuts it into smaller chunks, like slicing a book into searchable paragraphs. It also defines how those chunks are handed off to whatever search storage is being used, so the rest of the app does not need to know the details of each backend.
+This stage is the system’s guarded exit door for sandboxed agent work. It runs during the main work loop, whenever an agent inside a workspace tries to contact the outside network. Instead of letting the agent call any website or service directly, the request must pass through the egress proxy.
 
-The default index extension is the built-in backend used when no custom one is configured. It saves those chunks, updates them when the original content changes, and deletes old chunks that no longer match the source. When searching, it can match ordinary words and also use vector similarity, which means comparing numeric “meaning fingerprints” of text to find related content even when the exact words differ. Together, these parts turn raw text into a maintained, searchable index.
+The rules file builds the rulebook. It looks at workspace settings, declared permissions, available credentials, connector grants, model access, and storage options. From these, it creates simple decisions such as “this host is allowed,” “this host is blocked,” “this destination may receive this secret,” or “this call should be counted for billing.”
+
+The server file is the doorway that enforces that rulebook. It checks each outgoing request, denies unsafe hosts, and only injects sealed secrets when the destination is approved. For some connector traffic, it forwards the request through a grant broker, like a trusted middleman. It also records usage for audits and metering, then cleans up proxy resources when the sandbox stops.
 
 ## Files in this stage
 
-### Indexing rules and backend
-Shared chunking and indexing rules lead into the built-in backend that stores, updates, deletes, and searches indexed chunks.
+### Proxy Enforcement and Rules
+Implements the sandbox egress proxy that enforces outbound access decisions, credential injection, brokered forwarding, metering, and the rule derivation it relies on.
 
-### `core/src/ufo/indexing.py`
+### `core/src/ufo/sandbox/proxy/server.py`
 
-`domain_logic` · `cross-cutting indexing and retrieval preparation`
+`io_transport` · `startup, request handling, shutdown`
 
-This file solves a practical search problem: pages and memory items can be too long to search well as one giant block, so they need to be cut into smaller pieces, turned into numeric meaning-vectors, and stored in a search index. Think of it like cutting a book into labeled index cards so a librarian can find the right passage later.
+Agent code runs in a sandbox, so it cannot be allowed to freely call the internet or see raw credentials. This file is the gatekeeper. Think of it like a supervised mailroom: every outgoing envelope must show a valid badge, the mailroom checks where it is going, may add a secret stamp that the sender never gets to see, and records that the envelope was sent.
 
-The file does not talk directly to a database or search engine. Instead, it defines small shared shapes, such as `Chunk` for a piece of text and `Hit` for a search result, plus two contracts: `IndexBackend`, which promises storage and search operations, and `EmbedClient`, which promises to turn text into embeddings. An embedding is a list of numbers that represents the rough meaning of text so similar ideas can be found even when the words differ.
+The proxy receives HTTP CONNECT requests from sandboxed processes. It reads a run token from the proxy authorization header, checks that the referenced turn is still running, and resolves the rules for that turn's agent and workspace. These rules say which hosts are allowed, whether normal internet access is enabled, whether a credential should be injected, whether a request should be sent through a broker, and what should be counted.
 
-The main workflow is `chunk_embed_upsert`. It takes one body of text, asks `TextChunker` to split it into readable chunks, asks the embedder for vectors, writes the chunks into the index, and then removes old chunks for the same owner that no longer exist. That last cleanup matters: without it, edited or deleted text could still appear in future search results as stale leftovers.
-
-`TextChunker` tries to split text gently: paragraphs first, then lines, then sentence-like punctuation, then smaller punctuation, and finally whitespace or character limits. It also overlaps nearby chunks a little so a sentence crossing a boundary is less likely to lose its context.
+If the host needs no inspection, the proxy opens a plain tunnel and simply relays encrypted bytes. If a secret or broker rule applies, it performs a controlled man-in-the-middle step: it presents a temporary certificate trusted inside the sandbox, reads the decrypted HTTP request, swaps only the matching sentinel value for the real credential or forwards through a broker, then opens its own verified TLS connection upstream. It also parses model responses when needed to recover token usage and writes egress and token records asynchronously so network traffic is not slowed by accounting.
 
 #### Function details
 
-##### `IndexBackend.upsert`  (lines 68–68)
+##### `_ContentDecoder.unconsumed_tail`  (lines 138–138)
 
 ```
-async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+def unconsumed_tail(self) -> bytes
 ```
 
-**Purpose**: This is the contract for saving chunks into whatever search index an extension provides. “Upsert” means insert if new, or update if already present.
+**Purpose**: This protocol property describes the extra compressed bytes a decompressor has not consumed yet. It lets the proxy work with any decoder object that behaves like Python's zlib decoder.
 
-**Data flow**: It receives a group of `Chunk` objects, each containing text, ownership labels, and usually an embedding. The concrete backend stores them so they can be found later. It returns no value, but the index is changed.
+**Data flow**: A decoder object already holding compressed input exposes any leftover bytes through this property. Nothing is changed by reading it; callers use the returned bytes as the next pending input.
 
-**Call relations**: `chunk_embed_upsert` calls this after text has been split and embedded. The actual work is done by an extension that implements this protocol, because this file only defines the promise.
-
-*Call graph*: called by 1 (chunk_embed_upsert).
+**Call relations**: The token-usage parser relies on this shape while decoding compressed model responses. It is part of the small contract used by HttpTokenUsage._decode rather than a concrete implementation.
 
 
-##### `IndexBackend.delete`  (lines 70–70)
+##### `_ContentDecoder.decompress`  (lines 140–140)
 
 ```
-async def delete(self, scope: IndexScope) -> None
+def decompress(self, data: bytes, max_length: int=0) -> bytes
 ```
 
-**Purpose**: This is the contract for removing all indexed chunks that belong to one owner, such as one page or one memory item. Someone would use it when the original item is deleted or should no longer be searchable.
+**Purpose**: This protocol method describes how compressed response bytes are turned into ordinary body bytes. The optional limit prevents the parser from expanding a response without bound.
 
-**Data flow**: It receives an `IndexScope`, which names the owner kind and owner id. The backend uses that scope to delete matching chunks from its storage. It returns no value, but the index loses those records.
+**Data flow**: Compressed bytes and an optional maximum output size go in. The decoder returns decompressed bytes and keeps any not-yet-read input available through unconsumed_tail.
 
-**Call relations**: This method is part of the backend contract for cleanup flows. It is not called inside this file, but other indexing code can call it when an entire indexed object goes away.
-
-
-##### `IndexBackend.prune`  (lines 72–72)
-
-```
-async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
-```
-
-**Purpose**: This is the contract for deleting old chunks for one owner while keeping a known set of current chunks. It prevents edited text from leaving behind stale search results.
-
-**Data flow**: It receives an `IndexScope` naming the owner and a set of chunk digests to keep. The backend removes any indexed chunks for that owner whose digest is not in the keep set. It returns nothing, but the stored index is cleaned up.
-
-**Call relations**: `chunk_embed_upsert` calls this every time it re-indexes a body of text. After any new chunks are saved, pruning removes chunks that belonged to older versions of that same body.
-
-*Call graph*: called by 1 (chunk_embed_upsert).
+**Call relations**: HttpTokenUsage._decode calls this behavior when a model response uses gzip or deflate compression. The protocol keeps that code independent of the exact decoder class.
 
 
-##### `IndexBackend.has_chunks`  (lines 74–74)
+##### `_ContentDecoder.flush`  (lines 142–142)
 
 ```
-async def has_chunks(self, scope: IndexScope) -> bool
+def flush(self) -> bytes
 ```
 
-**Purpose**: This is the contract for asking whether an owner already has indexed chunks. It can be used to decide whether indexing work is needed.
+**Purpose**: This protocol method describes how to ask a decompressor for any final bytes after the response has ended. It is needed so token usage is not missed at the end of a compressed stream.
 
-**Data flow**: It receives an `IndexScope` naming one owner. The backend checks its storage for matching chunks and returns true or false. It does not change the index.
+**Data flow**: The decoder's current internal state goes in implicitly. It returns remaining decompressed bytes and may mark the decoder as finished.
 
-**Call relations**: This method belongs to the shared indexing contract. It is not used by this file’s workflow directly, but other code can call it before deciding to build or refresh an index.
-
-
-##### `IndexBackend.lexical`  (lines 76–78)
-
-```
-async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
-```
-
-**Purpose**: This is the contract for keyword-style search, where matching is based on the actual words in the query. It is useful when exact terms, names, or phrases matter.
-
-**Data flow**: It receives a query string, a set of allowed subjects, an owner kind, and a maximum number of results. The backend searches stored chunks that match those filters and returns `Hit` objects with text and scores. It does not change stored data.
-
-**Call relations**: Search orchestration code can call this on a backend implementation when it wants word-based matches. This file defines the shape of the call and result, while the extension decides how to search.
+**Call relations**: HttpTokenUsage._finish_decoder uses this at the end of parsing. That final flush happens before HttpTokenUsage.usage reports what it found.
 
 
-##### `IndexBackend.vector`  (lines 80–82)
+##### `generate_ca`  (lines 148–171)
 
 ```
-async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+async def generate_ca() -> tuple[str, str]
 ```
 
-**Purpose**: This is the contract for meaning-based search using an embedding. It helps find text with similar meaning even if it does not share the same exact words.
+**Purpose**: This creates a temporary certificate authority, which is a root certificate the sandbox can trust. The proxy uses it later to mint per-host certificates when it needs to inspect HTTPS safely.
 
-**Data flow**: It receives a numeric embedding, a set of allowed subjects, an owner kind, and a result limit. The backend compares that embedding to stored chunk embeddings and returns the closest `Hit` results. It does not change the index.
+**Data flow**: No caller-supplied data is needed. The function creates temporary certificate and key files with OpenSSL, reads them back as text, and returns the certificate plus private key.
 
-**Call relations**: Search code can call this after turning a user query into an embedding. This file only defines the agreement; the backend extension performs the actual nearest-match search.
+**Call relations**: Startup code calls this before constructing or launching the proxy. It delegates the actual command execution to _openssl and uses a temporary directory so the intermediate files disappear.
 
-
-##### `EmbedClient.embed`  (lines 86–86)
-
-```
-async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
-```
-
-**Purpose**: This is the contract for turning text strings into embeddings, which are number lists that capture rough meaning. Indexing needs this so chunks can later be found by semantic, or meaning-based, search.
-
-**Data flow**: It receives a tuple of text strings. The embedder returns a tuple of numeric vectors in the same order, one vector per text. It does not store anything by itself.
-
-**Call relations**: `chunk_embed_upsert` calls this after chunking text and before saving chunks. A concrete embedding provider implements the method outside this file.
-
-*Call graph*: called by 1 (chunk_embed_upsert).
+*Call graph*: calls 1 internal fn (_openssl); 2 external calls (Path, TemporaryDirectory).
 
 
-##### `chunk_embed_upsert`  (lines 89–114)
+##### `_openssl`  (lines 174–180)
 
 ```
-async def chunk_embed_upsert(index: IndexBackend, embed: EmbedClient, chunker: 'TextChunker', owner_kind: str, owner_id: str, subject: str, body: str) -> None
+async def _openssl(*argv: str) -> None
 ```
 
-**Purpose**: This is the shared indexing recipe for one piece of source text. It splits the text, embeds each chunk, saves the current chunks, and deletes old chunks that no longer match the source.
+**Purpose**: This is the small wrapper that runs the external openssl command-line tool. It keeps certificate generation out of Python crypto libraries and turns command failures into Python errors.
 
-**Data flow**: It receives an index backend, an embedding client, a chunker, owner labels, a subject, and the text body. First it makes chunks from the body. If there are chunks, it asks the embedder for vectors, copies each chunk with its vector attached, and upserts them into the index. Finally it prunes the owner’s index records to keep only the digests from this run, even if the body produced no chunks.
+**Data flow**: OpenSSL arguments go in. The function starts the process, waits for it, ignores normal output, and either returns nothing on success or raises an error containing OpenSSL's failure text.
 
-**Call relations**: This function ties the seam together. It calls `EmbedClient.embed` to get vectors, `IndexBackend.upsert` to store current chunks, and `IndexBackend.prune` to clean stale ones. It relies on `TextChunker.chunk` before those calls, although that call is through the passed chunker object.
+**Call relations**: generate_ca, EgressProxy.start, and EgressProxy._leaf_context all use this whenever they need keys, certificate requests, or signed certificates.
 
-*Call graph*: calls 3 internal fn (embed, prune, upsert); 2 external calls (__init__, replace).
-
-
-##### `TextChunker.chunk`  (lines 123–134)
-
-```
-def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]
-```
-
-**Purpose**: This is the public way to turn one text body into labeled `Chunk` objects ready for embedding. It gives each piece its owner information, order number, and stable digest.
-
-**Data flow**: It receives raw text plus owner kind, owner id, and subject. It asks `_slices` to produce text pieces, then wraps each piece in a `Chunk` and computes a digest with `_digest`. It returns a tuple of chunks with no embeddings yet.
-
-**Call relations**: `chunk_embed_upsert` uses this as the first step in indexing. Inside the chunker, it delegates the actual splitting to `_slices` and the stable identifier creation to `_digest`.
-
-*Call graph*: calls 2 internal fn (_digest, _slices); 1 external calls (__init__).
+*Call graph*: called by 3 (_leaf_context, start, generate_ca); 1 external calls (create_subprocess_exec).
 
 
-##### `TextChunker._slices`  (lines 136–144)
+##### `PerAgentRules.resolve`  (lines 206–230)
 
 ```
-def _slices(self, text: str) -> list[str]
+async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]
 ```
 
-**Purpose**: This decides how to cut raw text into final chunk strings. It keeps small text as-is, and for larger text it splits, merges, overlaps, and size-caps the pieces.
+**Purpose**: This builds the network rule list for one run token. It combines the base workspace rules with the specific agent's internet setting, stored credentials, active grants, and command-line credentials.
 
-**Data flow**: It receives one text string. Empty or whitespace-only text becomes an empty list. Short text is trimmed and capped by character length. Longer text is recursively split, merged into useful sizes, given overlap for context, and finally capped by maximum characters. It returns a list of final text slices.
+**Data flow**: A run token, or no token, goes in. With no token or no matching turn, only the base rules come out. With a valid turn, it reads the turn's agent, enters the workspace and agent context, derives any credential and grant rules, and returns the complete rule tuple.
 
-**Call relations**: `TextChunker.chunk` calls this before creating `Chunk` objects. `_slices` coordinates the helper methods: `_count_words`, `_recursive_split`, `_greedy_merge`, `_apply_overlap`, and `_cap_by_chars`.
+**Call relations**: EgressProxy receives this function as its rule resolver. Before a connection is allowed through, EgressProxy._rules_for calls it, and it first asks PerAgentRules._turn_of which agent and policy apply.
 
-*Call graph*: calls 5 internal fn (_apply_overlap, _cap_by_chars, _count_words, _greedy_merge, _recursive_split); called by 1 (chunk).
-
-
-##### `TextChunker._count_words`  (lines 147–153)
-
-```
-def _count_words(text: str) -> int
-```
-
-**Purpose**: This estimates how large a text is for chunking purposes. It treats mostly Chinese, Japanese, or Korean text differently because those languages often do not use spaces between words.
-
-**Data flow**: It receives a text string. It removes whitespace to see how much real text exists, then checks how much of it is CJK text. For dense CJK text it counts non-whitespace characters; otherwise it counts runs of non-space text. It returns a number used as the chunk size estimate.
-
-**Call relations**: `_slices`, `_recursive_split`, and `_greedy_merge` call this whenever they need to decide whether text is small enough, too large, or safe to combine.
-
-*Call graph*: called by 3 (_greedy_merge, _recursive_split, _slices); 1 external calls (sub).
+*Call graph*: calls 1 internal fn (_turn_of); 5 external calls (agent, derive_cli_rules, derive_credential_rules, derive_grant_rules, ws).
 
 
-##### `TextChunker._cap_by_chars`  (lines 155–167)
+##### `PerAgentRules._turn_of`  (lines 232–256)
 
 ```
-def _cap_by_chars(self, text: str) -> list[str]
+async def _turn_of(self, run: RunToken) -> tuple[UUID, bool] | None
 ```
 
-**Purpose**: This enforces a hard maximum character length for chunks. It is a safety net for unusually long text that still exceeds the desired size after word-based splitting.
+**Purpose**: This looks up which agent owns a turn and whether that agent had internet access enabled. It is the database read that ties a run token to the right agent policy.
 
-**Data flow**: It receives one text string. If it is already short enough, it returns it as a one-item list. If it is too long, it cuts it into character windows with a small overlap so context is not lost completely. It returns the non-empty pieces.
+**Data flow**: A run token supplies workspace and turn identifiers. The function queries the workspace database for the matching turn and agent, then returns the agent id plus the internet-access flag, or nothing if no matching row exists.
 
-**Call relations**: `_slices` calls this for short text and again at the end of the full splitting process. It is the final guardrail before chunks are turned into `Chunk` objects.
+**Call relations**: PerAgentRules.resolve calls this before adding agent-specific rules. If it finds no turn, resolution falls back to base rules instead of guessing.
 
-*Call graph*: called by 1 (_slices).
-
-
-##### `TextChunker._recursive_split`  (lines 169–181)
-
-```
-def _recursive_split(self, text: str, level: int) -> list[str]
-```
-
-**Purpose**: This breaks large text using increasingly smaller natural boundaries. It tries paragraphs first, then lines, then sentence punctuation, then smaller punctuation, before falling back to whitespace.
-
-**Data flow**: It receives text and a delimiter level. At each level, it tries to split using the delimiters for that level. Pieces that are still too large are split again at the next level. If no delimiter level remains, it uses `_split_on_whitespace`. It returns a list of smaller pieces.
-
-**Call relations**: `_slices` calls this for text that is too large. It calls `_split_at_delimiters`, checks size with `_count_words`, and may eventually call `_split_on_whitespace` as the fallback.
-
-*Call graph*: calls 3 internal fn (_count_words, _split_at_delimiters, _split_on_whitespace); called by 1 (_slices).
+*Call graph*: called by 1 (resolve); 2 external calls (select, workspace_tx).
 
 
-##### `TextChunker._split_at_delimiters`  (lines 184–197)
+##### `PerAgentRules.turn_live`  (lines 258–275)
 
 ```
-def _split_at_delimiters(text: str, delimiters: tuple[str, ...]) -> list[str]
+async def turn_live(self, run: RunToken) -> bool
 ```
 
-**Purpose**: This splits text at the earliest matching delimiter from a given set, while keeping the delimiter with the piece before it. That helps chunks preserve punctuation and line breaks.
+**Purpose**: This answers the security question: is the turn named by this token still running? It prevents old or ended tokens from continuing to reach hosts or draw credentials.
 
-**Data flow**: It receives text and a tuple of delimiters such as paragraph breaks or punctuation marks. It repeatedly finds the earliest next delimiter, cuts there, and continues with the remaining text. It returns only pieces that contain non-whitespace content.
+**Data flow**: A run token goes in. The function reads the turn status from the workspace database and returns true only when the status is RUNNING.
 
-**Call relations**: `_recursive_split` calls this while trying each delimiter level. It does the low-level cutting, and `_recursive_split` decides whether the resulting pieces are small enough.
+**Call relations**: This is meant to be supplied to EgressProxy as its authorizer. EgressProxy._turn_authorized calls it for each connection, separate from the cached rule lookup, so liveness is checked fresh.
 
-*Call graph*: called by 1 (_recursive_split).
-
-
-##### `TextChunker._split_on_whitespace`  (lines 199–215)
-
-```
-def _split_on_whitespace(self, text: str) -> list[str]
-```
-
-**Purpose**: This is the fallback splitter when natural punctuation or line boundaries are not enough. It cuts text by word runs, or by raw characters when there are no usable words.
-
-**Data flow**: It receives one text string. If normal word runs are available, it groups them into batches around the target word count. If there is one huge unbroken run, it cuts by character count instead. It returns non-empty pieces.
-
-**Call relations**: `_recursive_split` calls this only after delimiter-based splitting has run out of options. It makes sure even awkward text, like a very long unbroken string, can still be chunked.
-
-*Call graph*: called by 1 (_recursive_split).
+*Call graph*: 3 external calls (select, workspace_tx, ws).
 
 
-##### `TextChunker._greedy_merge`  (lines 217–231)
+##### `EgressProxy.start`  (lines 303–319)
 
 ```
-def _greedy_merge(self, pieces: list[str]) -> list[str]
+async def start(self, bind_host: str=PROXY_BIND_HOST, port: int=0, public_url: str | None=None) -> ProxyEndpoint
 ```
 
-**Purpose**: This joins small neighboring pieces back together so the index does not fill with tiny fragments. It aims for chunks that are large enough to be useful but not too large.
+**Purpose**: This starts the proxy listener and prepares the certificate files it needs for HTTPS interception. It returns the endpoint information that sandbox processes use to configure their proxy settings.
 
-**Data flow**: It receives a list of pieces. Starting from the first piece, it keeps adding the next piece if the combined size stays within a generous limit. When adding would make the chunk too large, it saves the current chunk and starts a new one. It returns the merged list.
+**Data flow**: A bind host, port, and optional public URL go in. The function creates a work directory, writes the proxy certificate authority files, generates a reusable leaf key, starts an asyncio server, and returns the bound port plus CA certificate.
 
-**Call relations**: `_slices` calls this after recursive splitting. It uses `_count_words` and `math.ceil` to decide whether a possible merge is still within the allowed size.
+**Call relations**: Deployment or tests call this during startup. Later incoming sockets are handed to EgressProxy._handle by the asyncio server, and EgressProxy.stop cleans up what start created.
 
-*Call graph*: calls 1 internal fn (_count_words); called by 1 (_slices); 1 external calls (ceil).
-
-
-##### `TextChunker._apply_overlap`  (lines 233–239)
-
-```
-def _apply_overlap(self, chunks: list[str]) -> list[str]
-```
-
-**Purpose**: This adds a little context from the end of each chunk to the start of the next one. That helps search work when the important meaning sits right across a chunk boundary.
-
-**Data flow**: It receives a list of chunk strings. If there is only one chunk or overlap is disabled, it returns the chunks unchanged. Otherwise, it prefixes each chunk after the first with trailing context from the previous chunk. It returns the overlapped chunk list.
-
-**Call relations**: `_slices` calls this after merging. It uses `_trailing_context` to choose the text to carry forward and `itertools.pairwise` to walk through neighboring chunks.
-
-*Call graph*: calls 1 internal fn (_trailing_context); called by 1 (_slices); 1 external calls (pairwise).
+*Call graph*: calls 1 internal fn (_openssl); 4 external calls (__init__, start_server, Path, TemporaryDirectory).
 
 
-##### `TextChunker._trailing_context`  (lines 241–251)
+##### `EgressProxy.stop`  (lines 321–358)
 
 ```
-def _trailing_context(self, text: str) -> str
+async def stop(self, graceful_shutdown_seconds: int=0) -> None
 ```
 
-**Purpose**: This chooses the overlap text to copy from the end of one chunk into the next. It prefers recent words, and if possible starts after a sentence boundary so the copied context reads more naturally.
+**Purpose**: This shuts the proxy down without hanging forever. It stops accepting new connections, gives current work a bounded chance to finish, cancels leftovers, flushes metering, and removes temporary certificate files.
 
-**Data flow**: It receives one chunk of text. If the chunk is not longer than the configured overlap amount, it returns an empty string. Otherwise it takes the last overlap-sized group of word runs, optionally trims it to start after a sentence-ending mark, and returns that context string.
+**Data flow**: A grace period in seconds goes in. The function closes the server, waits for active connection tasks, cancels unresolved rule work if needed, stops the metering worker, and clears local resources.
 
-**Call relations**: `_apply_overlap` calls this for each previous chunk when building the next overlapped chunk. It supplies the context that keeps neighboring chunks connected.
+**Call relations**: Shutdown code calls this after the proxy has been running. It coordinates with tasks created by EgressProxy._handle, EgressProxy._rules_for, and EgressProxy._enqueue_meter.
 
-*Call graph*: called by 1 (_apply_overlap).
+*Call graph*: 3 external calls (gather, wait, monotonic).
 
 
-##### `TextChunker._digest`  (lines 254–256)
+##### `EgressProxy._handle`  (lines 360–466)
 
 ```
-def _digest(owner_kind: str, owner_id: str, subject: str, ordinal: int, text: str) -> str
+async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None
 ```
 
-**Purpose**: This creates a stable unique identifier for a chunk. The identifier changes if the owner, subject, order, or text changes, which lets the index recognize stale chunks after edits.
+**Purpose**: This is the main per-connection decision point. It reads one proxy CONNECT request, authenticates the run, checks capacity and rules, then chooses either an opaque tunnel or an inspected HTTPS path.
 
-**Data flow**: It receives owner kind, owner id, subject, ordinal, and chunk text. It joins them with a separator, hashes that payload using SHA-256, and returns the hash with a `sha256:` prefix. It does not change any outside state.
+**Data flow**: A client stream reader and writer go in. The function reads the request headers, extracts the target host and proxy authorization token, validates the token and live turn, resolves rules, checks host permission, optionally resolves public internet hosts, and then either calls _tunnel or _mitm. It updates active connection counters while the connection is open.
 
-**Call relations**: `TextChunker.chunk` calls this for every produced slice. Later, `chunk_embed_upsert` uses these digests to tell the backend which chunks to keep during pruning.
+**Call relations**: The asyncio server created by EgressProxy.start calls this for every new socket. It hands off detailed work to _turn_authorized, _rules_for, _tunnel, _mitm, _read_request_head, and _respond.
 
-*Call graph*: called by 1 (chunk); 1 external calls (sha256).
+*Call graph*: calls 7 internal fn (_mitm, _rules_for, _run_token, _tunnel, _turn_authorized, _read_request_head, _respond); 3 external calls (__init__, close, current_task).
 
 
-### `extensions/index_default/ufo_ext_index_default.py`
+##### `EgressProxy._turn_authorized`  (lines 468–481)
 
-`domain_logic` · `indexing and search operations`
+```
+async def _turn_authorized(self, run: RunToken) -> bool
+```
 
-This file is the project’s default memory search engine. The rest of the system can talk to it using neutral objects like Chunk, Hit, and IndexScope, without caring whether the database underneath is PostgreSQL or SQLite. That matters because deployments may use PostgreSQL for production-scale search, while local development may use SQLite, and both should look the same to the rest of the app.
+**Purpose**: This wraps the turn-liveness check and logs failures in one place. It keeps authorization errors visible while letting the caller return a generic service-unavailable response.
 
-The file stores pieces of text called chunks. Each chunk belongs to an owner, has a subject, text, an order number, and optionally an embedding, which is a list of numbers that represents the meaning of the text for similarity search. For PostgreSQL, it writes embeddings in pgvector’s text format and uses PostgreSQL’s native full-text search. For SQLite, it packs embeddings into raw bytes and uses FTS5, SQLite’s built-in full-text search table. Think of this file as a translator: the app asks for “save these chunks” or “find matching chunks,” and this file speaks the exact dialect the chosen database understands.
+**Data flow**: A run token goes in. The configured authorizer is called; its true or false result comes back unchanged. If the authorizer crashes, the function logs the workspace, turn, and error class, then raises the error again.
 
-It also cleans up after re-indexing. If an owner is re-chunked and some old chunks are no longer present, prune removes the leftovers so search results do not point to stale text. Finally, manifest registers this backend under the name "default", so the extension system can discover and create it.
+**Call relations**: EgressProxy._handle calls this before resolving rules or connecting upstream. The actual policy check is supplied from outside, commonly PerAgentRules.turn_live.
+
+*Call graph*: called by 1 (_handle); 1 external calls (log_error).
+
+
+##### `EgressProxy._rules_for`  (lines 483–500)
+
+```
+async def _rules_for(self, run: RunToken | None) -> tuple[Rule, ...]
+```
+
+**Purpose**: This returns the rule set for a run while avoiding repeated expensive lookups. It caches successful results briefly and lets simultaneous requests for the same run share one lookup.
+
+**Data flow**: A run token, or no token, goes in. With no token it directly calls the resolver. With a token it checks the cache, starts or joins a background resolution task on a miss, and returns the resolved rules.
+
+**Call relations**: EgressProxy._handle calls this after authorization. It delegates cache misses to EgressProxy._resolve_rules and shields the shared task so one cancelled connection does not cancel every waiter.
+
+*Call graph*: calls 1 internal fn (_resolve_rules); called by 1 (_handle); 3 external calls (create_task, shield, monotonic).
+
+
+##### `EgressProxy._resolve_rules`  (lines 502–523)
+
+```
+async def _resolve_rules(self, run: RunToken) -> tuple[Rule, ...]
+```
+
+**Purpose**: This performs the actual rule resolution behind the cache. It records failures once and stores successful results with an expiry time.
+
+**Data flow**: A run token goes in. The configured resolver produces rules; on success they are stored in the bounded cache and returned. On failure the error is logged and re-raised, and the in-flight task entry is removed either way.
+
+**Call relations**: Only EgressProxy._rules_for starts this task. The task has _read_fault attached so abandoned failures do not leak through asyncio's default logging.
+
+*Call graph*: called by 1 (_rules_for); 4 external calls (__init__, current_task, monotonic, log_error).
+
+
+##### `EgressProxy._run_token`  (lines 525–531)
+
+```
+def _run_token(self, proxy_auth: str) -> RunToken | None
+```
+
+**Purpose**: This turns the Proxy-Authorization header into a trusted run token, or rejects it as absent or invalid. It is the first step from raw wire text to project identity.
+
+**Data flow**: A header value string goes in. If it is empty or cannot be decoded by the run token codec, the function returns None; otherwise it returns a RunToken object.
+
+**Call relations**: EgressProxy._handle calls this after parsing the CONNECT headers. A None result causes the connection to be denied before any host rules or secrets are considered.
+
+*Call graph*: called by 1 (_handle).
+
+
+##### `EgressProxy._resolve_public_address`  (lines 533–565)
+
+```
+async def _resolve_public_address(self, host: str, port: int) -> str
+```
+
+**Purpose**: This checks and resolves a host for general internet access. It only allows globally routable IPv4 addresses, blocking private networks, IPv6, multicast, and malformed names.
+
+**Data flow**: A host and port go in, though the port is not used for DNS itself. The function accepts literal IPv4 addresses or resolves DNS A records, verifies all resulting addresses are public, and returns the first allowed address as a string.
+
+**Call relations**: EgressProxy._handle uses this when a host is not exactly scoped but internet access is allowed. Callers may replace it with a custom resolver through resolve_public.
+
+*Call graph*: 1 external calls (IPv4Address).
+
+
+##### `EgressProxy._tunnel`  (lines 567–594)
+
+```
+async def _tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int, run: RunToken, rules: tuple[Rule, ...], connect_host: str) -> None
+```
+
+**Purpose**: This opens a plain TCP tunnel to an allowed host when the proxy does not need to inspect or change the HTTPS traffic. The sandbox and upstream server keep their encryption end-to-end.
+
+**Data flow**: Client streams, destination details, the run token, rules, and the already chosen connect host go in. The function opens the upstream connection, replies with CONNECT success, records metering if configured, and relays bytes both ways.
+
+**Call relations**: EgressProxy._handle calls this when there are no injection or broker forwarding rules for the host. It uses _relay for byte copying and _respond if the upstream connection fails.
+
+*Call graph*: calls 4 internal fn (_meter, _meter_ledger, _relay, _respond); called by 1 (_handle); 4 external calls (drain, write, open_connection, wait_for).
+
+
+##### `EgressProxy._mitm`  (lines 596–656)
+
+```
+async def _mitm(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int, injections: list[InjectionRule], forwards: list[ForwardRule], run: RunToken, rules: tuple[Rule,
+```
+
+**Purpose**: This handles allowed HTTPS traffic that must be inspected because a credential may need to be injected or a grant broker may need to receive the request. It decrypts only inside the proxy boundary and re-encrypts to the real upstream server.
+
+**Data flow**: Client streams, host, port, applicable injection and forwarding rules, the run token, and all rules go in. The function creates or reuses a host certificate, upgrades the client side to TLS, reads one HTTP request, forwards through a broker if a sentinel matches, or otherwise connects upstream, rewrites headers, relays the response, and optionally accumulates token usage.
+
+**Call relations**: EgressProxy._handle calls this for hosts with InjectionRule or ForwardRule entries. It hands broker cases to _forward_broker, certificate work to _leaf_context, header swapping to _inject, and streaming to _relay.
+
+*Call graph*: calls 11 internal fn (_forward_broker, _leaf_context, _meter, _meter_ledger, _meter_tokens, _forward_match, _inject, _read_request_head, _relay, _respond (+1 more)); called by 1 (_handle); 3 external calls (__init__, open_connection, wait_for).
+
+
+##### `EgressProxy._forward_broker`  (lines 658–702)
+
+```
+async def _forward_broker(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter, rule: ForwardRule, request: tuple[bytes, list[bytes]], host: str, run: RunToken, rules: tuple[
+```
+
+**Purpose**: This sends one sentinel-marked request through a grant broker instead of directly to the provider. That keeps the real account credential on the broker side, outside the sandbox and outside this proxy's outgoing request.
+
+**Data flow**: The decrypted client request, broker rule, host, run token, and rules go in. The function reads a bounded full request body, records metering, calls the broker with cleaned headers and URL, and writes the broker's reconstructed HTTP response back to the client. If the body is unacceptable or the broker fails, it writes a clear refusal.
+
+**Call relations**: EgressProxy._mitm calls this when _forward_match identifies a matching ForwardRule. It relies on _read_request_body, _forward_headers, _forward_response_bytes, _respond, and _drain_refused_body.
+
+*Call graph*: calls 7 internal fn (_meter, _meter_ledger, _drain_refused_body, _forward_headers, _forward_response_bytes, _read_request_body, _respond); called by 1 (_mitm); 3 external calls (drain, write, log).
+
+
+##### `EgressProxy._leaf_context`  (lines 704–749)
+
+```
+async def _leaf_context(self, host: str) -> ssl.SSLContext
+```
+
+**Purpose**: This creates and caches a TLS server certificate for one hostname. The certificate is signed by the proxy's temporary certificate authority so the sandbox can trust it during controlled inspection.
+
+**Data flow**: A host name goes in. The function returns a cached SSL context if one exists; otherwise it writes certificate request files, asks OpenSSL to sign a host certificate, builds a server-side SSL context, caches it, and returns it.
+
+**Call relations**: EgressProxy._mitm calls this before upgrading a CONNECT tunnel into decrypted HTTPS. It uses the CA material prepared by EgressProxy.start and the _openssl helper.
+
+*Call graph*: calls 1 internal fn (_openssl); called by 1 (_mitm); 2 external calls (Path, SSLContext).
+
+
+##### `EgressProxy._meter`  (lines 751–754)
+
+```
+def _meter(self, host: str, rules: tuple[Rule, ...]) -> None
+```
+
+**Purpose**: This emits an in-process metric when a rule says the host should be counted. It is the fast, immediate part of egress observability.
+
+**Data flow**: A host and rule list go in. For each matching MeterRule, the function emits a sandbox egress metric tagged with the host and counting dimension. It returns nothing and does not write the database.
+
+**Call relations**: The tunnel, direct MITM, and broker-forward paths call this once they have an admitted request or connection. Database-backed accounting is handled separately by _meter_ledger and _meter_tokens.
+
+*Call graph*: called by 3 (_forward_broker, _mitm, _tunnel); 1 external calls (emit_metric).
+
+
+##### `EgressProxy._meter_ledger`  (lines 756–762)
+
+```
+async def _meter_ledger(self, host: str, run: RunToken, rules: tuple[Rule, ...]) -> None
+```
+
+**Purpose**: This queues a database accounting record for ordinary egress requests. It avoids writing the ledger directly on the network relay path.
+
+**Data flow**: A host, run token, and rules go in. If a non-token MeterRule applies to the host, the function wraps the run token in an egress meter record and puts it on the metering queue; otherwise it does nothing.
+
+**Call relations**: EgressProxy._tunnel, EgressProxy._mitm, and EgressProxy._forward_broker call this after a permitted egress event. It hands the actual write to _enqueue_meter and the background metering loop.
+
+*Call graph*: calls 1 internal fn (_enqueue_meter); called by 3 (_forward_broker, _mitm, _tunnel); 1 external calls (__init__).
+
+
+##### `EgressProxy._meter_tokens`  (lines 764–770)
+
+```
+async def _meter_tokens(self, run: RunToken, accumulator: 'HttpTokenUsage') -> None
+```
+
+**Purpose**: This queues accounting for model token usage found in a proxied response. It keeps sandbox model usage separate from other turn-loop model billing.
+
+**Data flow**: A run token and HttpTokenUsage accumulator go in. The function asks the accumulator for parsed model and token counts; if none are found it logs that absence, and if found it queues a token meter record.
+
+**Call relations**: EgressProxy._mitm calls this after relaying a metered model response. The queued record is later processed by _meter_loop and _write_meter_batch.
+
+*Call graph*: calls 1 internal fn (_enqueue_meter); called by 1 (_mitm); 2 external calls (__init__, log).
+
+
+##### `EgressProxy._enqueue_meter`  (lines 772–779)
+
+```
+async def _enqueue_meter(self, record: _MeterRecord) -> None
+```
+
+**Purpose**: This puts an accounting item onto the background queue and starts the writer task if needed. It prevents request handling from waiting on database writes.
+
+**Data flow**: One metering record goes in. The function ensures the metering worker exists and is healthy, then enqueues the record, waiting only if the queue is full.
+
+**Call relations**: _meter_ledger and _meter_tokens both call this. It starts EgressProxy._meter_loop, which batches and writes records.
+
+*Call graph*: calls 1 internal fn (_meter_loop); called by 2 (_meter_ledger, _meter_tokens); 1 external calls (create_task).
+
+
+##### `EgressProxy._meter_loop`  (lines 781–813)
+
+```
+async def _meter_loop(self) -> None
+```
+
+**Purpose**: This is the background worker that batches metering records. Batching reduces database overhead when many proxy events happen close together.
+
+**Data flow**: Records arrive through the proxy's queue. The loop takes the first item, briefly waits for more, gathers up to the batch limit, writes the batch, marks queue items done, and exits when it receives a stop marker.
+
+**Call relations**: EgressProxy._enqueue_meter starts this worker on demand. It calls _write_meter_batch for the database work and is stopped by EgressProxy.stop.
+
+*Call graph*: calls 1 internal fn (_write_meter_batch); called by 1 (_enqueue_meter); 2 external calls (sleep, log_error).
+
+
+##### `EgressProxy._write_meter_batch`  (lines 815–858)
+
+```
+async def _write_meter_batch(self, records: list[_MeterRecord]) -> None
+```
+
+**Purpose**: This writes accumulated egress counts and token usage to the workspace ledger. It groups records by run so each turn is billed and audited correctly.
+
+**Data flow**: A list of metering records goes in. The function totals egress request counts and sums token usage by model for each run, enters the correct workspace, and writes egress and sandbox-token records. Failures for one run are logged without stopping the whole batch.
+
+**Call relations**: EgressProxy._meter_loop calls this after collecting a batch. It is the final step for records queued by _meter_ledger and _meter_tokens.
+
+*Call graph*: called by 1 (_meter_loop); 6 external calls (__init__, record_egress_request, record_sandbox_tokens, workspace_tx, log_error, ws).
+
+
+##### `_read_fault`  (lines 861–867)
+
+```
+def _read_fault(task: asyncio.Task[tuple[Rule, ...]]) -> None
+```
+
+**Purpose**: This consumes an exception from a background rule-resolution task if nobody else is left to await it. That prevents asyncio from logging a raw unhandled exception message.
+
+**Data flow**: A completed or cancelled task goes in. If it was not cancelled, the function reads its exception value for side effect and returns nothing.
+
+**Call relations**: EgressProxy._rules_for attaches this as a completion callback to rule-resolution tasks. Waiting callers still receive the exception normally; this only covers abandoned tasks.
+
+
+##### `_start_tls_server`  (lines 870–886)
+
+```
+async def _start_tls_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, context: ssl.SSLContext) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]
+```
+
+**Purpose**: This turns an accepted CONNECT tunnel into a server-side TLS session. It lets the proxy read the sandbox's HTTPS request in decrypted form after sending the normal CONNECT success response.
+
+**Data flow**: The existing stream reader, writer, and SSL context go in. The function pauses plaintext reading, sends CONNECT 200, upgrades the transport to TLS using the provided certificate context, patches the stream objects to use the TLS transport, and returns them.
+
+**Call relations**: EgressProxy._mitm calls this after obtaining a per-host certificate from _leaf_context. The returned streams are then used with _read_request_head and later response writing.
+
+*Call graph*: called by 1 (_mitm); 3 external calls (drain, write, get_running_loop).
+
+
+##### `_read_request_head`  (lines 889–922)
+
+```
+async def _read_request_head(reader: asyncio.StreamReader) -> tuple[bytes, list[bytes]] | _HeaderRefusal | None
+```
+
+**Purpose**: This reads an HTTP request line and headers with time and size limits. It protects the proxy from clients that send headers forever, too slowly, or too large.
+
+**Data flow**: A stream reader goes in. The function reads the first line and header lines until the blank separator, returning the request line and header list; if the input is empty it returns None, and if it times out or exceeds the limit it returns a refusal object.
+
+**Call relations**: EgressProxy._handle uses this for the initial proxy CONNECT request, and EgressProxy._mitm uses it for the decrypted inner HTTP request.
+
+*Call graph*: called by 2 (_handle, _mitm); 3 external calls (__init__, readline, timeout).
+
+
+##### `_forward_match`  (lines 925–939)
+
+```
+def _forward_match(headers: list[bytes], candidates: list[ForwardRule]) -> ForwardRule | None
+```
+
+**Purpose**: This checks whether a decrypted request carries a grant-forwarding sentinel. A sentinel is a placeholder secret value that identifies which granted account should be used without revealing the real credential.
+
+**Data flow**: Request headers and candidate ForwardRule objects go in. The function scans header values for an exact sentinel match, allowing common scheme prefixes like Bearer, and returns the matching rule or None.
+
+**Call relations**: EgressProxy._mitm calls this before deciding how to send the request. A match goes to _forward_broker; no match continues to the direct upstream path with possible header injection.
+
+*Call graph*: called by 1 (_mitm).
+
+
+##### `_read_request_body`  (lines 956–1009)
+
+```
+async def _read_request_body(reader: asyncio.StreamReader, headers: list[bytes]) -> bytes | _Refusal
+```
+
+**Purpose**: This reads the full body for a broker-forwarded request, but only when the body has a clear and acceptable Content-Length. The broker path handles one complete request envelope, not an open-ended stream.
+
+**Data flow**: A stream reader and headers go in. The function inspects length and transfer-encoding headers, returns the body bytes if valid and within the size limit, or returns a refusal explaining chunked, missing, malformed, negative, too-large, or truncated input.
+
+**Call relations**: EgressProxy._forward_broker calls this before contacting a grant broker. If a refusal comes back, the broker is not called and _drain_refused_body helps the client receive the error cleanly.
+
+*Call graph*: called by 1 (_forward_broker); 2 external calls (__init__, readexactly).
+
+
+##### `_drain_refused_body`  (lines 1012–1029)
+
+```
+async def _drain_refused_body(reader: asyncio.StreamReader, pending: int) -> None
+```
+
+**Purpose**: This discards request-body bytes after the proxy has already decided to refuse the request. It gives the client a chance to finish sending and then read the useful error response.
+
+**Data flow**: A reader and an upper bound on pending bytes go in. The function reads and throws away chunks until the bound, a timeout, or client close is reached. It buffers no full body and returns nothing.
+
+**Call relations**: EgressProxy._forward_broker calls this after writing a refusal for a bad forwarded body. It is a cleanup step for clearer client behavior, not part of successful forwarding.
+
+*Call graph*: called by 1 (_forward_broker); 2 external calls (read, timeout).
+
+
+##### `_forward_headers`  (lines 1032–1044)
+
+```
+def _forward_headers(headers: list[bytes], rule: ForwardRule) -> dict[str, str]
+```
+
+**Purpose**: This prepares safe request headers for a broker-forwarded call. It removes headers the broker or proxy must own, including the sentinel-bearing credential header.
+
+**Data flow**: Original header lines and the matching ForwardRule go in. The function drops connection, proxy, host, content-length, and sentinel headers, decodes the remaining names and values, and returns a plain dictionary for the broker.
+
+**Call relations**: EgressProxy._forward_broker calls this when building the broker request. The broker then supplies the real credential on its own side.
+
+*Call graph*: called by 1 (_forward_broker).
+
+
+##### `_forward_response_bytes`  (lines 1047–1065)
+
+```
+def _forward_response_bytes(response: ForwardedResponse) -> bytes
+```
+
+**Purpose**: This turns a broker's reconstructed provider response into HTTP bytes for the sandbox client. It also filters dangerous or proxy-owned headers.
+
+**Data flow**: A ForwardedResponse goes in, containing status, headers, and body. The function builds an HTTP/1.1 status line, copies safe headers, adds the measured content length and connection close, and appends the body bytes.
+
+**Call relations**: EgressProxy._forward_broker calls this after a successful broker call. It uses _has_crlf to prevent header injection through newline characters.
+
+*Call graph*: calls 1 internal fn (_has_crlf); called by 1 (_forward_broker); 1 external calls (HTTPStatus).
+
+
+##### `_has_crlf`  (lines 1068–1069)
+
+```
+def _has_crlf(value: str) -> bool
+```
+
+**Purpose**: This checks whether a string contains carriage-return or line-feed characters. Those characters are unsafe inside HTTP header names or values because they can split one header into many.
+
+**Data flow**: A string goes in. The function returns true if it contains either newline form, otherwise false.
+
+**Call relations**: _forward_response_bytes calls this while copying broker response headers. Headers that fail this check are dropped.
+
+*Call graph*: called by 1 (_forward_response_bytes).
+
+
+##### `_inject`  (lines 1072–1097)
+
+```
+def _inject(headers: list[bytes], candidates: list[InjectionRule]) -> bytes
+```
+
+**Purpose**: This rewrites request headers by replacing an exact sentinel placeholder with the real secret for the matching account. It deliberately leaves non-matching sentinels untouched so one account cannot accidentally receive another account's token.
+
+**Data flow**: Original header lines and candidate InjectionRule objects go in. The function skips connection headers, searches for a header whose name and value exactly match a rule's header and sentinel, writes the real value for that rule, copies other headers unchanged, and adds Connection: close.
+
+**Call relations**: EgressProxy._mitm calls this on the direct upstream path after it has decrypted one request. The rewritten headers are sent to the real HTTPS server.
+
+*Call graph*: called by 1 (_mitm).
+
+
+##### `_relay`  (lines 1100–1134)
+
+```
+async def _relay(client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter, upstream_reader: asyncio.StreamReader, upstream_writer: asyncio.StreamWriter, on_downstream: Callable[[bytes]
+```
+
+**Purpose**: This copies bytes in both directions between the sandbox client and the upstream server. It is the core pipe used for opaque tunnels and streamed MITM responses.
+
+**Data flow**: Client streams, upstream streams, and an optional callback for downstream response chunks go in. The function starts one pump each way, lets request EOF still allow response progress, optionally reports each response chunk, and closes the upstream writer when done.
+
+**Call relations**: EgressProxy._tunnel uses this for raw CONNECT tunnels, and EgressProxy._mitm uses it after sending an inspected request upstream. It delegates each one-way copy to _pump.
+
+*Call graph*: calls 1 internal fn (_pump); called by 2 (_mitm, _tunnel); 7 external calls (Event, can_write_eof, close, write_eof, create_task, timeout, wait).
+
+
+##### `_pump`  (lines 1137–1152)
+
+```
+async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, on_chunk: Callable[[bytes], None] | None=None, on_progress: Callable[[], None] | None=None) -> None
+```
+
+**Purpose**: This performs one direction of byte copying between two streams. It is the simple worker behind the two-way relay.
+
+**Data flow**: A reader, writer, and optional callbacks go in. The function repeatedly reads chunks, writes them to the destination, flushes the write, and reports progress or chunk contents if callbacks were provided.
+
+**Call relations**: _relay creates _pump tasks for client-to-upstream and upstream-to-client traffic. Errors and cancellations are treated as normal connection endings.
+
+*Call graph*: called by 1 (_relay); 3 external calls (read, drain, write).
+
+
+##### `_int_field`  (lines 1155–1157)
+
+```
+def _int_field(usage: dict[str, object], name: str) -> int
+```
+
+**Purpose**: This safely extracts an integer token count from a parsed usage dictionary. It treats missing values, non-integers, and booleans as zero.
+
+**Data flow**: A dictionary and field name go in. The function reads that field and returns its integer value only if it is a real integer; otherwise it returns 0.
+
+**Call relations**: HttpTokenUsage._absorb_anthropic and HttpTokenUsage._openai use this to normalize provider usage fields before building Usage records.
+
+*Call graph*: called by 2 (_absorb_anthropic, _openai).
+
+
+##### `HttpTokenUsage.feed`  (lines 1183–1220)
+
+```
+def feed(self, chunk: bytes) -> None
+```
+
+**Purpose**: This accepts raw response bytes as they pass through the proxy and starts turning them into parseable model-usage data. It understands HTTP headers, compression choices, and where the body begins.
+
+**Data flow**: One downstream response chunk goes in. The function accumulates headers until complete, rejects oversized headers or unsupported encodings, sets up gzip or deflate decoding if needed, then passes body bytes onward for chunk and usage parsing.
+
+**Call relations**: EgressProxy._mitm gives this method to _relay as the downstream callback for token-metered model hosts. It hands body data to _feed_wire_body and records failure through _fail.
+
+*Call graph*: calls 2 internal fn (_fail, _feed_wire_body); 1 external calls (decompressobj).
+
+
+##### `HttpTokenUsage.usage`  (lines 1222–1233)
+
+```
+def usage(self) -> tuple[str, Usage] | None
+```
+
+**Purpose**: This returns the model name and token counts found so far, if any. It is the final readout after a response has been streamed.
+
+**Data flow**: The accumulator's internal buffered response state goes in implicitly. The function finishes decompression, tries to parse a whole JSON body if streaming events did not reveal usage, and returns a model plus Usage object or None.
+
+**Call relations**: EgressProxy._meter_tokens calls this after _relay finishes. It relies on _finish_decoder and _maybe_json_body to catch late or non-streamed usage data.
+
+*Call graph*: calls 2 internal fn (_finish_decoder, _maybe_json_body); 1 external calls (__init__).
+
+
+##### `HttpTokenUsage._feed_wire_body`  (lines 1235–1281)
+
+```
+def _feed_wire_body(self, chunk: bytes) -> None
+```
+
+**Purpose**: This converts the HTTP response body as it appears on the wire into actual payload bytes. It understands normal bodies and chunked transfer encoding.
+
+**Data flow**: A body chunk goes in. For non-chunked bodies it sends bytes straight to the decoder; for chunked bodies it parses chunk sizes, extracts payload bytes, checks required separators, and stops cleanly at the terminating chunk.
+
+**Call relations**: HttpTokenUsage.feed calls this after headers are complete. It passes payload to _decode and calls _finish_decoder or _fail when chunk framing ends or breaks.
+
+*Call graph*: calls 3 internal fn (_decode, _fail, _finish_decoder); called by 1 (feed).
+
+
+##### `HttpTokenUsage._decode`  (lines 1283–1299)
+
+```
+def _decode(self, chunk: bytes) -> None
+```
+
+**Purpose**: This decompresses payload bytes when the response body is compressed, then forwards plain body text for parsing. It also protects against decoder stalls and excessive expansion.
+
+**Data flow**: Compressed or plain payload bytes go in. If there is no decompressor, the bytes are forwarded unchanged; otherwise the decompressor produces bounded plain bytes, which are passed to _feed_body. Bad compressed data marks the accumulator failed.
+
+**Call relations**: HttpTokenUsage._feed_wire_body calls this for each payload chunk. It uses the decoder contract described by _ContentDecoder and sends results to _feed_body.
+
+*Call graph*: calls 2 internal fn (_fail, _feed_body); called by 1 (_feed_wire_body).
+
+
+##### `HttpTokenUsage._finish_decoder`  (lines 1301–1310)
+
+```
+def _finish_decoder(self) -> None
+```
+
+**Purpose**: This completes decompression at the end of a response. It makes sure no final bytes are left trapped inside the decoder before usage is reported.
+
+**Data flow**: The accumulator's decompressor state goes in implicitly. If not already finished, it flushes any remaining decoded bytes into the body parser; if flushing fails, it marks parsing as failed.
+
+**Call relations**: HttpTokenUsage._feed_wire_body calls this when a chunked body ends, and HttpTokenUsage.usage calls it before returning final results.
+
+*Call graph*: calls 2 internal fn (_fail, _feed_body); called by 2 (_feed_wire_body, usage).
+
+
+##### `HttpTokenUsage._feed_body`  (lines 1312–1323)
+
+```
+def _feed_body(self, chunk: bytes) -> None
+```
+
+**Purpose**: This accumulates decoded response body text and splits it into lines for event parsing. It enforces a maximum buffer size so a huge response cannot grow memory forever.
+
+**Data flow**: Decoded body bytes go in. The function appends them to the body buffer, sends each complete line to _consume, keeps any partial line for later, and fails if the buffer grows beyond the limit.
+
+**Call relations**: HttpTokenUsage._decode and _finish_decoder call this with plain bytes. It passes line-level parsing to HttpTokenUsage._consume.
+
+*Call graph*: calls 2 internal fn (_consume, _fail); called by 2 (_decode, _finish_decoder).
+
+
+##### `HttpTokenUsage._consume`  (lines 1325–1342)
+
+```
+def _consume(self, line: bytes) -> None
+```
+
+**Purpose**: This examines one decoded response line for model usage information. It supports server-sent events, which are lines like 'data: {...}' used by streaming APIs, and also opportunistically checks plain JSON lines.
+
+**Data flow**: One line of bytes goes in. If it is a JSON server-sent event, the function parses it and dispatches to the Anthropic or OpenAI parser based on host; if it is not an event line, it may try whole-body JSON parsing.
+
+**Call relations**: HttpTokenUsage._feed_body calls this for each complete line. It delegates provider-specific meaning to _anthropic, _openai, and _maybe_json_body.
+
+*Call graph*: calls 3 internal fn (_anthropic, _maybe_json_body, _openai); called by 1 (_feed_body); 1 external calls (loads).
+
+
+##### `HttpTokenUsage._maybe_json_body`  (lines 1344–1359)
+
+```
+def _maybe_json_body(self, payload: bytes) -> None
+```
+
+**Purpose**: This tries to parse a non-streamed JSON response body for usage information. It covers model APIs that return one JSON object instead of server-sent event lines.
+
+**Data flow**: A byte payload goes in. If usage has not already been seen and the payload looks like JSON, the function parses it, then extracts Anthropic or OpenAI fields depending on the host.
+
+**Call relations**: HttpTokenUsage._consume calls this for non-event lines, and HttpTokenUsage.usage calls it on the remaining buffered body before giving up.
+
+*Call graph*: calls 2 internal fn (_absorb_anthropic, _openai); called by 2 (_consume, usage); 1 external calls (loads).
+
+
+##### `HttpTokenUsage._anthropic`  (lines 1361–1371)
+
+```
+def _anthropic(self, event: dict[str, object]) -> None
+```
+
+**Purpose**: This reads Anthropic streaming events and extracts model and token usage fields from the event types that carry them.
+
+**Data flow**: A parsed event dictionary goes in. For message_start it records the model and initial input/cache usage; for message_delta it updates output usage. Other event types are ignored.
+
+**Call relations**: HttpTokenUsage._consume calls this when the response host is Anthropic. It delegates field extraction to _absorb_anthropic.
+
+*Call graph*: calls 1 internal fn (_absorb_anthropic); called by 1 (_consume).
+
+
+##### `HttpTokenUsage._absorb_anthropic`  (lines 1373–1383)
+
+```
+def _absorb_anthropic(self, usage: object, initial: bool) -> None
+```
+
+**Purpose**: This copies Anthropic usage numbers into the accumulator. It knows which fields represent input, output, cache reads, and cache writes.
+
+**Data flow**: A usage object and a flag saying whether it is initial usage go in. If the object is a dictionary, initial calls set input and cache counts, every valid call may update output tokens, and the accumulator is marked as having seen usage.
+
+**Call relations**: HttpTokenUsage._anthropic and _maybe_json_body call this for Anthropic responses. It uses _int_field to avoid bad or missing numeric fields.
+
+*Call graph*: calls 1 internal fn (_int_field); called by 2 (_anthropic, _maybe_json_body).
+
+
+##### `HttpTokenUsage._openai`  (lines 1385–1394)
+
+```
+def _openai(self, event: dict[str, object]) -> None
+```
+
+**Purpose**: This reads OpenAI-style model and token usage fields from a parsed response object.
+
+**Data flow**: A parsed event dictionary goes in. The function records the model string when present, then reads prompt and completion token counts from the usage dictionary and marks usage as seen.
+
+**Call relations**: HttpTokenUsage._consume and _maybe_json_body call this for OpenAI responses. It uses _int_field for safe numeric extraction.
+
+*Call graph*: calls 1 internal fn (_int_field); called by 2 (_consume, _maybe_json_body).
+
+
+##### `HttpTokenUsage._fail`  (lines 1396–1400)
+
+```
+def _fail(self) -> None
+```
+
+**Purpose**: This marks token-usage parsing as failed and clears accumulated buffers. It is a safety stop for malformed, unsupported, or oversized responses.
+
+**Data flow**: No external input is needed. The function sets the overflow/failure flag and empties header, body, and chunk buffers so future feed calls do no more work.
+
+**Call relations**: Several HttpTokenUsage parsing steps call this when they detect bad framing, bad compression, unsupported encoding, or too much buffered data. After failure, usage will not report token counts.
+
+*Call graph*: called by 5 (_decode, _feed_body, _feed_wire_body, _finish_decoder, feed).
+
+
+##### `_respond`  (lines 1403–1421)
+
+```
+async def _respond(writer: asyncio.StreamWriter, status: int, message: str) -> None
+```
+
+**Purpose**: This writes a clear HTTP error or refusal response to the client and closes the conversation cleanly. The explanatory message is placed in the body, where HTTP clients are likely to show it.
+
+**Data flow**: A stream writer, status code, and message go in. The function builds a plain-text HTTP response with content length and connection close, writes it, drains the writer, and ignores routine socket errors from clients that already disconnected.
+
+**Call relations**: EgressProxy._handle uses this for denied or malformed CONNECT requests, _tunnel uses it for upstream failures, _mitm uses it for inspected-header refusals, and _forward_broker uses it for broker or body errors.
+
+*Call graph*: called by 4 (_forward_broker, _handle, _mitm, _tunnel); 3 external calls (drain, write, HTTPStatus).
+
+
+### `core/src/ufo/sandbox/proxy/rules.py`
+
+`domain_logic` · `turn setup before sandbox network requests`
+
+A sandbox is meant to run useful work without freely exposing secrets or the whole internet. This file is the rule factory for that boundary. It does not register new permissions directly; instead, it derives plain rule values that the egress proxy later reads, like a guard checking a guest list at a door.
+
+The rules answer a few practical questions. Which exact hosts may the sandbox contact? Should a fake placeholder secret, called a sentinel, be replaced with a real secret only when the request leaves the sandbox? Should requests to a host be counted for billing or spend tracking? Should a request be forwarded through the broker instead of sent directly, because the real account token lives only on the server side?
+
+The file covers several sources of permission. Model use opens the model provider host and injects the model API key. Extension manifests may allow public internet during live turns. S3 artifact storage opens only the bucket host needed for file sharing. Credential slots open their configured service hosts and inject per-workspace secrets. Grants open connector-related hosts and meter those requests, while CLI credential grants can create forwarding rules instead of local secret injection.
+
+A key safety behavior is that credential failures are contained. If one credential slot cannot be read or resolved, the code logs a warning and skips only that slot. It does not accidentally fall back to another secret, and it does not break all other network rules for the turn.
 
 #### Function details
 
-##### `pgvector_literal`  (lines 31–32)
+##### `provider_host`  (lines 91–95)
 
 ```
-def pgvector_literal(vector: tuple[float, ...]) -> str
+def provider_host(model: str) -> str
 ```
 
-**Purpose**: Turns a Python tuple of numbers into the bracketed text form PostgreSQL’s pgvector extension expects. This is needed before sending an embedding to PostgreSQL for storage or vector search.
+**Purpose**: This function chooses the network host for a model name. For example, model names starting with OpenAI-style prefixes map to the OpenAI API host, while Claude-style names map to the Anthropic API host.
 
-**Data flow**: It receives a tuple such as numbers representing an embedding. It converts each value to a float, joins them with commas, wraps them in square brackets, and returns one string that PostgreSQL can cast into its vector type.
+**Data flow**: It receives a model name as text, checks it against known prefixes, and returns the matching provider host. If no prefix matches, it raises an error instead of guessing, so the sandbox does not get an unclear or unsafe network permission.
 
-**Call relations**: When DefaultIndex.upsert stores chunks in PostgreSQL, it uses this function to format each chunk’s embedding. When DefaultIndex.vector searches PostgreSQL by meaning, it uses the same formatter for the query embedding.
+**Call relations**: It is used by derive_model_rules when building the rules for model access. That caller needs the host first so it can allow the right destination, inject the right kind of API key, and meter model usage.
 
-*Call graph*: called by 2 (upsert, vector).
-
-
-##### `cosine`  (lines 35–43)
-
-```
-def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
-```
-
-**Purpose**: Measures how similar two embeddings are using cosine similarity, which compares the direction of two number lists rather than their size. SQLite uses this because it does not have the same vector-search machinery as PostgreSQL here.
-
-**Data flow**: It receives two equal-length tuples of numbers. It computes the size of each vector, returns 0 if either one has no usable length, otherwise calculates a similarity score where higher means more alike.
-
-**Call relations**: DefaultIndex.vector calls this during SQLite searches after reading stored embeddings from the database. It is the in-Python fallback that scores every candidate row before the best matches are returned.
-
-*Call graph*: called by 1 (vector); 1 external calls (sqrt).
+*Call graph*: called by 1 (derive_model_rules).
 
 
-##### `pack_embedding`  (lines 46–47)
+##### `derive_model_rules`  (lines 98–113)
 
 ```
-def pack_embedding(vector: tuple[float, ...]) -> bytes
+def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Converts an embedding from Python numbers into compact bytes for SQLite storage. SQLite stores the vector as a blob because it does not have the PostgreSQL vector type used elsewhere.
+**Purpose**: This function builds the basic rules that let the sandbox call the chosen language model provider. It also makes sure the real model API key is inserted only at the proxy boundary, not exposed inside the sandbox.
 
-**Data flow**: It receives a tuple of floats. It writes them into a binary byte string using 32-bit floating point numbers and returns those bytes for database insertion.
+**Data flow**: It takes a model name and the real provider key. It finds the provider host, chooses the right authentication header shape, then returns three rules: allow that host, replace the sandbox's sentinel key with the real key on outgoing traffic, and meter usage under tokens.
 
-**Call relations**: DefaultIndex.upsert calls this only on the SQLite path, right before saving a chunk with an embedding.
+**Call relations**: It calls provider_host to identify the provider. It then creates the scope, injection, and metering rules that the proxy later enforces when the sandbox tries to contact the model API.
 
-*Call graph*: called by 1 (upsert); 1 external calls (pack).
-
-
-##### `unpack_embedding`  (lines 50–51)
-
-```
-def unpack_embedding(blob: bytes) -> tuple[float, ...]
-```
-
-**Purpose**: Converts a stored SQLite embedding blob back into Python numbers. This makes it possible to compare saved embeddings with a new query embedding.
-
-**Data flow**: It receives bytes read from SQLite. It treats every four bytes as one floating point number and returns a tuple of floats.
-
-**Call relations**: DefaultIndex.vector calls this on the SQLite path before passing the restored numbers into cosine for scoring.
-
-*Call graph*: called by 1 (vector); 1 external calls (unpack).
+*Call graph*: calls 1 internal fn (provider_host); 3 external calls (__init__, __init__, __init__).
 
 
-##### `_hit`  (lines 54–63)
+##### `derive_manifest_rules`  (lines 116–118)
 
 ```
-def _hit(row: sa.RowMapping, score: float) -> Hit
+def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]
 ```
 
-**Purpose**: Builds a Hit object, which is the standard search-result shape used outside this file. It hides the database row format from the rest of the index code.
+**Purpose**: This function checks whether any installed extension says the sandbox needs public internet access during live turns. If so, it adds the rule that permits that broader internet access.
 
-**Data flow**: It receives a database row and a score. It copies the chunk identity, owner information, subject, order, text, and score into a new Hit object and returns it.
+**Data flow**: It receives the loaded manifests and looks for one marked as needing sandbox internet. If at least one manifest asks for it, the output is a single InternetRule; otherwise the output is an empty tuple.
 
-**Call relations**: DefaultIndex.lexical and DefaultIndex.vector both use this after the database or local scoring has found matches. It is the final conversion step from raw search rows into normal application results.
+**Call relations**: It is part of the larger rule-building flow for a sandbox turn. Other functions add exact host permissions, while this one contributes the broader public-internet permission only when an extension manifest explicitly requires it.
 
-*Call graph*: called by 2 (lexical, vector); 1 external calls (__init__).
-
-
-##### `DefaultIndex.upsert`  (lines 171–208)
-
-```
-async def upsert(self, chunks: tuple[Chunk, ...]) -> None
-```
-
-**Purpose**: Adds or updates chunks in the index. Someone uses this when text has been chunked and should become searchable, or when an existing chunk’s text or embedding has changed.
-
-**Data flow**: It receives a tuple of Chunk objects. If the tuple is empty, it does nothing. Otherwise it opens one database transaction, checks whether the connection is PostgreSQL or SQLite, and writes each chunk using the right SQL for that database. PostgreSQL embeddings are converted with pgvector_literal; SQLite embeddings are packed with pack_embedding, and the SQLite full-text table is refreshed for each chunk.
-
-**Call relations**: This is called by higher-level indexing code when content needs to be saved into the default index. Inside, it hands embedding formatting to pgvector_literal or pack_embedding depending on the database, then writes the rows through the provided transaction connection.
-
-*Call graph*: calls 2 internal fn (pack_embedding, pgvector_literal).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `DefaultIndex.delete`  (lines 210–217)
+##### `derive_artifact_store_rules`  (lines 121–137)
 
 ```
-async def delete(self, scope: IndexScope) -> None
+async def derive_artifact_store_rules(blob: BlobStore) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Removes all chunks that belong to one owner scope. This is used when an indexed object is deleted or its whole indexed footprint needs to be cleared.
+**Purpose**: This function allows the sandbox to upload shared artifacts, such as produced files, when the artifact store is backed by S3. It opens only the exact S3 host needed, rather than granting general internet access.
 
-**Data flow**: It receives an IndexScope containing an owner kind and owner id. It opens a transaction, then deletes matching rows. In PostgreSQL it deletes from the main chunk table; in SQLite it first removes matching full-text rows and then removes the chunk rows.
+**Data flow**: It receives the configured blob store. If the store is an S3BlobStore, it asks the store for the host used for uploads, then returns rules allowing that host and counting requests to it. If the store is not S3, it returns no network rules because there is no external artifact host to allow.
 
-**Call relations**: Higher-level cleanup can call this directly. DefaultIndex.prune also calls it when the keep-set is empty, because keeping nothing is the same as deleting the whole scope.
+**Call relations**: During rule derivation, this function adds the special network path needed for file sharing. It calls the blob store's put_host method to learn the exact host, then hands back scope and metering rules for the proxy.
 
-*Call graph*: called by 1 (prune).
-
-
-##### `DefaultIndex.has_chunks`  (lines 219–222)
-
-```
-async def has_chunks(self, scope: IndexScope) -> bool
-```
-
-**Purpose**: Checks whether a given owner already has any chunks in the index. This lets callers decide whether indexing work already exists for that scope.
-
-**Data flow**: It receives an IndexScope. It opens a transaction, asks the database for one matching chunk, and returns true if a row exists or false if none exists.
-
-**Call relations**: This is a small query method used by outside index orchestration code when it needs a yes-or-no answer before deciding what to do next.
+*Call graph*: 3 external calls (__init__, __init__, put_host).
 
 
-##### `DefaultIndex.prune`  (lines 224–238)
+##### `derive_credential_rules`  (lines 140–203)
 
 ```
-async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+async def derive_credential_rules(slots: tuple[CredentialSlot, ...], workspace_id: UUID, store: CredentialStore) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Deletes old chunks for an owner while keeping a specified set of current chunk digests. This prevents stale search results after content is split into chunks again.
+**Purpose**: This function turns declared credential slots into safe network rules for one workspace. It allows only the resolved credential host, injects the real secret in place of the sandbox's placeholder, and optionally meters that host.
 
-**Data flow**: It receives an IndexScope and a frozen set of chunk digest strings to keep. If the keep set is empty, it delegates to delete and removes the whole scope. Otherwise it opens a transaction and removes every matching chunk whose digest is not in the keep list, including the SQLite full-text rows when SQLite is used.
+**Data flow**: It receives credential slot declarations, a workspace ID, and the credential store. For each slot with an injection target, it tries to read the workspace's secret and resolve the target host. If either is missing or fails, it logs a warning and skips that slot. If the slot is for Git basic authentication, it combines the configured username and secret into a Basic Authorization header value. It groups injections by host, then returns rules that allow each host, inject the needed headers, and add metering where configured.
 
-**Call relations**: This is used after re-indexing an owner, when the caller knows which chunk digests are still valid. If there is nothing to preserve, it calls DefaultIndex.delete; otherwise it performs database-specific pruning itself.
+**Call relations**: This is one of the main safety gates for secrets. It calls slot_secret to read the per-workspace secret, credential_host to resolve the allowed host, b64encode when Git needs a Basic auth value, and warn when a slot cannot be used. Its output is consumed by the proxy rule set so secrets are swapped in only as traffic leaves the sandbox.
 
-*Call graph*: calls 1 internal fn (delete).
-
-
-##### `DefaultIndex.lexical`  (lines 240–276)
-
-```
-async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
-```
-
-**Purpose**: Searches chunks by words in the text. This is the classic “find documents containing these terms” search path.
-
-**Data flow**: It receives a query string, allowed subjects, an owner kind, and a maximum result count. If there are no subjects, or the query is blank after database-specific cleanup, it returns no results. Otherwise it opens a transaction, runs PostgreSQL full-text search or SQLite FTS5 search, then turns each returned row into a Hit with _hit.
-
-**Call relations**: Search orchestration calls this when it wants text-based matches. The method relies on the database to rank matching rows, then uses _hit to hand results back in the common Hit format.
-
-*Call graph*: calls 1 internal fn (_hit).
+*Call graph*: 7 external calls (__init__, __init__, __init__, b64encode, credential_host, slot_secret, warn).
 
 
-##### `DefaultIndex.vector`  (lines 278–311)
+##### `derive_grant_rules`  (lines 206–223)
 
 ```
-async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+def derive_grant_rules(grants: tuple[Grant, ...], transfer_hosts: 'ConnectorTransferHosts | None'=None) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Searches chunks by meaning using embeddings instead of literal words. This helps find text that is semantically similar even when it does not share the same exact wording.
+**Purpose**: This function turns active connector grants into host allowlist and metering rules. A grant permits the sandbox to reach the connector's provider host and any file-transfer hosts related to that connector, but it does not inject account tokens.
 
-**Data flow**: It receives a query embedding, allowed subjects, an owner kind, and a result limit. If the embedding or subjects are empty, it returns no results. With PostgreSQL, it formats the query embedding with pgvector_literal and lets the database score nearby vectors. With SQLite, it loads candidate embeddings, unpacks each one, scores it with cosine similarity in Python, sorts best to worst, and returns the top hits through _hit.
+**Data flow**: It receives grants and, optionally, a ConnectorTransferHosts lookup. For each grant, it collects the grant's own provider host plus any transfer hosts, removes empty values and duplicates, then returns a scope rule for those hosts and a request-metering rule for each host.
 
-**Call relations**: Search orchestration calls this for vector-based retrieval. It uses PostgreSQL’s vector features when available, while on SQLite it combines unpack_embedding, cosine, sorting, and _hit to produce the same kind of result.
-
-*Call graph*: calls 4 internal fn (_hit, cosine, pgvector_literal, unpack_embedding).
-
-
-##### `manifest`  (lines 314–324)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Describes this extension to the host system and registers the index backend name "default". Without this, the extension system would not know how to create DefaultIndex.
-
-**Data flow**: It takes no input. It creates a Manifest containing the extension name, version, and an IndexBackendSpec whose factory builds a DefaultIndex using the transaction opener supplied by the host context. It returns that Manifest.
-
-**Call relations**: The extension loader calls this during discovery. The returned Manifest tells the core system that when it asks for the "default" index backend, it should construct DefaultIndex with the workspace-scoped transaction function.
+**Call relations**: This function is used when connector grants are folded into the sandbox's egress permissions. If transfer host information is available, it asks ConnectorTransferHosts.of for provider-specific file-store hosts before creating the rules the proxy will enforce.
 
 *Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `derive_cli_rules`  (lines 226–246)
+
+```
+def derive_cli_rules(grants: tuple[Grant, ...], acting_member_id: UUID | None, clis: Mapping[str, CliCredential]) -> tuple[Rule, ...]
+```
+
+**Purpose**: This function creates forwarding rules for connector CLI credentials. Instead of putting a real token in the sandbox, matching requests are sent through the broker, which holds and uses the account credential server-side.
+
+**Data flow**: It receives grants, the acting member ID if there is one, and the known CLI credential declarations. For each grant that has a matching CLI credential and is usable by the acting member, it builds a ForwardRule containing the host, header, sentinel value, account ID, and broker forwarder. Private grants owned by someone else are skipped.
+
+**Call relations**: This function fits beside grant rule derivation. derive_grant_rules opens and meters hosts, while derive_cli_rules adds the authenticated forwarding path for allowed CLI-style connector traffic. It calls grant_sentinel to build the placeholder value that the sandbox request must carry.
+
+*Call graph*: 2 external calls (__init__, grant_sentinel).
+
+
+##### `ConnectorTransferHosts.of`  (lines 260–261)
+
+```
+def of(self, provider: str) -> tuple[str, ...]
+```
+
+**Purpose**: This method answers which broker file-transfer hosts apply to a connector provider. It uses a provider-specific answer when one is known, otherwise it falls back to the default hosts for open connector namespaces.
+
+**Data flow**: It receives a provider name. It looks that name up in the explicit provider-to-hosts mapping; if present, it returns that tuple, even if it is empty. If the provider is not present, it returns the default tuple.
+
+**Call relations**: derive_grant_rules calls this method when it needs to add file-transfer hosts for a grant. This keeps the grant rule builder simple: it asks this object for the extra hosts and then turns them into allowlist and metering rules.
+
+
+##### `connector_transfer_hosts`  (lines 264–275)
+
+```
+def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> ConnectorTransferHosts
+```
+
+**Purpose**: This function builds the lookup table used to find connector file-transfer hosts. It reads the deployed extension manifests and records which hosts each registered connector declares.
+
+**Data flow**: It receives manifests. It walks through each connector in each manifest and maps the connector's provider name to its declared transfer hosts. It also asks for the open connector namespace, if one exists, and uses that namespace's transfer hosts as the default for providers without an explicit connector entry. It returns a ConnectorTransferHosts object containing both pieces.
+
+**Call relations**: This function prepares data for later grant rule derivation. It calls open_connector_namespace to find default broker transfer hosts, constructs ConnectorTransferHosts, and that object is later queried by derive_grant_rules through ConnectorTransferHosts.of.
+
+*Call graph*: 2 external calls (__init__, open_connector_namespace).

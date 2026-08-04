@@ -1,913 +1,1136 @@
-# Durable memory extension  `stage-12.2`
+# Browser Session Control  `stage-12.2`
 
-This stage adds long-term memory to the system. It is shared behind-the-scenes support that helps agents remember useful facts across work, instead of relying only on the current conversation. The manifest is the wiring panel. It tells the wider system which memory tools exist, when automatic recall should run, which background jobs should start, how page changes should be noticed, and where the memory viewing page lives.
+Browser Session Control is the system’s browser workshop. It is used during the main work loop whenever an agent needs to open a site, inspect it, click, type, download a file, or clean up afterward. It can use different browser sources: a Chrome running inside the sandbox, a remote Browserbase Chrome, the Browser Use service, or the project’s own automation stack.
 
-The store is the main filing cabinet and search desk. It saves memory records, finds the most relevant ones when an agent needs context, keeps links to source pages searchable, and does slower indexing work in the background so normal saves stay quick. The condenser is the cleaner. It looks at changed pages, pulls out facts worth keeping, and later combines related older facts into broader summaries so memory does not become a pile of duplicates. The surface is the read-only window for operators. It lets authorized people inspect stored memories for a workspace without changing them.
+The provider integrations decide where the browser comes from, like choosing which car to drive. The CDP layer, named for Chrome DevTools Protocol, is the control wire that sends commands to Chrome and listens for events. It manages tabs, page loading, dialogs, downloads, and safe JavaScript execution. The action layer turns planned actions into real mouse, keyboard, scroll, form, and upload events. The extraction layer reads the page and finds the exact element the agent referred to.
+
+tools.py exposes browser abilities as agent tools. backend.py connects each turn’s tool calls to a real Chrome session and handles recovery and file transfer. session.py holds the live session state, including tabs, dialogs, downloads, and page readiness.
+
+## Sub-stages
+
+- [Browser Provider Integrations](stage-12.2.1.md) `stage-12.2.1` — 3 files
+- [CDP Connection, Runtime, Tabs, and Page Lifecycle](stage-12.2.2.md) `stage-12.2.2` — 6 files
+- [Browser Action Execution and Input Translation](stage-12.2.3.md) `stage-12.2.3` — 5 files
+- [Page Content Extraction and Element Lookup](stage-12.2.4.md) `stage-12.2.4` — 4 files
 
 ## Files in this stage
 
-### Memory wiring and persistence
-Declares the memory extension and connects durable recall, condensation, storage, search, and background indexing into the system.
+### Browser Tool Execution
+Agent-facing browser tools are routed through the per-turn backend into a live Chrome session that performs page actions, screenshots, downloads, dialog handling, and cleanup.
 
-### `extensions/memory/ufo_ext_memory/manifest.py`
+### `extensions/browser/ufo_ext_browser/tools.py`
 
-`orchestration` · `startup for registration, then active during tool calls, prompt submission hooks, page-change processing, scheduled jobs, and memory UI requests`
+`orchestration` · `tool call handling during an agent turn`
 
-This file is like the front desk and schedule board for the memory feature. It tells the host application what the memory extension offers, when each part should run, and which helper should do the work.
+This file turns browser actions into safe, well-shaped tools. An agent does not talk to Chrome directly. Instead, it calls named tools like `navigate`, `find`, or `computer`, and this file checks the inputs, passes the request to a shared browser surface, then formats the answer back into a tool result.
 
-The extension has two user-facing tools. One searches memory and related source pages, so the agent can look up facts before answering. The other writes a durable memory item, such as a preference or stable fact about the user. The file also adds an automatic recall hook that runs when a user submits a prompt. That hook tries to find relevant memories and injects them into the model's context before the model replies. Importantly, this recall is best-effort: if it is slow or fails, the user request is allowed to continue instead of being blocked.
+The important shared part is the `BuaSurface`, which is the browser-use engine for the current turn. Think of it like checking out one browser remote control at the start of a task and returning it when the task ends. The file creates that remote control only when the first browser tool is used, reuses it for later browser calls in the same turn, and registers cleanup so the browser connection and any hosted browser lease are released even if the turn ends unexpectedly.
 
-The file also connects memory to source pages. When pages change, one listener indexes page text so it can be searched, while another listener asks a model to derive durable facts from those pages. Separate scheduled jobs index newly written memory items and consolidate older facts into broader summaries.
-
-Finally, the `manifest` function packages all of this into a `Manifest`, which is the extension's contract with the host system.
+Most handlers follow the same pattern: remove the human-only `user_description`, send the remaining data to `BuaSurface`, and return the reply as JSON text. Two tools do extra file work. `computer` can attach a screenshot image to the result and optionally save it into the shared workspace. `wait_for_download` waits for downloaded bytes from the browser and writes them into the workspace, so other agents or later steps can refer to the saved path.
 
 #### Function details
 
-##### `_date_bound`  (lines 146–157)
+##### `_browser`  (lines 105–128)
 
 ```
-def _date_bound(value: str | None, *, end: bool) -> datetime | None
+def _browser(ctx: ToolContext) -> BuaSurface
 ```
 
-**Purpose**: Turns an optional date string from the search tool into a real UTC time boundary. It exists so memory searches can be limited to a clear start and end window.
+**Purpose**: Gets the one browser surface used for the current agent turn. It creates it on first use, reuses it for later browser tools in the same turn, and makes sure it will be closed during cleanup.
 
-**Data flow**: It receives either no value or an ISO-style date or date-time string, plus a flag saying whether this is the end of the range. If there is no value, it returns no boundary. If there is a date, it parses it, assumes UTC when no time zone is given, and for an end date with no time included it moves the boundary to the next midnight so the named day is included. The result is a `datetime` value or `None`; a badly shaped date raises an error that the tool layer can report.
+**Data flow**: It receives the current tool context, which contains things like the selected browser connection provider, the sandbox, the agent model, and cleanup registry. If a browser surface is already cached for this turn, it returns that. If not, it builds a new `BuaSurface`, stores it in a weak cache keyed by the cleanup object, registers its close method for later cleanup, and returns it. If there is no browser connection provider, it raises an error instead of trying to run without a browser.
 
-**Call relations**: The memory search tool calls this before searching. It converts the user's `start_date` and `end_date` fields into the time values that `MemorySearchService.search` can pass down to the memory store.
+**Call relations**: All browser tool handlers call this before doing real browser work. It is the shared doorway to `BuaSurface.__init__`, so navigation, reading, finding, form entry, screenshots, uploads, downloads, and tab operations all reuse the same browser connection within the turn.
 
-*Call graph*: called by 1 (memory_search_handler); 2 external calls (fromisoformat, timedelta).
-
-
-##### `MemorySearchService.search`  (lines 166–214)
-
-```
-async def search(self, queries: tuple[str, ...], subjects: frozenset[str], start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
-```
-
-**Purpose**: Runs the shared memory search workflow used by the tool and by other extensions. It searches both durable memory items and indexed source-page snippets, then returns a single set of readable matches.
-
-**Data flow**: It receives focused query strings, a set of subjects whose memory is allowed to be searched, and optional start and end dates. It gets the memory store from the extension context, runs all memory-item searches and all source-page searches in parallel, then interleaves the results so each query gets a fair chance. It removes duplicates, caps the result count, wraps each hit as a `MemoryMatch`, and returns a tuple of matches with text, kind, reference, and creation time.
-
-**Call relations**: The `memory_search_handler` builds this service when the agent uses the memory search tool. The manifest also registers it as the default memory search provider, so other parts of the system can use the same search behavior instead of inventing their own.
-
-*Call graph*: 5 external calls (__init__, __init__, gather, zip_longest, store_for).
+*Call graph*: called by 11 (_computer, _find, _form_input, _get_page_text, _navigate, _read_page, _tabs_close, _tabs_context, _tabs_create, _upload_file (+1 more)); 1 external calls (__init__).
 
 
-##### `match_line`  (lines 217–224)
+##### `_json_result`  (lines 131–132)
 
 ```
-def match_line(match: MemoryMatch) -> str
+def _json_result(reply: dict[str, JsonValue]) -> ToolResult
 ```
 
-**Purpose**: Formats one memory search result into a line of text the agent can read. It includes the snippet, the kind of result, and, when available, a reference that can be opened later.
+**Purpose**: Wraps a plain dictionary reply as a tool result containing JSON text. This gives the agent a consistent text response format for most browser tools.
 
-**Data flow**: It receives one `MemoryMatch`. It starts with the result kind and text. If the match has an object reference, it appends that reference and the date if known. It returns one plain text bullet line.
+**Data flow**: It receives a dictionary of JSON-safe values. It converts that dictionary into a JSON string, places the string inside a text content object, and returns a tool result containing that text. It does not change the original browser state or write files.
 
-**Call relations**: After `memory_search_handler` receives matches from `MemorySearchService.search`, it calls this helper for each match to build the final tool response shown to the agent.
+**Call relations**: Most tool handlers use this after receiving a reply from the browser surface. It is the final packaging step for navigation, tab operations, page reading, finding, form input, uploads, downloads, and cases where `computer` does not need to attach an image separately.
 
-*Call graph*: called by 1 (memory_search_handler).
-
-
-##### `memory_search_handler`  (lines 227–242)
-
-```
-async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult
-```
-
-**Purpose**: Implements the `memory_search` tool that the agent can call. It lets the agent look up stored facts and source-document snippets before answering a user.
-
-**Data flow**: It receives the tool context and validated search arguments. It checks that the extension context is present, converts optional date strings into time bounds, and searches the readable subjects for the current conversation. If nothing matches, it returns a short 'No matching memory' message. Otherwise it formats each match into text and returns that as the tool result.
-
-**Call relations**: The `manifest` function registers this as the handler for the `memory_search` tool. During a tool call, it relies on `_date_bound` for date parsing, `MemorySearchService.search` for the actual lookup, and `match_line` for the final readable output.
-
-*Call graph*: calls 2 internal fn (_date_bound, match_line); 3 external calls (__init__, __init__, __init__).
+*Call graph*: called by 11 (_computer, _find, _form_input, _get_page_text, _navigate, _read_page, _tabs_close, _tabs_context, _tabs_create, _upload_file (+1 more)); 3 external calls (__init__, __init__, dumps).
 
 
-##### `memory_update_handler`  (lines 245–259)
+##### `_required_str`  (lines 135–138)
 
 ```
-async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult
+def _required_str(value: JsonValue, field: str) -> str
 ```
 
-**Purpose**: Implements the `memory_update` tool that writes a durable memory item. The agent uses it when it learns a stable fact, preference, decision, event, or task-related memory worth keeping.
+**Purpose**: Checks that a value from a browser reply is a non-empty string. It is used when later code must decode or save that value and cannot safely continue if it is missing.
 
-**Data flow**: It receives the tool context and a validated memory write request. It checks that the extension context is present, decides the subject from the current conversation audience, builds a `MemoryWrite` record with the body, class, kind, confidence, and source reference, and commits it to the memory store. It returns a short confirmation naming the subject that received the memory.
+**Data flow**: It receives a value and the name of the field being checked. If the value is a non-empty string, it returns that string. If the value is missing, empty, or not a string, it raises a clear error naming the missing field.
 
-**Call relations**: The `manifest` function registers this as the handler for the `memory_update` tool. When the tool runs, this function hands the actual database write to the memory store returned by `store_for`.
+**Call relations**: `_computer` uses this before decoding a screenshot for workspace storage. `_wait_for_download` uses it before saving a downloaded filename and file contents. In both flows it acts like a safety checkpoint before touching the sandbox file system.
 
-*Call graph*: 4 external calls (__init__, __init__, __init__, store_for).
-
-
-##### `recall_hook`  (lines 262–292)
-
-```
-async def recall_hook(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Automatically finds memories relevant to a user's new prompt and injects them into the model's context. It is designed not to block the conversation if memory lookup fails.
-
-**Data flow**: It receives a hook context. If the event is not a user prompt submission, it does nothing. Otherwise it computes which memory subjects may be searched, tries to recall matching items within a short timeout, logs which memories were injected or what kind of error happened, filters out topic-only recalls, and returns extra context text when there are usable memories. If lookup fails or times out, it returns `None` so the user's turn continues without memory.
-
-**Call relations**: The `manifest` function registers this for the `user_prompt_submit` event. The wider system calls it before the model runs; it calls into the memory store for recall and returns an `InjectContext` only when it has safe, relevant memory to add.
-
-*Call graph*: 5 external calls (__init__, timeout, log, recall_subjects, store_for).
+*Call graph*: called by 2 (_computer, _wait_for_download).
 
 
-##### `index_memory`  (lines 295–304)
+##### `_navigate`  (lines 141–145)
 
 ```
-async def index_memory(ctx: ExtensionContext) -> None
+async def _navigate(ctx: ToolContext, args: NavigateInput) -> ToolResult
 ```
 
-**Purpose**: Runs the scheduled job that turns committed memory items into searchable index chunks. Without this, newly written memories might exist in storage but not be findable by semantic search.
+**Purpose**: Runs the browser navigation tool, such as opening a URL or moving through browser history. It lets the agent change what page a tab is showing.
 
-**Data flow**: It receives an extension context for a workspace. It checks that both the search index and embedding backend are available. Then it creates a `MemoryIndexer` with the index, embedding service, transaction support, text chunker, and page state storage, and runs it. The function returns nothing, but it updates indexing state and search data through the indexer.
+**Data flow**: It receives the tool context and validated navigation input. It converts the input to a JSON-friendly dictionary, leaving out empty values and the `user_description` field that is only for human timeline context. It sends the remaining navigation request to the current browser surface, then returns the browser reply as JSON text.
 
-**Call relations**: The `manifest` function registers this as the `memory_index` scheduled job. The job scheduler calls it for workspaces selected by `_items_awaiting_index`, and it delegates the detailed indexing work to `MemoryIndexer`.
+**Call relations**: This is the handler registered for the `navigate` tool. When the agent asks to navigate, this function gets the shared browser surface through `_browser`, hands off the browser action, and uses `_json_result` to package the answer.
 
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `index_pages`  (lines 307–323)
-
-```
-async def index_pages(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Responds to source-page changes by indexing page text and keeping a memory-side mirror of the page. This makes changed documents searchable through the memory system.
-
-**Data flow**: It receives a hook context. If the payload is not a page-change batch, it does nothing. If it is a page-change batch, it checks that indexing and embedding backends are available, builds a `PageIndexer`, and applies the delivered page changes. It returns no hook outcome, but the page index and mirror rows are updated.
-
-**Call relations**: The `manifest` function registers this for `page_change` events. The core runner delivers batches of page changes, and this function hands those changes to `PageIndexer` so they become searchable source snippets.
-
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
 
 
-##### `derive_facts`  (lines 326–337)
+##### `_tabs_context`  (lines 148–149)
 
 ```
-async def derive_facts(ctx: HookContext) -> HookOutcome
+async def _tabs_context(ctx: ToolContext, args: TabsContextInput) -> ToolResult
 ```
 
-**Purpose**: Responds to source-page changes by deriving durable fact memories from changed pages. It turns document content into remembered facts that can later be recalled directly.
+**Purpose**: Returns context about the browser tabs that are currently open. It helps the agent understand what pages exist before choosing where to act.
 
-**Data flow**: It receives a hook context. If the payload is not a page-change batch, it does nothing. If it is a page-change batch, it requires a model backend because fact derivation needs model reasoning. It creates a `FactDeriver` using the memory store and model, then applies it to the page changes. It returns no hook outcome, but it may write new facts and retire page-derived facts that were replaced.
+**Data flow**: It receives the tool context and the input model, though the current browser request does not need extra fields. It asks the shared browser surface for tab context using an empty request, then wraps the reply as JSON text.
 
-**Call relations**: The `manifest` function registers this as a second `page_change` consumer, separate from `index_pages`. The page-change runner calls it with batches, and it delegates the model-based extraction work to `FactDeriver`.
+**Call relations**: This is the handler for the `tabs_context` tool. It gets the shared browser surface through `_browser` and then immediately formats the returned tab information with `_json_result`.
 
-*Call graph*: 2 external calls (__init__, store_for).
+*Call graph*: calls 2 internal fn (_browser, _json_result).
 
 
-##### `consolidate_memory`  (lines 340–348)
+##### `_tabs_create`  (lines 152–154)
 
 ```
-async def consolidate_memory(ctx: ExtensionContext) -> None
+async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult
 ```
 
-**Purpose**: Runs the scheduled job that groups older related facts into higher-level summaries. This keeps memory useful as it grows, replacing clusters of small facts with broader semantic memories.
+**Purpose**: Creates a new browser tab, optionally starting it at a given URL. If no URL is provided, it opens a blank page.
 
-**Data flow**: It receives an extension context for a workspace. It checks that the embedding backend is available, then creates a `MemoryConsolidator` with embedding, transaction, workspace, and model information. It runs the consolidator. The function returns nothing, but the consolidator may create summary memories and mark original facts as superseded.
+**Data flow**: It receives the tool context and tab creation input. It builds a small request containing the requested URL, or `about:blank` as the default. It sends that to the browser surface and returns the result as JSON text.
 
-**Call relations**: The `manifest` function registers this as the `memory_consolidate` scheduled job. The scheduler uses `_consolidatable_workspaces` to choose likely workspaces, then calls this function to perform the consolidation pass.
+**Call relations**: This is the handler registered for the `tabs_create` tool. It asks `_browser` for the turn’s browser surface, delegates tab creation to it, and passes the reply through `_json_result`.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result).
+
+
+##### `_tabs_close`  (lines 157–161)
+
+```
+async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult
+```
+
+**Purpose**: Closes a browser tab, either the current one or a specific tab when an id is supplied. It lets the agent clean up pages it no longer needs.
+
+**Data flow**: It receives the tool context and close-tab input. It converts the input into a JSON-friendly request, skipping empty values and removing `user_description`. It sends that request to the browser surface, then returns the browser’s reply as JSON text.
+
+**Call relations**: This is the handler for the `tabs_close` tool. Like the other tab tools, it uses `_browser` to reach the shared browser surface and `_json_result` to produce the final tool response.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_upload_file`  (lines 164–168)
+
+```
+async def _upload_file(ctx: ToolContext, args: UploadFileInput) -> ToolResult
+```
+
+**Purpose**: Sets a file upload field on a web page using files from the shared workspace. It lets the agent upload documents without needing to manually operate the operating system file picker.
+
+**Data flow**: It receives the tool context plus an upload target reference and one or more workspace file paths. It removes the human-only description and sends the upload details to the browser surface. The browser surface performs the page-side upload action, and the reply comes back as JSON text.
+
+**Call relations**: This is the handler for the `upload_file` tool. It depends on `_browser` for browser access and `_json_result` for output formatting, while the actual upload behavior is delegated to the browser surface.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_read_page`  (lines 171–175)
+
+```
+async def _read_page(ctx: ToolContext, args: ReadPageInput) -> ToolResult
+```
+
+**Purpose**: Reads a structured view of the current web page, often based on the page’s accessibility tree, which is a browser-provided outline of visible and interactive content. This helps the agent understand what can be clicked, typed into, or read.
+
+**Data flow**: It receives the tool context and options such as depth, filter, page reference, or tab id. It converts those options into a JSON-friendly request, leaving out empty values and `user_description`. It sends the request to the browser surface and returns the structured page information as JSON text.
+
+**Call relations**: This is the handler for the `read_page` tool. It uses `_browser` to reach the active browser surface, lets that surface inspect the page, and then uses `_json_result` to deliver the page snapshot back to the agent.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_get_page_text`  (lines 178–182)
+
+```
+async def _get_page_text(ctx: ToolContext, args: GetPageTextInput) -> ToolResult
+```
+
+**Purpose**: Extracts raw text from the current browser page. It is useful when the agent needs the words on a page more than a structured list of controls.
+
+**Data flow**: It receives the tool context and optional tab id. It turns the input into a JSON-friendly request without empty values or `user_description`, asks the browser surface for page text, and returns the result as JSON text.
+
+**Call relations**: This is the handler for the `get_page_text` tool. It follows the standard flow of getting the shared browser surface with `_browser`, delegating the browser inspection, and packaging the response with `_json_result`.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_find`  (lines 185–189)
+
+```
+async def _find(ctx: ToolContext, args: FindInput) -> ToolResult
+```
+
+**Purpose**: Searches the current page for elements that match a query, such as text, names, roles, or URLs. It helps the agent locate the right button, link, field, or other page item before acting.
+
+**Data flow**: It receives the tool context and a search query, plus optional tab information. It converts the input into a JSON-friendly request, excluding empty values and `user_description`. It sends that request to the browser surface, which performs the search, then returns the matches as JSON text.
+
+**Call relations**: This is the handler for the `find` tool. It relies on `_browser` to access the browser surface, which may use the context’s finding/ranking hook, and then `_json_result` to send the findings back to the agent.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_form_input`  (lines 192–196)
+
+```
+async def _form_input(ctx: ToolContext, args: FormInputInput) -> ToolResult
+```
+
+**Purpose**: Sets the value of a form field or similar page control identified by a browser reference. It lets the agent fill in web forms in a targeted way.
+
+**Data flow**: It receives the tool context, a page reference, and the value to enter. It removes the human-facing `user_description`, keeps the actual form input details, and sends them to the browser surface. The browser surface changes the page field and returns a reply, which is wrapped as JSON text.
+
+**Call relations**: This is the handler for the `form_input` tool. It gets browser access from `_browser`, delegates the actual page edit to the browser surface, and formats the result through `_json_result`.
+
+*Call graph*: calls 2 internal fn (_browser, _json_result); 1 external calls (model_dump).
+
+
+##### `_computer`  (lines 199–217)
+
+```
+async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult
+```
+
+**Purpose**: Runs lower-level browser interactions such as mouse, keyboard, scroll, wait, and screenshot actions. It can also return a screenshot image and optionally save that screenshot into the shared workspace.
+
+**Data flow**: It receives the tool context and a list of computer-style actions. It sends those actions to the browser surface after removing `user_description`. The browser may reply with normal JSON fields and a base64-encoded screenshot, which is image data written as text. If `save_to_workspace` is true, the function checks that the screenshot exists, decodes it into bytes, writes it to the sandbox at the requested path or a default screenshot path, and adds that path to the reply. If a screenshot is present, it returns both JSON text and an image content item; otherwise it returns only JSON text.
+
+**Call relations**: This is the handler for the `computer` tool. It starts by using `_browser` to perform the actions. It uses `_required_str` when a screenshot must be saved, and it uses `_json_result` only for replies that do not need a separate image attachment.
+
+*Call graph*: calls 3 internal fn (_browser, _json_result, _required_str); 6 external calls (__init__, __init__, __init__, b64decode, model_dump, dumps).
+
+
+##### `_wait_for_download`  (lines 220–228)
+
+```
+async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> ToolResult
+```
+
+**Purpose**: Waits for a browser download to finish and saves the downloaded file into the shared workspace. This turns a browser-only download into a normal workspace file path that later steps can use.
+
+**Data flow**: It receives the tool context plus optional download id, target path, and timeout. It asks the browser surface to wait for the download and return its filename and base64-encoded contents. It checks that both required strings are present, decodes the file bytes, writes them into the sandbox under the requested folder or the default downloads folder, and returns JSON containing the saved path, filename, and reported size.
+
+**Call relations**: This is the handler for the `wait_for_download` tool. It uses `_browser` to receive the completed download, `_required_str` to make sure the needed file data is present, and `_json_result` to report the workspace path back to the agent.
+
+*Call graph*: calls 3 internal fn (_browser, _json_result, _required_str); 2 external calls (b64decode, model_dump).
+
+
+### `extensions/browser/ufo_ext_browser/bua/backend.py`
+
+`orchestration` · `per-turn browser tool handling and turn cleanup`
+
+A browser tool call like “navigate,” “find,” or “upload this file” should not have to know where Chrome is running. It might be inside the current sandbox, or it might be a remote hosted browser. This file hides that difference behind BuaSurface, a small “tool surface” used for one conversation turn.
+
+The first time a browser action is requested, BuaSurface asks a CDP provider for a lease. CDP means Chrome DevTools Protocol, the control channel used to drive Chrome. A lease is like borrowing a car key: it gives access to a browser session and must be returned. BuaSurface then creates a BrowserSession, which does the direct browser work.
+
+The file also protects recovery after crashes. It stores a durable token for the leased browser. If the process crashes before cleanup, a replayed turn can reattach to the same live browser instead of opening a new blank one. Normal cleanup removes that token so later turns do not reconnect to a released session.
+
+Uploads and downloads also pass through this surface. Uploads are resolved as workspace paths, copied to wherever the leased browser can see them, and checked so the page really received the bytes. Downloads are fetched from the lease, base64-encoded, and returned with a safe filename.
+
+#### Function details
+
+##### `BuaSurface._open`  (lines 60–73)
+
+```
+async def _open(self) -> BrowserSession
+```
+
+**Purpose**: Opens or returns the current browser session for this turn. It avoids connecting to Chrome until a browser tool actually needs it.
+
+**Data flow**: It starts with the BuaSurface’s stored session and lease state. If a session already exists, it returns it. Otherwise it gets or creates a lease, asks the lease for a browser endpoint and download location, builds a BrowserSession, opens it, stores it, and returns it.
+
+**Call relations**: All user-facing browser actions come through this helper first. When there is no lease yet, it asks BuaSurface._acquire_lease for one, then hands the endpoint into BrowserSession so later calls can navigate, read, type, upload, or download through the same connection.
+
+*Call graph*: calls 2 internal fn (_acquire_lease, __init__); called by 11 (computer, find, form_input, get_page_text, navigate, read_page, tabs_close, tabs_context, tabs_create, upload_file (+1 more)).
+
+
+##### `BuaSurface._acquire_lease`  (lines 75–88)
+
+```
+async def _acquire_lease(self) -> CdpLease
+```
+
+**Purpose**: Gets access to a browser session, preferring to reattach to a still-live session after a crash recovery. If recovery is not possible, it creates a fresh lease.
+
+**Data flow**: It reads any saved token for this conversation. If a token exists, it asks the provider to reattach. If that old session is gone, it clears the token. Then it leases a new browser session, stores the new token, and returns the lease.
+
+**Call relations**: BuaSurface._open calls this when it needs browser access and has no lease yet. It uses BuaSurface._stored_token and BuaSurface._store_token so crash recovery and normal fresh starts share one path.
+
+*Call graph*: calls 2 internal fn (_store_token, _stored_token); called by 1 (_open).
+
+
+##### `BuaSurface._stored_token`  (lines 90–94)
+
+```
+async def _stored_token(self) -> str | None
+```
+
+**Purpose**: Looks up the saved browser reattach token for this conversation. The token is what lets a replayed turn reconnect to the same browser after a hard crash.
+
+**Data flow**: It checks whether both a scoped store and conversation ID are available. If not, it returns nothing. If they are, it reads the token key from the store and returns the value only if it is a string.
+
+**Call relations**: BuaSurface._acquire_lease calls this before deciding whether to reattach or create a new lease. It is the read side of the recovery-token mechanism.
+
+*Call graph*: called by 1 (_acquire_lease).
+
+
+##### `BuaSurface._store_token`  (lines 96–99)
+
+```
+async def _store_token(self, token: str | None) -> None
+```
+
+**Purpose**: Writes or clears the saved browser reattach token for this conversation. This keeps recovery possible after crashes, but prevents later turns from reusing a session that was properly released.
+
+**Data flow**: It receives a token string or null. If store information is missing, it does nothing. Otherwise it writes that value under the conversation-specific token key.
+
+**Call relations**: BuaSurface._acquire_lease stores a fresh token or clears a dead one. BuaSurface.aclose clears the token during normal shutdown so only crash-recovery paths can reattach.
+
+*Call graph*: called by 2 (_acquire_lease, aclose).
+
+
+##### `BuaSurface.navigate`  (lines 101–106)
+
+```
+async def navigate(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Navigates a browser tab to a requested URL. It validates that the URL is actually text before sending it to the browser.
+
+**Data flow**: It receives tool arguments, opens the browser session, reads the url field, checks that it is a string, converts the optional tab_id into an integer when possible, and returns the browser session’s navigation result.
+
+**Call relations**: This is one of the public tool methods. It uses BuaSurface._open to ensure the browser exists and _tab_id to normalize the optional tab choice before handing the work to BrowserSession.
+
+*Call graph*: calls 2 internal fn (_open, _tab_id).
+
+
+##### `BuaSurface.tabs_context`  (lines 108–110)
+
+```
+async def tabs_context(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Returns information about the browser’s current tabs. A tool can use this to understand what pages are open and which tab it may want to act on.
+
+**Data flow**: It receives the tool arguments, opens the browser session, asks the session for tab context, and returns that context unchanged.
+
+**Call relations**: This public tool method is a thin route into BrowserSession. Its only setup step is BuaSurface._open, which makes sure a valid browser connection exists.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.tabs_create`  (lines 112–115)
+
+```
+async def tabs_create(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Creates a new browser tab, optionally starting at a requested URL. If no usable URL is supplied, it opens a blank page.
+
+**Data flow**: It receives arguments, opens the browser session, reads the optional url value, replaces missing or empty non-text values with about:blank, then returns the result from the browser session.
+
+**Call relations**: This public tab tool depends on BuaSurface._open for the connection, then delegates the actual tab creation to BrowserSession.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.tabs_close`  (lines 117–119)
+
+```
+async def tabs_close(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Closes a browser tab according to the provided arguments. This lets the tool surface tidy up or switch away from pages the user no longer needs.
+
+**Data flow**: It receives the close arguments, opens the browser session, passes those arguments to the session’s tab-closing method, and returns the session’s reply.
+
+**Call relations**: Like the other tab tools, it uses BuaSurface._open for setup and leaves the browser-specific details to BrowserSession.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.upload_file`  (lines 121–142)
+
+```
+async def upload_file(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Attaches workspace files to a page file input, even when the browser is remote. It makes sure the page gets files from the workspace rather than arbitrary paths on the host.
+
+**Data flow**: It receives tool arguments, opens the browser, verifies that files is a list of non-empty strings, turns each into a workspace-safe path, asks the lease to place each file where Chrome can read it, and passes those placed paths to the browser session. After attaching, it waits until uploaded bytes have really arrived, then returns the browser reply.
+
+**Call relations**: This public upload tool combines several pieces: BuaSurface._open gives a session, BuaSurface._lease gives transport access, workspace_path confines paths to the workspace, BuaSurface._read supplies bytes when needed, and BuaSurface._settle_upload verifies the page actually received the files.
+
+*Call graph*: calls 3 internal fn (_lease, _open, _settle_upload); 2 external calls (partial, workspace_path).
+
+
+##### `BuaSurface._settle_upload`  (lines 144–164)
+
+```
+async def _settle_upload(self, session: BrowserSession, args: dict[str, JsonValue]) -> None
+```
+
+**Purpose**: Waits for uploaded files to be fully present in the page before returning. This prevents a quiet failure where a remote browser sees a filename but the file bytes have not arrived yet.
+
+**Data flow**: It receives a browser session and the upload arguments. If no bytes were shipped by this surface, it returns immediately. Otherwise it repeatedly asks the browser what file sizes are attached, compares them with the sizes that were sent, retries the attach after short sleeps, and raises an error if the expected bytes never appear.
+
+**Call relations**: BuaSurface.upload_file calls this after the first attach. It talks back to BrowserSession to inspect attached sizes and repeat the upload if the remote transport is still catching up.
+
+*Call graph*: calls 2 internal fn (attached_sizes, upload_file); called by 1 (upload_file); 1 external calls (sleep).
+
+
+##### `BuaSurface._lease`  (lines 166–169)
+
+```
+def _lease(self) -> CdpLease
+```
+
+**Purpose**: Returns the active browser transport lease, or fails clearly if code asks for it before one exists. This protects file transfer paths from silently operating without browser access.
+
+**Data flow**: It reads the BuaSurface’s lease field. If a lease is present, it returns it. If not, it raises a runtime error.
+
+**Call relations**: BuaSurface.upload_file uses this when placing files for the browser. BuaSurface.wait_for_download uses it when fetching downloaded bytes from wherever the browser stored them.
+
+*Call graph*: called by 2 (upload_file, wait_for_download).
+
+
+##### `BuaSurface._read`  (lines 171–194)
+
+```
+async def _read(self, path: str) -> bytes
+```
+
+**Purpose**: Reads a workspace file’s bytes from the sandbox for upload to a remote browser. It checks the size first so an oversized upload does not fill this process’s memory.
+
+**Data flow**: It receives a workspace path. It requires a sandbox, quotes the path safely for shell use, asks the sandbox for the file size, rejects unreadable or too-large files, base64-reads the file through the sandbox, decodes the content in a worker thread, records the byte count, and returns the raw bytes.
+
+**Call relations**: BuaSurface.upload_file passes this function as the byte reader to the lease’s file-placement step. It is only used when the transport needs to ship file contents rather than letting Chrome read the workspace path directly.
+
+*Call graph*: 2 external calls (to_thread, quote).
+
+
+##### `BuaSurface.read_page`  (lines 196–198)
+
+```
+async def read_page(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Asks the browser session for a structured reading of the current page. This is used when a tool needs a browser-aware view of page content.
+
+**Data flow**: It receives read arguments, opens the browser session, forwards the arguments to the session, and returns the session’s page-reading result.
+
+**Call relations**: This public tool method is a direct wrapper around BrowserSession. BuaSurface._open supplies the session before the page read begins.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.get_page_text`  (lines 200–202)
+
+```
+async def get_page_text(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Gets text from the current page. This gives the caller a simpler text-focused view instead of a richer browser structure.
+
+**Data flow**: It receives arguments, opens the browser session, forwards the arguments to the session’s text extraction method, and returns the result.
+
+**Call relations**: The browser tool layer calls this when it wants page text. BuaSurface._open prepares the session, and BrowserSession performs the actual extraction.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.find`  (lines 204–206)
+
+```
+async def find(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Searches for something on the page, optionally using a host-side find completer to improve the search. A completer is helper logic that can finish or refine a find request.
+
+**Data flow**: It receives find arguments, opens the browser session, sends the arguments plus the optional find completer to the session, and returns the search result.
+
+**Call relations**: This public find tool uses BuaSurface._open for the browser connection, then hands the search to BrowserSession together with the completer stored on the surface.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.form_input`  (lines 208–210)
+
+```
+async def form_input(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Fills or changes form fields on the page according to the tool arguments. This is how higher-level browser tools type into web forms.
+
+**Data flow**: It receives form input arguments, opens the browser session, forwards the arguments to the session, and returns the session’s result.
+
+**Call relations**: The method acts as the surface-level entry for form input. It relies on BuaSurface._open for setup and BrowserSession for the browser interaction.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.computer`  (lines 212–214)
+
+```
+async def computer(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Runs lower-level computer-style browser actions, such as interactions that are closer to operating the page directly. It gives the tool layer access to the browser session’s general control path.
+
+**Data flow**: It receives action arguments, opens the browser session, passes the arguments to the session’s computer method, and returns the result.
+
+**Call relations**: This public method is another route through the same per-turn browser session. BuaSurface._open ensures the session exists before BrowserSession performs the requested action.
+
+*Call graph*: calls 1 internal fn (_open).
+
+
+##### `BuaSurface.wait_for_download`  (lines 216–232)
+
+```
+async def wait_for_download(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Waits until the browser finishes a download, then returns the downloaded bytes as base64 text with a safe filename. This works whether the browser saved the file in the sandbox or in remote provider storage.
+
+**Data flow**: It receives wait arguments, opens the browser session, waits for a download record, asks the lease to fetch the download bytes by its identifier, base64-encodes those bytes in a worker thread, cleans the suggested filename down to one safe path segment, and returns filename, content, and size.
+
+**Call relations**: This public download tool combines BrowserSession, which knows when the page downloaded something, with BuaSurface._lease, which knows where the bytes live. It uses _file_name before returning so later code can safely write the file into a workspace path.
+
+*Call graph*: calls 3 internal fn (_lease, _open, _file_name); 1 external calls (to_thread).
+
+
+##### `BuaSurface.aclose`  (lines 234–248)
+
+```
+async def aclose(self) -> None
+```
+
+**Purpose**: Closes the browser session, releases the lease, and clears the recovery token at the end of a normal turn. This prevents paid or remote browser sessions from being orphaned and prevents later turns from reconnecting to released sessions.
+
+**Data flow**: It starts from the stored session and lease. If a session exists, it closes it and clears the session field. Whether or not that close succeeds, it then closes the lease, clears the lease field, and stores a null token.
+
+**Call relations**: Turn cleanup calls this after browser work is done. It uses BuaSurface._store_token to remove the durable token; if a hard crash skips this function, the token remains available for BuaSurface._acquire_lease during recovery.
+
+*Call graph*: calls 1 internal fn (_store_token).
+
+
+##### `_file_name`  (lines 251–257)
+
+```
+def _file_name(suggested: str) -> str
+```
+
+**Purpose**: Turns a download’s suggested name into a safe single filename. It blocks names like ../notes.md from escaping the folder where the caller meant to save the file.
+
+**Data flow**: It receives the browser’s suggested filename, takes only the last path segment using PurePosixPath, and returns a default name if the result is empty, dot, or dot-dot. Otherwise it returns the cleaned name.
+
+**Call relations**: BuaSurface.wait_for_download calls this before returning a downloaded file to the caller. It is the safety check between a web page’s chosen filename and later workspace writes.
+
+*Call graph*: called by 1 (wait_for_download); 1 external calls (PurePosixPath).
+
+
+##### `_tab_id`  (lines 260–271)
+
+```
+def _tab_id(value: JsonValue) -> int | None
+```
+
+**Purpose**: Converts a loose tab identifier from JSON-like tool arguments into an integer tab ID when possible. It treats missing, false-like, or unsuitable values as no specific tab.
+
+**Data flow**: It receives a JSON value. Booleans and unsupported values become null, integers pass through, floats are truncated to integers, and non-empty strings are parsed as integers.
+
+**Call relations**: BuaSurface.navigate uses this when a navigation request includes an optional tab_id. The normalized value is then passed to BrowserSession so navigation targets the intended tab or defaults naturally.
+
+*Call graph*: called by 1 (navigate).
+
+
+### `extensions/browser/ufo_ext_browser/bua/session.py`
+
+`orchestration` · `per browser turn: session startup, browser tool calls, and teardown`
+
+A BrowserSession is the project’s bridge into Chrome. Chrome is controlled through CDP, the Chrome DevTools Protocol, which is a WebSocket-based control channel that lets another program inspect pages, click, type, watch downloads, and listen for browser events. Without this file, the rest of the browser tools would have no single place to open Chrome, subscribe to important events, or remember what is currently happening.
+
+The session starts with basic state: known tabs, active downloads, out-of-process frame sessions, dialog messages, keyboard/platform details, and a settle tracker that notices when the page is still loading network resources. When opened, it resolves the CDP address, connects to Chrome, asks Chrome what platform it is running on, enables download events, starts discovering tabs, creates a blank tab, and attaches listeners for downloads, page loading, dialogs, and tab creation or destruction.
+
+Most user-facing methods in this file are thin doorways into more focused helper objects. For example, tab actions go through BrowserTabs, page reading goes through BrowserContent, form work goes through BrowserForms, JavaScript work goes through BrowserRuntime, and low-level mouse/keyboard-style control goes through BrowserComputer. Think of BrowserSession as the front desk of a hotel: it knows who is checked in, receives alerts, and sends each request to the right specialist. Closing the session shuts tabs, closes the CDP connection, cancels background work, and resets all remembered state.
+
+#### Function details
+
+##### `BrowserSession.__init__`  (lines 48–66)
+
+```
+def __init__(self, cdp: CdpEndpoint | None=None, model: str | None=None, download_dir: str='') -> None
+```
+
+**Purpose**: Creates a new session object and fills it with empty, ready-to-use state. It does not connect to Chrome yet; it only prepares the place where tabs, downloads, dialogs, and background tasks will be tracked.
+
+**Data flow**: It receives an optional CDP endpoint, optional model name, and download directory. It chooses the coordinate size to use for screenshots, stores the connection settings, creates empty lists and maps for browser state, and creates fresh helpers for settling and tab events. The result is a BrowserSession instance that is ready to be opened.
+
+**Call relations**: BuaSurface._open creates this object before the browser can be used. During setup it creates the settle tracker and tab event tracker, and asks the coordinate helper whether the requested model needs a special coordinate space.
+
+*Call graph*: calls 1 internal fn (__init__); called by 1 (_open); 2 external calls (__init__, model_coordinate_space).
+
+
+##### `BrowserSession.open`  (lines 68–75)
+
+```
+async def open(self) -> None
+```
+
+**Purpose**: Opens the connection to Chrome if it is not already open. It protects callers from double-opening the same session.
+
+**Data flow**: It checks whether a connection already exists. If not, it runs the bootstrap process; if bootstrapping fails partway through, it closes anything that was opened and then reports the original failure. After success, the session has a live CDP connection and an initial tab.
+
+**Call relations**: The async context manager calls this when entering a `with` block. It delegates the real setup to BrowserSession._bootstrap and uses BrowserSession.close as cleanup if setup goes wrong.
+
+*Call graph*: calls 2 internal fn (_bootstrap, close); called by 1 (__aenter__).
+
+
+##### `BrowserSession._bootstrap`  (lines 77–113)
+
+```
+async def _bootstrap(self) -> None
+```
+
+**Purpose**: Does the detailed startup work needed to make Chrome usable through this session. It connects to CDP, registers event listeners, enables downloads, discovers tabs, and creates the first blank tab.
+
+**Data flow**: It reads the stored CDP endpoint and headers, resolves them to a WebSocket URL, opens a CDP connection, asks Chrome for version details, and records whether the browser appears to be on macOS. It then builds reader/helper objects for tabs, downloads, and dialogs, connects Chrome events to their callbacks, enables download behavior, starts target discovery, creates an about:blank tab, and stores the attached tab in the session.
+
+**Call relations**: BrowserSession.open calls this as the main startup phase. It hands tab events to BrowserTabs, download events to BrowserDownloads, dialog events to BrowserDialogs, and network/page loading events to the settle and tab tracking machinery.
+
+*Call graph*: calls 4 internal fn (open, dialog_reader, download_reader, tab_reader); called by 1 (open); 3 external calls (__init__, resolve_ws_url, as_str).
+
+
+##### `BrowserSession.close`  (lines 115–135)
+
+```
+async def close(self) -> None
+```
+
+**Purpose**: Shuts down the session and returns it to a clean empty state. It is designed to be safe even if the browser is already partly closed or in an error state.
+
+**Data flow**: It attempts to close each known Chrome tab, closes the CDP connection, and then clears all session memory: connection, tabs, frame sessions, downloads, scroll state, settle tracker, dialogs, background tasks, and tab events. It cancels any background tasks that were spawned by the session.
+
+**Call relations**: The async context manager calls this on exit, and BrowserSession.open also calls it if startup fails. It creates fresh settle and tab event trackers so a later open starts cleanly.
+
+*Call graph*: calls 1 internal fn (__init__); called by 2 (__aexit__, open); 1 external calls (__init__).
+
+
+##### `BrowserSession.__aenter__`  (lines 137–139)
+
+```
+async def __aenter__(self) -> Self
+```
+
+**Purpose**: Lets BrowserSession be used with Python’s async context manager pattern. This means callers can write code that automatically opens the browser session before use.
+
+**Data flow**: It receives the session itself, opens it, and returns the same session to the caller. Afterward, the caller can use the browser tools with a live connection.
+
+**Call relations**: It is the entry side of the context-manager story. It simply calls BrowserSession.open so all normal startup rules and cleanup-on-failure behavior are reused.
+
+*Call graph*: calls 1 internal fn (open).
+
+
+##### `BrowserSession.__aexit__`  (lines 141–142)
+
+```
+async def __aexit__(self, *exc: object) -> None
+```
+
+**Purpose**: Automatically closes the browser session when an async context manager block ends. This helps prevent leftover tabs, connections, or background tasks.
+
+**Data flow**: It receives any exception information from the context manager, ignores the details, and closes the session. Afterward, the session’s stored browser state is reset.
+
+**Call relations**: It is the exit side of the context-manager story. It delegates shutdown to BrowserSession.close.
+
+*Call graph*: calls 1 internal fn (close).
+
+
+##### `BrowserSession.connection`  (lines 144–147)
+
+```
+def connection(self) -> CdpConnection
+```
+
+**Purpose**: Returns the live CDP connection for helpers that need to talk directly to Chrome. If the session has not been opened, it raises a clear browser-unavailable error.
+
+**Data flow**: It checks the stored connection field. If the field is empty, it raises BrowserUnavailable; otherwise it returns the existing CdpConnection object unchanged.
+
+**Call relations**: Reader and helper objects use this kind of access when they need to send CDP commands. It is the guardrail that prevents browser work from silently running without an open browser.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `_items_awaiting_index`  (lines 351–356)
+##### `BrowserSession.spawn_background`  (lines 149–152)
 
 ```
-def _items_awaiting_index() -> sa.Select[tuple[UUID]]
+def spawn_background(self, coro: Coroutine[Any, Any, None]) -> None
 ```
 
-**Purpose**: Builds the database query used to find workspaces that have memory items not yet indexed. It helps the scheduler avoid running the indexing job where there is no indexing work to do.
+**Purpose**: Starts an asynchronous background job and remembers it so it can be cancelled later. This is useful for browser work that must continue while the main call moves on.
 
-**Data flow**: It takes no direct input. It builds a SQL query that selects distinct workspace IDs from memory items whose embedding digest is missing, which means they still need embedding and indexing. It returns the query object rather than executing it.
+**Data flow**: It receives a coroutine, schedules it as an asyncio task, stores that task in the session’s background task set, and arranges for the task to remove itself from the set when finished.
 
-**Call relations**: The `manifest` function passes this query builder to `owner_candidates` for the `memory_index` job. The job system uses it to decide which workspace owners should receive an `index_memory` run.
+**Call relations**: Other browser helpers can use this when they need side work. BrowserSession.close later cancels whatever tasks are still remembered, so background work does not leak past the session lifetime.
 
-*Call graph*: 1 external calls (select).
+*Call graph*: 1 external calls (ensure_future).
 
 
-##### `_consolidatable_workspaces`  (lines 359–375)
+##### `BrowserSession.is_top_level_frame`  (lines 154–155)
 
 ```
-def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]
+def is_top_level_frame(self, session_id: str | None, frame_id: Json | None) -> bool
 ```
 
-**Purpose**: Builds the database query used to find workspaces where memory consolidation is actually worthwhile. It looks for enough old, live facts to form a meaningful cluster.
+**Purpose**: Asks whether a browser frame is the main frame of a tab rather than an embedded frame. This matters because page events can come from many nested frames.
 
-**Data flow**: It takes no direct input. It computes an age cutoff based on the current UTC time, then builds a SQL query for workspaces with at least the required number of facts that are old enough, not page-derived, and not already superseded. It returns the query object rather than executing it.
+**Data flow**: It receives a CDP session id and frame id, creates a BrowserTabs helper, and asks that helper to decide whether the frame is top-level. It returns a true-or-false answer.
 
-**Call relations**: The `manifest` function passes this query builder to `owner_candidates` for the `memory_consolidate` job. The scheduler uses it before calling `consolidate_memory`, so consolidation is not attempted for workspaces with too few or too-new facts.
+**Call relations**: This method is a small doorway into BrowserTabs. It is used when event handling needs to know whether a loading or frame event describes the main page.
 
-*Call graph*: 2 external calls (now, select).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `manifest`  (lines 378–454)
+##### `BrowserSession.init_session`  (lines 157–158)
 
 ```
-def manifest() -> Manifest
+async def init_session(self, session_id: str) -> None
 ```
 
-**Purpose**: Creates the extension manifest, which is the host system's map of everything this memory extension provides. This is the central registration point for tools, hooks, jobs, objects, skills, search providers, and UI routes.
+**Purpose**: Initializes a newly attached CDP session so it is ready for tab/page work. This usually means enabling the browser domains and listeners needed for that target.
 
-**Data flow**: It takes no input. It builds a `Manifest` containing the extension name and version, the `memory_search` and `memory_update` tool definitions, the memory object kind, hook registrations for prompt recall and page changes, scheduled job definitions, the memory skill folder, the default memory search provider, and the memory surface routes. It returns that manifest to the host application.
+**Data flow**: It receives a CDP session id, creates a BrowserTabs helper, and asks it to initialize that session. The outcome is side effects in Chrome and session state rather than a returned value.
 
-**Call relations**: The host loads this function during extension startup. The objects it returns tell the rest of the system when to call `memory_search_handler`, `memory_update_handler`, `recall_hook`, `index_pages`, `derive_facts`, `index_memory`, and `consolidate_memory`.
+**Call relations**: Tab attachment flows call this through the BrowserTabs helper. The session acts as the stable owner of shared state while BrowserTabs performs the tab-specific setup.
 
-*Call graph*: 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, owner_candidates).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-### `extensions/memory/ufo_ext_memory/condenser.py`
+##### `BrowserSession.page`  (lines 160–161)
 
-`domain_logic` · `page-change processing and periodic background consolidation`
-
-The memory system can store many small pieces of information, but raw page text and repeated facts are not ideal for recall. This file acts like a careful editor. First, `FactDeriver` watches batches of changed source pages and asks a language model to pull out durable, standalone facts. It only replaces old page-derived facts after a new fact has actually been written, so a bad model reply does not accidentally erase useful memory. Deleted pages are treated differently: their facts are retired because there is no replacement page left to read from.
-
-Second, `MemoryConsolidator` is a background cleaner for older facts. It looks for facts that are old enough, still active, and not tied directly to a source page. It groups them by subject, embeds their text into numeric vectors, then clusters facts whose vectors point in a similar direction. An embedding is a model-made number list that lets the code compare meanings mathematically. For each related cluster, it asks the model for one concise summary, writes that as a `semantic` memory item, and marks the original facts as superseded. Think of it like replacing several sticky notes about the same topic with one clearer note. Model calls are made before database write transactions where possible, so the database is not kept waiting on slow model work.
-
-#### Function details
-
-##### `FactDeriver.apply`  (lines 113–127)
-
-```
-async def apply(self, changes: tuple[PageChange, ...]) -> None
-```
-
-**Purpose**: This is the main entry for turning page changes into fact memories. It decides which changed pages are worth sending to the model, and it retires facts for pages that have disappeared.
-
-**Data flow**: It receives a batch of page changes. It asks the memory store which pages are still live, retires facts for missing pages, filters out deleted or very short pages, then sends the remaining pages onward in small groups. After a group successfully produces replacement facts, it tells the store to supersede older facts for those pages.
-
-**Call relations**: The page-change runner calls this method when it has delivered a batch of changes. `apply` splits the work into bounded chunks with `itertools.batched`, calls `FactDeriver._derive` for each chunk, and only then asks the store to retire replaced page facts.
-
-*Call graph*: calls 1 internal fn (_derive); 1 external calls (batched).
-
-
-##### `FactDeriver._derive`  (lines 129–179)
-
-```
-async def _derive(self, pages: tuple[PageChange, ...]) -> tuple[PageChange, ...]
-```
-
-**Purpose**: This function does the careful middle step between a page batch and committed fact memories. It makes sure each page is still at the same revision, parses the model's answer, writes valid facts, and reports which pages really got replacements.
-
-**Data flow**: It receives a small group of page changes. It rechecks the current page state so it does not write facts for stale content, asks `_extract` for raw model output, parses that output with `_parse_facts`, filters out low-notability or mismatched facts, and commits each accepted fact as a `MemoryWrite`. It returns only the pages for which at least one fact was actually written.
-
-**Call relations**: `FactDeriver.apply` calls this after filtering and batching pages. `_derive` calls `_extract` to talk to the model, `_parse_facts` to turn the model reply into validated fact objects, and creates `MemoryWrite` records that the store can commit.
-
-*Call graph*: calls 2 internal fn (_extract, _parse_facts); called by 1 (apply); 1 external calls (__init__).
-
-
-##### `FactDeriver._extract`  (lines 181–198)
-
-```
-async def _extract(self, pages: tuple[PageChange, ...]) -> str
-```
-
-**Purpose**: This function makes one bounded language-model request to extract facts from a small group of pages. It keeps the request size under control by trimming page bodies before sending them.
-
-**Data flow**: It receives page changes, builds a compact JSON payload containing each page id and shortened body text, wraps that payload in a model request with extraction instructions, and sends it through the configured model access object. It returns the raw text reply from the model.
-
-**Call relations**: `FactDeriver._derive` calls this when it has confirmed that a page group is still current. `_extract` builds `Message` and `ModelRequest` objects and uses JSON formatting so the model sees the pages in a predictable shape.
-
-*Call graph*: called by 1 (_derive); 3 external calls (__init__, __init__, dumps).
-
-
-##### `MemoryConsolidator.run`  (lines 228–237)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: This is the top-level background job that turns clusters of old related facts into single semantic summaries. If no model is configured, it safely does nothing.
-
-**Data flow**: It starts with no direct input beyond the consolidator's configured database, workspace, embedding client, and optional model. It reads candidate old facts, groups them by subject, skips subjects with too few facts, embeds their text, clusters similar facts, and consolidates large enough clusters. The result is new semantic memories and superseded old facts, if suitable clusters exist.
-
-**Call relations**: A scheduler or periodic job calls `run`. It coordinates the whole process by calling `_aged_facts`, `_buckets`, `_embed`, `_clusters`, and `_consolidate` in order.
-
-*Call graph*: calls 5 internal fn (_aged_facts, _buckets, _clusters, _consolidate, _embed).
-
-
-##### `MemoryConsolidator._aged_facts`  (lines 239–269)
-
-```
-async def _aged_facts(self) -> tuple[_AgedFact, ...]
-```
-
-**Purpose**: This function finds old active fact memories that are eligible for consolidation. It deliberately ignores facts already superseded and facts that came directly from pages.
-
-**Data flow**: It calculates a cutoff time, opens a database transaction, and selects a limited number of fact rows from the current workspace that are older than the cutoff and still active. It converts each database row into an `_AgedFact` object and returns them as a tuple.
-
-**Call relations**: `MemoryConsolidator.run` calls this first to get the raw material for consolidation. It uses SQLAlchemy to build the database query and `_AgedFact` objects to carry the selected fields through later steps.
-
-*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
-
-
-##### `MemoryConsolidator._buckets`  (lines 271–280)
-
-```
-def _buckets(self, facts: tuple[_AgedFact, ...]) -> tuple[tuple[str, tuple[_AgedFact, ...]], ...]
-```
-
-**Purpose**: This function groups candidate facts by subject so unrelated topics are not merged together. It also caps each subject bucket so one busy subject cannot make the job too large.
-
-**Data flow**: It receives aged facts, builds groups keyed by their subject text, sorts each group by recency, keeps only the newest facts up to a fixed limit, and returns subject-and-facts pairs.
-
-**Call relations**: `MemoryConsolidator.run` calls this after reading aged facts. The returned buckets decide which facts will be embedded and clustered together.
-
-*Call graph*: called by 1 (run).
-
-
-##### `MemoryConsolidator._embed`  (lines 282–286)
-
-```
-async def _embed(self, facts: tuple[_AgedFact, ...]) -> dict[UUID, tuple[float, ...]]
-```
-
-**Purpose**: This function converts fact text into embeddings, which are number lists used to compare meaning. Similar meanings should produce vectors that point in similar directions.
-
-**Data flow**: It receives a group of facts, trims each fact body to a safe size, sends the text list to the embedding client, and returns a dictionary from fact id to embedding vector.
-
-**Call relations**: `MemoryConsolidator.run` calls this for each subject bucket that has enough facts. The vectors it returns are then used by `_clusters` to decide which facts belong together.
-
-*Call graph*: called by 1 (run).
-
-
-##### `MemoryConsolidator._clusters`  (lines 288–307)
-
-```
-def _clusters(self, facts: tuple[_AgedFact, ...], embeddings: dict[UUID, tuple[float, ...]]) -> tuple[tuple[_AgedFact, ...], ...]
-```
-
-**Purpose**: This function groups facts that appear semantically similar based on their embeddings. It uses a simple newest-first approach, so newer facts become the heads of clusters.
-
-**Data flow**: It receives facts and their embedding vectors. For each fact, newest first, it compares the fact's vector with the first fact in each existing cluster using cosine similarity, which measures whether two vectors point in the same direction. It either adds the fact to a matching cluster or starts a new one, then returns all clusters.
-
-**Call relations**: `MemoryConsolidator.run` calls this after embeddings are available. `_clusters` calls `_cosine` for the similarity check, and its output tells `run` which clusters are large enough to send to `_consolidate`.
-
-*Call graph*: calls 1 internal fn (_cosine); called by 1 (run).
-
-
-##### `MemoryConsolidator._consolidate`  (lines 309–367)
-
-```
-async def _consolidate(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> None
-```
-
-**Purpose**: This function replaces one cluster of related facts with one semantic summary. It is careful to avoid writing a summary if the underlying facts changed while the model was working.
-
-**Data flow**: It receives a model and a cluster of facts. It first asks `_summarize` for summary text; if there is none, it stops. Then it opens a database transaction, reloads the donor facts, checks that their bodies and confidence values still match what it expected, inserts a new semantic memory item, and marks the original facts as superseded by that new item.
-
-**Call relations**: `MemoryConsolidator.run` calls this for each cluster that is large enough. `_consolidate` calls `_summarize`, uses `uuid4` to create the new summary id, and uses SQL insert, select, and update operations to make the replacement safely.
-
-*Call graph*: calls 1 internal fn (_summarize); called by 1 (run); 4 external calls (insert, select, update, uuid4).
-
-
-##### `MemoryConsolidator._summarize`  (lines 369–378)
-
-```
-async def _summarize(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> str
 ```
-
-**Purpose**: This function asks the language model to write one concise statement that captures a cluster of related facts. It trims both the input facts and the returned summary to fixed limits.
-
-**Data flow**: It receives a model and a fact cluster. It builds a compact JSON payload of shortened fact bodies, sends that with summarization instructions to the model, strips extra whitespace from the reply, cuts it to the maximum allowed length, and returns the summary text.
-
-**Call relations**: `MemoryConsolidator._consolidate` calls this before opening the database write transaction. It builds `Message` and `ModelRequest` objects and sends them through `ModelAccess.complete`.
-
-*Call graph*: calls 1 internal fn (complete); called by 1 (_consolidate); 3 external calls (__init__, __init__, dumps).
-
-
-##### `_recency`  (lines 381–382)
-
-```
-def _recency(fact: _AgedFact) -> tuple[datetime, UUID]
-```
-
-**Purpose**: This small helper defines how to order facts by age, with the fact id as a tie-breaker. It gives sorting code one consistent way to say which fact is more recent.
-
-**Data flow**: It receives one `_AgedFact` and returns a pair made from its creation time and id. Sorting code can use that pair to order facts predictably.
-
-**Call relations**: This helper supports the file's grouping and clustering flow, where facts are processed newest first. It does not call out to other project code.
-
-
-##### `_cosine`  (lines 385–391)
-
+async def page(self, tab_id: int | None=None) -> Tab
 ```
-def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
-```
 
-**Purpose**: This function measures how similar two embedding vectors are. A result near 1 means the vectors point in much the same direction, while 0 is returned if either vector has no length.
+**Purpose**: Returns the active tab, or a requested tab, as a Tab object. Callers use it when they need to know which browser page an action should apply to.
 
-**Data flow**: It receives two tuples of numbers. It calculates each vector's length, returns 0 if comparison would be unsafe, otherwise divides their dot product by the product of their lengths. The output is a similarity score used for clustering.
+**Data flow**: It receives an optional tab id, creates a BrowserTabs helper, and asks it to find the matching tab. The result is a Tab object representing the selected browser tab.
 
-**Call relations**: `MemoryConsolidator._clusters` calls this when deciding whether a fact should join an existing cluster. It uses `math.sqrt` for the vector-length calculation.
+**Call relations**: This is a tab-selection doorway into BrowserTabs. Higher-level browser actions can call it before reading or acting on a page.
 
-*Call graph*: called by 1 (_clusters); 1 external calls (sqrt).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `_parse_facts`  (lines 394–418)
+##### `BrowserSession.navigate`  (lines 163–164)
 
 ```
-def _parse_facts(text: str) -> tuple[ExtractedFact, ...]
+async def navigate(self, url: str, tab_id: int | None=None) -> JsonDict
 ```
-
-**Purpose**: This function turns the model's raw extraction reply into validated fact objects. It is forgiving about individual bad facts, but strict when the reply does not contain a readable facts list at all.
-
-**Data flow**: It receives raw text from the model. It looks for the first JSON object in that text, decodes it, checks that it contains a `facts` list, and validates each dictionary in that list as an `ExtractedFact`. Malformed individual entries are skipped, while a missing or unreadable list raises an error.
-
-**Call relations**: `FactDeriver._derive` calls this after `_extract` returns a model reply. Its output decides which facts can be committed, and its errors cause the whole page group to settle nothing rather than risk deleting old facts based on an unreadable answer.
-
-*Call graph*: called by 1 (_derive); 1 external calls (JSONDecoder).
-
-
-### `extensions/memory/ufo_ext_memory/store.py`
 
-`domain_logic` · `request handling and background indexing`
+**Purpose**: Navigates a tab to a new web address. It is the session-level method for telling Chrome, in plain terms, 'go to this URL.'
 
-This file gives the memory extension a complete life cycle: write a memory now, make it searchable later, and safely remove or hide it when its source page changes. A memory is stored in the `memory_item` database table. The write path deliberately does not split text into chunks or create embeddings, which are number lists used for meaning-based search. Instead, background indexers do that work later, like a librarian cataloging new notes after they have been dropped in an inbox.
+**Data flow**: It receives a URL and optional tab id, creates a BrowserTabs helper, and asks it to navigate the chosen tab. It returns a JSON-style dictionary describing the result.
 
-Recall combines several signals. It asks the index for plain word matches and meaning-based vector matches, blends their rankings with reciprocal-rank fusion, then reads the real memory rows back from the database. It also applies time decay to facts, so old time-sensitive facts slowly count less, and prevents one memory type from crowding out all others. Newly written but not-yet-indexed memories can still be found through a small direct database scan.
+**Call relations**: This method forwards navigation work to BrowserTabs, which knows how to talk to Chrome targets and keep tab state consistent.
 
-The file also mirrors source pages in `mem_page`, searches those page chunks, and checks that a page is still current before showing a result. This matters because stale chunks in an index could otherwise reveal old or deleted page content. The two indexer classes are the cleanup crew: one indexes memories, and one indexes source pages while invalidating facts tied to page revisions that have moved on.
+*Call graph*: calls 1 internal fn (tab_reader).
 
-#### Function details
 
-##### `recall_subjects`  (lines 143–144)
+##### `BrowserSession.tab_info`  (lines 166–167)
 
 ```
-def recall_subjects(audience: Audience) -> frozenset[str]
+async def tab_info(self, tab: Tab) -> JsonDict
 ```
 
-**Purpose**: Turns an audience description into the exact set of subjects that memory recall is allowed to search. A subject is the visibility label used to keep one audience’s memories separate from another’s.
+**Purpose**: Builds a small information summary for one tab. This gives callers a structured view of a tab instead of making them inspect internal Tab fields.
 
-**Data flow**: It receives an `Audience` value → passes it to the shared audience helper → returns a frozen set of subject strings that can be used as a search filter.
+**Data flow**: It receives a Tab object, creates a BrowserTabs helper, and asks it to format that tab’s information. It returns a JSON-style dictionary.
 
-**Call relations**: This is a small adapter around `ufo.sdk.audience.audience_subjects`. Callers use it before recall so `MemoryStore.recall` and source search only look at memories the audience is allowed to see.
+**Call relations**: This is part of the tab-status flow. BrowserSession owns the tab list, while BrowserTabs supplies the tab-specific interpretation.
 
-*Call graph*: 1 external calls (audience_subjects).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `inventory`  (lines 184–253)
+##### `BrowserSession.tabs_context`  (lines 169–170)
 
 ```
-async def inventory(transaction: Transaction, workspace_id: UUID) -> tuple[MemoryInventoryItem, ...]
+async def tabs_context(self) -> JsonDict
 ```
 
-**Purpose**: Returns a bounded, newest-first list of stored memories for an operator or explorer view. Unlike recall, it is not answering a query; it shows what is in the memory store and what indexing or decay state each row is in.
+**Purpose**: Returns context about the current set of tabs. This helps the rest of the system know what pages are open and which one is relevant.
 
-**Data flow**: It receives a workspace-scoped transaction opener and a workspace id → reads recent `memory_item` rows and their linked source ids from the database → calculates age, half-life, and decay value using one shared current time → returns `MemoryInventoryItem` objects.
+**Data flow**: It creates a BrowserTabs helper and asks it to describe the session’s tabs. The output is a JSON-style dictionary suitable for a tool response or prompt context.
 
-**Call relations**: This function calls `_aware`, `half_life_days`, and `decay_multiplier` so the inventory view reports the same aging math that recall uses. It stands beside `MemoryStore.recall`: recall finds useful memories for a query, while inventory explains what has been stored.
+**Call relations**: It delegates to BrowserTabs, which reads the session’s tab state and turns it into useful browser context.
 
-*Call graph*: calls 3 internal fn (_aware, decay_multiplier, half_life_days); 3 external calls (__init__, now, select).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `_aware`  (lines 256–257)
+##### `BrowserSession.tab_titles`  (lines 172–173)
 
 ```
-def _aware(when: datetime) -> datetime
+async def tab_titles(self) -> list[str]
 ```
 
-**Purpose**: Makes sure a timestamp has a timezone. This prevents age calculations from mixing timezone-aware and timezone-naive times, which Python treats differently.
-
-**Data flow**: It receives a `datetime` → if it already has timezone information it returns it unchanged; otherwise it marks it as UTC → returns a safe timestamp for time math.
-
-**Call relations**: Both `inventory` and `decay_multiplier` call this before subtracting dates. It is a small safety helper that keeps decay and age calculations consistent.
-
-*Call graph*: called by 2 (decay_multiplier, inventory); 1 external calls (replace).
-
-
-##### `MemoryWrite.page_origin_is_complete`  (lines 280–288)
-
-```
-def page_origin_is_complete(self) -> Self
-```
+**Purpose**: Returns the titles of open tabs. This is a compact way to show what pages the browser currently has open.
 
-**Purpose**: Checks that page-derived memories include all required page origin fields together. A memory cannot say it came from a page unless it names the page, the page revision, and the source id.
+**Data flow**: It creates a BrowserTabs helper and asks it for tab titles. The output is a list of strings.
 
-**Data flow**: It reads the `MemoryWrite` object after validation → checks whether only some page-origin fields were filled in → returns the same object if complete, or raises an error if the origin is partial.
+**Call relations**: It is another simple doorway into BrowserTabs, used when callers need a lightweight tab overview rather than full tab details.
 
-**Call relations**: This validator runs when a `MemoryWrite` is created. It protects `MemoryStore.commit`, which relies on page-derived writes having a complete binding to a specific source page revision.
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `_fuse`  (lines 316–339)
+##### `BrowserSession.tab_reader`  (lines 175–176)
 
 ```
-def _fuse(legs: tuple[tuple[Hit, ...], ...], cosine_leg: tuple[Hit, ...]) -> dict[str, tuple[float, float, str]]
+def tab_reader(self) -> BrowserTabs
 ```
 
-**Purpose**: Combines ranked search hits from multiple search methods into one best score per owning row. It is the shared scoring engine for both memory recall and source-page search.
+**Purpose**: Creates a BrowserTabs helper tied to this session. BrowserTabs is the specialist for tab creation, closing, navigation, attachment, and tab event interpretation.
 
-**Data flow**: It receives one or more hit lists plus the vector hit list → ranks chunks inside each list, adds reciprocal-rank scores for chunks that appear in the lists, keeps the best chunk for each owner, and records the owner’s best vector similarity → returns a dictionary keyed by owner id with fused score, cosine score, and snippet text.
+**Data flow**: It takes the current session and the fixed viewport size and creates a new BrowserTabs object. The helper can then read and update the session’s tab-related state.
 
-**Call relations**: `fuse_hits` and `fuse_recall` both call this. It is the central place where lexical matches and vector matches stop being separate lists and become a single candidate ranking.
+**Call relations**: Many session methods call this when they need tab work. Bootstrap also uses it to remember initial targets, attach the first tab, and wire tab-related Chrome events.
 
-*Call graph*: called by 2 (fuse_hits, fuse_recall); 1 external calls (from_iterable).
+*Call graph*: called by 10 (_bootstrap, init_session, is_top_level_frame, navigate, page, tab_info, tab_titles, tabs_close, tabs_context, tabs_create); 1 external calls (__init__).
 
 
-##### `fuse_hits`  (lines 342–347)
+##### `BrowserSession.page_reader`  (lines 178–179)
 
 ```
-def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+def page_reader(self) -> BrowserPage
 ```
 
-**Purpose**: Ranks source-page search results by combining lexical and vector hits into one score per page. It uses only the fused rank score, which is enough for source snippets.
+**Purpose**: Creates a BrowserPage helper tied to this session. BrowserPage is the specialist for page structure, frame references, and screen points for page elements.
 
-**Data flow**: It receives lexical hits, vector hits, and a limit → calls `_fuse`, sorts owners by fused rank score, trims to the limit → returns `Fused` results with owner id, score, and matched text.
+**Data flow**: It takes the session, viewport size, and maximum frame depth and creates a BrowserPage object. The helper can then interpret page references using current tab and frame information.
 
-**Call relations**: `MemoryStore.search_sources` calls this after it asks the index for page hits. The result is then checked against the page mirror before being returned to the caller.
+**Call relations**: BrowserSession.resolve_ref and BrowserSession.ref_point call this when a string reference must be turned into a frame/node location or coordinates.
 
-*Call graph*: calls 1 internal fn (_fuse); called by 1 (search_sources); 1 external calls (__init__).
+*Call graph*: called by 2 (ref_point, resolve_ref); 1 external calls (__init__).
 
 
-##### `fuse_recall`  (lines 350–367)
+##### `BrowserSession.content_reader`  (lines 181–182)
 
 ```
-def fuse_recall(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], tail: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+def content_reader(self) -> BrowserContent
 ```
 
-**Purpose**: Ranks memory recall candidates by blending fused rank with meaning-based similarity. This gives a memory credit both for appearing high in search results and for being semantically close to the query.
+**Purpose**: Creates a BrowserContent helper tied to this session. BrowserContent is the specialist for reading page content, extracting text, building trees, and searching.
 
-**Data flow**: It receives lexical hits, vector hits, a tail hit list for not-yet-indexed memories, and a limit → calls `_fuse`, normalizes the fused rank, blends it with vector similarity, sorts, and trims → returns `Fused` memory candidates.
+**Data flow**: It passes the current session into a new BrowserContent object. That object can use the session’s connection and tabs to inspect the browser page.
 
-**Call relations**: `MemoryStore.recall` calls this after collecting indexed hits and tail hits. Its output is passed to `_enrich`, where candidate ids become full memory rows.
+**Call relations**: The tree, read_page, get_page_text, and find methods call this helper whenever the system needs to understand what is visible or present on a page.
 
-*Call graph*: calls 1 internal fn (_fuse); called by 1 (recall); 1 external calls (__init__).
+*Call graph*: called by 4 (find, get_page_text, read_page, tree); 1 external calls (__init__).
 
 
-##### `half_life_days`  (lines 385–391)
+##### `BrowserSession.download_reader`  (lines 184–185)
 
 ```
-def half_life_days(item_class: str, memory_kind: str) -> float | None
+def download_reader(self) -> BrowserDownloads
 ```
 
-**Purpose**: Chooses how quickly a fact should fade in ranking based on its memory kind. Non-fact memories do not decay here.
+**Purpose**: Creates a BrowserDownloads helper tied to this session. BrowserDownloads is the specialist for tracking Chrome download events and waiting for a download to finish.
 
-**Data flow**: It receives an item class and memory kind → returns no half-life for non-facts, or the configured number of days for fact-like kinds → falls back to the default fact half-life when the kind is unknown.
+**Data flow**: It passes the current session and maximum wait time into a new BrowserDownloads object. The helper can read and update the session’s download list.
 
-**Call relations**: `decay_multiplier` calls this to perform ranking decay, and `inventory` calls it to show the same half-life to operators.
+**Call relations**: Bootstrap uses it to wire Chrome download events to callbacks. BrowserSession.wait_for_download uses it later when a caller needs to wait until a download has completed.
 
-*Call graph*: called by 2 (decay_multiplier, inventory).
+*Call graph*: called by 2 (_bootstrap, wait_for_download); 1 external calls (__init__).
 
 
-##### `decay_multiplier`  (lines 394–406)
+##### `BrowserSession.dialog_reader`  (lines 187–188)
 
 ```
-def decay_multiplier(item_class: str, memory_kind: str, confidence: int, as_of: datetime | None, now: datetime) -> float
+def dialog_reader(self) -> BrowserDialogs
 ```
 
-**Purpose**: Calculates the multiplier that makes older facts count less during recall. Confidence also matters: a low-confidence fact starts with less weight.
+**Purpose**: Creates a BrowserDialogs helper tied to this session. BrowserDialogs is the specialist for noticing JavaScript alert, confirm, or prompt dialogs.
 
-**Data flow**: It receives item class, memory kind, confidence, the time the fact is current as of, and the current time → finds the half-life, computes age in days, and applies the decay formula → returns a number that will multiply the relevance score.
+**Data flow**: It passes the current session into a new BrowserDialogs object. The helper can record dialog messages in the session when Chrome reports them.
 
-**Call relations**: `decay_factor` uses this during recall, and `inventory` uses it for display. It calls `_aware` and `half_life_days` so all time handling and half-life choice stay in one place.
+**Call relations**: Bootstrap calls this to connect Chrome’s dialog-opening event to the dialog callback.
 
-*Call graph*: calls 2 internal fn (_aware, half_life_days); called by 2 (decay_factor, inventory).
+*Call graph*: called by 1 (_bootstrap); 1 external calls (__init__).
 
 
-##### `decay_factor`  (lines 409–412)
+##### `BrowserSession.form_reader`  (lines 190–191)
 
 ```
-def decay_factor(item: Recalled, now: datetime) -> float
+def form_reader(self) -> BrowserForms
 ```
 
-**Purpose**: Applies the standard decay calculation to a recalled memory object. It is a convenience wrapper used while ranking recall results.
+**Purpose**: Creates a BrowserForms helper tied to this session. BrowserForms is the specialist for typing into fields, uploading files, and checking attached file sizes.
 
-**Data flow**: It receives a `Recalled` item and the current time → chooses the best timestamp from `as_of` or `created_at` → calls `decay_multiplier` → returns the score multiplier for that item.
+**Data flow**: It passes the current session into a new BrowserForms object. The helper can use the browser connection and page references to perform form actions.
 
-**Call relations**: `MemoryStore.recall` calls this after full memory rows have been loaded. The returned factor is multiplied into each item’s recall score before final sorting.
+**Call relations**: Upload, attached-size checks, and form input methods all call this to send their work to the forms specialist.
 
-*Call graph*: calls 1 internal fn (decay_multiplier); called by 1 (recall).
+*Call graph*: called by 3 (attached_sizes, form_input, upload_file); 1 external calls (__init__).
 
 
-##### `enforce_type_diversity`  (lines 415–433)
+##### `BrowserSession.runtime_reader`  (lines 193–194)
 
 ```
-def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]
+def runtime_reader(self) -> BrowserRuntime
 ```
 
-**Purpose**: Prevents one class of memory from filling the whole recall result list. This helps the caller get a mix instead of, for example, only facts when episodic pointers are also relevant.
+**Purpose**: Creates a BrowserRuntime helper tied to this session. BrowserRuntime is the specialist for running JavaScript and calling functions on browser-side objects.
 
-**Data flow**: It receives ranked recalled rows and a limit → keeps rows in order while capping how many of each item class can be admitted → backfills from overflow if needed → returns at most the requested number of rows.
+**Data flow**: It passes the current session into a new BrowserRuntime object. The helper can then use the CDP runtime features for the requested page session.
 
-**Call relations**: `MemoryStore.recall` calls this after decay-adjusted sorting. It is one of the last steps before episodic memories are rewritten into topic pointers.
+**Call relations**: BrowserSession.eval_js and BrowserSession.call_on call this whenever code needs to run inside the browser page.
 
-*Call graph*: called by 1 (recall).
+*Call graph*: called by 2 (call_on, eval_js); 1 external calls (__init__).
 
 
-##### `as_topic_pointer`  (lines 436–446)
+##### `BrowserSession.tabs_create`  (lines 196–197)
 
 ```
-def as_topic_pointer(item: Recalled, index: int) -> Recalled
+async def tabs_create(self, url: str='about:blank') -> JsonDict
 ```
 
-**Purpose**: Turns an episodic memory result into a pointer rather than returning its full body. Episodic memory acts like a breadcrumb to explore, not text to automatically inject as context.
+**Purpose**: Creates a new browser tab, optionally at a given URL. It gives callers a session-level way to open another page.
 
-**Data flow**: It receives a recalled item and its position in the final list → if the item is not episodic, returns it unchanged; if it is episodic, replaces its body with a short topic label and marks the recall mode as `topic` → returns the adjusted item.
+**Data flow**: It receives a URL, defaulting to about:blank, creates a BrowserTabs helper, and asks it to create the tab. It returns a JSON-style dictionary describing the result.
 
-**Call relations**: `MemoryStore.recall` calls this on the final diversified list. It uses `dataclasses.replace` so the original result shape is kept while only the body and mode change.
+**Call relations**: This forwards tab creation to BrowserTabs, keeping the session as the public tool surface while the tab helper does the Chrome-specific work.
 
-*Call graph*: called by 1 (recall); 1 external calls (replace).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `MemoryStore.commit`  (lines 471–560)
+##### `BrowserSession.tabs_close`  (lines 199–200)
 
 ```
-async def commit(self, write: MemoryWrite) -> None
+async def tabs_close(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Stores one memory write in the database without doing expensive indexing work inline. Repeated writes of the same workspace, subject, class, and body update the same row instead of creating duplicate recallable facts.
+**Purpose**: Closes a browser tab based on the caller’s arguments. It is the session-level doorway for removing tabs.
 
-**Data flow**: It receives a `MemoryWrite` → creates a stable content-based id → inserts or updates the `memory_item` row, clearing the indexing digest if the page binding changed → if the memory came from a source page, inserts or updates the `memory_source` link → returns nothing but changes database state.
+**Data flow**: It receives a JSON-style argument dictionary, creates a BrowserTabs helper, and asks it to close the requested tab. It returns a JSON-style result.
 
-**Call relations**: This is the main write path on `MemoryStore`. It deliberately leaves `embedding_digest` empty when indexing is needed, so `MemoryIndexer._claim_due` can later pick the row up and build searchable chunks.
+**Call relations**: It delegates tab-closing details to BrowserTabs, which understands tab ids and the session’s tab list.
 
-*Call graph*: 3 external calls (case, or_, uuid5).
+*Call graph*: calls 1 internal fn (tab_reader).
 
 
-##### `MemoryStore.supersede_page_facts`  (lines 562–678)
+##### `BrowserSession.upload_file`  (lines 202–203)
 
 ```
-async def supersede_page_facts(self, page_id: UUID, revision: int | None) -> None
+async def upload_file(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Retires memory facts that were derived from an old or removed page revision. It is careful not to delete a fact if another source page still supports the same fact.
+**Purpose**: Uploads or attaches a file to a file input on the page. This is how browser automation supplies files to web forms.
 
-**Data flow**: It receives a page id and optionally the page’s current revision → finds stale `memory_source` links for that page → deletes those links, deletes memory rows with no remaining links, or repoints rows to a surviving link and clears their indexing digest → deletes index chunks for rows that were fully removed.
+**Data flow**: It receives a JSON-style argument dictionary, creates a BrowserForms helper, and asks it to perform the upload. The returned JSON-style dictionary describes the outcome.
 
-**Call relations**: This method is called by the fact-derivation flow when a page has been reprocessed or removed. It coordinates with the index backend by deleting chunks for removed rows and with `MemoryIndexer` by marking repointed rows as due for re-checking.
+**Call relations**: BuaSurface._settle_upload calls this as part of the upload flow. BrowserSession forwards the request to BrowserForms because form code knows how to reach the correct page element.
 
-*Call graph*: 4 external calls (__init__, delete, select, update).
+*Call graph*: calls 1 internal fn (form_reader); called by 1 (_settle_upload).
 
 
-##### `MemoryStore.recall`  (lines 680–708)
+##### `BrowserSession.attached_sizes`  (lines 205–206)
 
 ```
-async def recall(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None) -> tuple[Recalled, ...]
+async def attached_sizes(self, args: JsonDict) -> list[int]
 ```
 
-**Purpose**: Finds memories relevant to a query for the allowed subjects. It combines indexed search, a fallback scan for just-written items, row validation, time decay, diversity, and episodic pointer conversion.
+**Purpose**: Checks the sizes of files attached through a form upload flow. This helps confirm what was attached without reading or transferring the file contents here.
 
-**Data flow**: It receives a query, subject filter, result limit, and optional time window → gets lexical and vector index hits through `_legs`, gets unindexed tail hits through `_untail_leg`, fuses them with `fuse_recall`, loads valid memory rows with `_enrich`, applies decay with `decay_factor`, enforces type diversity, rewrites episodic items with `as_topic_pointer` → returns recalled memories.
+**Data flow**: It receives a JSON-style argument dictionary, creates a BrowserForms helper, and asks it for attached file sizes. It returns a list of integer sizes.
 
-**Call relations**: This is the main read path for memory. It orchestrates many helpers in this file so callers do not need to know whether a result came from the index, from the unindexed tail, or from a page-derived row that needed freshness checks.
+**Call relations**: BuaSurface._settle_upload calls this after upload-related work. BrowserForms provides the page/form-specific logic while the session supplies shared browser state.
 
-*Call graph*: calls 7 internal fn (_enrich, _legs, _untail_leg, as_topic_pointer, decay_factor, enforce_type_diversity, fuse_recall); 2 external calls (replace, now).
+*Call graph*: calls 1 internal fn (form_reader); called by 1 (_settle_upload).
 
 
-##### `MemoryStore.search_sources`  (lines 710–768)
+##### `BrowserSession.tree`  (lines 208–209)
 
 ```
-async def search_sources(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None) -> tuple[SourceMatch, ...]
+async def tree(self, args: JsonDict, filter_type: str='all') -> str
 ```
 
-**Purpose**: Searches synced source pages and returns matching snippets. It uses the same index style as memory recall, but the owners are pages rather than memory items.
+**Purpose**: Returns a text tree of page content, optionally filtered by content type. This gives callers a readable outline of what the page contains.
 
-**Data flow**: It receives a query, subjects, limit, and optional time window → gets lexical and vector page hits through `_legs`, fuses them with `fuse_hits`, reads matching `mem_page` mirror rows, asks the core page state service whether each page is still current → returns `SourceMatch` results for pages that still match subject and revision.
+**Data flow**: It receives JSON-style arguments and a filter type, creates a BrowserContent helper, and asks it to build the tree. It returns the tree as a string.
 
-**Call relations**: This method calls `_legs` and `fuse_hits`, then performs the freshness checks that protect against stale indexed page chunks. It depends on `PageIndexer` keeping the `mem_page` mirror up to date.
+**Call relations**: It delegates page-inspection work to BrowserContent, which knows how to collect and format page structure.
 
-*Call graph*: calls 2 internal fn (_legs, fuse_hits); 3 external calls (__init__, select, UUID).
+*Call graph*: calls 1 internal fn (content_reader).
 
 
-##### `MemoryStore._legs`  (lines 770–778)
+##### `BrowserSession.read_page`  (lines 211–212)
 
 ```
-async def _legs(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]
+async def read_page(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Runs the two normal search legs for a query: word-based search and vector-based search. A search leg is one route for finding candidate chunks.
+**Purpose**: Reads the current page into a structured response. This is one of the main ways the system turns a live webpage into information a model or caller can use.
 
-**Data flow**: It receives a query, subject filter, owner kind, and limit → embeds the query with `_embed_query`, asks the index for lexical hits, and asks for vector hits only if embedding succeeded → returns both hit lists.
+**Data flow**: It receives JSON-style arguments, creates a BrowserContent helper, and asks it to read the page. The output is a JSON-style dictionary with the page-reading result.
 
-**Call relations**: `MemoryStore.recall` uses this for memory items, and `MemoryStore.search_sources` uses it for source pages. It hides the detail that vector search is skipped when the query cannot be embedded.
+**Call relations**: It is part of the content-reading tool surface. BrowserContent performs the detailed browser inspection while BrowserSession routes the request.
 
-*Call graph*: calls 1 internal fn (_embed_query); called by 2 (recall, search_sources).
+*Call graph*: calls 1 internal fn (content_reader).
 
 
-##### `MemoryStore._untail_leg`  (lines 780–823)
+##### `BrowserSession.get_page_text`  (lines 214–215)
 
 ```
-async def _untail_leg(self, query: str, subjects: frozenset[str], limit: int) -> tuple[Hit, ...]
+async def get_page_text(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Finds newly committed memories that have not been indexed yet. This keeps a fresh memory recallable before the background indexer has had a chance to process it.
+**Purpose**: Extracts text from the current page. This is useful when the caller needs the words on the page rather than a fuller structural description.
 
-**Data flow**: It receives a query, subject filter, and limit → splits the query into terms, scans a bounded number of newest unindexed memory rows in the database, counts term matches in each body, builds temporary `Hit` objects for matching rows, sorts by match count → returns a limited hit list.
+**Data flow**: It receives JSON-style arguments, creates a BrowserContent helper, and asks it for page text. It returns a JSON-style dictionary with the extracted text result.
 
-**Call relations**: `MemoryStore.recall` calls this as a third leg alongside index hits. Once `MemoryIndexer` settles a row and fills its digest, that row leaves this tail scan and is served by the index instead.
+**Call relations**: It forwards text extraction to BrowserContent, keeping text-reading logic out of the session itself.
 
-*Call graph*: called by 1 (recall); 3 external calls (__init__, split, select).
+*Call graph*: calls 1 internal fn (content_reader).
 
 
-##### `MemoryStore._embed_query`  (lines 825–833)
+##### `BrowserSession.find`  (lines 217–218)
 
 ```
-async def _embed_query(self, query: str) -> tuple[float, ...]
+async def find(self, args: JsonDict, complete: FindCompleter | None=None) -> JsonDict
 ```
 
-**Purpose**: Turns a text query into an embedding vector for meaning-based search. If embedding fails, recall can still continue using word-based search.
+**Purpose**: Searches within the current page for requested content. An optional completer can help finish or refine the search result for the caller.
 
-**Data flow**: It receives a query string → returns an empty tuple for blank text, otherwise asks the embedding backend for one vector → on success returns that vector, and on error logs a warning and returns no vector.
+**Data flow**: It receives JSON-style search arguments and an optional FindCompleter, creates a BrowserContent helper, and asks it to find matches. It returns a JSON-style dictionary with the search result.
 
-**Call relations**: `MemoryStore._legs` calls this before vector search. Its failure-tolerant behavior means `MemoryStore.recall` and `MemoryStore.search_sources` degrade gracefully instead of failing the whole request.
+**Call relations**: It is the session doorway into BrowserContent’s search logic. BrowserContent does the page inspection, and the optional completer can participate in producing the final answer.
 
-*Call graph*: called by 1 (_legs).
+*Call graph*: calls 1 internal fn (content_reader).
 
 
-##### `MemoryStore._enrich`  (lines 835–909)
+##### `BrowserSession.form_input`  (lines 220–221)
 
 ```
-async def _enrich(self, fused: tuple[Fused, ...], subjects: frozenset[str], start: datetime | None, end: datetime | None) -> tuple[Recalled, ...]
+async def form_input(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Turns fused memory candidate ids into full, safe-to-return memory rows. It drops superseded rows, rows outside the time window, and page-derived rows whose source page is no longer at the expected subject and revision.
+**Purpose**: Types or sets input in a form field on the page. This is the browser-session method for filling out web forms.
 
-**Data flow**: It receives fused candidates, allowed subjects, and optional time bounds → reads matching `memory_item` rows from the database → asks for current page states for page-derived rows → returns `Recalled` objects in fused order only for rows that pass all checks.
+**Data flow**: It receives JSON-style arguments, creates a BrowserForms helper, and asks it to perform the input action. It returns a JSON-style result.
 
-**Call relations**: `MemoryStore.recall` calls this after `fuse_recall`. This is the point where index candidates are checked against durable database truth before being shown.
+**Call relations**: It delegates form-specific work to BrowserForms, which can resolve the target field and use the browser connection to change it.
 
-*Call graph*: called by 1 (recall); 3 external calls (__init__, select, UUID).
+*Call graph*: calls 1 internal fn (form_reader).
 
 
-##### `store_for`  (lines 912–923)
+##### `BrowserSession.computer`  (lines 223–224)
 
 ```
-def store_for(ext: ExtensionContext) -> MemoryStore
+async def computer(self, args: JsonDict) -> JsonDict
 ```
 
-**Purpose**: Builds a `MemoryStore` from an extension context. It fails clearly if the required index or embedding backends were not connected.
+**Purpose**: Runs a lower-level computer-style browser action, such as mouse or keyboard interaction, against the page. This is for actions that are closer to using the browser like a person would.
 
-**Data flow**: It receives an `ExtensionContext` → checks that `index` and `embed` are present → copies the transaction opener, workspace id, page-state reader, and backends into a new `MemoryStore` → returns that store.
+**Data flow**: It receives JSON-style action arguments, creates a BrowserComputer with the session, viewport, and maximum wait time, and runs it. The output is a JSON-style result.
 
-**Call relations**: Other extension code uses this as the factory for the memory workflow. The resulting `MemoryStore` is what exposes `commit`, `recall`, `search_sources`, and page-fact retirement.
+**Call relations**: Unlike the reader factory methods, this creates BrowserComputer directly for the requested action. BrowserComputer then uses the session’s connection and state to carry out the interaction.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `MemoryIndexer.run`  (lines 945–947)
+##### `BrowserSession.wait_for_download`  (lines 226–227)
 
 ```
-async def run(self) -> None
+async def wait_for_download(self, args: JsonDict) -> BrowserDownload
 ```
 
-**Purpose**: Runs one indexing pass for due memory items. It is the background worker entry point for turning stored memories into searchable chunks.
+**Purpose**: Waits for a download to finish and returns its download record. The file contents are not read here; the completed download is reported to whoever owns the download directory.
 
-**Data flow**: It starts with no direct input besides the indexer’s configured services → claims a batch of due rows with `_claim_due` → sends each claimed item to `_index_item` → returns after the batch is processed.
+**Data flow**: It receives JSON-style arguments, creates a BrowserDownloads helper, and asks it to wait for the matching download. It returns a BrowserDownload object when the download completes or the wait logic finishes as defined by that helper.
 
-**Call relations**: This method ties together the two parts of memory indexing: safe claiming and per-item indexing. It is called by whatever scheduler or job runner drives the extension’s background derivations.
+**Call relations**: It uses BrowserDownloads, the same helper whose callbacks were wired during bootstrap to receive Chrome download events.
 
-*Call graph*: calls 2 internal fn (_claim_due, _index_item).
-
-
-##### `MemoryIndexer._claim_due`  (lines 949–984)
-
-```
-async def _claim_due(self) -> tuple[MemoryItem, ...]
-```
-
-**Purpose**: Atomically reserves memory rows that need indexing so two workers do not embed the same row at the same time. The claim has a lease timeout so a crashed worker does not block the row forever.
-
-**Data flow**: It reads the current time and computes a lease cutoff → selects rows whose embedding digest is empty and whose claim is absent or expired → marks selected rows as claimed in the database → returns them as `MemoryItem` objects.
-
-**Call relations**: `MemoryIndexer.run` calls this before indexing. `_index_item` then processes only the returned rows, while overlapping workers skip rows already claimed.
-
-*Call graph*: called by 1 (run); 5 external calls (now, timedelta, or_, select, update).
+*Call graph*: calls 1 internal fn (download_reader).
 
 
-##### `MemoryIndexer._index_item`  (lines 986–1023)
+##### `BrowserSession.eval_js`  (lines 229–230)
 
 ```
-async def _index_item(self, item: MemoryItem) -> None
+async def eval_js(self, session_id: str, expression: str) -> Json
 ```
 
-**Purpose**: Indexes one claimed memory item, or withdraws its chunks if the item should not currently be publishable. Publishable means a page-derived memory still matches the live page subject and revision.
+**Purpose**: Runs a JavaScript expression inside a specific browser session. This gives helper code a controlled way to ask the page for information or perform page-side work.
 
-**Data flow**: It receives a claimed `MemoryItem` → checks publishability with `_publishable`; if not allowed, deletes its index chunks and settles the row → if allowed and chunks are missing, chunks and embeds the body into the index → rereads the row’s current page binding to catch races → settles only if the binding is still the one it processed.
+**Data flow**: It receives a CDP session id and JavaScript expression, creates a BrowserRuntime helper, and asks it to evaluate the expression. It returns the JSON-like value produced by the browser runtime.
 
-**Call relations**: `MemoryIndexer.run` calls this for each claimed item. It calls `_publishable`, `chunk_embed_upsert`, and `_settle`, and it talks to the index backend to remove stale chunks when needed.
+**Call relations**: It delegates JavaScript execution to BrowserRuntime, which knows the CDP runtime commands needed for the chosen page session.
 
-*Call graph*: calls 2 internal fn (_publishable, _settle); called by 1 (run); 3 external calls (__init__, select, chunk_embed_upsert).
-
-
-##### `MemoryIndexer._publishable`  (lines 1025–1034)
-
-```
-async def _publishable(self, subject: str, page_id: UUID | None, revision: int | None) -> bool
-```
-
-**Purpose**: Decides whether a memory body is allowed to appear in the search index. Tool-written memories are always allowed; page-derived memories are allowed only while their source page still matches the stored subject and revision.
-
-**Data flow**: It receives a subject, optional page id, and optional revision → if there is no page id, returns true → otherwise reads the current page state and compares subject and revision → returns true only for an exact match.
-
-**Call relations**: `MemoryIndexer._index_item` calls this before publishing and again after indexing work. These checks stop stale page-derived memories from occupying recall candidate slots.
-
-*Call graph*: called by 1 (_index_item).
+*Call graph*: calls 1 internal fn (runtime_reader).
 
 
-##### `MemoryIndexer._settle`  (lines 1036–1060)
+##### `BrowserSession.call_on`  (lines 232–239)
 
 ```
-async def _settle(self, item: MemoryItem) -> None
+async def call_on(self, session_id: str, object_id: str, function: str, arguments: list[Json] | None=None) -> JsonDict
 ```
 
-**Purpose**: Marks a claimed memory row as decided by the indexer. It stores a digest of the body and clears the claim so the row no longer appears due.
+**Purpose**: Calls a JavaScript function on a specific browser-side object. This is useful when the page has returned an object reference and the system needs to ask that object for more detail.
 
-**Data flow**: It receives the claimed `MemoryItem` → hashes the body text → updates the database row with the digest and clears `embedding_claimed_at`, but only if the row still has the same subject, body, page binding, source id, and an active claim → returns nothing.
+**Data flow**: It receives a CDP session id, an object id, a function body or name, and optional arguments. It creates a BrowserRuntime helper, asks it to call the function on that object, and returns a JSON-style dictionary with the result.
 
-**Call relations**: `MemoryIndexer._index_item` calls this after either publishing chunks or deciding the row should be withheld. The guarded update prevents an old indexing decision from settling a row that was changed underneath it.
+**Call relations**: It is the object-function counterpart to eval_js. BrowserRuntime performs the actual CDP runtime call while BrowserSession supplies the public method.
 
-*Call graph*: called by 1 (_index_item); 2 external calls (sha256, update).
-
-
-##### `PageIndexer.apply`  (lines 1083–1085)
-
-```
-async def apply(self, changes: tuple[PageChange, ...]) -> None
-```
-
-**Purpose**: Applies a delivered batch of source-page changes to the memory extension’s page index. It is the batch-level entry point for page indexing.
-
-**Data flow**: It receives a tuple of `PageChange` objects → processes each change one by one through `_apply` → returns after all changes have been applied.
-
-**Call relations**: The core page-change runner owns the cursor and calls this with changes. `PageIndexer.apply` delegates the actual per-page logic to `_apply`.
-
-*Call graph*: calls 1 internal fn (_apply).
+*Call graph*: calls 1 internal fn (runtime_reader).
 
 
-##### `PageIndexer._apply`  (lines 1087–1145)
+##### `BrowserSession.resolve_ref`  (lines 241–242)
 
 ```
-async def _apply(self, change: PageChange) -> None
+def resolve_ref(self, tab: Tab, ref: str) -> tuple[FrameNode, int]
 ```
 
-**Purpose**: Indexes or removes one source page change, while checking that the page is still current before and after expensive embedding work. It also marks facts from old page revisions as needing re-checking.
+**Purpose**: Turns a page reference string into the frame and node index it points to. This lets later actions target a specific element or frame instead of guessing.
 
-**Data flow**: It receives one `PageChange` → reads the current page state → calls `_unsettle_left_behind_facts` → for tombstones or stale changes, deletes page chunks and mirror rows when appropriate → for current live pages, chunks and embeds the page body, checks the page state again, then upserts the `mem_page` mirror row → returns nothing but updates the index and database.
+**Data flow**: It receives a Tab object and a reference string, creates a BrowserPage helper, and asks it to resolve the reference. It returns a pair containing the frame node and an integer index.
 
-**Call relations**: `PageIndexer.apply` calls this for each change. It uses `chunk_embed_upsert` for live page content and cooperates with `MemoryIndexer` by clearing digests on facts tied to page revisions that are no longer current.
+**Call relations**: It delegates reference parsing and page-structure lookup to BrowserPage, which understands frame trees and element references.
 
-*Call graph*: calls 1 internal fn (_unsettle_left_behind_facts); called by 1 (apply); 5 external calls (__init__, delete, insert, update, chunk_embed_upsert).
-
-
-##### `PageIndexer._unsettle_left_behind_facts`  (lines 1147–1175)
-
-```
-async def _unsettle_left_behind_facts(self, page_id: UUID, state: PageState | None) -> None
-```
-
-**Purpose**: Marks page-derived memory rows as due for the memory indexer when their source page has moved on or disappeared. This lets the memory indexer withdraw chunks for facts whose page revision is no longer live.
-
-**Data flow**: It receives a page id and the page’s current state if any → builds a database condition for rows created from that page that no longer match the live subject and revision, or all rows from the page if it is gone → clears their embedding digest and claim fields → returns nothing.
-
-**Call relations**: `PageIndexer._apply` calls this at the start of every page change. It does not delete the memory rows itself; it asks `MemoryIndexer` to revisit their publishability by making them due again.
-
-*Call graph*: called by 1 (_apply); 2 external calls (or_, update).
+*Call graph*: calls 1 internal fn (page_reader).
 
 
-### Memory exploration
-Provides the operator-facing read-only interface for browsing stored memory records by workspace.
-
-### `extensions/memory/ufo_ext_memory/surface.py`
-
-`io_transport` · `request handling`
-
-This file is the small web doorway into the memory extension’s stored data. Its job is to show an operator what the system currently has in durable memory for one workspace, much like opening a read-only filing cabinet to inspect every folder inside.
-
-The file serves two things. First, it returns a static HTML page, `memory.html`, which is the browser interface. Second, it exposes an API endpoint that returns memory records as JSON, a common plain data format used by web pages and services.
-
-Access is tied to the shared operator session. In plain terms, the user must already be recognized as an operator, and the request must be scoped to one workspace. That workspace scope matters because the memory table belongs to the extension, and reads must only see rows for the selected workspace. The code relies on row-level security, meaning the database itself helps enforce “only show rows this workspace is allowed to see.”
-
-The important behavior is that this surface is read-only. It does not create, update, or delete memories. It simply opens the extension’s own workspace-scoped store, asks for an inventory of memory items, and sends them back newest first so the web page can display exactly what recall would draw from.
-
-#### Function details
-
-##### `app_page`  (lines 27–30)
+##### `BrowserSession.ref_point`  (lines 244–245)
 
 ```
-async def app_page(ctx: SurfaceContext, request: Request) -> Response
+async def ref_point(self, tab: Tab, ref: str) -> tuple[int, int]
 ```
 
-**Purpose**: This function returns the memory explorer web page to the operator’s browser. It exists so the whole interface can be served as a single HTML file.
+**Purpose**: Finds a screen point for a referenced page item. This is useful when an action needs coordinates, such as clicking the center of an element.
 
-**Data flow**: It receives the surface context and the incoming web request, then checks whether the HTML file was loaded when the module started. If the file is missing, it raises an error so the problem is visible instead of returning a broken blank page. If the file is present, it wraps the HTML text in an HTTP response and sends it back to the browser.
+**Data flow**: It receives a Tab object and a reference string, creates a BrowserPage helper, and asks it for the point. It returns an x and y coordinate pair.
 
-**Call relations**: When an operator opens the memory surface with a GET request to the base path, the route table points the request here. This function does not fetch memory data itself; it only delivers the page that will later call the JSON API.
+**Call relations**: It uses BrowserPage to convert a logical page reference into physical coordinates. BrowserComputer or other interaction code can then use those coordinates for visible-page actions.
 
-*Call graph*: 1 external calls (HTMLResponse).
-
-
-##### `memories`  (lines 33–42)
-
-```
-async def memories(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: This function returns all memory records for the currently bound workspace as JSON. It is the data endpoint used by the explorer page to fill in the list of memories.
-
-**Data flow**: It receives the surface context, which includes the workspace id chosen for this operator session, and the incoming request. It creates an extension context for the memory extension with an empty declared credential set, then opens the extension’s scoped transaction. Through that transaction it asks the memory store for its inventory for the workspace. The resulting memory objects are converted into JSON-friendly dictionaries and returned in a JSON HTTP response.
-
-**Call relations**: After the browser has loaded the explorer page, it calls the `api/memories` route, which leads here. This function hands the actual database reading to `ufo_ext_memory.store.inventory`, then turns the returned items into the web response the page can display.
-
-*Call graph*: 5 external calls (__init__, __init__, __init__, JSONResponse, inventory).
+*Call graph*: calls 1 internal fn (page_reader).

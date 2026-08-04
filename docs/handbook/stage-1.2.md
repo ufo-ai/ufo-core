@@ -1,541 +1,154 @@
-# Extension database migrations  `stage-1.2`
+# Core Alembic Harness and Foundational Schema  `stage-1.2`
 
-This stage is behind-the-scenes setup for extensions. A migration is a small, ordered database change, run when the system is installed or upgraded, and sometimes undone during rollback. The evaluation environment migration builds test email and calendar tables. The default index migrations create storage for searchable text chunks, including keyword and meaning-based search, then make chunk IDs safe by tying them to a workspace. The memory migrations build the memory tables and memory pages, add memory type and confidence, connect pages and memories to workspaces, add fast lookup indexes, record “as of” times, copy old time data forward, link memories back to their source pages and revisions, allow room-based audiences, and finally let one memory point to multiple source pages. The sample extension adds a simple per-workspace note table, useful as a model. The skill creation migrations create storage for user-made skills, then tighten ownership so each skill belongs to a specific agent. Together these files shape the database so each extension has the storage it needs.
+This stage is part of setting up and upgrading the database, before the main system can safely do its work. It uses Alembic, a tool that applies database changes step by step, like a careful renovation plan for stored data. The env.py file is the entry point: it connects to the database, loads the project’s table definitions, and tells Alembic to run any missing updates.
+
+The earliest migrations then build the system’s basic storage. 0001_heartbeat.py creates the first core tables for workspaces, agents, members, conversations, conversation turns, identities, and usage costs. 0002_credentials.py adds encrypted credential storage for each workspace. 0003_proposal.py adds proposals, which track requested changes and whether they are pending, approved, or rejected. 0004_loop_depth.py expands conversation turns so subagents and parent-child turn links can be recorded. 0006_ext_store.py gives extensions a small per-workspace JSON storage area. Finally, knowledge_graph_0001_graph.py adds early knowledge graph tables for known things and the relationships between them.
 
 ## Files in this stage
 
-### Evaluation environment schema
-Initial evaluation-environment migration tables provide fake or test email and calendar storage with rollback support.
+### Migration Harness
+Alembic starts here, configuring the database connection and running the ordered schema migrations.
 
-### `extensions/eval_env/ufo_ext_eval_env/migrations/0001_eval_env.py`
+### `core/src/ufo/schema/migrations/env.py`
 
-`data_model` · `database migration / setup`
+`orchestration` · `database migration`
 
-This is a database migration: a small script that changes the shape of the database in a controlled way. Here, it adds two new tables for the evaluation environment. One table stores email messages, including the folder, sender, recipients, subject, body, and send time. The other stores calendar events, including the title, start and end times, attendees, and status.
+This file exists so the project can safely change its database layout over time. A database migration is like a set of renovation instructions: add this column, create that table, rename this field. Alembic is the tool that reads those instructions and applies them to the real database.
 
-Both tables are tied to a workspace. A workspace is the larger container these emails and events belong to. The migration adds a foreign key, which is a database rule saying each email or event must point to an existing workspace. It also says that if a workspace is deleted, its related evaluation emails and events should be deleted too. This prevents leftover data from sitting around without a home.
+The file first imports the project’s table metadata, which is the in-code description of the expected database shape. When migrations run, `run_migrations` gives Alembic a live database connection and that metadata. It also turns on a special batch mode for SQLite, because SQLite has limits around changing existing tables and needs some changes done in a more careful way.
 
-The file also adds indexes on the workspace ID columns. An index is like a book’s index: it helps the database quickly find all emails or events for one workspace instead of scanning everything.
+The `run` function is the async wrapper. It reads the database settings from Alembic’s configuration, creates an asynchronous SQLAlchemy engine, opens a connection, and then runs the synchronous migration work safely inside that connection. Finally, it disposes of the engine so connections are cleaned up.
 
-Without this file, the evaluation environment would have nowhere persistent to store its mailbox and calendar records, so features depending on that test data would fail or have to keep everything only in memory.
+At the bottom, the file immediately starts `run()` with `asyncio.run`. That means when Alembic loads this file, the migration process begins right away. Without this file, Alembic would not know how to connect to this project’s database or which schema definition to compare migrations against.
 
 #### Function details
 
-##### `upgrade`  (lines 12–39)
+##### `run_migrations`  (lines 11–18)
+
+```
+def run_migrations(connection: Connection) -> None
+```
+
+**Purpose**: This function tells Alembic how to run migrations on one already-open database connection. It supplies the project’s table metadata and starts a migration transaction, so schema changes are applied as one controlled unit where the database supports that.
+
+**Data flow**: It receives a live SQLAlchemy database connection. It gives that connection, the project’s metadata, and a SQLite-specific safety setting to Alembic. Alembic then begins a migration transaction and applies the migration steps; the function does not return data, but the database schema may be changed.
+
+**Call relations**: The async setup function `run` opens the database connection and hands it to `run_migrations`. Inside, `run_migrations` calls Alembic’s configuration and migration functions so the external migration tool can do the actual schema update work.
+
+*Call graph*: 3 external calls (begin_transaction, configure, run_migrations).
+
+
+##### `run`  (lines 21–26)
+
+```
+async def run() -> None
+```
+
+**Purpose**: This function prepares the database connection needed for migrations. It reads the Alembic configuration, creates an asynchronous database engine, opens a connection, runs the migration function, and then cleans up the engine.
+
+**Data flow**: It reads database settings from Alembic’s current configuration section. From those settings it builds an async SQLAlchemy engine, opens a connection, passes that connection into `run_migrations`, and finally disposes of the engine so resources are released. It returns nothing; its visible effect is that pending migrations may be applied to the database.
+
+**Call relations**: The file starts this function immediately with `asyncio.run` when Alembic loads the environment script. `run` calls SQLAlchemy’s `async_engine_from_config` to create the database engine, then hands control to `run_migrations` for the actual Alembic migration work.
+
+*Call graph*: 1 external calls (async_engine_from_config).
+
+
+### Initial Core Schema
+The first migrations establish the foundational workspace, agent, conversation, credential, and proposal storage.
+
+### `core/src/ufo/schema/migrations/versions/0001_heartbeat.py`
+
+`data_model` · `database migration`
+
+This file is like the blueprint for the project’s first empty filing cabinet. When a new database is set up, it tells Alembic, the database migration tool, exactly which tables to create and what rules those tables must follow. Without this file, the application would not have a place to store its core records: who belongs to a workspace, which agents exist, what conversations happened, and how much model usage was recorded.
+
+The migration starts with a workspace table, then builds the other tables around it. Agents and members belong to a workspace. Conversations belong to a workspace and a member. Surface identities connect an outside identity, currently only for the command-line interface surface called "cli", back to a member. Turns record individual steps in a conversation, including their order, status, incoming text, and final result when finished. The ledger table records billable usage, currently token counts and their price.
+
+The file also adds safety rules directly in the database. For example, turn sequence numbers must be at least 1, turn statuses must be one of a known set, and ledger amounts must be positive. These rules help stop bad or inconsistent data from being saved even if a bug appears elsewhere in the code.
+
+#### Function details
+
+##### `upgrade`  (lines 12–114)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the database structure for evaluation emails and calendar events. It is used when applying this migration so the application can start storing those records per workspace.
+**Purpose**: Creates the initial database structure for the application. Someone uses this when moving a fresh database forward to revision 0001 so the app has all of its required core tables.
 
-**Data flow**: It takes no direct input from application code. When the migration tool runs it, it tells the database to create an `eval_env_email` table, add a lookup index for email workspace IDs, create an `eval_env_event` table, and add a lookup index for event workspace IDs. After it finishes, the database has two new tables ready to hold evaluation mailbox and calendar data.
+**Data flow**: It takes no regular application input. It reads the migration instructions written in the function, then asks Alembic to create tables, columns, keys, uniqueness rules, foreign-key links, check rules, and one index. The result is a database that now has the initial schema needed to store workspaces, agents, members, conversations, turns, surface identities, and ledger entries.
 
-**Call relations**: This function is called by Alembic, the database migration tool, when moving the database forward to this revision. Inside, it hands table and column definitions to Alembic and SQLAlchemy, which translate those Python instructions into database changes.
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands each table definition to Alembic operations such as create_table and create_index, while SQLAlchemy objects describe the column types and database rules in a database-independent way.
 
-*Call graph*: 9 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
+*Call graph*: 13 external calls (create_index, create_table, BigInteger, CheckConstraint, Column, DateTime, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint (+3 more)).
 
 
-##### `downgrade`  (lines 42–46)
+##### `downgrade`  (lines 117–125)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Removes the evaluation email and calendar database structures. It is used when rolling this migration back to return the database to its earlier shape.
+**Purpose**: Removes everything created by this migration. Someone uses this when rolling the database back before revision 0001, usually during development, testing, or an emergency rollback.
 
-**Data flow**: It takes no direct input from application code. When run, it first removes the calendar event workspace index, then drops the event table, then removes the email workspace index, and finally drops the email table. After it finishes, the database no longer has these evaluation environment tables.
+**Data flow**: It takes no regular application input. It tells Alembic to remove the ledger index first, then drops the tables in reverse dependency order so linked tables are removed before the tables they depend on. The result is a database with this migration’s schema removed.
 
-**Call relations**: This function is called by Alembic when moving the database backward from this revision. It hands drop instructions to Alembic so the changes made by `upgrade` can be undone cleanly.
+**Call relations**: Alembic calls this function when reversing this migration. It uses Alembic drop operations to undo the work done by upgrade, carefully removing the index and then each table.
 
 *Call graph*: 2 external calls (drop_index, drop_table).
 
 
-### Default index chunk storage
-Default index migrations establish searchable chunk storage and then scope chunk identity by workspace.
+### `core/src/ufo/schema/migrations/versions/0002_credentials.py`
 
-### `extensions/index_default/migrations/0001_chunk.py`
+`data_model` · `database migration during setup or rollback`
 
-`data_model` · `database migration`
+This migration teaches the database about credentials. A migration is a small, ordered change to the database structure, like adding a new shelf to a filing cabinet before the app starts putting papers there. Without this file, the application would have no official database table for storing workspace-specific secrets, so any feature that needs saved credentials would fail or have nowhere safe and consistent to write them.
 
-This file is a database migration: a small recipe that tells the system how to change its database from one version to the next. Here, the new thing is a `chunk` table. A chunk is a piece of text, with information about what it belongs to, where it appears in order, and optional machine-readable embedding data used for semantic search.
+The migration creates a table named `credential`. Each credential belongs to a workspace, identified by `workspace_id`, and has a `slot`, which is a text label for which credential it is. The actual secret is stored as `ciphertext`, meaning encrypted bytes rather than readable text. The table also records when the credential was created and last updated.
 
-The file supports two database engines. For PostgreSQL, it enables the `vector` extension, creates the `chunk` table, adds a generated `tsv` column for full-text search, and builds indexes so searches can be fast. One index supports normal word-based search, and another supports nearest-neighbor search over embeddings, which is how the system can find text with similar meaning. For SQLite, which does not have the same vector and full-text features built in, it creates a simpler `chunk` table and a separate FTS5 virtual table for full-text search. A virtual table is like a special search helper table maintained by SQLite.
-
-Without this migration, the index extension would have nowhere to store the text pieces it needs to search. Search would either fail outright because the table is missing, or become impractically slow because the needed indexes do not exist.
+Two important rules are built into the table. First, `workspace_id` must point to an existing workspace, so credentials cannot float around without an owner. Second, the pair of `workspace_id` and `slot` is the primary key, meaning one workspace can have many credential slots, but cannot have two credentials with the same slot name. The `downgrade` function reverses the change by dropping the table, which is useful when rolling the database back to an earlier version.
 
 #### Function details
 
-##### `upgrade`  (lines 31–51)
+##### `upgrade`  (lines 12–22)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the database structures needed to store and search indexed text chunks. It chooses the right setup for PostgreSQL or SQLite so the same feature can run on different database backends.
+**Purpose**: Creates the `credential` table so the application can store encrypted credentials tied to workspaces. This is used when moving the database forward from the previous schema version.
 
-**Data flow**: It starts by asking Alembic, the database migration tool, what kind of database connection is active. If the database is PostgreSQL, it sends raw SQL to enable vector support, create the chunk table, and add search indexes. If the database is not PostgreSQL, it uses SQLAlchemy and Alembic helpers to create a portable table, adds an index on the subject field, and creates a SQLite full-text search table. The result is a database that now has the storage and search structures required by the index.
+**Data flow**: Before this runs, the database has no `credential` table from this migration. The function describes the table columns, the required fields, the link back to the `workspace` table, and the rule that each workspace-and-slot pair must be unique. After it runs, the database has a new table ready to hold encrypted credential records.
 
-**Call relations**: Alembic calls this function when the migration is applied. The function then delegates the actual database work to Alembic operations such as executing SQL, creating tables, and creating indexes. SQLAlchemy column and constraint objects are used only in the non-PostgreSQL path to describe the table in a database-neutral way.
+**Call relations**: Alembic, the database migration tool, calls this function when applying revision `0002`. Inside, it hands the table definition to Alembic’s table-creation operation, using SQLAlchemy building blocks to describe the column types and constraints in a database-independent way.
 
-*Call graph*: 9 external calls (create_index, create_table, execute, get_bind, Column, Integer, LargeBinary, PrimaryKeyConstraint, Text).
-
-
-##### `downgrade`  (lines 54–60)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses this migration by removing the chunk storage and search structures. Someone would use it when rolling the database back to the version before this index table existed.
-
-**Data flow**: It reads the active database type from Alembic. For PostgreSQL, it drops the `chunk` table, which also removes the PostgreSQL-specific generated search column and indexes tied to that table. For non-PostgreSQL databases, it first drops the SQLite full-text search table, then removes the subject index, then removes the main `chunk` table. After it runs, the database no longer contains the structures created by `upgrade`.
-
-**Call relations**: Alembic calls this function when the migration is rolled back. The function uses Alembic’s drop and execute operations to undo the same database changes that `upgrade` made, taking a different path depending on the connected database engine.
-
-*Call graph*: 4 external calls (drop_index, drop_table, execute, get_bind).
+*Call graph*: 8 external calls (create_table, Column, DateTime, ForeignKeyConstraint, LargeBinary, PrimaryKeyConstraint, Text, Uuid).
 
 
-### `extensions/index_default/migrations/0002_chunk_workspace_id.py`
-
-`data_model` · `database migration`
-
-This migration updates the database table named `chunk`, but only when the database is PostgreSQL. A migration is a step-by-step database change that lets the project move from one stored-data shape to another safely.
-
-Before this change, each chunk was identified only by `chunk_digest`, which is like labeling boxes only by their contents. This file adds `workspace_id`, so the label also says which room the box belongs to. The table’s primary key, meaning the database rule for what makes each row unique, changes from just `chunk_digest` to the pair `workspace_id` plus `chunk_digest`.
-
-The file also includes the reverse operation. If the migration is rolled back, it removes `workspace_id` and restores the old primary key. Both directions first check the database type. If it is not PostgreSQL, they do nothing, because the raw SQL statements here are written for PostgreSQL and may not work elsewhere.
-
-#### Function details
-
-##### `upgrade`  (lines 22–26)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the forward database change. It makes chunks workspace-scoped by adding a required `workspace_id` column and changing the table’s uniqueness rule to include it.
-
-**Data flow**: It starts by asking Alembic for the current database connection and checking what kind of database is in use. If the database is not PostgreSQL, it stops without changing anything. If it is PostgreSQL, it runs each SQL statement in order: remove the old primary key, add the new workspace column, then create the new combined primary key.
-
-**Call relations**: Alembic calls this function when moving the database schema forward to this revision. Inside the function, it uses Alembic’s database operation object to inspect the connection and then send the SQL commands to the database.
-
-*Call graph*: 2 external calls (execute, get_bind).
-
-
-##### `downgrade`  (lines 29–33)
+##### `downgrade`  (lines 25–26)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses the migration if the project needs to go back to the previous database shape. It removes workspace scoping from chunks and restores the older primary key based only on `chunk_digest`.
+**Purpose**: Removes the `credential` table when rolling the database back to the earlier schema version. This is the undo path for the migration.
 
-**Data flow**: It asks Alembic for the current database connection and checks the database type. If it is not PostgreSQL, it exits without doing anything. If it is PostgreSQL, it runs the rollback SQL in order: drop the combined primary key, remove the `workspace_id` column, then recreate the old primary key.
+**Data flow**: Before this runs, the database may contain the `credential` table created by `upgrade`. The function asks Alembic to drop that table. After it runs, the table and any credential data stored in it are gone.
 
-**Call relations**: Alembic calls this function during a rollback from this revision. The function relies on Alembic to get the active database connection and to execute each SQL statement against that database.
-
-*Call graph*: 2 external calls (execute, get_bind).
-
-
-### Memory foundation schema
-Early memory migrations create the main memory and page tables, enrich memory records, and attach memory pages to workspaces.
-
-### `extensions/memory/ufo_ext_memory/migrations/0001_memory.py`
-
-`data_model` · `database migration / setup`
-
-This is a database migration: a small, versioned script that changes the shape of the database. Here, it adds a new table called `memory_item`, which is where the memory extension stores pieces of memory tied to a workspace. Without this file, the extension would have nowhere reliable to save its memory records.
-
-The table stores each memory item with an ID, the workspace it belongs to, a subject, the memory text itself, and a class that says what kind of memory it is. The allowed memory classes are limited to `fact`, `episodic`, and `semantic`, so bad or unexpected labels cannot be inserted. The subject is also checked: it must either be `shared` or start with `member:`, which keeps the data in a predictable shape.
-
-The table is linked to the existing `workspace` table. If a workspace is deleted, its memory items are deleted too. That is the database equivalent of clearing all notes from a folder when the folder is removed.
-
-The migration also adds an index on `embedding_digest`, likely so the system can quickly find memory items that still need, or are associated with, embedding work. An embedding is a machine-readable numeric representation of text used for search or similarity.
-
-#### Function details
-
-##### `upgrade`  (lines 12–35)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Creates the `memory_item` table and its lookup index when this migration is applied. This is used when installing or updating the memory extension so the database has the storage it needs.
-
-**Data flow**: Before this runs, the database does not have the `memory_item` table from this migration. The function describes the table columns, required fields, allowed values, links to the `workspace` table, and the primary key. It then asks Alembic, the database migration tool, to create the table and an index. After it runs, the database can store memory records and can search by `embedding_digest` more efficiently.
-
-**Call relations**: Alembic calls this function when moving the database forward to revision `memory_0001`. Inside it, the function hands the table and index instructions to Alembic operations, using SQLAlchemy building blocks to describe columns, constraints, and data types in a database-independent way.
-
-*Call graph*: 9 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 38–40)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the database objects created by `upgrade` if this migration is rolled back. This lets developers or deployment tools undo the memory table change cleanly.
-
-**Data flow**: Before this runs, the `memory_item` table and its `memory_item_due` index may exist. The function first drops the index, then drops the table. After it runs, the database no longer contains the storage created for memory items by this migration.
-
-**Call relations**: Alembic calls this function when moving the database backward from revision `memory_0001`. It reverses the work of `upgrade` by handing drop instructions to Alembic in the safe order: remove the index first, then remove the table it belongs to.
-
-*Call graph*: 2 external calls (drop_index, drop_table).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0002_mem_page.py`
-
-`config` · `database migration`
-
-This file tells the database how to move from one version of the memory extension schema to the next. Think of it like a renovation instruction sheet: when upgrading, it says which new room to add; when rolling back, it says how to remove that room again.
-
-The new table is called `mem_page`. It stores one row per memory page. Each page has a `page_id`, which is a unique identifier and the table’s primary key, meaning it is the main way to tell one page apart from another. It also stores a `subject`, which is required text describing what the page is about, and `created_at`, a required timestamp with timezone information showing when the page was created.
-
-The file uses Alembic, a database migration tool, together with SQLAlchemy, a Python library for describing database tables and columns. Without this migration, the rest of the memory extension could not reliably save or look up these memory pages, because the needed table would not exist. The matching downgrade step matters because it lets developers or deployments safely roll the database back to the previous schema version if needed.
-
-#### Function details
-
-##### `upgrade`  (lines 12–19)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Adds the `mem_page` table to the database during an upgrade. This is used when the system is moving forward to schema version `memory_0002` and needs a place to store memory page records.
-
-**Data flow**: Before this runs, the database is expected not to have the `mem_page` table from this migration. The function defines three required columns: a unique page ID, a text subject, and a creation time with timezone. After it runs, the database contains the new `mem_page` table with `page_id` as its primary key.
-
-**Call relations**: Alembic calls this function when applying the migration. Inside it, SQLAlchemy column and type definitions describe the table layout, and Alembic’s table creation operation sends that layout to the database.
-
-*Call graph*: 6 external calls (create_table, Column, DateTime, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 22–23)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the `mem_page` table during a rollback. This is used when the system needs to undo this migration and return to the previous database version.
-
-**Data flow**: Before this runs, the database may contain the `mem_page` table created by the upgrade. The function asks Alembic to drop that table. After it runs, the table and any data stored in it are gone.
-
-**Call relations**: Alembic calls this function when reversing the migration. It hands the work directly to Alembic’s table drop operation, which performs the database change.
+**Call relations**: Alembic calls this function when reversing revision `0002`. It does not rebuild individual pieces itself; it simply delegates to Alembic’s drop-table operation to remove the table created by the upgrade step.
 
 *Call graph*: 1 external calls (drop_table).
 
 
-### `extensions/memory/ufo_ext_memory/migrations/0003_memory_kind.py`
-
-`data_model` · `database migration during upgrade or rollback`
-
-This migration changes the shape of the `memory_item` database table. A database migration is like a careful renovation plan: it says exactly what to add when moving forward, and what to remove if the project must go back to the previous version.
-
-Before this migration, a memory item did not record its category or a confidence score. The file adds `memory_kind`, a text field that defaults to `fact`, and `confidence`, a whole-number field that defaults to `5`. Both are required fields, so every existing and future row must have values. The defaults matter because existing memory records need safe values immediately; otherwise the database could reject the change because old rows would have empty required fields.
-
-The migration uses Alembic, a tool that applies database schema changes in order, and SQLAlchemy, a Python library used here to describe database column types. Without this file, newer code that expects memories to have a kind and confidence value could fail when reading from or writing to the database.
-
-#### Function details
-
-##### `upgrade`  (lines 12–20)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Adds the new `memory_kind` and `confidence` columns to the `memory_item` table when the database is upgraded. This prepares stored memories to carry extra information used by later memory behavior, such as decay or trust scoring.
-
-**Data flow**: It starts with the existing `memory_item` table. It adds a required text column called `memory_kind`, giving existing rows the default value `fact`, then adds a required integer column called `confidence`, giving existing rows the default value `5`. After it runs, every memory item row has both new fields.
-
-**Call relations**: Alembic calls this function when applying this migration in the forward direction. Inside it, the function asks Alembic to add columns, while SQLAlchemy supplies the column definitions and data types that describe what should be added.
-
-*Call graph*: 4 external calls (add_column, Column, Integer, Text).
-
-
-##### `downgrade`  (lines 23–25)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the `confidence` and `memory_kind` columns from the `memory_item` table when rolling the database back to the previous migration. This restores the table to the older shape expected by earlier code.
-
-**Data flow**: It starts with a `memory_item` table that includes the two added columns. It drops `confidence` first, then drops `memory_kind`. After it runs, those pieces of information are no longer stored in the table.
-
-**Call relations**: Alembic calls this function when undoing this migration. It hands the actual column removal work to Alembic’s database operation helper, which performs the schema changes.
-
-*Call graph*: 1 external calls (drop_column).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0004_mem_page_workspace.py`
-
-`io_transport` · `database migration`
-
-This file is an Alembic migration, which means it is a small, ordered database change that can be applied or reversed. Its job is to update the `mem_page` table so every memory page has a `workspace_id`. A workspace is the larger container the page belongs to, and tying memory pages to it directly makes later lookups and cleanup safer and simpler.
-
-The upgrade happens carefully in stages. First, it adds the new `workspace_id` column as optional, because existing rows do not have a value yet. Then it fills that column by looking at each memory page's related `page` record and copying that page's workspace. Only after the old data has been filled in does it make the column required. Finally, it adds a foreign key, which is a database rule saying: this `workspace_id` must point to a real row in the `workspace` table. The rule also says that if a workspace is deleted, its memory pages are deleted too, like removing a folder and everything inside it.
-
-The downgrade reverses this change by removing the foreign key rule and then dropping the column. Without this migration, memory pages would not have their own direct workspace identity, which could make workspace-based filtering, ownership checks, or cleanup harder and more error-prone.
-
-#### Function details
-
-##### `upgrade`  (lines 12–26)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the database change that adds `workspace_id` to the `mem_page` table. It also fills the new field for existing data and adds a database rule to keep it connected to a valid workspace.
-
-**Data flow**: Before this runs, `mem_page` rows only know their workspace indirectly through the related `page` row. The function adds a temporary optional column, copies each workspace ID from `page` into `mem_page`, changes the column so it must always have a value, and adds a foreign key rule pointing to `workspace.id`. After it finishes, every memory page has a required direct workspace reference, and deleting a workspace will also delete its related memory pages.
-
-**Call relations**: Alembic calls this function when moving the database forward to revision `memory_0004`. Inside, it uses Alembic operations to add the column, run a SQL update, and safely alter the table in a batch so the new requirement and foreign key are put in place.
-
-*Call graph*: 5 external calls (add_column, batch_alter_table, execute, Column, Uuid).
-
-
-##### `downgrade`  (lines 29–32)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the migration by removing the workspace link from `mem_page`. Someone would use this only when rolling the database schema back to the previous version.
-
-**Data flow**: Before this runs, `mem_page` has a required `workspace_id` column with a foreign key rule. The function opens a table-alteration block, removes the foreign key rule first, and then removes the `workspace_id` column. After it finishes, memory pages no longer store a direct workspace ID.
-
-**Call relations**: Alembic calls this function when rolling back from revision `memory_0004`. It uses a batched table alteration so the constraint and column are removed in a controlled order, avoiding a database error from trying to drop a column while a foreign key still depends on it.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-### Memory indexing and time
-Middle memory migrations add consolidation and inventory indexes, introduce an as-of timestamp, and backfill time data from pages.
-
-### `extensions/memory/ufo_ext_memory/migrations/0005_consolidate_index.py`
-
-`io_transport` · `database migration during upgrade or rollback`
-
-This file is an Alembic migration, which means it is a small, ordered database change that can be applied when the project upgrades its schema. The memory system stores items in a table called `memory_item`. Some of those items are live facts, and an hourly consolidation job needs to find older live facts within each workspace. Without a useful index, the database may have to look through many unrelated rows, like searching every page in a filing cabinet instead of using a tab for the right section.
-
-The migration creates an index named `memory_item_consolidate` on two columns: `workspace_id` and `created_at`. That means the database can quickly find memory items for a specific workspace in time order. The important detail is that this is a partial index: it only includes rows where `item_class` is `fact` and `superseded_by` is empty. In plain terms, it only tracks current fact records, not old replaced records or other kinds of memory items. This keeps the index smaller and better matched to the consolidation job.
-
-The file also includes the reverse operation. If the migration is rolled back, the index is dropped, returning the database schema to its earlier state.
-
-#### Function details
-
-##### `upgrade`  (lines 12–19)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the schema change by creating an index that makes it faster to find live fact records for consolidation. This is used when moving the database forward to this migration version.
-
-**Data flow**: It reads no application data directly. It sends a request to the database migration tool to create an index on the `memory_item` table, using `workspace_id` and `created_at` as the lookup keys, and limiting the index to current fact rows. After it runs, the database has a new helper structure that can speed up consolidation queries.
-
-**Call relations**: During a database upgrade, Alembic calls this function for this migration step. The function asks SQLAlchemy to build the condition text for the partial index, then hands the full index creation request to Alembic so the database can apply it.
-
-*Call graph*: 2 external calls (create_index, text).
-
-
-##### `downgrade`  (lines 22–23)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses this migration by removing the consolidation index. This is used if the database must be rolled back to the previous schema version.
-
-**Data flow**: It takes the current database schema, tells the migration tool to drop the `memory_item_consolidate` index from the `memory_item` table, and leaves the table without that extra lookup shortcut. It does not delete memory records themselves.
-
-**Call relations**: During a rollback, Alembic calls this function instead of `upgrade`. The function hands off the drop request to Alembic, which performs the database change.
-
-*Call graph*: 1 external calls (drop_index).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0006_inventory_index.py`
-
-`config` · `database migration`
-
-This file changes the database shape for the memory extension. The problem it solves is speed: the operator explorer needs to show memory items for a single workspace, ordered by when they were created, and it includes all kinds of rows, even older or superseded ones. An existing index only helps a narrower query, so the explorer could otherwise end up scanning the whole memory table each time it loads a page. That is like looking through every book in a library just to find the newest books on one shelf.
-
-The migration creates a database index on the `memory_item` table using two columns: `workspace_id` and `created_at`. An index is a database shortcut, similar to a sorted lookup card, that lets the database jump straight to the rows for one workspace and read them in time order. This matters because the explorer usually asks for only a limited number of rows, so the database can stop after finding the first page instead of checking everything.
-
-The file uses Alembic, a database migration tool. `upgrade` applies the change, and `downgrade` reverses it. The revision fields tell Alembic where this migration fits in the ordered chain of memory database changes.
-
-#### Function details
-
-##### `upgrade`  (lines 17–18)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the migration by creating the `memory_item_inventory` index. This makes workspace-specific, newest-first inventory reads much cheaper for the database.
-
-**Data flow**: Before this runs, the `memory_item` table may not have a general index suited to the explorer's query. The function asks Alembic to create an index named `memory_item_inventory` on `memory_item`, sorted by `workspace_id` and `created_at`. After it runs, the database has a shortcut for finding memory items in one workspace by creation time.
-
-**Call relations**: Alembic calls this function when moving the database forward to revision `memory_0006`. Inside it, the function hands the actual database operation to `alembic.op.create_index`, which performs the index creation.
-
-*Call graph*: 1 external calls (create_index).
-
-
-##### `downgrade`  (lines 21–22)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the migration by removing the `memory_item_inventory` index. This is used if the database schema needs to be rolled back to the previous revision.
-
-**Data flow**: Before this runs, the database may contain the `memory_item_inventory` index. The function asks Alembic to drop that index from the `memory_item` table. After it runs, that lookup shortcut is gone, and queries that depended on it for speed may become slower again.
-
-**Call relations**: Alembic calls this function when rolling the database back from revision `memory_0006`. It delegates the actual removal work to `alembic.op.drop_index`, which updates the database schema.
-
-*Call graph*: 1 external calls (drop_index).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0007_memory_as_of.py`
+### `core/src/ufo/schema/migrations/versions/0003_proposal.py`
 
 `data_model` · `database migration`
 
-This migration changes the shape of the database table that stores memory records. A database migration is like a set of careful renovation instructions for a building: it says exactly what to add when moving forward, and how to remove it if rolling back.
+This is a database migration: a small, ordered recipe for changing the shape of the database. It belongs to Alembic, the tool that applies database changes step by step so every installation can move from one version of the schema to the next safely.
 
-Here, the table is `memory_item`, and the new column is `as_of`. The column stores a date and time with timezone information, and it is allowed to be empty. That means old memory records do not need to be rewritten immediately, and new records can use the field only when the system knows the relevant time.
+Here, the change is called revision 0003 and it comes after revision 0002. When applied, it creates a new table named proposal. Think of the table like a ledger for suggested changes. Each row has an id, links back to the workspace and agent involved, stores the old and new digests, keeps the proposal body as JSON data, and records timestamps for when it was created and last updated.
 
-This matters because some memories are not just general facts; they may be true as of a certain moment. For example, a stored note like “the project deadline is Friday” is more useful if the system knows when that information was current.
-
-The file also includes the reverse operation. If this migration is undone, the `as_of` column is removed from the `memory_item` table. Alembic, the database migration tool, uses the `revision`, `down_revision`, and `depends_on` values to place this change in the correct order among other migrations.
-
-#### Function details
-
-##### `upgrade`  (lines 12–14)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function applies the migration. It adds the optional `as_of` timestamp column to the `memory_item` table.
-
-**Data flow**: It starts with the existing `memory_item` table. It opens a safe table-alteration block, creates a new database column named `as_of` with a timezone-aware date-and-time type, and adds it to the table. After it runs, memory records can store an extra time value, though the value may be left blank.
-
-**Call relations**: Alembic calls this function when the database is being moved forward to this revision. Inside that flow, it asks Alembic to alter the `memory_item` table and uses SQLAlchemy to describe the new column and its date-time type.
-
-*Call graph*: 3 external calls (batch_alter_table, Column, DateTime).
-
-
-##### `downgrade`  (lines 17–19)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function reverses the migration. It removes the `as_of` column from the `memory_item` table.
-
-**Data flow**: It starts with a database that already has the `as_of` column. It opens a safe table-alteration block and drops that column. After it runs, memory records no longer have a place to store this timestamp, and any stored values in that column are lost.
-
-**Call relations**: Alembic calls this function when rolling the database back before this revision. It uses Alembic’s table-alteration helper to undo exactly what `upgrade` added.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0008_page_information_time.py`
-
-`io_transport` · `database migration / upgrade`
-
-This file is a one-time database upgrade step for the memory extension. Some rows in the `memory_item` table have a `source_ref`, which points back to a page, but their `as_of` time is empty. That missing time matters because a memory is more useful when the system knows when the source information was created or last updated.
-
-The migration reads memory items in small batches, like carrying boxes instead of trying to move the whole warehouse at once. For each memory item, it tries to treat `source_ref` as a page ID. If the value is not a valid ID, it skips that row safely. It then looks up the matching rows in the `page` table and chooses the page's update time if available, otherwise its creation time. That chosen time is converted into a real date-time value and written back into the memory item's `as_of` field.
-
-The upgrade is careful not to overwrite records that already have an `as_of` value. The downgrade does nothing, meaning this data-filling step is not automatically reversed if the migration is rolled back.
-
-#### Function details
-
-##### `upgrade`  (lines 17–69)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Fills empty `as_of` timestamps on memory records using the creation or update time of the page each memory came from. This is used during a database upgrade so older data matches the newer expectation that memories can say when their information was current.
-
-**Data flow**: It starts with the database connection supplied by Alembic, the migration tool. It reads memory rows whose `source_ref` is present but whose `as_of` time is missing, processes them in batches, turns valid `source_ref` values into page IDs, reads the matching page rows, chooses each page's updated time or created time, converts that text into a date-time value, and writes that value back to the related memory rows.
-
-**Call relations**: Alembic calls this when applying the migration. Inside, it asks Alembic for the active database connection, uses SQLAlchemy to build the database queries and updates, and uses `datetime.fromisoformat` to turn stored timestamp text into date-time objects before saving them to `memory_item.as_of`.
-
-*Call graph*: 11 external calls (get_bind, fromisoformat, DateTime, Text, Uuid, bindparam, column, select, table, update (+1 more)).
-
-
-##### `downgrade`  (lines 72–73)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Defines what should happen if this migration is rolled back, but intentionally does nothing. The migration does not try to remove the timestamps it filled in.
-
-**Data flow**: Nothing goes in, nothing is read, and nothing is changed. The function simply exits, leaving the database as it is.
-
-**Call relations**: Alembic would call this during a rollback of the migration. Because the function has no work inside it, it does not call or hand off to anything else.
-
-
-### Memory provenance model
-Later memory migrations make source tracking more explicit through page provenance, page revisions, room audiences, and multi-source partitioning.
-
-### `extensions/memory/ufo_ext_memory/migrations/0009_memory_page_provenance.py`
-
-`data_model` · `database migration`
-
-This file is an Alembic migration, which means it is a small script used to change the database structure over time. Its job is to improve how the system records the origin of a memory item. Before this migration, a memory item might store its source page in a general-purpose text field called `source_ref`. That is like writing an address on a sticky note: useful, but easy to misuse or misread. This migration creates a dedicated `created_from_page_id` column, which is a proper database ID pointing to a page.
-
-During the upgrade, the file first adds the new column to the `memory_item` table. Then it looks through memory items that already have a `source_ref`. For each one, it tries to read that text as a UUID, which is a standard unique identifier. If the text is not a valid UUID, it leaves it alone. If it is a valid UUID and there is a real page with that ID, the migration copies that ID into `created_from_page_id` and clears `source_ref`. It does this in batches so it does not load too much data at once.
-
-The downgrade reverses only the structure change by removing the new column. It does not restore the old `source_ref` values.
-
-#### Function details
-
-##### `upgrade`  (lines 16–59)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function moves the database forward to the new design. It adds a dedicated page-origin column to memory items and fills it for old records when their existing text source clearly matches a real page.
-
-**Data flow**: It starts with the current `memory_item` table, where some rows may have a `source_ref` text value. It adds `created_from_page_id`, reads memory items in small groups, tries to treat each `source_ref` as a page UUID, checks that such a page actually exists, and then writes that page ID into the new column while clearing the old text field for those rows. Rows with missing, invalid, or non-matching source text are left unchanged except for having the new empty column available.
-
-**Call relations**: Alembic calls this function when applying this migration. Inside it, the function asks Alembic for a database connection, uses SQLAlchemy building blocks to describe the tables and queries, and then sends select and update commands to the database. It is the forward-moving half of this migration: it prepares the schema and carefully carries over any trustworthy existing data.
-
-*Call graph*: 11 external calls (batch_alter_table, get_bind, Column, Text, Uuid, bindparam, column, select, table, update (+1 more)).
-
-
-##### `downgrade`  (lines 62–64)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function moves the database backward by removing the page-origin column added by the upgrade. Someone would use it only when rolling this migration back.
-
-**Data flow**: It starts with a `memory_item` table that has `created_from_page_id`. It opens a safe table-alteration block and drops that column. The result is the older table shape without the dedicated page provenance field.
-
-**Call relations**: Alembic calls this function when undoing this migration. It uses Alembic’s table-alteration helper and does not call the data-copying logic from `upgrade`. Because the upgrade cleared some old `source_ref` values after moving them, this rollback removes the new column but does not recreate those old text references.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0010_page_revision.py`
-
-`other` · `database migration`
-
-This file is an Alembic migration, which means it is a small script used to move the database from one version of the app’s expected shape to the next. The problem it solves is precision: before this migration, a memory item could point to a page, but not to the exact revision of that page. If the page changed later, the system could not clearly tell which version was used to derive that memory.
-
-On upgrade, it adds two optional database fields. One goes on memory items and records the page revision they were created from. The other goes on stored memory pages and records their revision. Then it deliberately invalidates some old work: memory items derived from pages have their embedding information cleared, all cached memory pages are deleted, and two saved progress cursors are removed. In plain terms, it is telling the system, “The rules changed, so forget the old page-derived results and rebuild them correctly.”
-
-On downgrade, it removes the two new fields. This lets the database move back to the previous shape if the migration is reversed. The important behavior is that upgrading is not just a schema change; it also resets stale derived data to avoid mixing old assumptions with the new revision-aware model.
+The table also protects the data from common mistakes. It only allows the status to be one of pending, approved, or rejected. It requires each proposal to belong to an existing workspace and agent. If someone approved it, that approver must be an existing member. Without this migration, the application would have nowhere reliable to save proposal records, and any feature depending on proposal review or approval would fail at the database level.
 
 #### Function details
 
@@ -545,170 +158,86 @@ On downgrade, it removes the two new fields. This lets the database move back to
 def upgrade() -> None
 ```
 
-**Purpose**: Moves the database forward to support page revision tracking in the memory extension. It also clears old page-derived memory data that may no longer be trustworthy once revisions matter.
+**Purpose**: This function applies the migration by creating the proposal table. It is used when the database is moving forward from revision 0002 to revision 0003.
 
-**Data flow**: It starts with the existing database tables. It adds a nullable `created_from_page_revision` number to `memory_item` and a nullable `revision` number to `mem_page`. Then it opens a database connection, clears embedding fields for memory items that came from pages, deletes all stored memory pages, and removes saved cursor records for page indexing and fact derivation. Afterward, the schema can store revision information, and old derived page data is queued to be rebuilt rather than reused.
+**Data flow**: It takes no direct input from the application. Alembic calls it during a migration run, and it tells the database to add a proposal table with specific columns, required fields, allowed status values, links to other tables, and a primary key. After it runs successfully, the database can store proposal records.
 
-**Call relations**: Alembic calls this function when applying this migration. Inside it, the function asks Alembic to alter tables safely, uses SQLAlchemy to describe the new columns and SQL statements, then sends cleanup commands through the active database connection so the rest of the memory system can later regenerate page-based data under the new model.
+**Call relations**: Alembic calls this function when upgrading the schema. Inside it, the function hands the table design to alembic.op.create_table, using SQLAlchemy building blocks such as columns, text fields, timestamps, JSON storage, check constraints, foreign keys, and a primary key to describe exactly what should be created.
 
-*Call graph*: 5 external calls (batch_alter_table, get_bind, BigInteger, Column, text).
-
-
-##### `downgrade`  (lines 34–38)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Moves the database backward by removing the page revision fields added by this migration. Someone would use it when rolling the database back to the previous version.
-
-**Data flow**: It starts with a database that has the new revision columns. It alters `mem_page` to remove `revision`, then alters `memory_item` to remove `created_from_page_revision`. Afterward, the database shape matches the earlier migration version, without revision tracking for page-derived memory.
-
-**Call relations**: Alembic calls this function when reversing this migration. It uses Alembic’s table-alteration helper to undo the schema additions made by `upgrade`; unlike `upgrade`, it does not try to restore deleted page cache data or cursor records.
-
-*Call graph*: 1 external calls (batch_alter_table).
+*Call graph*: 9 external calls (create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
 
 
-### `extensions/memory/ufo_ext_memory/migrations/0011_room_audience.py`
-
-`config` · `database migration`
-
-This file is a small database migration, meaning it changes the shape or rules of the database as the project evolves. Here, the important rule is a check constraint on the `memory_item` table. A check constraint is a database safety rule that rejects rows whose values do not match an allowed pattern.
-
-Before this migration, a memory item’s `subject` could only be `shared` or start with `member:`. That meant the database itself would refuse memory items aimed at a room or at a foreign room/user style audience. This migration updates that rule so `subject` can also look like `room:%:%` or `foreign:%:%`. In plain terms, it teaches the database that room-scoped memory audiences are valid.
-
-The file uses Alembic, a database migration tool, to alter the table safely. It first removes the old constraint named `memory_item_subject`, then creates a new constraint with the same name but broader allowed patterns. The downgrade does the reverse: it removes the broader rule and restores the older, stricter one. Like replacing a sign at a doorway, the table stays the same, but the list of who is allowed through changes.
-
-#### Function details
-
-##### `upgrade`  (lines 11–18)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the forward database change. It updates the `memory_item.subject` rule so the database accepts shared, member, room, and foreign-style subjects.
-
-**Data flow**: It reads no application data directly. It opens a safe table-alteration context for the `memory_item` table, removes the old `memory_item_subject` check constraint, then creates a replacement rule that allows `shared`, `member:%`, `room:%:%`, and `foreign:%:%` values. The result is a database that will accept the newly supported room-audience memory records.
-
-**Call relations**: When Alembic runs this migration during an upgrade, it calls this function. The function hands the actual table-changing work to `alembic.op.batch_alter_table`, which provides the tool used to drop and recreate the database constraint safely.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-##### `downgrade`  (lines 21–27)
+##### `downgrade`  (lines 34–35)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses the migration. It restores the older database rule where memory subjects can only be `shared` or member-based.
+**Purpose**: This function reverses the migration by removing the proposal table. It is used if the database needs to roll back from revision 0003 to revision 0002.
 
-**Data flow**: It reads no application data directly. It opens a table-alteration context for `memory_item`, removes the broader `memory_item_subject` constraint, then recreates the older version that only allows `shared` and `member:%`. After this, the database will again reject room-style and foreign-style subject values.
+**Data flow**: It takes no direct input from the application. Alembic calls it during a rollback, and it tells the database to drop the proposal table. After it runs, proposal records and the table structure are gone.
 
-**Call relations**: When Alembic rolls the database back from this migration, it calls this function. As in the upgrade path, the function relies on `alembic.op.batch_alter_table` to perform the constraint change on the table.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-### `extensions/memory/ufo_ext_memory/migrations/0012_source_partition.py`
-
-`data_model` · `database migration`
-
-This file is an Alembic migration, meaning it is a controlled database change that can be applied or rolled back. The problem it solves is source tracking for memory items. Before this change, a memory item was tied directly to the page revision it came from. That made it hard to represent the same fact appearing in more than one feed or page. This migration keeps the memory item's main identity based on its content, but adds a clearer way to say, "this fact was seen through this source page."
-
-It first adds a nullable `source_id` column to `memory_item`. Then it cleans up old rows: if a memory item claims it came from a page, but the page is missing or the revision information is incomplete, the migration clears that origin so the row is not left half-linked. For rows with a complete page origin, it fills in `source_id` from the page.
-
-It then adds a check rule to make sure page origin fields stay all-or-nothing: either page, revision, and source are all present, or none are. Finally it creates a new `memory_source` table. This table records links between memory items and the pages they were derived from. If a memory item is deleted, its source links are automatically deleted too, like removing a folder and having its labels go with it.
-
-#### Function details
-
-##### `upgrade`  (lines 50–112)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the new source-linking design to the database. It adds the `source_id` field, repairs older rows so they are either fully linked or not linked at all, creates the new `memory_source` table, and copies existing complete origins into that table.
-
-**Data flow**: It starts with the existing `memory_item` and `page` tables. It adds a new column to `memory_item`, looks up each item's page source when possible, clears incomplete page origins, fills `source_id` for valid ones, adds a database rule to prevent partial origins, creates `memory_source`, and inserts one source-link row for each memory item that now has a source. The result is the same memory items, but with source information split into a safer and more flexible link table.
-
-**Call relations**: The Alembic migration runner calls this when moving the database forward to this revision. Inside, it asks Alembic for a database connection, uses Alembic table-changing helpers for schema changes, and uses SQLAlchemy expressions to update and copy the existing data before the new constraints are enforced.
-
-*Call graph*: 13 external calls (batch_alter_table, create_table, get_bind, BigInteger, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Uuid, insert (+3 more)).
-
-
-##### `downgrade`  (lines 115–119)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses this migration if the database needs to move back to the previous version. It removes the source-link table and removes the `source_id` column and its consistency rule from `memory_item`.
-
-**Data flow**: It starts with a database that has the new `memory_source` table and the extra `memory_item.source_id` column. It drops the link table first, then opens `memory_item` for alteration, removes the check rule, and drops the column. The result is a schema shaped like the previous migration expected.
-
-**Call relations**: The Alembic migration runner calls this during rollback. It hands the actual table removal and column/constraint changes to Alembic operations, which generate the database-specific SQL needed to undo the upgrade.
-
-*Call graph*: 2 external calls (batch_alter_table, drop_table).
-
-
-### Sample and skill schemas
-Remaining extension migrations create sample workspace notes and evolve user-created skills from workspace-level records to agent-owned records.
-
-### `extensions/sample/migrations/0001_sample_ext_note.py`
-
-`data_model` · `database migration`
-
-This migration is like an instruction card for changing the database when the sample extension is installed or updated. The real problem it solves is persistence: the extension needs a safe place in the database to keep a note tied to a workspace. Without this file, the application might try to use the sample extension's note feature but find that the needed table does not exist.
-
-The file tells Alembic, the database migration tool, how this change fits into the larger database history. It gives the migration a unique revision name, says it has no earlier migration inside this extension, labels it as part of the sample extension branch, and says it depends on the main application migration named "0001". That dependency matters because this table points at the existing workspace table, so the workspace table must already exist.
-
-When moving forward, the migration creates a table called `sample_ext_note`. Each row belongs to one workspace, contains a required text note, and uses the workspace ID as its primary key, meaning there can be only one note per workspace. The foreign key rule also says that if a workspace is deleted, its note is deleted automatically. When rolling backward, the migration simply drops the table.
-
-#### Function details
-
-##### `upgrade`  (lines 12–19)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function applies the migration by creating the database table used by the sample extension to store workspace notes. It is used when the database is being moved forward to include this extension's schema.
-
-**Data flow**: Before it runs, the database has no `sample_ext_note` table. The function defines a new table with a required workspace ID, a required note body, a primary key that allows only one row per workspace, and a link back to the main `workspace` table. After it runs, the database can store one note for each workspace, and those notes are automatically removed when their workspace is removed.
-
-**Call relations**: Alembic calls this function during an upgrade. Inside that upgrade step, it asks SQLAlchemy to describe the table columns and constraints, then hands that description to Alembic so Alembic can create the table in the database.
-
-*Call graph*: 6 external calls (create_table, Column, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 22–23)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function reverses the migration by removing the table created by `upgrade`. It is used when rolling the database back to a state before this sample extension table existed.
-
-**Data flow**: Before it runs, the database may contain the `sample_ext_note` table and any notes stored in it. The function tells Alembic to drop that table. After it runs, the table and its stored notes are gone.
-
-**Call relations**: Alembic calls this function during a downgrade. It does not rebuild the table details itself; it simply hands off the table name to Alembic, which performs the database removal.
+**Call relations**: Alembic calls this function when downgrading the schema. It delegates the actual removal to alembic.op.drop_table, which performs the database operation.
 
 *Call graph*: 1 external calls (drop_table).
 
 
-### `extensions/skill_create/ufo_ext_skill_create/migrations/skill_create_0001_user_skill.py`
+### Conversation Extensions
+These migrations extend the conversation model for nested turns and add per-workspace extension JSON storage.
+
+### `core/src/ufo/schema/migrations/versions/0004_loop_depth.py`
 
 `data_model` · `database migration`
 
-This is a database migration file. A migration is like a set of instructions for changing the shape of the database in a controlled way, so every installation can be brought to the same version.
+This migration changes the shape of the database, like adding new labeled drawers to a filing cabinet. Before this change, a conversation could only have the surface value `cli`, meaning it came from the command-line interface. This file expands that rule so conversations can also be marked as `subagent`, which lets the system distinguish work done by a secondary agent from work done directly in the main command-line flow.
 
-Here, the file adds a table called `user_skill`. Each row represents one skill saved by a user inside a workspace. The table stores the workspace it belongs to, the skill name, a digest, the skill content, and timestamps for when it was created and last updated.
+It also adds two optional fields to the `turn` table. `parent_turn_id` stores the identifier of another turn, allowing one turn to point back to the turn that caused it. This is how the database can represent nested or loop-like activity instead of only a flat list. `subagent_profile` stores text describing the subagent profile used for that turn, if there was one.
 
-The table uses two fields together as its identity: `workspace_id` and `name`. In plain terms, this means two different workspaces can each have a skill with the same name, but one workspace cannot have two skills with the same name. The `workspace_id` also points to the main `workspace` table. If a workspace is deleted, its related skills are automatically deleted too. This avoids leaving behind orphaned skill records that no longer belong anywhere.
+The `upgrade` function applies these changes. The `downgrade` function reverses them: it removes the new columns and tightens the conversation rule back to only allowing `cli`. This matters because migrations must be reversible when possible, so developers can move the database forward or backward to match the version of the application they are running.
 
-The file also includes the reverse operation: removing the `user_skill` table. That lets the database be rolled back if this migration needs to be undone.
+#### Function details
+
+##### `upgrade`  (lines 12–17)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies this migration to move the database from revision `0003` to `0004`. It adds storage for parent-child turn links and subagent profile text, then updates the allowed conversation surface values to include `subagent`.
+
+**Data flow**: It starts with the existing database schema. It adds two nullable columns to the `turn` table: `parent_turn_id`, a UUID value that can point to another turn, and `subagent_profile`, free text for the subagent profile. It then changes the `conversation` table’s check constraint, which is a database rule that rejects invalid values, so `surface` may be either `cli` or `subagent`. The result is a database that can store nested subagent-related turn data.
+
+**Call relations**: Alembic, the database migration tool, calls this function when applying revision `0004`. Inside the function, it hands the actual database changes to Alembic operations such as adding columns and altering the `conversation` table, while SQLAlchemy is used to describe the new column types.
+
+*Call graph*: 5 external calls (add_column, batch_alter_table, Column, Text, Uuid).
+
+
+##### `downgrade`  (lines 20–25)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses this migration and returns the database schema to the previous revision’s shape. It removes subagent-related turn storage and restores the older rule that conversations may only use the `cli` surface.
+
+**Data flow**: It starts with a database that has the `0004` changes applied. First it changes the `conversation` table’s check constraint back so only `cli` is allowed as a `surface` value. Then it drops the `subagent_profile` and `parent_turn_id` columns from the `turn` table. The result is a schema matching the earlier version, though any data stored only in those removed columns would be lost.
+
+**Call relations**: Alembic calls this function when rolling the database back from revision `0004` to `0003`. The function delegates the table edits to Alembic’s batch table alteration and column removal operations so the rollback happens in the database itself.
+
+*Call graph*: 2 external calls (batch_alter_table, drop_column).
+
+
+### `core/src/ufo/schema/migrations/versions/0006_ext_store.py`
+
+`data_model` · `database migration`
+
+This migration is like adding a new labeled storage cabinet to the database. Each drawer belongs to one workspace, one extension, and one key, and the drawer can hold a JSON value. JSON is a flexible data format for storing objects, lists, strings, numbers, and similar values.
+
+The file exists so the database structure can evolve in a controlled way. When the project is upgraded, Alembic, the database migration tool, runs `upgrade()` to create the new `ext_store` table. The table records which workspace the data belongs to, which extension owns it, the key name, the stored value, and timestamps for when the record was created and last changed.
+
+A key detail is the primary key: `workspace_id`, `extension`, and `key` together must be unique. In plain terms, one extension cannot store two different values under the same key in the same workspace. The table also has a foreign key to `workspace.id`, which means every stored extension value must belong to a real workspace.
+
+If the migration needs to be reversed, `downgrade()` removes the table. Without this file, extensions would not have this shared database-backed place to store per-workspace settings or state.
 
 #### Function details
 
@@ -718,13 +247,13 @@ The file also includes the reverse operation: removing the `user_skill` table. T
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the `user_skill` database table so the application can store user-created skills. This is used when moving the database forward to include the skill creation feature.
+**Purpose**: Creates the `ext_store` database table during an upgrade. This gives extensions a structured place to store per-workspace values.
 
-**Data flow**: Before this runs, the database has no `user_skill` table from this migration. The function describes the new table, its columns, its link to the `workspace` table, and its primary key. After it runs, the database can store skill records tied to workspaces.
+**Data flow**: It starts with the migration tool being told to move the database forward. The function describes the new table: workspace ID, extension name, key, optional JSON value, creation time, update time, a link back to the workspace table, and a uniqueness rule across workspace, extension, and key. The result is a new table in the database.
 
-**Call relations**: During an Alembic migration upgrade, Alembic calls this function. It hands the table definition to Alembic's `create_table` operation, using SQLAlchemy building blocks to describe the columns and constraints.
+**Call relations**: Alembic calls this when applying this migration. Inside, it asks SQLAlchemy to describe the table columns and constraints, then hands that description to Alembic's table-creation operation so the actual database structure is changed.
 
-*Call graph*: 7 external calls (create_table, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
+*Call graph*: 8 external calls (create_table, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
 
 
 ##### `downgrade`  (lines 26–27)
@@ -733,54 +262,57 @@ def upgrade() -> None
 def downgrade() -> None
 ```
 
-**Purpose**: Removes the `user_skill` table. This is used when rolling the database back to the state before this feature's table existed.
+**Purpose**: Removes the `ext_store` table when rolling this migration back. This undoes the schema change made by `upgrade()`.
 
-**Data flow**: Before this runs, the database may contain the `user_skill` table. The function tells Alembic to drop that table. After it runs, the table and its stored skill records are gone.
+**Data flow**: It starts with the migration tool being told to move the database backward. The function names the table to remove. The result is that the `ext_store` table, including any data inside it, is dropped from the database.
 
-**Call relations**: During an Alembic migration downgrade, Alembic calls this function. It delegates the actual removal to Alembic's `drop_table` operation.
+**Call relations**: Alembic calls this during a rollback of this migration. It hands the table name to Alembic's drop-table operation, which performs the database change.
 
 *Call graph*: 1 external calls (drop_table).
 
 
-### `extensions/skill_create/ufo_ext_skill_create/migrations/skill_create_0002_agent_skills.py`
+### Legacy Knowledge Graph
+The final foundational migration adds the legacy graph tables for entities and relationships.
+
+### `core/src/ufo/schema/migrations/versions/knowledge_graph_0001_graph.py`
 
 `data_model` · `database migration`
 
-This file is an Alembic migration. Alembic is the tool that applies step-by-step database changes as the project evolves. Before this migration, a row in the user_skill table was identified by workspace_id and name. After this migration, the same skill name can exist separately for different agents inside the same workspace, so agent_id must become part of the identity of each skill.
+This file is part of the database history for the project. A database migration is like a renovation instruction sheet: it says exactly what new rooms, doors, and labels must be added to the database so newer code has the storage it expects.
 
-The migration first adds a new agent_id column to user_skill. Existing skill rows do not yet have an agent, so the file fills them in by choosing the earliest-created agent in the same workspace. This is a practical default that lets old data fit the new model instead of being left blank.
+Here, the new “rooms” are two tables. `graph_entity` stores named items in a workspace, such as a person, company, organization, or topic. Each entity belongs to a workspace, has a subject scope such as `shared` or a specific `member:...`, and keeps both its display name and a normalized name used for lookup. The table also records whether the entity is only a stub, meaning a placeholder rather than a fully known item.
 
-After the data is filled in, the migration makes agent_id required, replaces the old primary key with a new one that includes workspace_id, agent_id, and name, and adds a foreign key. A foreign key is a database rule saying the agent_id must point to a real row in the agent table.
+`graph_edge` stores connections between entities. For example, one entity might work at another, mention another, or have been derived from another. Each edge points from one entity to another, links back to the source page where it came from, includes a confidence score, and can be marked as a tombstone, which means it is treated as removed without necessarily forgetting its history.
 
-The file has separate paths for PostgreSQL and SQLite because these databases support schema changes differently. PostgreSQL can run direct ALTER TABLE commands. SQLite often needs Alembic’s batch mode, which rebuilds table details more carefully behind the scenes.
+The file also adds indexes, which are shortcuts that help the database find common lookups quickly. Without this migration, the knowledge graph feature would have nowhere reliable to store its entities and relationships.
 
 #### Function details
 
-##### `upgrade`  (lines 18–35)
+##### `upgrade`  (lines 12–66)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Applies the new database design where each user skill belongs to an agent. It adds the agent_id column, fills it for old rows, then changes database rules so future rows must include a valid agent.
+**Purpose**: This function applies the migration by adding the knowledge graph tables and their lookup shortcuts to the database. It is used when moving the database forward to a version of the application that expects graph entities and graph edges to exist.
 
-**Data flow**: The function reads the current database connection to find out which database engine is being used. It changes the user_skill table by adding agent_id, copies in a default agent for existing skills using the earliest agent in the same workspace, then updates constraints so the table is keyed by workspace, agent, and skill name. The result is a database where user skills are agent-owned and protected by a link to the agent table.
+**Data flow**: It starts with an existing database schema. It asks Alembic, the database migration tool, to create the `graph_entity` table with columns, required fields, foreign-key links to workspaces, and checks that limit allowed entity types and subject formats. It then creates an index for finding entities by workspace, subject, and normalized name. Next it creates the `graph_edge` table with links to workspaces, source and target entities, a source page, confidence data, deletion state, and checks for allowed edge types and subject formats. Finally, it adds indexes that make common edge searches faster. The result is a database that can store and query the knowledge graph.
 
-**Call relations**: This function is called by the Alembic migration runner when upgrading the database to this revision. It uses SQLAlchemy to describe the new column, Alembic batch table editing for safer table changes, direct SQL statements for data backfill and PostgreSQL-specific changes, and the active database connection to choose the correct path for PostgreSQL or SQLite.
+**Call relations**: When the migration runner moves the database forward, it calls `upgrade`. This function hands the detailed table, column, constraint, and index instructions to Alembic and SQLAlchemy. SQLAlchemy describes the pieces of the tables, while Alembic carries out the actual database changes.
 
-*Call graph*: 5 external calls (batch_alter_table, execute, get_bind, Column, Uuid).
+*Call graph*: 11 external calls (create_index, create_table, Boolean, CheckConstraint, Column, DateTime, Float, ForeignKeyConstraint, PrimaryKeyConstraint, Text (+1 more)).
 
 
-##### `downgrade`  (lines 38–49)
+##### `downgrade`  (lines 69–75)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses the migration and returns user_skill to the older design where skills are identified only by workspace and name. Someone would use this if rolling the database back to the previous version.
+**Purpose**: This function reverses the migration by removing the knowledge graph indexes and tables. It is used if the database must be rolled back to a version before the knowledge graph schema existed.
 
-**Data flow**: The function checks which database engine is connected. It removes the foreign key from user_skill to agent, restores the older primary key based on workspace_id and name, and drops the agent_id column. The result is a database shaped like it was before agent-owned skills were introduced.
+**Data flow**: It starts with a database that contains `graph_entity`, `graph_edge`, and their indexes. It first removes the indexes on graph edges, then removes the edge table itself. After that it removes the entity lookup index and then the entity table. The result is a database schema returned to its earlier state, without the knowledge graph storage.
 
-**Call relations**: This function is called by the Alembic migration runner during a rollback. Like the upgrade path, it chooses direct SQL for PostgreSQL and Alembic batch table editing for SQLite, because those databases need different techniques for changing table constraints and columns.
+**Call relations**: When the migration runner rolls the database backward, it calls `downgrade`. This function delegates the actual removal work to Alembic’s drop operations. It removes the edge table before the entity table because edges depend on entities, much like taking down connecting wires before removing the posts they attach to.
 
-*Call graph*: 3 external calls (batch_alter_table, execute, get_bind).
+*Call graph*: 2 external calls (drop_index, drop_table).
