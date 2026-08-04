@@ -46,7 +46,7 @@ A seat is what lets a person talk to the agent.
   approves one.
 - There is a hard cap on seats. When it is reached, no more seats can be granted from chat and the
   team has to be involved.
-- Only an admin can grant or revoke seats. An admin can also list who currently holds one.
+- Only an admin can grant or revoke seats. Any member can list who currently holds one.
 
 To an admin approving one: "Approving this adds a seat beyond your included allowance, and it bills as
 overage."

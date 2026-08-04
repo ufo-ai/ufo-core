@@ -150,6 +150,31 @@ CLAIMS = (
         pattern=r"async def _admin_billing\(ctx: ToolContext\)",
     ),
     Claim(
+        claim="only an admin can grant or revoke a seat",
+        corpus="references/billing-and-seats.md",
+        phrase="Only an admin can grant or revoke seats",
+        source=METRONOME,
+        pattern=(
+            r"async def grant_seat\(.*\n"
+            r"\s+seats = await _admin_seats\(ctx\)\n"
+            r"(?:.*\n)*?"
+            r"async def revoke_seat\(.*\n"
+            r"\s+seats = await _admin_seats\(ctx\)"
+        ),
+    ),
+    Claim(
+        claim="any member can list who holds a seat",
+        corpus="references/billing-and-seats.md",
+        phrase="Any member can list who currently holds one",
+        source=METRONOME,
+        pattern=(
+            r"async def list_seats\(.*\n"
+            r"\s+assert ctx\.ext is not None\n"
+            r"\s+async with ctx\.ext\.transaction\(\) as connection:\n"
+            r"\s+snapshot = await Seats\(ctx\.turn\.workspace_id\)\.snapshot\(connection\)"
+        ),
+    ),
+    Claim(
         claim="an externally shared channel reads and writes only itself",
         corpus="references/capabilities.md",
         phrase="reads and\nwrites only itself",
