@@ -11,8 +11,9 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import aiosqlite
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -21,7 +22,7 @@ from alembic.script import ScriptDirectory
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from ufo_testsupport.tables import reset_workspace_data
 
 import ufo.db
@@ -1041,6 +1042,148 @@ async def test_a_refused_connect_counts_under_the_class_the_driver_really_raises
         {"path": "workspace", "error_class": "ConnectionRefusedError"},
         {"path": "workspace", "error_class": "gaierror"},
     ]
+
+
+@pytest.fixture
+def tx_engine(tmp_path: Path) -> AsyncEngine:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'transactions.db'}"
+    apply_migrations(url)
+    return _build_engine(url, ufo.db._APP)
+
+
+async def _add_workspace(connection: AsyncConnection, workspace_id: UUID) -> None:
+    await connection.execute(
+        sa.insert(tables.workspace).values(
+            id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+        )
+    )
+
+
+async def _committed_workspaces(engine: AsyncEngine) -> list[UUID]:
+    async with _opened(engine, "workspace") as connection:
+        return list((await connection.execute(sa.select(tables.workspace.c.id))).scalars())
+
+
+async def test_a_body_that_raises_commits_nothing(tx_engine: AsyncEngine) -> None:
+    workspace_id = uuid4()
+
+    with pytest.raises(ValueError):
+        async with _opened(tx_engine, "workspace") as connection:
+            await _add_workspace(connection, workspace_id)
+            raise ValueError("the caller's own failure")
+
+    assert await _committed_workspaces(tx_engine) == []
+
+
+async def test_a_cancel_inside_the_body_rolls_back_before_the_caller_sees_it(
+    tx_engine: AsyncEngine,
+) -> None:
+    workspace_id = uuid4()
+    written = asyncio.Event()
+    opened: list[AsyncConnection] = []
+
+    async def step() -> None:
+        async with _opened(tx_engine, "workspace") as connection:
+            opened.append(connection)
+            await _add_workspace(connection, workspace_id)
+            written.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.ensure_future(step())
+    await written.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert opened[0].closed
+    assert await _committed_workspaces(tx_engine) == []
+
+
+async def test_a_cancel_landing_inside_the_teardown_finishes_it_first(
+    tx_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    opened: list[AsyncConnection] = []
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+    original_commit = aiosqlite.Connection.commit
+    pause_next_commit = True
+
+    async def paused_commit(connection: aiosqlite.Connection) -> None:
+        nonlocal pause_next_commit
+        if pause_next_commit:
+            pause_next_commit = False
+            commit_started.set()
+            await release_commit.wait()
+        await original_commit(connection)
+
+    monkeypatch.setattr(aiosqlite.Connection, "commit", paused_commit)
+
+    async def step() -> None:
+        async with _opened(tx_engine, "workspace") as connection:
+            opened.append(connection)
+            await _add_workspace(connection, workspace_id)
+
+    task = asyncio.ensure_future(step())
+    await commit_started.wait()
+    task.cancel()
+    release_commit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+    assert opened[0].closed
+    assert await _committed_workspaces(tx_engine) == [workspace_id]
+
+
+async def test_a_teardown_that_fails_raises_on_the_caller(tx_engine: AsyncEngine) -> None:
+    def fail_the_commit(connection: sa.Connection) -> None:
+        raise RuntimeError("the commit lost the race")
+
+    sa.event.listen(tx_engine.sync_engine, "commit", fail_the_commit)
+
+    with pytest.raises(RuntimeError, match="the commit lost the race"):
+        async with _opened(tx_engine, "workspace") as connection:
+            await _add_workspace(connection, uuid4())
+
+
+async def test_a_teardown_that_fails_under_a_cancel_still_raises_on_the_caller(
+    tx_engine: AsyncEngine,
+) -> None:
+    def fail_the_commit(connection: sa.Connection) -> None:
+        task.cancel()
+        raise RuntimeError("the commit lost the race")
+
+    sa.event.listen(tx_engine.sync_engine, "commit", fail_the_commit)
+
+    async def step() -> None:
+        async with _opened(tx_engine, "workspace") as connection:
+            await _add_workspace(connection, uuid4())
+
+    task = asyncio.ensure_future(step())
+    with pytest.raises(RuntimeError, match="the commit lost the race"):
+        await task
+
+
+async def test_a_teardown_that_failed_before_its_cancel_landed_still_raises_on_the_caller(
+    tx_engine: AsyncEngine,
+) -> None:
+    def fail_the_commit(connection: sa.Connection) -> None:
+        closing = asyncio.current_task()
+        assert closing is not None
+        closing.add_done_callback(lambda _: task.cancel())
+        raise RuntimeError("the commit lost the race")
+
+    sa.event.listen(tx_engine.sync_engine, "commit", fail_the_commit)
+
+    async def step() -> None:
+        async with _opened(tx_engine, "workspace") as connection:
+            await _add_workspace(connection, uuid4())
+
+    task = asyncio.ensure_future(step())
+    with pytest.raises(RuntimeError, match="the commit lost the race"):
+        await task
 
 
 def test_the_unavailable_count_is_a_registered_metric() -> None:

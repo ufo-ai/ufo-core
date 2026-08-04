@@ -289,19 +289,39 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
     cycle `apply_migrations` breaks the same way."""
     from ufo.o11y import emit_histogram, emit_metric
 
-    async with AsyncExitStack() as stack:
-        started = time.monotonic()
-        try:
-            connection = await stack.enter_async_context(engine.begin())
-        except Exception as error:
-            if isinstance(error, sa.exc.TimeoutError):
-                emit_metric("db_pool_exhausted_total", path=path)
-            emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
-            raise
-        finally:
-            elapsed = round((time.monotonic() - started) * 1000)
-            emit_histogram("db_tx_acquire_ms", elapsed, path=path)
+    stack = AsyncExitStack()
+    started = time.monotonic()
+    try:
+        connection = await stack.enter_async_context(engine.begin())
+    except Exception as error:
+        if isinstance(error, sa.exc.TimeoutError):
+            emit_metric("db_pool_exhausted_total", path=path)
+        emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
+        raise
+    finally:
+        elapsed = round((time.monotonic() - started) * 1000)
+        emit_histogram("db_tx_acquire_ms", elapsed, path=path)
+    caught: BaseException | None = None
+    try:
         yield connection
+    except BaseException as error:
+        caught = error
+    close = asyncio.ensure_future(
+        stack.__aexit__(type(caught), caught, caught.__traceback__)
+        if caught is not None
+        else stack.__aexit__(None, None, None)
+    )
+    cancelled: asyncio.CancelledError | None = None
+    while not close.done():
+        try:
+            await asyncio.shield(close)
+        except asyncio.CancelledError as cancel:
+            cancelled = cancel
+    close.result()
+    if cancelled is not None:
+        raise cancelled
+    if caught is not None:
+        raise caught
 
 
 @asynccontextmanager
