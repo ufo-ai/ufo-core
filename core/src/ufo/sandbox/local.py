@@ -9,6 +9,11 @@ sentinel-swap and metering hold exactly as they do in a container. The in-sandbo
 helpers are installed onto the command PATH — the same binaries the image bakes — so the file tools
 and the egress CLI work with only a Python interpreter present.
 
+A command's git is the sandbox's, never the host's: Apple's git ships
+`credential.helper=osxkeychain`, and storing a credential through it raises a keychain authorization
+UI, then blocks on a synchronous XPC reply nothing can send — hanging `git`, and the turn awaiting
+it, forever.
+
 This is a development default, not an isolation boundary: a subprocess is confined to the workspace
 only through the `workspace_path` guard on tool arguments, not by the kernel. Docker and E2B are the
 carriers that add real isolation."""
@@ -42,6 +47,25 @@ READ_CHUNK_BYTES = 1024 * 1024
 WORKSPACE_WRITE_PREFIX = "ufo-write-"
 MODE_BITS = 0o777
 SANDBOX_BINARIES = ("sbx", "sbxfs")
+
+
+def _git_without_host_config(scratch: Path) -> dict[str, str]:
+    """Every level a host credential helper could reach a command through, closed. The command
+    inherits the environment, so the two config files are not enough: `GIT_CONFIG_COUNT` and
+    `GIT_CONFIG_PARAMETERS` carry config of their own and outrank both, and `GIT_ASKPASS` and a
+    terminal prompt each ask a question no command can answer.
+
+    The global level points at the scratch home rather than `os.devnull`, which reads the same and
+    still writes: `git config --global` against `/dev/null` fails to lock it, taking `git lfs
+    install` and `gh auth setup-git` down with it."""
+    return {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": str(scratch / "home" / ".gitconfig"),
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_CONFIG_PARAMETERS": "",
+        "GIT_ASKPASS": "",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
 
 
 def _provision_scratch() -> Path:
@@ -93,6 +117,7 @@ class LocalCarrier:
                 "REQUESTS_CA_BUNDLE": str(ca_path),
                 "CURL_CA_BUNDLE": str(ca_path),
                 "NODE_EXTRA_CA_CERTS": str(ca_path),
+                **_git_without_host_config(self._scratch),
                 **spec.env,
             },
         )
@@ -115,6 +140,7 @@ class LocalCarrier:
                 "PATH": (
                     f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"
                 ),
+                **_git_without_host_config(self._scratch),
             },
         )
 

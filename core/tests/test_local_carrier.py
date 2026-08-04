@@ -31,6 +31,12 @@ from ufo.sandbox.session import (
 
 RUN_TOKEN = "run-token-abc"
 PROXY_PORT = 9999
+PROBE_SYSTEM_HELPER = "probe-system-helper-that-never-runs"
+PROBE_GLOBAL_HELPER = "probe-global-helper-that-never-runs"
+PROBE_ENV_HELPER = "probe-env-helper-that-never-runs"
+PROBE_PARAMS_HELPER = "probe-params-helper-that-never-runs"
+PROBE_ASKPASS_USER = "probe-askpass-user"
+PROMPTS_DISABLED = "terminal prompts disabled"
 LOOPBACK_PROBE = (
     "import urllib.request;"
     "print(urllib.request.urlopen('http://127.0.0.1:{port}/json/version', timeout=2).read())"
@@ -62,6 +68,109 @@ async def test_create_exec_and_read_in_a_temp_dir(tmp_path: Path) -> None:
 
     out = [chunk async for chunk in carrier.read(handle, "/workspace/out.txt")]
     assert b"".join(out) == b"hi\n"
+
+
+async def test_the_host_git_config_does_not_reach_a_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential helper a command cannot answer blocks it forever — Apple's git names
+    `osxkeychain`, whose store raises a keychain authorization UI and then waits on a reply nothing
+    sends. Every level the host's configuration reaches a command by is dropped: the system and
+    global config files, and `GIT_CONFIG_COUNT`, which carries config in the environment and
+    outranks them both. `attach` reads it back too, because its handles run commands as well.
+
+    Each level gets a control that reads it back with the guard lifted through `spec.env`, so a
+    passing assertion is the guard working rather than a read that found nothing. The guarded read
+    pins git's exit code for "no such key" too: an empty stdout alone would also be what a `git`
+    that refused to start prints, which would leave this green while every sandbox command died.
+    Writing the global config is exercised for the same reason — pointing the level at an unwritable
+    path reads identically here and takes `git lfs install` and `gh auth setup-git` down.
+    """
+    workspace = tmp_path / "workspace"
+    system_config = tmp_path / "system-gitconfig"
+    global_config = tmp_path / "global-gitconfig"
+    system_config.write_text(f"[credential]\n\thelper = {PROBE_SYSTEM_HELPER}\n")
+    global_config.write_text(f"[credential]\n\thelper = {PROBE_GLOBAL_HELPER}\n")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_config))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", PROBE_ENV_HELPER)
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'credential.helper={PROBE_PARAMS_HELPER}'")
+    carrier = LocalCarrier()
+    argv = ("git", "config", "--get-all", "credential.helper")
+
+    created = await carrier.create(_spec(workspace))
+    attached = await carrier.attach(_spec(workspace))
+    assert attached is not None
+    guarded = await carrier.exec(created, argv, 30)
+    guarded_attach = await carrier.exec(attached, argv, 30)
+    wrote = await carrier.exec(
+        created, ("git", "config", "--global", "user.email", "probe@example.com"), 30
+    )
+    lifted = {
+        name: await carrier.exec(await carrier.create(replace(_spec(workspace), env=env)), argv, 30)
+        for name, env in {
+            PROBE_SYSTEM_HELPER: {"GIT_CONFIG_NOSYSTEM": "0"},
+            PROBE_GLOBAL_HELPER: {"GIT_CONFIG_GLOBAL": str(global_config)},
+            PROBE_ENV_HELPER: {"GIT_CONFIG_COUNT": "1"},
+            PROBE_PARAMS_HELPER: {
+                "GIT_CONFIG_PARAMETERS": f"'credential.helper={PROBE_PARAMS_HELPER}'"
+            },
+        }.items()
+    }
+
+    for helper, result in lifted.items():
+        assert helper in result.stdout.split()
+    for result in (guarded, guarded_attach):
+        assert result.stdout == ""
+        assert result.exit_code == 1
+    assert wrote.exit_code == 0, wrote.stderr
+
+
+async def test_a_command_is_never_asked_for_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same wedge: a command that is asked for a credential waits for an
+    answer nobody sends. `GIT_ASKPASS` names a host program git runs to get one — a GUI helper there
+    blocks exactly as the keychain does — and a terminal prompt blocks on a terminal no reader is
+    watching. Both are closed, so git fails fast instead.
+
+    Each has its own control lifted through `spec.env`: with the host askpass restored git returns
+    the username it printed, and with prompting restored git reaches for the terminal and reports
+    that instead. `git credential fill` is the probe: obtaining a credential is its whole job.
+    """
+    askpass = tmp_path / "askpass"
+    askpass.write_text(f"#!/bin/sh\necho {PROBE_ASKPASS_USER}\n")
+    askpass.chmod(0o755)
+    monkeypatch.setenv("GIT_ASKPASS", str(askpass))
+    carrier = LocalCarrier()
+    argv = (
+        "bash",
+        "-c",
+        "printf 'protocol=https\\nhost=probe.invalid\\n\\n' | git credential fill 2>&1",
+    )
+
+    guarded = await carrier.exec(await carrier.create(_spec(tmp_path / "workspace")), argv, 30)
+    askpass_lifted = await carrier.exec(
+        await carrier.create(
+            replace(_spec(tmp_path / "workspace"), env={"GIT_ASKPASS": str(askpass)})
+        ),
+        argv,
+        30,
+    )
+    prompt_lifted = await carrier.exec(
+        await carrier.create(
+            replace(_spec(tmp_path / "workspace"), env={"GIT_TERMINAL_PROMPT": "1"})
+        ),
+        argv,
+        30,
+    )
+
+    assert PROBE_ASKPASS_USER in askpass_lifted.stdout
+    assert PROMPTS_DISABLED not in prompt_lifted.stdout
+    assert PROBE_ASKPASS_USER not in guarded.stdout
+    assert PROMPTS_DISABLED in guarded.stdout
 
 
 async def test_read_streams_a_large_file_in_bounded_chunks(tmp_path: Path) -> None:
