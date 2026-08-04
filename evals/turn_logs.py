@@ -27,6 +27,9 @@ MAX_RETAINED_TURNS = 256
 MAX_JSON_DEPTH = 16
 LOG_EXPORT_WAIT_SECONDS = 30.0
 RECEIVER_START_WAIT_SECONDS = 30.0
+RECEIVER_STOP_GRACE_SECONDS = 5
+RECEIVER_STOP_WAIT_SECONDS = 30.0
+RECEIVER_CANCEL_WAIT_SECONDS = 10.0
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -90,6 +93,7 @@ class TurnLogCollector:
                 access_log=False,
                 lifespan="off",
                 ws="none",
+                timeout_graceful_shutdown=RECEIVER_STOP_GRACE_SECONDS,
             ),
             ready,
         )
@@ -124,10 +128,26 @@ class TurnLogCollector:
             await asyncio.gather(ready_wait, return_exceptions=True)
             if ready.is_set():
                 server.should_exit = True
-                await task
+                await self._stopped(task)
             else:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    async def _stopped(self, task: "asyncio.Task[None]") -> None:
+        done, _ = await asyncio.wait((task,), timeout=RECEIVER_STOP_WAIT_SECONDS)
+        if task in done:
+            await task
+            return
+        message = f"eval receiver did not stop within {RECEIVER_STOP_WAIT_SECONDS}s of should_exit"
+        task.cancel()
+        done, _ = await asyncio.wait((task,), timeout=RECEIVER_CANCEL_WAIT_SECONDS)
+        if task not in done:
+            raise RuntimeError(f"{message}, and ignored cancellation")
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                raise RuntimeError(message) from failure
+        raise RuntimeError(message)
 
     async def read(self, turn_id: UUID) -> TurnLog | None:
         async def wait_for_record() -> TurnLog:

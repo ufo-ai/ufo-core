@@ -60,6 +60,11 @@ OWNER_EMAIL = "owner@example.com"
 TOKEN_SECRET = "cli-e2e-token-secret"
 SERVER_START_TIMEOUT_SECONDS = 10.0
 SERVER_POLL_SECONDS = 0.02
+SERVER_STOP_GRACE_SECONDS = 5
+SERVER_STOP_TIMEOUT_SECONDS = 20.0
+STOP_FLOOR_SECONDS = 3.0
+STOP_DEADLINE_SECONDS = 8.0
+REGISTERED_TIMEOUT_SECONDS = 5.0
 CATALOG = """\
 [[extensions]]
 name = "memory"
@@ -408,7 +413,13 @@ class _ThreadedServer:
 
     def __init__(self, app: FastAPI, port: int) -> None:
         self._server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                timeout_graceful_shutdown=SERVER_STOP_GRACE_SECONDS,
+            )
         )
         self._thread = threading.Thread(target=self._server.run, daemon=True)
 
@@ -422,7 +433,40 @@ class _ThreadedServer:
 
     def stop(self) -> None:
         self._server.should_exit = True
-        self._thread.join(timeout=SERVER_START_TIMEOUT_SECONDS)
+        if self._thread.is_alive():
+            self._thread.join(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+
+    @property
+    def stopped(self) -> bool:
+        return not self._thread.is_alive()
+
+
+def test_a_connection_still_open_at_stop_does_not_hold_the_threaded_server() -> None:
+    entered = threading.Event()
+    app = FastAPI()
+
+    @app.get("/never")
+    async def never() -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    port = _free_port()
+    server = _ThreadedServer(app, port)
+    held = socket.socket()
+    try:
+        server.start()
+        held.connect(("127.0.0.1", port))
+        held.sendall(b"GET /never HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert entered.wait(REGISTERED_TIMEOUT_SECONDS), "the handler never ran"
+        started = time.monotonic()
+        server.stop()
+        waited = time.monotonic() - started
+    finally:
+        server.stop()
+        held.close()
+    assert server.stopped
+    assert waited >= SERVER_STOP_GRACE_SECONDS, waited
+    assert STOP_FLOOR_SECONDS <= waited < STOP_DEADLINE_SECONDS, waited
 
 
 async def _bootstrap_workspace() -> UUID:
@@ -563,12 +607,17 @@ def chat_server(
 
         yield CliRunner(), str(config_path)
     finally:
+        stopped = True
         if server is not None:
             server.stop()
+            stopped = server.stopped
         if dbos_client is not None:
             dbos_client.destroy()
         loop_queue.reset_runtime()
         asyncio.run(dispose_db())
+        assert stopped, (
+            f"uvicorn server did not stop within {SERVER_STOP_TIMEOUT_SECONDS}s of should_exit"
+        )
 
 
 def test_chat_streams_the_answer_then_spend_reports_the_burn(

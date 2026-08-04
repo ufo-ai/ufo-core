@@ -7,8 +7,10 @@ asserted on is the calls it did *not* receive, because "never a blind duplicate 
 exactly a claim about calls."""
 
 import asyncio
+import socket
 import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +23,7 @@ import uvicorn
 from click.testing import CliRunner
 from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse, Response
+from uvicorn._types import ASGIApplication, ASGIReceiveCallable, ASGISendCallable, Scope
 
 from ufo_control import gateway_slack_connect
 from ufo_control.gateway_slack_connect import (
@@ -50,6 +53,11 @@ CHANNEL_ID = "C0CUSTOMER"
 INVITE_ID = "I0INVITE"
 SERVER_START_TICKS = 500
 TICK_SECONDS = 0.01
+SERVER_STOP_GRACE_SECONDS = 5
+SERVER_STOP_WAIT_SECONDS = 20.0
+STOP_FLOOR_SECONDS = 3.0
+STOP_DEADLINE_SECONDS = 8.0
+REGISTERED_WAIT_SECONDS = 5.0
 
 SlackHandler = Callable[[dict[str, str]], Awaitable[tuple[int, Any]]]
 
@@ -98,13 +106,19 @@ class SlackStub:
         return [form for name, form in self.calls if name == method]
 
 
-@pytest.fixture
-async def slack(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[SlackStub]:
-    """`log_config=None` for the same reason `ufo-control gateway` passes it: uvicorn's default
-    dictConfig stops `uvicorn.error` from propagating to the root logger, process-wide."""
-    stub = SlackStub()
+@asynccontextmanager
+async def _serving(
+    app: ASGIApplication | Callable[..., Any] | str,
+) -> AsyncIterator[uvicorn.Server]:
     server = uvicorn.Server(
-        uvicorn.Config(stub.app(), host="127.0.0.1", port=0, log_config=None, lifespan="off")
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_config=None,
+            lifespan="off",
+            timeout_graceful_shutdown=SERVER_STOP_GRACE_SECONDS,
+        )
     )
     serving = asyncio.create_task(server.serve())
     for _ in range(SERVER_START_TICKS):
@@ -112,13 +126,46 @@ async def slack(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[SlackStub]:
             break
         await asyncio.sleep(TICK_SECONDS)
     assert server.started, "the Slack stand-in never bound a port"
-    port = server.servers[0].sockets[0].getsockname()[1]
-    monkeypatch.setattr(gateway_slack_connect, "SLACK_API_BASE", f"http://127.0.0.1:{port}")
     try:
-        yield stub
+        yield server
     finally:
         server.should_exit = True
-        await serving
+        await asyncio.wait_for(serving, SERVER_STOP_WAIT_SECONDS)
+
+
+@pytest.fixture
+async def slack(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[SlackStub]:
+    """`log_config=None` for the same reason `ufo-control gateway` passes it: uvicorn's default
+    dictConfig stops `uvicorn.error` from propagating to the root logger, process-wide."""
+    stub = SlackStub()
+    async with _serving(stub.app()) as server:
+        port = server.servers[0].sockets[0].getsockname()[1]
+        monkeypatch.setattr(gateway_slack_connect, "SLACK_API_BASE", f"http://127.0.0.1:{port}")
+        yield stub
+
+
+async def test_a_connection_still_open_at_stop_does_not_hold_the_stand_in() -> None:
+    entered = asyncio.Event()
+
+    async def never_answers(
+        scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
+    ) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    held = socket.socket()
+    try:
+        async with _serving(never_answers) as server:
+            held.connect(("127.0.0.1", server.servers[0].sockets[0].getsockname()[1]))
+            held.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            await asyncio.wait_for(entered.wait(), REGISTERED_WAIT_SECONDS)
+            started = loop.time()
+        waited = loop.time() - started
+    finally:
+        held.close()
+    assert waited >= SERVER_STOP_GRACE_SECONDS, waited
+    assert STOP_FLOOR_SECONDS <= waited < STOP_DEADLINE_SECONDS, waited
 
 
 def _inviter(pool: asyncpg.Pool, worker_id: str = "worker-a") -> SlackConnectInviter:

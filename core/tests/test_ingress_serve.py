@@ -2,18 +2,20 @@ import asyncio
 import json
 import socket
 import threading
-from collections.abc import AsyncIterator, Iterator, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import sqlalchemy as sa
 import uvicorn
+from uvicorn._types import ASGIApplication, ASGIReceiveCallable, ASGISendCallable, Scope
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, InvalidStatus
@@ -850,6 +852,11 @@ WebSocket client's own 10-second default still ends the wait and the refusal is 
 ten seconds later. Twenty-five times the shortened timeout the test sets, so the bound is a
 measurement rather than a race."""
 TICK_SECONDS = 0.02
+SERVER_STOP_GRACE_SECONDS = 5
+SERVER_STOP_WAIT_SECONDS = 20.0
+STOP_FLOOR_SECONDS = 3.0
+STOP_DEADLINE_SECONDS = 8.0
+REGISTERED_WAIT_SECONDS = 5.0
 
 
 @dataclass
@@ -946,6 +953,38 @@ async def socket_origin() -> AsyncIterator[_SocketOrigin]:
         yield origin
 
 
+@asynccontextmanager
+async def _serving(
+    app: ASGIApplication | Callable[..., Any] | str, **config: object
+) -> AsyncIterator[uvicorn.Server]:
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            log_config=None,
+            lifespan="off",
+            timeout_graceful_shutdown=SERVER_STOP_GRACE_SECONDS,
+            **config,
+        )
+    )
+    serving = asyncio.create_task(server.serve())
+    for _ in range(SERVER_START_TICKS):
+        if server.started:
+            break
+        await asyncio.sleep(TICK_SECONDS)
+    assert server.started, "the ingress never bound a port"
+    try:
+        yield server
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, SERVER_STOP_WAIT_SECONDS)
+
+
+def _bound_port(server: uvicorn.Server) -> int:
+    return int(server.servers[0].sockets[0].getsockname()[1])
+
+
 @pytest.fixture
 async def socket_ingress(
     socket_origin: _SocketOrigin, monkeypatch: pytest.MonkeyPatch
@@ -956,28 +995,36 @@ async def socket_ingress(
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     async with upstream_client() as upstream:
         app = _server(_StubCarrier(socket_origin.port), upstream).app()
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app,
-                host="127.0.0.1",
-                port=0,
-                log_config=None,
-                lifespan="off",
-                ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
-                ws_per_message_deflate=False,
-            )
-        )
-        serving = asyncio.create_task(server.serve())
-        for _ in range(SERVER_START_TICKS):
-            if server.started:
-                break
-            await asyncio.sleep(TICK_SECONDS)
-        assert server.started, "the ingress never bound a port"
-        try:
-            yield server.servers[0].sockets[0].getsockname()[1]
-        finally:
-            server.should_exit = True
-            await serving
+        async with _serving(
+            app,
+            ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
+            ws_per_message_deflate=False,
+        ) as server:
+            yield _bound_port(server)
+
+
+async def test_a_connection_still_open_at_stop_does_not_hold_the_ingress() -> None:
+    entered = asyncio.Event()
+
+    async def never_answers(
+        scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
+    ) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    held = socket.socket()
+    try:
+        async with _serving(never_answers) as server:
+            held.connect(("127.0.0.1", _bound_port(server)))
+            held.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            await asyncio.wait_for(entered.wait(), REGISTERED_WAIT_SECONDS)
+            started = loop.time()
+        waited = loop.time() - started
+    finally:
+        held.close()
+    assert waited >= SERVER_STOP_GRACE_SECONDS, waited
+    assert STOP_FLOOR_SECONDS <= waited < STOP_DEADLINE_SECONDS, waited
 
 
 def _socket(
@@ -1352,27 +1399,15 @@ async def test_a_socket_to_a_site_that_does_not_answer_is_refused_before_it_is_a
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     async with upstream_client() as upstream:
         app = _server(_StubCarrier(_unused_port()), upstream).app()
-        server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, lifespan="off")
-        )
-        serving = asyncio.create_task(server.serve())
-        for _ in range(SERVER_START_TICKS):
-            if server.started:
-                break
-            await asyncio.sleep(TICK_SECONDS)
-        assert server.started, "the ingress never bound a port"
-        try:
+        async with _serving(app) as server:
             with pytest.raises(InvalidStatus) as refused:
                 async with _socket(
-                    server.servers[0].sockets[0].getsockname()[1],
+                    _bound_port(server),
                     conversation_id,
                     "/hmr",
                     session=_session(workspace_id, conversation_id),
                 ):
                     pass
-        finally:
-            server.should_exit = True
-            await serving
     assert refused.value.response.status_code == 502
     assert refused.value.response.body == SITE_NOT_ANSWERING.encode()
 
@@ -1398,32 +1433,22 @@ async def test_a_site_that_accepts_and_never_answers_the_handshake_times_out(
         await asyncio.Event().wait()
 
     hung = await asyncio.start_server(accept_and_hang, "127.0.0.1", 0)
-    async with upstream_client() as upstream:
-        app = _server(_StubCarrier(hung.sockets[0].getsockname()[1]), upstream).app()
-        server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=0, log_config=None, lifespan="off")
-        )
-        serving = asyncio.create_task(server.serve())
-        for _ in range(SERVER_START_TICKS):
-            if server.started:
-                break
-            await asyncio.sleep(TICK_SECONDS)
-        assert server.started, "the ingress never bound a port"
-        started = asyncio.get_running_loop().time()
-        try:
-            with pytest.raises(InvalidStatus) as refused:
-                async with _socket(
-                    server.servers[0].sockets[0].getsockname()[1],
-                    conversation_id,
-                    "/hmr",
-                    session=_session(workspace_id, conversation_id),
-                ):
-                    pass
-            waited = asyncio.get_running_loop().time() - started
-        finally:
-            server.should_exit = True
-            await serving
-            hung.close()
+    try:
+        async with upstream_client() as upstream:
+            app = _server(_StubCarrier(hung.sockets[0].getsockname()[1]), upstream).app()
+            async with _serving(app) as server:
+                started = asyncio.get_running_loop().time()
+                with pytest.raises(InvalidStatus) as refused:
+                    async with _socket(
+                        _bound_port(server),
+                        conversation_id,
+                        "/hmr",
+                        session=_session(workspace_id, conversation_id),
+                    ):
+                        pass
+                waited = asyncio.get_running_loop().time() - started
+    finally:
+        hung.close()
     assert waited < OPEN_TIMEOUT_HEADROOM_SECONDS, waited
     assert refused.value.response.status_code == 502
     assert refused.value.response.body == SITE_NOT_ANSWERING.encode()

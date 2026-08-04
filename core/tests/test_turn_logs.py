@@ -2,7 +2,9 @@
 
 import asyncio
 import gzip
+import socket
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,11 +26,17 @@ from evals.turn_logs import (
     MAX_OTLP_BODY_BYTES,
     MAX_RETAINED_TURNS,
     MAX_TURN_LOG_BYTES,
+    RECEIVER_STOP_GRACE_SECONDS,
     TurnLogCollector,
     _ReadyServer,
 )
 
 TURN_EVENT = "eval.turn.context"
+STOP_FLOOR_SECONDS = 3.0
+STOP_DEADLINE_SECONDS = 8.0
+REGISTERED_WAIT_SECONDS = 0.5
+SHRUNK_WAIT_SECONDS = 0.05
+STOPPED_WAIT_SECONDS = 5.0
 
 
 @pytest.mark.parametrize(
@@ -108,6 +116,95 @@ async def test_turn_log_collector_receives_its_allowlisted_otlp_event(
             "completed": True,
         },
     )
+
+
+async def test_a_connection_still_open_at_stop_does_not_hold_the_receiver(
+    unused_tcp_port: int,
+) -> None:
+    collector = TurnLogCollector("127.0.0.1", unused_tcp_port, uuid4(), TURN_EVENT)
+    loop = asyncio.get_running_loop()
+    held = socket.socket()
+    try:
+        async with collector.serving():
+            held.connect(("127.0.0.1", unused_tcp_port))
+            held.sendall(b"POST /v1/logs HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\nx")
+            await asyncio.sleep(REGISTERED_WAIT_SECONDS)
+            started = loop.time()
+        waited = loop.time() - started
+    finally:
+        held.close()
+    assert waited >= RECEIVER_STOP_GRACE_SECONDS, waited
+    assert STOP_FLOOR_SECONDS <= waited < STOP_DEADLINE_SECONDS, waited
+
+
+async def test_a_receiver_that_never_stops_names_the_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def accepts_cancellation(server: _ReadyServer) -> None:
+        server.ready.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("evals.turn_logs._ReadyServer.serve", accepts_cancellation)
+    monkeypatch.setattr(turn_logs, "RECEIVER_STOP_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    monkeypatch.setattr(turn_logs, "RECEIVER_CANCEL_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    collector = TurnLogCollector("127.0.0.1", 4318, uuid4(), TURN_EVENT)
+    with pytest.raises(RuntimeError) as stalled:
+        async with collector.serving():
+            pass
+    assert str(stalled.value) == (
+        f"eval receiver did not stop within {SHRUNK_WAIT_SECONDS}s of should_exit"
+    )
+    assert stalled.value.__cause__ is None
+
+
+async def test_a_receiver_that_ignores_cancellation_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ignores_cancellation(server: _ReadyServer) -> None:
+        server.ready.set()
+        try:
+            while not release.is_set():
+                with suppress(asyncio.CancelledError):
+                    await release.wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr("evals.turn_logs._ReadyServer.serve", ignores_cancellation)
+    monkeypatch.setattr(turn_logs, "RECEIVER_STOP_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    monkeypatch.setattr(turn_logs, "RECEIVER_CANCEL_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    collector = TurnLogCollector("127.0.0.1", 4318, uuid4(), TURN_EVENT)
+    try:
+        with pytest.raises(RuntimeError, match="ignored cancellation"):
+            async with collector.serving():
+                pass
+    finally:
+        release.set()
+        await asyncio.wait_for(stopped.wait(), STOPPED_WAIT_SECONDS)
+
+
+async def test_a_receiver_that_fails_under_cancellation_keeps_its_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fails_under_cancellation(server: _ReadyServer) -> None:
+        server.ready.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("receiver died stopping") from None
+
+    monkeypatch.setattr("evals.turn_logs._ReadyServer.serve", fails_under_cancellation)
+    monkeypatch.setattr(turn_logs, "RECEIVER_STOP_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    monkeypatch.setattr(turn_logs, "RECEIVER_CANCEL_WAIT_SECONDS", SHRUNK_WAIT_SECONDS)
+    collector = TurnLogCollector("127.0.0.1", 4318, uuid4(), TURN_EVENT)
+    with pytest.raises(RuntimeError) as stalled:
+        async with collector.serving():
+            pass
+    assert "ignored cancellation" not in str(stalled.value)
+    assert isinstance(stalled.value.__cause__, RuntimeError)
+    assert str(stalled.value.__cause__) == "receiver died stopping"
 
 
 async def test_turn_log_collector_keeps_one_record_per_turn() -> None:
