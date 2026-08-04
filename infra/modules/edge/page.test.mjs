@@ -57,6 +57,12 @@ after(async () => {
 });
 
 const DESKTOP = { viewport: { width: 1200, height: 800 } };
+// The same window pulled short, where the block's 5vh of sky measures 30px instead of 40px.
+const DESKTOP_SHORT = { viewport: { width: DESKTOP.viewport.width, height: 600 } };
+// And pulled tall, where 5vh wants 60px and only the clamp's ceiling holds the sky to 48px. It takes
+// this much window: at 960px 5vh measures 48px on the nose, so a ceiling raised to any number above
+// 48 would still measure 48 there and hold nothing back.
+const DESKTOP_TALL = { viewport: { width: DESKTOP.viewport.width, height: 1200 } };
 // An iPhone 15-class device: the viewport, pixel density and pointer Safari reports there, so the
 // page's coarse-pointer rules resolve the way they do on the phone.
 const PHONE = {
@@ -71,6 +77,13 @@ const PHONE_LANDSCAPE = {
   ...PHONE,
   viewport: { width: PHONE.viewport.height, height: PHONE.viewport.width },
 };
+// A landscape window 568px across, with Safari's own chrome taking its share of the height: the
+// shortest window the page is served in, and 76px inside the band where the block's copy is taller
+// than the room the window leaves it — at this width the block wants 285.83px and the sky takes
+// 20px above and below it, so every window under 326px caps. The width is load-bearing as much as
+// the height — the panel's padding is a share of it — so both are stated outright rather than
+// spread from PHONE.
+const PHONE_LANDSCAPE_SHORT = { ...PHONE, viewport: { width: 568, height: 250 } };
 
 async function open(craft = 1, device = DESKTOP) {
   const page = await browser.newPage(device);
@@ -152,24 +165,98 @@ async function press(page, x, y, hold = 140) {
   await page.waitForTimeout(80);
 }
 
-test("the join stands in the middle of the page, above the fleet", async () => {
-  const page = await open(6);
-  const placed = await page.locator("#join").evaluate((el) => {
+// The ack is the block's last line and its tallest copy, and nothing prints in it until a hand
+// acts, so every case that could clip it is measured with one landed.
+async function landAJoin(page, address) {
+  await page.fill("#email", address);
+  await page.click("#go");
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.includes("waitlist"),
+  );
+}
+
+// The panel caps its own height, so the window's edge is no longer the only thing that can hide a
+// line: copy the cap holds back lies inside the window and outside the panel's scroll port, which
+// is what a member sees through. Every box that has to be read or pressed is measured against
+// both, and the box's own height is what wholly shown means.
+const shownIn = (page, ...selectors) =>
+  page.locator("#join").evaluate((panel, wanted) => {
+    const to2 = (n) => Math.round(n * 100) / 100;
+    const outer = panel.getBoundingClientRect();
+    const clipTop = outer.top + panel.clientTop;
+    const clipBottom = clipTop + panel.clientHeight;
+    const spanned = (box, top, bottom) =>
+      to2(Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top)));
+    return Object.fromEntries(
+      wanted.map((selector) => {
+        const box = panel.querySelector(selector).getBoundingClientRect();
+        return [
+          selector,
+          {
+            height: to2(box.height),
+            inClip: spanned(box, clipTop, clipBottom),
+            inWindow: spanned(box, 0, innerHeight),
+          },
+        ];
+      }),
+    );
+  }, selectors);
+
+function assertWhollyShown(shown, where) {
+  for (const [selector, box] of Object.entries(shown)) {
+    assert.deepEqual(
+      { inClip: box.inClip, inWindow: box.inWindow },
+      { inClip: box.height, inWindow: box.height },
+      `${selector} shows ${box.inClip}px inside the panel's cap and ${box.inWindow}px inside the ` +
+        `window, of ${box.height}px, at ${where}`,
+    );
+  }
+}
+
+// 5vh of sky below the block, clamped between these two.
+const BOTTOM_GAP_MIN = 20;
+const BOTTOM_GAP_MAX = 48;
+
+const placementOf = (page) =>
+  page.locator("#join").evaluate((el) => {
     const b = el.getBoundingClientRect();
     const middle = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
     return {
       tag: el.tagName,
       drawn: b.width > 0 && b.height > 0,
-      offCentre: Math.max(
-        Math.abs(b.x + b.width / 2 - innerWidth / 2),
-        Math.abs(b.y + b.height / 2 - innerHeight / 2),
-      ),
+      offCentreX: Math.abs(b.x + b.width / 2 - innerWidth / 2),
+      gap: innerHeight - b.bottom,
+      top: b.top,
+      belowMiddle: b.top > innerHeight / 2,
+      // the panel caps its height and scrolls, so its own cap can put copy out of sight on a
+      // viewport whose edge does not
+      scrolled: el.scrollHeight > el.clientHeight + 1,
       reachable: middle?.closest("#join") === el,
     };
   });
+
+// A scroll under a hand rather than under a script, which is the difference between a panel that
+// caps its copy and one that hides it: a panel whose overflow is hidden still answers an assignment
+// to scrollTop, and only a wheel notices.
+async function rollThePanel(page, by) {
+  const panel = await boxOf(page, "#join");
+  await page.mouse.move(panel.x + panel.width / 2, panel.y + panel.height / 2);
+  await page.mouse.wheel(0, by);
+  await page.waitForTimeout(120);
+  return page.locator("#join").evaluate((el) => el.scrollTop);
+}
+
+test("the join stands at the foot of the page, above the fleet", async () => {
+  const page = await open(6);
+  const placed = await placementOf(page);
   assert.equal(placed.tag, "FORM");
   assert.equal(placed.drawn, true);
-  assert.ok(placed.offCentre < 1, `the block sits ${placed.offCentre}px off centre`);
+  assert.ok(placed.offCentreX < 1, `the block sits ${placed.offCentreX}px off centre`);
+  assert.ok(
+    placed.gap >= BOTTOM_GAP_MIN && placed.gap <= BOTTOM_GAP_MAX,
+    `${placed.gap}px between the block and the bottom edge`,
+  );
+  assert.equal(placed.belowMiddle, true);
   assert.equal(placed.reachable, true);
   await page.close();
 });
@@ -219,14 +306,72 @@ test("the desktop panel keeps its 14px terminal size", async () => {
   await page.close();
 });
 
+// Both short viewports, because the coarse-pointer rules carry 16px type and 44px targets: a phone
+// in landscape is the one holding the tallest block.
+test("a short viewport shows the whole block, entry included", async () => {
+  for (const device of [DESKTOP_SHORT, PHONE_LANDSCAPE]) {
+    const page = await open(6, device);
+    const { width, height } = page.viewportSize();
+    const where = `${width}x${height}`;
+    const placed = await placementOf(page);
+    assert.ok(placed.top >= 0, `the block is cut off by ${-placed.top}px at ${where}`);
+    assert.ok(
+      placed.gap >= BOTTOM_GAP_MIN && placed.gap <= BOTTOM_GAP_MAX,
+      `${placed.gap}px between the block and the bottom edge at ${where}`,
+    );
+    assert.equal(placed.scrolled, false, `the block scrolls its own copy out of sight at ${where}`);
+    assert.equal(placed.reachable, true);
+    assertWhollyShown(await shownIn(page, "#email", "#go", "#ack"), where);
+    // Again with the ack's copy in it: the reserved room is one thing, the landed line another, and
+    // the cap is what would take the difference.
+    await landAJoin(page, `short-${height}@yourco.com`);
+    const landed = await placementOf(page);
+    assert.equal(landed.scrolled, false, `a landed ack put the block past its cap at ${where}`);
+    assertWhollyShown(await shownIn(page, "#email", "#go", "#ack"), `${where} after a join`);
+    await page.close();
+  }
+});
+
+// Shorter than the block, the window is where the plain cap earns itself: uncapped the block's head
+// hangs 55.83px off the top of a 568x250 window, and capped it stands 20px inside it. What the cap
+// holds back a hand can still roll into view.
+test("a window shorter than the block caps it, and a hand rolls the rest into view", async () => {
+  const page = await open(6, PHONE_LANDSCAPE_SHORT);
+  const { width, height } = page.viewportSize();
+  const where = `${width}x${height}`;
+  const placed = await placementOf(page);
+  assert.ok(placed.top >= 0, `the block's head hangs ${-placed.top}px off the top of the window`);
+  assert.ok(
+    placed.gap >= BOTTOM_GAP_MIN && placed.gap <= BOTTOM_GAP_MAX,
+    `${placed.gap}px between the block and the bottom edge`,
+  );
+  assert.equal(placed.scrolled, true, "the cap did not bind on the shortest window the page serves");
+  assert.equal(placed.reachable, true);
+  // What the cap holds back here is 76px, the ack's reserved strip bar a fraction, so the two
+  // controls a hand acts on stand whole inside it before anything lands.
+  assertWhollyShown(await shownIn(page, "#email", "#go"), where);
+  await landAJoin(page, "capped@yourco.com");
+  const landed = await placementOf(page);
+  assert.equal(landed.scrolled, true, "the cap stopped binding once the ack landed");
+  assert.ok(landed.top >= 0, `the block's head hangs ${-landed.top}px off the top after a join`);
+  assert.ok(
+    landed.gap >= BOTTOM_GAP_MIN && landed.gap <= BOTTOM_GAP_MAX,
+    `${landed.gap}px between the block and the bottom edge after a join`,
+  );
+  // A landed ack prints into the strip the cap was already holding back, so the cap binds no harder
+  // on the two controls than it did before the join.
+  assertWhollyShown(await shownIn(page, "#email", "#go"), `${where} after a join`);
+  // The strip the cap holds back is what the wheel has to reach: 23.69 of 76.8px of the ack stands
+  // inside the port before it, and the wheel takes the panel's whole 76px, so all of it after.
+  assert.ok((await rollThePanel(page, 200)) > 0, "a hand's scroll moved nothing");
+  assertWhollyShown(await shownIn(page, "#ack"), `${where} after a hand rolled the panel`);
+  await page.close();
+});
+
 test("the block fits a phone with nothing clipped", async () => {
   const page = await open(6, PHONE);
   // The longest copy the block ever carries is the ack, so measure with it on screen.
-  await page.fill("#email", "phone@yourco.com");
-  await page.click("#go");
-  await page.waitForFunction(() =>
-    document.getElementById("ack").textContent.includes("waitlist"),
-  );
+  await landAJoin(page, "phone@yourco.com");
   const laid = await page.locator("#join").evaluate((block) => {
     const box = block.getBoundingClientRect();
     return {
@@ -237,10 +382,13 @@ test("the block fits a phone with nothing clipped", async () => {
       top: box.top,
       bottom: box.bottom,
       clipped: block.scrollWidth > block.clientWidth + 1,
+      // nothing clipped means the cap holds nothing back either, not just that the copy fits across
+      capped: block.scrollHeight > block.clientHeight + 1,
     };
   });
   assert.equal(laid.pageOverflow, 0);
   assert.equal(laid.clipped, false);
+  assert.equal(laid.capped, false);
   assert.ok(
     laid.left >= 0 && laid.right <= laid.viewport.width,
     `the block spans ${laid.left}–${laid.right}px of ${laid.viewport.width}px`,
@@ -249,7 +397,37 @@ test("the block fits a phone with nothing clipped", async () => {
     laid.top >= 0 && laid.bottom <= laid.viewport.height,
     `the block spans ${laid.top}–${laid.bottom}px of ${laid.viewport.height}px`,
   );
+  assertWhollyShown(
+    await shownIn(page, "#email", "#go", "#ack"),
+    `${laid.viewport.width}x${laid.viewport.height} after a join`,
+  );
   await page.close();
+});
+
+// 5vh of sky under the block, and both ends of the clamp that holds it: a window tall enough for 5vh
+// to want 60px keeps the ceiling's 48, one short enough for it to want 12.5px keeps the floor's 20,
+// and the two in between keep the 5vh they measure. The two ends are stated as the constants the
+// placement assertions bound with, so a clamp and the numbers the suite carries for it cannot drift
+// apart in either direction.
+test("the sky under the block is 5vh, clamped at both ends", async () => {
+  for (const [device, gap] of [
+    [DESKTOP_TALL, BOTTOM_GAP_MAX],
+    [DESKTOP, 40],
+    [DESKTOP_SHORT, 30],
+    [PHONE_LANDSCAPE_SHORT, BOTTOM_GAP_MIN],
+  ]) {
+    const page = await open(6, device);
+    const placed = await page.locator("#join").evaluate((el) => {
+      const b = el.getBoundingClientRect();
+      const to2 = (n) => Math.round(n * 100) / 100;
+      return {
+        gap: to2(innerHeight - b.bottom),
+        offCentreX: to2(Math.abs(b.x + b.width / 2 - innerWidth / 2)),
+      };
+    });
+    assert.deepEqual(placed, { gap, offCentreX: 0 });
+    await page.close();
+  }
 });
 
 test("a craft is drawn, not a door", async () => {

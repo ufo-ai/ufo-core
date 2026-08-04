@@ -44,13 +44,16 @@
     .craft{text-shadow:0 0 6px currentColor}
   }
 
-  /* The panel: the curl card's join, rendered for a browser — always in the layout. Smoked glass,
-     so a craft drifting behind it is dimmed rather than swallowed; the black halo on every line
-     keeps the copy readable while that light passes. */
+  /* The panel: the curl card's join, rendered for a browser — always in the layout, at the foot
+     of the sky. Smoked glass, so a craft drifting behind it is dimmed rather than swallowed; the
+     black halo on every line keeps the copy readable while that light passes. */
   .panel{
-    position:fixed; left:50%; top:50%;
-    transform:translate(-50%,-50%);
+    --gap:clamp(20px,5vh,48px);
+    position:fixed; left:50%; bottom:var(--gap);
+    transform:translateX(-50%);
     width:min(92vw,30rem);
+    max-height:calc(100dvh - 2*var(--gap));
+    overflow:auto;
     padding:clamp(18px,4vw,28px);
     border:1px solid var(--hull);
     background:rgba(0,0,0,.6);
