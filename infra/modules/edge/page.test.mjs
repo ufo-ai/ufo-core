@@ -202,6 +202,39 @@ const shownIn = (page, ...selectors) =>
     );
   }, selectors);
 
+// What a member can read of the ack, as against what the strip reserves for it: its box is taller
+// than its copy wherever the copy is shorter, and the box is not what is read. The printed line boxes
+// are — the rectangles ackRoom counts — measured against the same two bounds as any other part, and
+// shaped for assertWhollyShown. Empty is empty: nothing printed measures nothing.
+const ackCopyShownIn = (page) =>
+  page.locator("#join").evaluate((panel) => {
+    const to2 = (n) => Math.round(n * 100) / 100;
+    const range = document.createRange();
+    range.selectNodeContents(panel.querySelector("#ack"));
+    const printed = [...range.getClientRects()];
+    if (!printed.length) return {};
+    const copy = { top: printed[0].top, bottom: printed.at(-1).bottom };
+    const outer = panel.getBoundingClientRect();
+    const clipTop = outer.top + panel.clientTop;
+    const spanned = (top, bottom) =>
+      to2(Math.max(0, Math.min(copy.bottom, bottom) - Math.max(copy.top, top)));
+    return {
+      "the ack's printed copy": {
+        height: to2(copy.bottom - copy.top),
+        inClip: spanned(clipTop, clipTop + panel.clientHeight),
+        inWindow: spanned(0, innerHeight),
+      },
+    };
+  });
+
+// A control the page left enabled is a control a member is still expected to use, so it is the set a
+// bound window has to keep whole — read off the page rather than assumed, because only one of
+// report()'s four paths takes the entry away.
+const liveControls = (page) =>
+  page
+    .locator("#join")
+    .evaluate((block) => ["#email", "#go"].filter((id) => !block.querySelector(id).disabled));
+
 function assertWhollyShown(shown, where) {
   for (const [selector, box] of Object.entries(shown)) {
     assert.deepEqual(
@@ -236,8 +269,10 @@ const placementOf = (page) =>
   });
 
 // A scroll under a hand rather than under a script, which is the difference between a panel that
-// caps its copy and one that hides it: a panel whose overflow is hidden still answers an assignment
-// to scrollTop, and only a wheel notices.
+// caps its copy and one that hides it: a panel that hides it still answers the page's own scroll of
+// a landed ack, and only a wheel notices. The wheel starts from wherever the page left the panel —
+// after a print that is the scroll the copy needed, not the head — so what comes back measures the
+// hand only against the scroll it began at.
 async function rollThePanel(page, by) {
   const panel = await boxOf(page, "#join");
   await page.mouse.move(panel.x + panel.width / 2, panel.y + panel.height / 2);
@@ -334,7 +369,7 @@ test("a short viewport shows the whole block, entry included", async () => {
 
 // Shorter than the block, the window is where the plain cap earns itself: uncapped the block's head
 // hangs 55.83px off the top of a 568x250 window, and capped it stands 20px inside it. What the cap
-// holds back a hand can still roll into view.
+// holds back a hand can still roll into view, and what lands in the ack the page rolls in itself.
 test("a window shorter than the block caps it, and a hand rolls the rest into view", async () => {
   const page = await open(6, PHONE_LANDSCAPE_SHORT);
   const { width, height } = page.viewportSize();
@@ -358,13 +393,327 @@ test("a window shorter than the block caps it, and a hand rolls the rest into vi
     landed.gap >= BOTTOM_GAP_MIN && landed.gap <= BOTTOM_GAP_MAX,
     `${landed.gap}px between the block and the bottom edge after a join`,
   );
-  // A landed ack prints into the strip the cap was already holding back, so the cap binds no harder
-  // on the two controls than it did before the join.
+  // The strip reserves a line more than a landed ack prints here, so what has to be inside the port
+  // is the copy, not the box: the two lines it printed, and both controls with them.
   assertWhollyShown(await shownIn(page, "#email", "#go"), `${where} after a join`);
-  // The strip the cap holds back is what the wheel has to reach: 23.69 of 76.8px of the ack stands
-  // inside the port before it, and the wheel takes the panel's whole 76px, so all of it after.
-  assert.ok((await rollThePanel(page, 200)) > 0, "a hand's scroll moved nothing");
+  assertWhollyShown(await ackCopyShownIn(page), `${where} after a join`);
+  // The rest of the strip the cap holds back is what the wheel has to reach, and the print has
+  // already spent part of it: standing the copy whole takes 24 of the panel's 76px and leaves
+  // 47.69 of 76.8px of the ack's box inside the port, so the hand's own 52 is what carries the
+  // whole box in — which is why the wheel is measured against where the print left the panel and
+  // not against zero.
+  const printRolledTo = await page.locator("#join").evaluate((el) => el.scrollTop);
+  assert.ok((await rollThePanel(page, 200)) > printRolledTo, "a hand's scroll moved nothing");
   assertWhollyShown(await shownIn(page, "#ack"), `${where} after a hand rolled the panel`);
+  await page.close();
+});
+
+// Every path that prints in the ack, and what each leaves a member holding. Only a landed join takes
+// the entry away: the button is down while a request is in flight, and both refusals hand it back,
+// so on three of the four the address is still there to be corrected and on two the button is still
+// there to be pressed. Each path drives the page the way the suite's own path tests do.
+const REPORT_PATHS = [
+  {
+    name: "a request in flight",
+    opening: "Joining",
+    live: ["#email"],
+    // A request that never answers, so the ack the submit prints stays up to be measured.
+    async drive(page) {
+      await page.evaluate(() => (window.fetch = () => new Promise(() => {})));
+      await page.fill("#email", "joining@yourco.com");
+      await page.click("#go");
+    },
+  },
+  {
+    name: "a refused address",
+    opening: "That email",
+    live: ["#email", "#go"],
+    // Native validation passes a dotless domain and the worker's regex does not, so this is a real
+    // 400 off the wire — the path a member has to type into again.
+    async drive(page) {
+      await page.fill("#email", "pilot@localhost");
+      await page.click("#go");
+    },
+  },
+  {
+    name: "a request that failed",
+    opening: "Request failed",
+    live: ["#email", "#go"],
+    async drive(page) {
+      await page.evaluate(() => {
+        window.fetch = async () => ({ ok: true, text: () => Promise.reject(new Error("cut")) });
+      });
+      await page.fill("#email", "cut@off.com");
+      await page.click("#go");
+    },
+  },
+  {
+    name: "a landed join",
+    opening: "#",
+    live: [],
+    drive: (page, tag) => landAJoin(page, `bound-${tag}@yourco.com`),
+  },
+];
+
+// Safari's chrome takes a different share of the screen from phone to phone, so the cap binds across
+// a band of window heights rather than at one, and these are the shortest window the page is served
+// in and two deeper caps still. Wherever it binds the ack is the copy held back, and the room the
+// page spends to roll it in comes out of the heading: the block's own head keeps standing 20px
+// inside the window, and so does every control the path left enabled. Nothing here rests on the
+// entry being disabled — three of the four paths leave it live, which is why each is walked.
+//
+// Two things the page cannot buy back at 568x200, both measured: before anything lands, 158px of
+// port holds 168.31px of head, entry and button, so the button stands 10.31px short until a hand
+// rolls it in; and on a landed join the entry gives up 11.69px of itself to the copy — the one path
+// that has taken it away by then.
+test("wherever the cap binds, what a report prints reads whole and live controls stay whole", async () => {
+  for (const height of [250, 220, 200]) {
+    for (const path of REPORT_PATHS) {
+      const { viewport } = PHONE_LANDSCAPE_SHORT;
+      const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { ...viewport, height } });
+      const where = `${viewport.width}x${height}, ${path.name}`;
+      assert.equal((await placementOf(page)).scrolled, true, `the cap does not bind at ${where}`);
+      await path.drive(page, height);
+      await page.waitForFunction(
+        (opening) => document.getElementById("ack").textContent.startsWith(opening),
+        path.opening,
+      );
+      const reported = await placementOf(page);
+      assert.equal(reported.scrolled, true, `the cap stopped binding at ${where}`);
+      assert.ok(
+        reported.top >= 0,
+        `the block's head hangs ${-reported.top}px off the top at ${where}`,
+      );
+      assert.ok(
+        reported.gap >= BOTTOM_GAP_MIN && reported.gap <= BOTTOM_GAP_MAX,
+        `${reported.gap}px between the block and the bottom edge at ${where}`,
+      );
+      assertWhollyShown(await ackCopyShownIn(page), where);
+      const live = await liveControls(page);
+      assert.deepEqual(live, path.live, `${where} left ${live.join(" and ") || "nothing"} enabled`);
+      assertWhollyShown(await shownIn(page, ...live), where);
+      await page.close();
+    }
+  }
+});
+
+// Two of the four paths hand the button back, so a member can wheel wherever they like and press it
+// again — and the ack that prints then lands wherever the panel is standing, not at the head. A roll
+// that never moved the panel back would leave that copy read and a control the refusal handed back
+// clipped: measured at 568x200, the wheel leaves the panel at 126, the resubmit's own focus scroll at
+// 124, the print needs 49, and #email shows 0 of 44px inside the port until the print stands the
+// panel at what the copy needs. The band is walked because the gap between the two is the cap's, and
+// the cap binds across it — 76 against a need of −1 at 250, 106 against 29 at 220.
+const REFUSED_ADDRESS = REPORT_PATHS.find((path) => path.name === "a refused address");
+
+test("a report stands its copy and live controls whole from a member's own scroll", async () => {
+  for (const height of [250, 220, 200]) {
+    const { viewport } = PHONE_LANDSCAPE_SHORT;
+    const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { ...viewport, height } });
+    const where = `${viewport.width}x${height}, a refused address resubmitted from the panel's foot`;
+    await REFUSED_ADDRESS.drive(page, `resubmit-${height}`);
+    await page.waitForFunction(
+      (opening) => document.getElementById("ack").textContent.startsWith(opening),
+      REFUSED_ADDRESS.opening,
+    );
+    const rolled = await page.locator("#join").evaluate((el) => el.scrollTop);
+    const theirs = await rollThePanel(page, 400);
+    assert.ok(
+      theirs > rolled,
+      `the wheel did not move the panel past the report's ${rolled} at ${where}`,
+    );
+    // The button the refusal handed back, pressed from down there: the same address is refused off the
+    // wire again, so the button comes back a second time and the wait cannot pass on the first ack.
+    await page.click("#go");
+    await page.waitForFunction(() => {
+      const block = document.getElementById("join");
+      return (
+        !block.querySelector("#go").disabled &&
+        block.querySelector("#ack").textContent.startsWith("That email")
+      );
+    });
+    const stood = await page.locator("#join").evaluate((el) => el.scrollTop);
+    assert.ok(stood < theirs, `the report left the panel at the member's ${theirs} at ${where}`);
+    assertWhollyShown(await ackCopyShownIn(page), where);
+    const live = await liveControls(page);
+    assert.deepEqual(
+      live,
+      REFUSED_ADDRESS.live,
+      `${where} left ${live.join(" and ") || "nothing"} enabled`,
+    );
+    assertWhollyShown(await shownIn(page, ...live), where);
+    await page.close();
+  }
+});
+
+// Room lost after a report is the same clip arriving from the other side, and the window takes it two
+// ways. Its bottom edge dragged up walks the port's bottom edge under copy that has already printed
+// and changes nothing about the copy: measured on a page that rolled only as it printed, at
+// 568x250 → 200 a landed ack held 44.59 of 44.59px inside the port and then 0px of it, 15.69px of it
+// still inside the window; at 1200x240 → 180 its 38.39px left the port and the window both,
+// `scrollTop` unmoved at 24 and 16. Its side edge dragged in takes the same room without moving the
+// port at all: at 568x250 → 320x250 that ack rewraps from two lines onto three, its 44.59px of copy
+// becomes 70.19px, and 49.41px is all of it left inside a port that is still 208px, `scrollTop` stuck
+// at 24 where the copy now needs 45. A phone whose URL bar comes back, a window edge dragged up and a
+// window edge dragged in, because what changed is the room and not the copy.
+//
+// The room the roll spends is the heading's, as it is when the copy lands: what the resize cannot buy
+// back is measured too — at 568x200 a landed join leaves the disabled entry 32.31 of 44px and at
+// 1200x180, 23.78 of 35.39px, which is why the controls asserted are the ones the path left live.
+const ROOM_LOSING_RESIZES = [
+  {
+    device: PHONE_LANDSCAPE_SHORT,
+    from: { width: 568, height: 250 },
+    to: { width: 568, height: 200 },
+  },
+  {
+    device: DESKTOP,
+    from: { width: 1200, height: 240 },
+    to: { width: 1200, height: 180 },
+  },
+  {
+    device: PHONE_LANDSCAPE_SHORT,
+    from: { width: 568, height: 250 },
+    to: { width: 320, height: 250 },
+  },
+];
+
+test("copy that has printed is rolled back in when the window takes its room away", async () => {
+  for (const { device, from, to } of ROOM_LOSING_RESIZES) {
+    for (const path of REPORT_PATHS) {
+      const page = await open(6, { ...device, viewport: from });
+      const where = `${from.width}x${from.height} → ${to.width}x${to.height}, ${path.name}`;
+      await path.drive(page, `${from.width}x${from.height}-${to.width}x${to.height}`);
+      await page.waitForFunction(
+        (opening) => document.getElementById("ack").textContent.startsWith(opening),
+        path.opening,
+      );
+      assertWhollyShown(await ackCopyShownIn(page), `${from.width}x${from.height}, ${path.name}`);
+      await page.setViewportSize(to);
+      await page.waitForFunction(
+        ([width, height]) => innerWidth === width && innerHeight === height,
+        [to.width, to.height],
+      );
+      await page.waitForTimeout(120);
+      const afterLoss = await placementOf(page);
+      assert.equal(afterLoss.scrolled, true, `the cap does not bind at ${where}`);
+      assert.ok(
+        afterLoss.top >= 0,
+        `the block's head hangs ${-afterLoss.top}px off the top at ${where}`,
+      );
+      assert.ok(
+        afterLoss.gap >= BOTTOM_GAP_MIN && afterLoss.gap <= BOTTOM_GAP_MAX,
+        `${afterLoss.gap}px between the block and the bottom edge at ${where}`,
+      );
+      assertWhollyShown(await ackCopyShownIn(page), where);
+      assertWhollyShown(await shownIn(page, ...(await liveControls(page))), where);
+      await page.close();
+    }
+  }
+});
+
+// A resize is not a loss, and only room lost takes anything from copy that has already printed. A
+// window narrowed 568 → 560 at the same height rewraps none of it, so the copy needs the scroll it
+// needed before — 74px on a landed join, 49px falling to 48px on the reports that print one line —
+// and one grown 200 → 210 hands 10px of port back. In neither may the roll throw away a scroll the
+// member made themselves. Both ends are walked on each: the move that must not roll, and then a real
+// loss on the same page, which must. 568x200 is a height every one of the four paths rolls from, so on
+// each of them the member has somewhere of their own to wheel to. The loss after the growth stops 5px
+// above the height the print rolled at — the copy needs 69px at 205 against the 74px it needed at 200
+// — so nothing rolls there unless the page took the growth in. Each loss is also taken at a height
+// whose port can hold the printed copy and the controls the path left live at once, which is what the
+// leg asserts: 560x190 leaves 148px of port, where 560x180 leaves 138px against the 144px from the
+// entry's top to the copy's foot and no scroll shows both — 188px is the first height that does, and
+// there #email has 1.98px to spare.
+const ROOM_KEEPING_RESIZES = [
+  {
+    name: "the window narrows at the same height",
+    to: { width: 560, height: 200 },
+    shrunkTo: 190,
+  },
+  {
+    name: "the window grows 10px, short of clearing the copy",
+    to: { width: 568, height: 210 },
+    shrunkTo: 205,
+  },
+];
+const ROOM_KEEPING_FROM = { width: 568, height: 200 };
+
+test("a resize that takes no room away leaves a member's own scroll alone", async () => {
+  for (const { name, to, shrunkTo } of ROOM_KEEPING_RESIZES) {
+    for (const path of REPORT_PATHS) {
+      const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: ROOM_KEEPING_FROM });
+      const where = `${ROOM_KEEPING_FROM.width}x${ROOM_KEEPING_FROM.height}, ${name}, ${path.name}`;
+      await path.drive(page, `kept-${to.width}x${to.height}`);
+      await page.waitForFunction(
+        (opening) => document.getElementById("ack").textContent.startsWith(opening),
+        path.opening,
+      );
+      const rolled = await page.locator("#join").evaluate((el) => el.scrollTop);
+      assert.ok(rolled > 0, `the report printed without rolling at ${where}: nothing is at risk`);
+      const theirs = await rollThePanel(page, -400);
+      assert.ok(theirs < rolled, `the wheel did not move the panel off ${rolled} at ${where}`);
+      assertWhollyShown(await shownIn(page, ".head"), `${where}, as the member left it`);
+      await page.setViewportSize(to);
+      // Both dimensions: one row moves the width alone, and a wait on the height it is already at
+      // would resolve before the resize landed and pass a narrowing that never arrived.
+      await page.waitForFunction(
+        ([width, height]) => innerWidth === width && innerHeight === height,
+        [to.width, to.height],
+      );
+      await page.waitForTimeout(120);
+      assert.equal(
+        await page.locator("#join").evaluate((el) => el.scrollTop),
+        theirs,
+        `the resize moved the panel off the member's ${theirs} at ${where}`,
+      );
+      assertWhollyShown(await shownIn(page, ".head"), `${where}, after the resize`);
+      // The gate is a gate and not a stop: room actually lost still rolls the printed copy back in.
+      await page.setViewportSize({ width: to.width, height: shrunkTo });
+      await page.waitForFunction(
+        ([width, height]) => innerWidth === width && innerHeight === height,
+        [to.width, shrunkTo],
+      );
+      await page.waitForTimeout(120);
+      const lost = `${where}, then shrunk to ${shrunkTo}`;
+      assertWhollyShown(await ackCopyShownIn(page), lost);
+      assertWhollyShown(await shownIn(page, ...(await liveControls(page))), lost);
+      await page.close();
+    }
+  }
+});
+
+// The other end of the same rule: a print stands the panel at what the copy needs from wherever the
+// member left it, and a resize only ever rolls forward from there. Room the window takes away has to
+// come from somewhere, but a member already sitting past what the copy needs is reading it, and
+// pulling the panel back to the need would throw their own scroll away. At 568x200 → 180 the copy's
+// need goes 49 → 69 while the wheel has left them at 126, so the loss is real and it is behind them.
+test("a resize rolls the panel forward or not at all", async () => {
+  const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { width: 568, height: 200 } });
+  const where = "568x200 → 568x180, a refused address, the member at the panel's foot";
+  await REFUSED_ADDRESS.drive(page, "forward-only");
+  await page.waitForFunction(
+    (opening) => document.getElementById("ack").textContent.startsWith(opening),
+    REFUSED_ADDRESS.opening,
+  );
+  const rolled = await page.locator("#join").evaluate((el) => el.scrollTop);
+  const theirs = await rollThePanel(page, 400);
+  assert.ok(
+    theirs > rolled,
+    `the wheel did not move the panel past the report's ${rolled} at ${where}`,
+  );
+  await page.setViewportSize({ width: 568, height: 180 });
+  await page.waitForFunction(
+    ([width, height]) => innerWidth === width && innerHeight === height,
+    [568, 180],
+  );
+  await page.waitForTimeout(120);
+  assert.equal(
+    await page.locator("#join").evaluate((el) => el.scrollTop),
+    theirs,
+    `the resize moved the panel off the member's ${theirs} at ${where}`,
+  );
+  assertWhollyShown(await ackCopyShownIn(page), where);
   await page.close();
 });
 

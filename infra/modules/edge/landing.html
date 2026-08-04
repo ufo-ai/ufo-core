@@ -613,10 +613,60 @@ const email = document.getElementById('email');
 const go = document.getElementById('go');
 const ack = document.getElementById('ack');
 
+// The panel's own scroll the copy that printed needs to stand inside the port: where the copy ends
+// inside the panel's content, less the port's height. Whole pixels, because the assignment is rounded
+// to one and a need rounded down leaves the last line its own fraction short: a raw 48.31 is kept as
+// 48 and reads 18.69 of 19px, where 49 reads all 19. Read from the content's top and not from the
+// port's, so a scroll the member made themselves leaves it where it was — what a resize has to be
+// judged on is the room the copy has, not where the copy was last left standing. Nothing printed
+// needs nothing.
+function scrollPrintedNeeds(){
+  const printed = document.createRange();
+  printed.selectNodeContents(ack);
+  const lastLine = [...printed.getClientRects()].pop();
+  if(!lastLine) return 0;
+  const clipTop = join.getBoundingClientRect().top + join.clientTop;
+  return Math.ceil(lastLine.bottom + join.scrollTop - clipTop - join.clientHeight);
+}
+
+let needsAnswered = 0;
+
+// The block stands at the foot of the sky and caps its height there, so on a window shorter than its
+// copy the line that lands last is the line the cap holds back: without this the ack renders below
+// the scroll port and a member reads half a sentence. What stands in the port is the copy that
+// printed and not the strip holding it — standing the whole box in would spend up to two empty lines
+// of the entry's and the button's room, which every path but a landed join leaves a member to act in.
+// The copy's own need is the least scroll that reads it whole, so it is also the most room left to the
+// controls above it, and wherever the port can hold the copy and those controls together this stands
+// both whole. Under 188px of window on a coarse pointer it cannot hold both: at 560x180 the port
+// measures 138px against the 144px from the entry's top to the copy's foot, and there the room goes to
+// the answer the member has just asked for.
+//
+// The panel stands where the print needs it, and not merely no further back than that: two of the four
+// paths hand the button back, so a member is free to wheel to the panel's foot and press again, and an
+// ack printing above them there is one they never see.
 function report(message, bad){
   ack.textContent = message;
   ack.classList.toggle('bad', Boolean(bad));
+  needsAnswered = scrollPrintedNeeds();
+  join.scrollTop = needsAnswered;
 }
+
+// The cap is derived from the window's own height and the copy's wrapping from its width, so the room
+// a printed line has is not settled when it prints. A URL bar coming back, a turned phone or a window
+// edge dragged up walks the port's bottom edge up past copy that already landed; a window edge
+// dragged in rewraps that copy onto another line under an edge that never moved. Either way the
+// member who just joined loses their number to empty strip, and either way the room is what changed
+// and not the copy, so the same roll answers it — but only where the copy lost room. A resize that
+// hands port height back, or one that rewraps nothing, has taken nothing away, and rolling then would
+// throw away a scroll the member made themselves: the head they scrolled up to read snaps back out of
+// the port under their hand.
+addEventListener('resize', () => {
+  const needs = scrollPrintedNeeds();
+  const lost = needs > needsAnswered;
+  needsAnswered = needs;
+  if(lost && needs > join.scrollTop) join.scrollTop = needs;
+});
 
 join.addEventListener('submit', async e => {
   e.preventDefault();
