@@ -17,6 +17,7 @@ import ufo_ext_memory.manifest as memory_manifest_module
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
@@ -27,7 +28,6 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
-from ufo_testsupport.surfaces import NO_SUBAGENTS
 
 from ufo.accounting import record_egress_request, record_sandbox_tokens, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
@@ -39,6 +39,8 @@ from ufo.ext.context import context_for
 from ufo.ext.loader import memory_search, skill_registry, turn_runtime_skills
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
+from ufo.loop.prompts.render import SKILL_INDEX_SLOT, render_skill_index
+from ufo.loop.subagents import CORE_SKILL_INDEX, SubagentRegistry
 from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -47,7 +49,7 @@ from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
-from ufo.sdk.manifest import Manifest
+from ufo.sdk.manifest import Manifest, SubagentProfile
 from ufo.serve import _mount_shared_surfaces
 from ufo.skills.runtime import RuntimeSkill
 from ufo.subjects import member_subject
@@ -166,6 +168,29 @@ CHILD_SKILL = RuntimeSkill(
 DEPLOY_SKILLS = skill_registry((web_manifest(), memory_manifest_module.manifest()), (CHILD_SKILL,))
 
 
+class ProbeTask(BaseModel):
+    task: str
+
+
+class ProbeResult(BaseModel):
+    result: str
+
+
+def _profile(name: str, tools: tuple[str, ...]) -> SubagentProfile:
+    return SubagentProfile(
+        name=name,
+        prompt=f"be focused\n\n{SKILL_INDEX_SLOT}" if tools else "be focused",
+        tool_names=tools,
+        input_model=ProbeTask,
+        output_model=ProbeResult,
+    )
+
+
+PORTAL_SUBAGENTS = SubagentRegistry(
+    (_profile("researcher", ("read", "load_skill")), _profile("narrow", ()))
+)
+
+
 SCHEDULED_TASK_KIND_ONLY = Manifest(
     name="scheduled_tasks",
     version="0.1.0",
@@ -205,7 +230,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=DEPLOY_SKILLS,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
-        subagents=NO_SUBAGENTS,
+        subagents=PORTAL_SUBAGENTS,
         memory=memory_search(manifests, None, index, embed) if with_memory else None,
     )
     return app
@@ -929,3 +954,42 @@ async def test_the_subject_fence_holds_on_every_page(
 
     walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
     assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]
+
+
+async def test_subagent_skills_list_the_deploys_and_only_where_load_skill_is_held(portal) -> None:
+    """A profile is deploy shape, so its page names the deploy index every agent shares — the same
+    top-level skills the agent panel lists as `deploy`, a child skill never among them — and never
+    an agent's member-authored ones, which belong to whichever agent spawned the child. A profile
+    holding no `load_skill` reaches none of them and its page says so."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+
+    listed = (await client.get("/surface/web/subagents/researcher/skills", headers=headers)).json()
+    assert listed["loads_skills"] is True
+    assert [(skill["name"], skill["description"]) for skill in listed["skills"]] == list(
+        DEPLOY_SKILLS.index()
+    )
+    assert CHILD_SKILL.name in DEPLOY_SKILLS.by_name
+    assert CHILD_SKILL.name not in {skill["name"] for skill in listed["skills"]}
+
+    narrow = (await client.get("/surface/web/subagents/narrow/skills", headers=headers)).json()
+    assert narrow == {"loads_skills": False, "skills": []}
+
+
+async def test_subagent_overview_composes_the_prompt_a_child_runs(portal) -> None:
+    """The page shows the boot composition, not the profile's template: a profile whose
+    instructions carry `{{skill_index}}` has it filled from the deploy registry, so the whole
+    rendered index reaches the prompt and the slot never does. The index asserted whole is what
+    separates the deploy registry from the core default a spawn would otherwise fall back to —
+    `memory` is in one and not the other."""
+    client, workspace_id, _agent_a, _agent_b = portal
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+
+    prompt = (
+        await client.get("/surface/web/subagents/researcher/overview", headers=headers)
+    ).json()["subagent"]["prompt"]
+    assert SKILL_INDEX_SLOT not in prompt
+    assert render_skill_index(DEPLOY_SKILLS.index()) in prompt
+    assert "memory" in {name for name, _ in DEPLOY_SKILLS.index()} - set(
+        name for name, _ in CORE_SKILL_INDEX
+    )

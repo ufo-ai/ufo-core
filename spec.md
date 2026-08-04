@@ -408,7 +408,12 @@ member — grants kept in the web extension's own store, granted and revoked in 
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent) —
 while a workspace admin reaches and administers every agent. The deploy's typed subagent profiles
 are listed beside those agents unfiltered — a subagent belongs to no member, so no audience gates
-it and no chat route reaches it. An out-of-audience agent is not-found on every portal route,
+it and no chat route reaches it. Each opens a page of the same deploy shape: the system prompt its
+children run under, the deploy skills it can load (none without `load_skill`; a spawn adds the
+spawning agent's own member-authored ones), and the conversations it ran in — which a spawn stamps
+with the spawning conversation's audience, so whose work a member sees is the parent's answer while
+the agents their audience reaches still bound the page. An out-of-audience agent is not-found on
+every portal route,
 the administration view (agents with their policy,
 installations, and web-audience grants; members and seats; spend caps with their subjects named;
 the deploy's installed extensions and public-internet ceiling) answers a workspace admin only,

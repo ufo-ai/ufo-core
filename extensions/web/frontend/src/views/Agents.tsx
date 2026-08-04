@@ -5,13 +5,14 @@ export type AgentsProps = {
   agents: Agent[];
   subagents: Subagent[];
   onOpen: (agentId: string) => void;
+  onOpenSubagent: (name: string) => void;
   onNewChat: (agentId: string) => void;
 };
 
 const ROW = "flex items-baseline gap-md border-b border-edge-soft py-md last:border-b-0";
 const MODEL = "font-mono text-mono opacity-(--muted-strong)";
 
-export function Agents({ agents, subagents, onOpen, onNewChat }: AgentsProps) {
+export function Agents({ agents, subagents, onOpen, onOpenSubagent, onNewChat }: AgentsProps) {
   return (
     <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
       <h1 className="m-0 text-title font-strong">Agents</h1>
@@ -34,7 +35,13 @@ export function Agents({ agents, subagents, onOpen, onNewChat }: AgentsProps) {
         ))}
         {subagents.map((subagent) => (
           <li key={subagent.name} className={ROW}>
-            <span className="text-body">{subagent.name} · subagent</span>
+            <button
+              type="button"
+              onClick={() => onOpenSubagent(subagent.name)}
+              className="border-0 bg-transparent p-0 text-left text-body text-inherit"
+            >
+              {subagent.name} · subagent
+            </button>
             <span className={MODEL}>{subagent.model ?? ""}</span>
           </li>
         ))}

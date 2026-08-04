@@ -23,7 +23,7 @@ type Conversation = {
   disclosable: boolean;
 };
 
-type Turn = {
+export type Turn = {
   id: string;
   seq: number;
   status: string;
@@ -121,7 +121,7 @@ function Disclose({
  *  two audiences that name no member — what it is, since a room's content nobody reads here and
  *  a workspace-shared conversation everybody does. The short id distinguishes two of a kind; the
  *  queue key is never a member-facing name. */
-function who(entry: Conversation): string {
+export function who(entry: { member_email: string | null; readable: boolean; id: string }): string {
   if (entry.member_email) return entry.member_email;
   const kind = entry.readable ? "Shared" : "Channel or room";
   return kind + " · " + entry.id.slice(0, 8);
@@ -245,7 +245,7 @@ function ConversationDetail({
   );
 }
 
-function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
+export function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
   const answer = turn.outcome || turn.error_class;
   return (
     <div

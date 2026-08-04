@@ -482,8 +482,12 @@ test("the agents view lists the deploy's subagents below the agents, opening not
     "general_purpose · subagent",
   ]);
   expect(within(rows[0]).getAllByRole("button").length).toBe(2);
-  expect(within(rows[1]).queryAllByRole("button").length).toBe(0);
-  expect(within(rows[2]).queryAllByRole("button").length).toBe(0);
+  expect(within(rows[1]).getAllByRole("button").map((button) => button.textContent)).toEqual([
+    "deep_research · subagent",
+  ]);
+  expect(within(rows[2]).getAllByRole("button").map((button) => button.textContent)).toEqual([
+    "general_purpose · subagent",
+  ]);
 });
 
 test("a member who is not an admin is offered no administration control", () => {

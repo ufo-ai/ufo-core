@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
+import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -19,14 +20,17 @@ import {
 } from "@/lib/rail";
 import {
   AGENT_TABS,
+  SUBAGENT_TABS,
   agentHash,
   chatHash,
   newChatHash,
   parseHash,
+  subagentHash,
   workspaceHash,
   type AgentTab,
   type PlaceStep,
   type Route,
+  type SubagentTab,
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
@@ -87,6 +91,12 @@ export function App({ agents, subagents, member }: AppProps) {
   const openAgent = useCallback(
     (agentId: string, tab: AgentTab = "overview") =>
       go(agentHash(agentId, tab), { kind: "agent", agentId, tab }),
+    [go],
+  );
+
+  const openSubagent = useCallback(
+    (name: string, tab: SubagentTab = "overview") =>
+      go(subagentHash(name, tab), { kind: "subagent", name, tab }),
     [go],
   );
 
@@ -175,7 +185,9 @@ export function App({ agents, subagents, member }: AppProps) {
           <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
             <li>
               <SidebarButton
-                current={route.kind === "agents" || route.kind === "agent"}
+                current={
+                  route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
+                }
                 onClick={openAgents}
               >
                 Agents
@@ -216,6 +228,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onCreated={created}
           onActivity={activity}
           onOpenAgent={openAgent}
+          onOpenSubagent={openSubagent}
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
           sought={sought}
@@ -235,6 +248,7 @@ function Pane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onOpenSubagent,
   onNewChat,
   onPlaceWorkspace,
   sought,
@@ -248,6 +262,7 @@ function Pane({
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: readonly string[];
@@ -262,7 +277,20 @@ function Pane({
         agents={agents}
         subagents={subagents}
         onOpen={onOpenAgent}
+        onOpenSubagent={onOpenSubagent}
         onNewChat={onNewChat}
+      />
+    );
+  }
+  if (route.kind === "subagent") {
+    const subagent = subagents.find((entry) => entry.name === route.name);
+    if (!subagent) return <PaneNote>No such subagent.</PaneNote>;
+    return (
+      <SubagentPane
+        subagent={subagent}
+        tab={route.tab}
+        tabs={SUBAGENT_TABS}
+        onTab={(tab) => onOpenSubagent(subagent.name, tab)}
       />
     );
   }

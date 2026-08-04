@@ -54,6 +54,7 @@ from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
+    SubagentDetail,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -363,8 +364,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member, the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else
     — and the deploy's subagent profiles, the same roster for every member because a subagent
-    belongs to none of them. `agents` stays the set a member may open and message, so the roster
-    rides its own list and never reaches the chat paths."""
+    belongs to none of them. Each profile rides as its summary, the boot read narrowed to what a
+    list shows: its own page carries the instructions and the work it did. `agents` stays the set a
+    member may open and message, so the roster never reaches the chat paths."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -376,7 +378,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 {"id": str(agent.id), "name": agent.name, "main": agent.main, "model": agent.model}
                 for agent in audience.agents
             ],
-            "subagents": [subagent.model_dump(mode="json") for subagent in ctx.subagents],
+            "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
         }
     )
 
@@ -1082,6 +1084,119 @@ async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
     return StreamingResponse(stream, media_type="application/octet-stream")
 
 
+async def _subagent_gate(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, WebAudience, SubagentDetail] | Response:
+    """The shared entry of every subagent page read: the session's member and audience, plus the
+    path's profile — 404 when this deploy registers no such profile. No audience narrows the
+    profile itself, so the whole roster reads; the audience decides only whose work the page can
+    show, and the work rides on agents, so every read below carries `agent_ids`."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    profile = ctx.subagent(request.path_params["subagent"])
+    if profile is None:
+        return Response("no such subagent", status_code=404)
+    return member_id, audience, profile
+
+
+def _reachable_agents(audience: WebAudience) -> frozenset[UUID]:
+    """The agents this viewer's audience reaches — every agent for an admin, since the audience is
+    built that way. A subagent page shows only work these agents spawned, so an out-of-audience
+    agent stays not-found here as on every other portal route."""
+    return frozenset(agent.id for agent in audience.agents)
+
+
+async def subagent_overview(ctx: SurfaceContext, request: Request) -> Response:
+    """One profile's configuration: the system prompt its children run under, the model it pins or
+    inherits from the spawning agent, its round cap, and whether its answer is walled as untrusted
+    content wherever a parent receives it."""
+    gated = await _subagent_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, _audience, profile = gated
+    return JSONResponse({"subagent": profile.model_dump(mode="json")})
+
+
+async def subagent_skills(ctx: SurfaceContext, request: Request) -> Response:
+    """The deploy skills this profile can load, empty when it holds no `load_skill`. A spawn also
+    merges the spawning agent's member-authored skills into the child's index, and one profile is
+    reached by every agent, so those are listed on each agent's own skills panel and this names the
+    part every child of this profile loads."""
+    gated = await _subagent_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    _member_id, _audience, profile = gated
+    listed = ctx.deploy_skills if profile.loads_skills else ()
+    return JSONResponse(
+        {
+            "loads_skills": profile.loads_skills,
+            "skills": [{"name": name, "description": description} for name, description in listed],
+        }
+    )
+
+
+async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Response:
+    """The conversations this profile ran in, under the agents this viewer's audience reaches — the
+    children of their own requests and of the workspace-shared ones, every one for an admin. A
+    spawn copies the spawning conversation's audience onto the child, so whose work a member sees
+    is the parent's answer."""
+    gated = await _subagent_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, audience, profile = gated
+    listed = await ctx.list_subagent_conversations(
+        profile.name,
+        member_id,
+        _reachable_agents(audience),
+        admin=audience.admin,
+        limit=CONVERSATION_LIST_LIMIT,
+    )
+    return JSONResponse(
+        {
+            "conversations": [
+                {
+                    "id": str(run.id),
+                    "agent_name": run.agent_name,
+                    "member_email": run.member_email,
+                    "turn_count": run.turn_count,
+                    "last_turn_at": _iso(run.last_turn_at),
+                    "readable": run.readable,
+                }
+                for run in listed
+            ]
+        }
+    )
+
+
+async def subagent_conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
+    """One subagent conversation's turns, and beneath them the turns it spawned in turn — the same
+    transcript the spawning conversation nests, read here scoped to the profile that ran it and to
+    the agents this viewer's audience reaches. A row the listing shows unreadable refuses here."""
+    gated = await _subagent_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, audience, profile = gated
+    try:
+        conversation_id = UUID(request.path_params["conversation_id"])
+    except ValueError:
+        return Response("no such conversation", status_code=404)
+    agent_id = await ctx.readable_subagent_conversation(
+        conversation_id, profile.name, member_id, _reachable_agents(audience)
+    )
+    if agent_id is None:
+        return Response("no such conversation", status_code=404)
+    turns = await ctx.list_turns(conversation_id)
+    spawned = await ctx.conversation_subagent_turns(conversation_id)
+    return JSONResponse(
+        {
+            "turns": [_turn_row(turn) for turn in turns],
+            "subagent_turns": [_turn_row(turn) for turn in spawned],
+        }
+    )
+
+
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
     """Member-fillable declared BYOK slots and their fill state — never a value, and never the
     `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
@@ -1473,6 +1588,16 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
+    SurfaceRoute(method="GET", path="subagents/{subagent}/overview", handler=subagent_overview),
+    SurfaceRoute(method="GET", path="subagents/{subagent}/skills", handler=subagent_skills),
+    SurfaceRoute(
+        method="GET", path="subagents/{subagent}/conversations", handler=subagent_conversations
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="subagents/{subagent}/conversations/{conversation_id}",
+        handler=subagent_conversation_turns,
+    ),
     SurfaceRoute(
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/turns",

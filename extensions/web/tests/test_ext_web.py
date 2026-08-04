@@ -47,6 +47,7 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
+from ufo.ext.surface import record_transcript_access
 from ufo.grants import (
     ConnectFlow,
     GrantStore,
@@ -56,7 +57,7 @@ from ufo.grants import (
 )
 from ufo.hub import InProcessHub, SkillLoad, ToolCall
 from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
+from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
 from ufo.members import ADD_MEMBER_GATE
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -68,6 +69,7 @@ from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import (
+    SUBAGENT_SURFACE,
     AskQuestion,
     AskUserInput,
     ConnectRequest,
@@ -113,7 +115,7 @@ class ProbeResult(BaseModel):
     result: str
 
 
-def _profile(name: str, model: str | None) -> SubagentProfile:
+def _profile(name: str, model: str | None, rounds: int) -> SubagentProfile:
     return SubagentProfile(
         name=name,
         prompt="be focused",
@@ -121,11 +123,12 @@ def _profile(name: str, model: str | None) -> SubagentProfile:
         input_model=ProbeTask,
         output_model=ProbeResult,
         model=model,
+        max_rounds=rounds,
     )
 
 
 PORTAL_SUBAGENTS = SubagentRegistry(
-    (_profile("general_purpose", None), _profile("deep_research", "claude-opus-4-8"))
+    (_profile("general_purpose", None, 12), _profile("deep_research", "claude-opus-4-8", 40))
 )
 TOKEN_SECRET = "web-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -5046,3 +5049,191 @@ async def test_the_team_panel_refuses_a_foreign_domain(
                 )
             )
         ).one_or_none() is None
+
+
+async def test_subagent_page_reads_the_profile_and_refuses_an_unknown_name(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A profile's own page: its instructions, the model it pins, its round cap, and whether its
+    answer is walled as untrusted. The roster is the whole set that exists, so a name outside it is
+    a 404 — and a profile holding no `load_skill` lists no skills rather than the deploy's."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    overview = await client.get("/surface/web/subagents/deep_research/overview", headers=cookie)
+    assert overview.status_code == 200
+    detail = overview.json()["subagent"]
+    assert {key: value for key, value in detail.items() if key != "prompt"} == {
+        "name": "deep_research",
+        "model": "claude-opus-4-8",
+        "max_rounds": 40,
+        "untrusted_output": False,
+        "loads_skills": False,
+    }
+    assert detail["prompt"] == subagent_system_prompt(
+        _profile("deep_research", "claude-opus-4-8", 40), skills=EMPTY_SKILL_REGISTRY.index()
+    )
+    assert detail["prompt"].startswith("be focused")
+    assert FINISH_CONTRACT in detail["prompt"]
+
+    inherits = await client.get("/surface/web/subagents/general_purpose/overview", headers=cookie)
+    assert inherits.json()["subagent"]["model"] is None
+
+    assert (
+        await client.get("/surface/web/subagents/nonexistent/overview", headers=cookie)
+    ).status_code == 404
+
+    skills_read = await client.get("/surface/web/subagents/general_purpose/skills", headers=cookie)
+    assert skills_read.json() == {"loads_skills": False, "skills": []}
+
+
+async def test_subagent_conversations_follow_the_spawning_conversation_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A spawn copies the spawning conversation's audience onto the child, so a profile's page
+    lists the children of this member's own requests and of the workspace-shared ones, never
+    another member's — and an admin lists every one. Another profile's children never appear on
+    this page, and the transcript read fails closed on the same answer the listing shows."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    admin_id, token_admin = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    mine = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+        surface=SUBAGENT_SURFACE,
+    )
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+        surface=SUBAGENT_SURFACE,
+    )
+    other_profile = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="other",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id, mine, agent_id, seq=1, inbound="find it", subagent_profile="deep_research"
+    )
+    await _seed_listed_turn(
+        workspace_id, mine, agent_id, seq=2, inbound="and again", subagent_profile="deep_research"
+    )
+    await _seed_listed_turn(
+        workspace_id, theirs, agent_id, seq=1, inbound="theirs", subagent_profile="deep_research"
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        other_profile,
+        agent_id,
+        seq=1,
+        inbound="general work",
+        subagent_profile="general_purpose",
+    )
+    path = "/surface/web/subagents/deep_research/conversations"
+
+    listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert listed.status_code == 200
+    rows = listed.json()["conversations"]
+    assert len(rows) == 1
+    assert rows[0] | {"last_turn_at": None} == {
+        "id": str(mine),
+        "agent_name": "assistant",
+        "member_email": "m@example.com",
+        "turn_count": 2,
+        "last_turn_at": None,
+        "readable": True,
+    }
+    assert datetime.fromisoformat(rows[0]["last_turn_at"]).tzinfo is not None
+
+    admin_rows = (
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    ).json()["conversations"]
+    assert {entry["id"] for entry in admin_rows} == {str(mine), str(theirs)}
+    assert {entry["readable"] for entry in admin_rows} == {False}
+
+    readable = await client.get(f"{path}/{mine}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert readable.status_code == 200
+    assert [turn["inbound"] for turn in readable.json()["turns"]] == ["find it", "and again"]
+
+    for blocked in (theirs, other_profile):
+        refused = await client.get(
+            f"{path}/{blocked}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+        assert refused.status_code == 404
+    admin_refused = await client.get(
+        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    )
+    assert admin_refused.status_code == 404
+    with ws(workspace_id):
+        assert await record_transcript_access(workspace_id, theirs, agent_id, admin_id) is not None
+    still_refused = await client.get(
+        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    )
+    assert still_refused.status_code == 404
+
+
+async def test_subagent_work_stays_behind_the_agent_wall(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The page is deploy shape but the work it lists is an agent's, so an agent outside the
+    viewer's web audience is absent from the listing and not-found on the transcript — the same
+    answer every other portal route gives for it. A grant on that agent, or being an admin, shows
+    the row."""
+    client, workspace_id, _agent_id = web
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    walled = await _seed_agent_conversation(
+        workspace_id,
+        walled_agent,
+        queue_key="walled",
+        audience="shared",
+        member_id=None,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        walled,
+        walled_agent,
+        seq=1,
+        inbound="ops work",
+        subagent_profile="deep_research",
+    )
+    path = "/surface/web/subagents/deep_research/conversations"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    assert (await client.get(path, headers=cookie)).json()["conversations"] == []
+    assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 404
+
+    admin_rows = (
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    ).json()["conversations"]
+    assert [entry["id"] for entry in admin_rows] == [str(walled)]
+
+    await _grant_web_access(workspace_id, walled_agent, "member@example.com")
+    granted = await client.get(path, headers=cookie)
+    assert [entry["id"] for entry in granted.json()["conversations"]] == [str(walled)]
+    assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 200

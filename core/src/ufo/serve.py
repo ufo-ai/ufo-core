@@ -68,7 +68,7 @@ from ufo.ext.manifest import (
 )
 from ufo.ext.surface import (
     DeployExtensionView,
-    SubagentSummary,
+    SubagentDetail,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
@@ -86,9 +86,10 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
+from ufo.loop.engine import SKILL_LOAD_TOOL
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
-from ufo.loop.subagents import SubagentRegistry
+from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.interface import AUTO_MODEL
@@ -799,7 +800,14 @@ def _mount_shared_surfaces(
     )
     slots = declared_slots(manifests)
     subagent_roster = tuple(
-        SubagentSummary(name=profile.name, model=profile.model)
+        SubagentDetail(
+            name=profile.name,
+            model=profile.model,
+            prompt=subagent_system_prompt(profile, skills=skills.index()),
+            max_rounds=profile.max_rounds,
+            untrusted_output=profile.untrusted_output,
+            loads_skills=SKILL_LOAD_TOOL in profile.tool_names,
+        )
         for profile in sorted(subagents.profiles, key=lambda profile: profile.name)
     )
     kind_schemas = {

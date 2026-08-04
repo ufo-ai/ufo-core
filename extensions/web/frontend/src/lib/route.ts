@@ -17,7 +17,10 @@ export const WORKSPACE_TABS = [
   "usage",
 ] as const;
 
+export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
+
 export type AgentTab = (typeof AGENT_TABS)[number];
+export type SubagentTab = (typeof SUBAGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
 export type PlaceStep = "push" | "replace" | "back";
@@ -36,12 +39,14 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab }
+  | { kind: "subagent"; name: string; tab: SubagentTab }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "admin" };
 
 const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
+const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 
 const PLACE_KEYS = ["kind", "after", "q", "chip", "open"] as const;
@@ -71,6 +76,10 @@ function isAgentTab(name: string | undefined): name is AgentTab {
   return AGENT_TABS.includes((name ?? "") as AgentTab);
 }
 
+function isSubagentTab(name: string | undefined): name is SubagentTab {
+  return SUBAGENT_TABS.includes((name ?? "") as SubagentTab);
+}
+
 function isWorkspaceTab(name: string): name is WorkspaceTab {
   return WORKSPACE_TABS.includes(name as WorkspaceTab);
 }
@@ -90,6 +99,14 @@ export function parseHash(hash: string): Route {
   if (agent) {
     return { kind: "agent", agentId: agent[1], tab: isAgentTab(agent[2]) ? agent[2] : "overview" };
   }
+  const subagent = hash.match(SUBAGENT_HASH);
+  if (subagent) {
+    return {
+      kind: "subagent",
+      name: subagent[1],
+      tab: isSubagentTab(subagent[2]) ? subagent[2] : "overview",
+    };
+  }
   return { kind: "home" };
 }
 
@@ -103,6 +120,10 @@ export function newChatHash(agentId: string): string {
 
 export function agentHash(agentId: string, tab: AgentTab): string {
   return "#/agents/" + agentId + (tab === "overview" ? "" : "/" + tab);
+}
+
+export function subagentHash(name: string, tab: SubagentTab): string {
+  return "#/subagents/" + name + (tab === "overview" ? "" : "/" + tab);
 }
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {

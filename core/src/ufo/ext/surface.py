@@ -412,6 +412,28 @@ class SubagentSummary(BaseModel):
     model: str | None
 
 
+class SubagentDetail(BaseModel):
+    """One profile as its own portal page reads it: the summary's fields plus the system prompt a
+    child runs under, the agentic round cap a spawn forces a finish at, whether the child's answer
+    is walled as untrusted, and whether it may load skills at all — a profile without `load_skill`
+    reaches none.
+
+    `prompt` is the boot composition — the profile's instructions with the deploy skill index
+    filled in, then the shared output discipline and the finish contract. A spawn composes the same
+    way against the spawning agent's index, which adds that agent's member-authored skills, and
+    appends the bodies of any skills the payload preloads."""
+
+    name: str
+    model: str | None
+    prompt: str
+    max_rounds: int
+    untrusted_output: bool
+    loads_skills: bool
+
+    def summary(self) -> SubagentSummary:
+        return SubagentSummary(name=self.name, model=self.model)
+
+
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
     Slots come from installed manifests, the same declarations the `credential` object kind
@@ -577,6 +599,25 @@ class ListedConversation(BaseModel):
     disclosable: bool
 
 
+class SubagentRun(BaseModel):
+    """One conversation a subagent profile ran in, as its own page lists it: the agent that spawned
+    it, the member whose request it served, and how much of it the profile did. A row exists only
+    where a turn of the profile ran, so `last_turn_at` always names one. `readable` is whether this
+    viewer reads those turns — a row they may not read still counts as work the profile did."""
+
+    id: UUID
+    agent_name: str
+    member_email: str | None
+    turn_count: int
+    last_turn_at: datetime
+    readable: bool
+
+    @field_validator("last_turn_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class LedgerEntry(BaseModel):
     """One accounting row of a turn — a dimension's metered amount and its priced cost."""
 
@@ -700,7 +741,7 @@ class SurfaceContext:
     _models: tuple[str, ...]
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
-    _subagents: tuple[SubagentSummary, ...]
+    _subagents: tuple[SubagentDetail, ...]
     _declared_slots: tuple[DeclaredSlot, ...]
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
@@ -720,11 +761,24 @@ class SurfaceContext:
         return self._deploy_sandbox_internet
 
     @property
-    def subagents(self) -> tuple[SubagentSummary, ...]:
+    def subagents(self) -> tuple[SubagentDetail, ...]:
         """The typed subagent profiles this deploy's agents delegate to, by name — the roster a
-        portal lists beside the workspace's agents, fixed at boot from the same registry
-        `spawn_subagent` dispatches against."""
+        portal lists beside the workspace's agents and the page each row opens, fixed at boot from
+        the same registry `spawn_subagent` dispatches against."""
         return self._subagents
+
+    def subagent(self, name: str) -> SubagentDetail | None:
+        """One profile by name, or None when this deploy registers no such profile — the 404 a
+        portal page answers on, since the roster is the whole set that exists."""
+        return next((profile for profile in self._subagents if profile.name == name), None)
+
+    @property
+    def deploy_skills(self) -> tuple[tuple[str, str], ...]:
+        """The deploy's loadable-skill index — the floor of what any child can load. A spawn merges
+        the spawning agent's member-authored skills onto it before rendering the child's
+        `{{skill_index}}`, and a profile is deploy shape reached by every agent, so those belong to
+        `agent_skills` and this names the shared part."""
+        return self._skills.index()
 
     @property
     def models(self) -> tuple[str, ...]:
@@ -1941,6 +1995,110 @@ class SurfaceContext:
                 )
             ).first()
         return disclosed is not None
+
+    async def list_subagent_conversations(
+        self, profile: str, member_id: UUID, agent_ids: frozenset[UUID], *, admin: bool, limit: int
+    ) -> tuple[SubagentRun, ...]:
+        """Every conversation one subagent profile ran in, newest activity first and bounded — the
+        per-profile view of the work `list_agent_conversations` deliberately withholds, where that
+        one lists an agent's conversations with members. Two filters, because one profile serves
+        every agent: `agent_ids` is the caller's audience, so an agent it does not reach is absent
+        here exactly as it is not-found on every other portal route, and the child's own audience —
+        the spawning conversation's, which a spawn copies onto it — decides whose work a member
+        sees. An admin lists every one and reads only what `readable` says. The agent that spawned
+        it names each row."""
+        activity = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.subagent_profile == profile,
+            )
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(
+                tables.conversation.c.id,
+                tables.conversation.c.audience,
+                tables.agent.c.name.label("agent_name"),
+                tables.member.c.email,
+                activity.c.turn_count,
+                activity.c.last_turn_at,
+            )
+            .select_from(
+                tables.conversation.join(
+                    activity, activity.c.conversation_id == tables.conversation.c.id
+                )
+                .join(tables.agent, tables.agent.c.id == tables.conversation.c.agent_id)
+                .outerjoin(tables.member, tables.member.c.id == tables.conversation.c.member_id)
+            )
+            .where(
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.surface == SUBAGENT_SURFACE,
+                tables.conversation.c.agent_id.in_(agent_ids),
+            )
+            .order_by(activity.c.last_turn_at.desc())
+            .limit(limit)
+        )
+        if not admin:
+            query = query.where(
+                tables.conversation.c.audience.in_(_readable_audience_values(member_id))
+            )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            SubagentRun(
+                id=row.id,
+                agent_name=row.agent_name,
+                member_email=row.email,
+                turn_count=row.turn_count,
+                last_turn_at=row.last_turn_at,
+                readable=row.audience in _readable_audience_values(member_id),
+            )
+            for row in rows
+        )
+
+    async def readable_subagent_conversation(
+        self, conversation_id: UUID, profile: str, member_id: UUID, agent_ids: frozenset[UUID]
+    ) -> UUID | None:
+        """The agent a readable subagent conversation of this profile ran under, or None — the gate
+        a per-profile transcript read answers on, and the agent id the turn reads then scope to. It
+        must be this profile's own child work, under an agent the caller's audience reaches, and
+        readable by the same gate every other content route fails closed on — so a row the listing
+        shows unreadable is a row this refuses. That gate is asked with `admin=False`: this route
+        never honours a disclosure, because the listing beside it reports audience alone and the
+        two must answer together. An admin reads a child by opening the parent it was spawned
+        from, which nests these turns."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id)
+                    .select_from(
+                        tables.conversation.join(
+                            tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
+                        )
+                    )
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.surface == SUBAGENT_SURFACE,
+                        tables.conversation.c.agent_id.in_(agent_ids),
+                        tables.turn.c.subagent_profile == profile,
+                    )
+                    .limit(1)
+                )
+            ).one_or_none()
+        if found is None:
+            return None
+        if not await self.readable_conversation(
+            conversation_id, found.agent_id, member_id, admin=False
+        ):
+            return None
+        return found.agent_id
 
     async def conversation_subagent_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT
