@@ -176,6 +176,12 @@ spec:
     - host: ${gateway_origin_host}
       http:
         paths:
+          - path: /v1/onboard
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
           - path: /ufo
             pathType: Exact
             backend:

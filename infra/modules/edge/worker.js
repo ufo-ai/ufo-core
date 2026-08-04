@@ -162,6 +162,9 @@ async function join(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/v1/onboard/")) {
+      return fetch(new Request(`${env.ORIGIN_BASE}${url.pathname}${url.search}`, request));
+    }
     switch (url.pathname) {
       case "/":
         return landing(request, env, url);

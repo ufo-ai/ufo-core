@@ -175,6 +175,10 @@ case "$URL" in
     printf '%s' "$FORMAT" |
       sed -e 's/%{http_code}/302/g' -e "s|%{redirect_url}|https://app.$HOST/login|g"
     ;;
+  */v1/onboard/ufo)
+    [ "$BAD_ONBOARD_HOST" != "$HOST" ] || exit 1
+    printf 'x-ufo-session header is required.\n'
+    ;;
   */ufo)
     [ "$BAD_HOST" != "$HOST" ] || HOST=wrong.example
     printf 'UFO_URL="${UFO_URL:-https://%s}"\\n' "$HOST"
@@ -849,16 +853,18 @@ def test_edge_deploys_are_isolated(
         "BAD_HOST": "",
         "BAD_FLEET_HOST": "",
         "BAD_LOGIN_HOST": "",
+        "BAD_ONBOARD_HOST": "",
         "BAD_ROOT_HOST": "",
         "NEGATIVE_FLEET_HOST": "",
         "DOOR_CALLS": str(calls),
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 4
+    assert len(invoked) == 5
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/login",
+        f"https://{host}/v1/onboard/ufo",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
     ]
@@ -878,6 +884,14 @@ def test_edge_deploys_are_isolated(
     )
     assert failed.returncode != 0
     environment["BAD_LOGIN_HOST"] = ""
+    environment["BAD_ONBOARD_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_ONBOARD_HOST"] = ""
     environment["BAD_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
@@ -2295,6 +2309,10 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "$CURL_CALLS"\n'
         'case "$*" in\n'
+        '  *"/v1/onboard/ufo"*)\n'
+        '    [ "$BAD_RESPONSE" != onboard ] || exit 1\n'
+        "    printf 'x-ufo-session header is required.\\n'\n"
+        "    ;;\n"
         "  */ufo)\n"
         "    [ \"$BAD_RESPONSE\" != ufo ] || { printf 'wrong\\n'; exit; }\n"
         '    printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_HOST"\n'
@@ -2320,10 +2338,11 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         "-chdir=infra/envs/prod output -raw hostname"
     )
     assert calls.read_text().splitlines() == [
+        "-fsS -X POST https://origin.flyingobject.ai/v1/onboard/ufo",
         "-fsS https://origin.flyingobject.ai/ufo",
         "-fsS https://origin.flyingobject.ai/fleet",
     ]
-    for bad_response in ("ufo", "fleet"):
+    for bad_response in ("onboard", "ufo", "fleet"):
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
             capture_output=True,
@@ -2697,6 +2716,8 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "$ORIGIN_CALLS"\n'
         'case "$*" in\n'
+        '  *"/v1/onboard/ufo"*) [ "$FAIL_PATH" != onboard ] || exit 1; '
+        "printf 'x-ufo-session header is required.\\n' ;;\n"
         '  */ufo) [ "$FAIL_PATH" != ufo ] || exit 1; '
         'printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_RESPONSE_HOST" ;;\n'
         '  */fleet) [ "$FAIL_PATH" != fleet ] || exit 1; printf \'%s\\n\' "$FLEET_BODY" ;;\n'
@@ -2726,7 +2747,8 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         env=environment,
     )
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 2
+    assert len(invoked) == 3
+    assert any(call.endswith(f"https://origin.{hostname}/v1/onboard/ufo") for call in invoked)
     assert any(call.endswith(f"https://origin.{hostname}/ufo") for call in invoked)
     assert any(call.endswith(f"https://origin.{hostname}/fleet") for call in invoked)
     subprocess.run(
@@ -2735,7 +2757,7 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         env=environment | {"FLEET_BODY": '{"craft":0}'},
     )
 
-    for failed_path in ("ufo", "fleet"):
+    for failed_path in ("onboard", "ufo", "fleet"):
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
             capture_output=True,
@@ -3354,6 +3376,12 @@ def test_edge_doors_use_separate_environment_origins() -> None:
         == """    - host: ${gateway_origin_host}
       http:
         paths:
+          - path: /v1/onboard
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
           - path: /ufo
             pathType: Exact
             backend:

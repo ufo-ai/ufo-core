@@ -10,10 +10,12 @@ const EMAIL_LEDGER =
   "create table if not exists waitlist_email (email text primary key, queued_at text, sent_at text)";
 
 const outbound = [];
+const outboundRequests = [];
 let fleetReply = () => Response.json({ craft: 0 });
 globalThis.fetch = async (input) => {
   const url = input instanceof Request ? input.url : input;
   outbound.push(url);
+  outboundRequests.push(input instanceof Request ? input : new Request(input));
   if (url.endsWith("/fleet")) return fleetReply();
   return new Response(`origin:${url}`);
 };
@@ -414,9 +416,32 @@ test("the worker uses its configured environment origin", async () => {
   }
 });
 
+test("onboarding posts to the configured gateway origin unchanged", async () => {
+  const reply = await worker.fetch(
+    new Request("https://flyingobject.ai/v1/onboard/ufo?step=email", {
+      method: "POST",
+      body: "member@example.com",
+      headers: { "x-ufo-session": "member-session" },
+    }),
+    env,
+  );
+  const forwarded = outboundRequests.at(-1);
+  assert.equal(
+    await reply.text(),
+    "origin:https://testing.flyingobject.ai/v1/onboard/ufo?step=email",
+  );
+  assert.equal(
+    forwarded.url,
+    "https://testing.flyingobject.ai/v1/onboard/ufo?step=email",
+  );
+  assert.equal(forwarded.method, "POST");
+  assert.equal(forwarded.headers.get("x-ufo-session"), "member-session");
+  assert.equal(await forwarded.text(), "member@example.com");
+});
+
 test("any other path passes through untouched", async () => {
-  const reply = await request("https://flyingobject.ai/v1/onboard/ufo", { ua: "Mozilla/5.0" });
-  assert.equal(await reply.text(), "origin:https://flyingobject.ai/v1/onboard/ufo");
+  const reply = await request("https://flyingobject.ai/status", { ua: "Mozilla/5.0" });
+  assert.equal(await reply.text(), "origin:https://flyingobject.ai/status");
 });
 
 test("apex /login 302s to the app host, the sole authenticated origin", async () => {
