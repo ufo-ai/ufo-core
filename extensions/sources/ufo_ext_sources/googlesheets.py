@@ -10,19 +10,36 @@ each page reports as its own cursor the highest `modifiedTime` the run has lande
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
 grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
 its tab as a quoted A1 sheet reference with each apostrophe doubled so the returned range matches
-back to the tab that was asked for — an unquoted title is a different request, one carrying a space
-or punctuation failing to parse at all, one that reads as a cell reference resolving against the
-first visible sheet, one a named range also carries resolving to that range; both stamp their
-parent file's times onto every derived record, and a page reports its cursor even where a file lands
-no derived record at all — an empty tab list, a tab list the grant cannot read — so the reported
-value covers that file and the corpus below it goes unlisted on the next run. A file the grant
-refuses is covered by that cursor like any other: its `spreadsheets` record is the Drive metadata
-fallback, the tabs the refusal drops land nothing. A batch refusal naming one file falls back to
-individual tab reads to isolate the refused tab: the file's other tabs land, the reported cursor
-covers the file as if that tab had landed too, and the tab's rows land on the next run that lists
-the file — the run Drive stamps a fresh `modifiedTime` on it, or one re-listing the group it is tied
-in. The watermark is the file's, so a change Drive does not stamp on `modifiedTime` leaves that
-file's tabs as they last synced.
+back to the requested tab. A batch refusal naming one file falls back to individual tab reads to
+isolate the refused tab. Both derived streams stamp their parent file's times onto every record,
+and a page reports its cursor even where a file lands no derived record at all. The watermark is the
+file's, so a change Drive does not stamp on `modifiedTime` leaves that file's tabs as they last
+synced.
+
+A file the grant refuses, on its metadata or on one of its tabs, travels beside that watermark
+rather than holding it down: the page reports a `_Checkpoint` — the watermark the listing reached,
+plus the ids of the refused files — and a run that drains its listing then re-fetches carried ids
+the listing did not reach, one Drive `files.get` and that file's Sheets reads each, so a grant
+arriving later lands the tabs the refusal dropped. The watermark folds the listing's
+`modifiedTime`s alone — a carried `files.get` stamps its own file's times onto that file's records
+and never onto the cursor — so the reported value covers exactly the listing prefix the run drained.
+A carried id the listing does reach is settled there, and the carry re-fetches it no second time.
+The carried `files.get` projects `trashed`, so a carried id the member trashes leaves the set, as
+one Drive answers `404` for does.
+
+A carried retry's record count is a function of the grant, not of a stable enumeration, so it cannot
+sit inside a skip count (`core/src/ufo/sources/backend.py`: "the connector must reproduce the same
+record sequence for the skip count to be sound"). Hence `retried` and one page per carried id: every
+carried page reports a cursor the page before it did not, which is what ends a run past the cap at
+that page rather than counting on through the tail, and the count such a run stores spans listed
+records. A run resuming on a stored count re-drives the listing prefix it discards and lands the
+carry behind it. One shape still spans a count — a carried file landing past the adapter's overrun
+ceiling inside its own page — and there those records land in that run and the resume re-fetches and
+discards them. A resume whose re-driven listing has shrunk below the stored count discards the
+carried page with the prefix and settles the id on records the adapter dropped: `fetch` hands
+`paginate` the origin cursor alone, so that run and the healed run whose cursor and requests it
+matches byte for byte admit no connector-side distinction. That file's tabs land on the run Drive
+next stamps its `modifiedTime`, which is where a refusal leaves them with no carry at all.
 
 The listing is ordered by `modifiedTime` and files share values, so the filter's bound is inclusive:
 a run whose record cap ends inside a group of files sharing one `modifiedTime` reports that value,
@@ -52,11 +69,14 @@ reasons) and raises, failing the run with its stored cursor held.
 credential is resolved through the auth proxy the runner threads — this connector holds no token.
 The write path is intentionally absent — the source seam only reads."""
 
+import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.sdk.sources import (
     RestConnector,
@@ -71,6 +91,7 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SHEETS_API_URL = "https://sheets.googleapis.com/v4"
 DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
+REFUSED_LIMIT = 50
 VALUES_BATCH_SIZE = 50
 _REFUSAL_STATUS = frozenset({401, 403})
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
@@ -85,10 +106,9 @@ _QUOTA_REASONS = frozenset(
 )
 _SERVICE_ERROR_DOMAIN = "googleapis.com"
 _GRANT_REASONS = frozenset({"accessNotConfigured", "insufficientPermissions"})
-DRIVE_FIELDS = (
-    "nextPageToken,files(id,name,webViewLink,createdTime,modifiedTime,"
-    "owners(emailAddress,displayName))"
-)
+DRIVE_FILE_FIELDS = "id,name,webViewLink,createdTime,modifiedTime,owners(emailAddress,displayName)"
+DRIVE_FIELDS = f"nextPageToken,files({DRIVE_FILE_FIELDS})"
+DRIVE_CARRIED_FIELDS = f"{DRIVE_FILE_FIELDS},trashed"
 
 GOOGLE_SHEETS_STREAMS: list[StreamSpec] = [
     StreamSpec(
@@ -115,6 +135,21 @@ GOOGLE_SHEETS_STREAMS: list[StreamSpec] = [
 ]
 
 
+class _Checkpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    watermark: str
+    refused: list[str]
+    retried: str | None = None
+
+
+@dataclass(frozen=True)
+class _FileVisit:
+    file_id: str
+    record: dict[str, Any] | None
+    refused: bool
+
+
 class GoogleSheetsConnector(RestConnector):
     name = "googlesheets"
     base_url = "https://www.googleapis.com"
@@ -123,27 +158,43 @@ class GoogleSheetsConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[StreamPage]:
+        watermark, carried, retried = _decode_cursor(cursor)
         page: list[dict[str, Any]] = []
-        reported = cursor
+        reported = watermark
+        refused_ids = set(carried)
+        listed: set[str] = set()
+        last = cursor
         try:
-            async for spreadsheet in self._spreadsheet_records(client, cursor=cursor):
-                if stream.name == "spreadsheets":
-                    page.append(spreadsheet)
-                elif stream.name == "sheets":
-                    page.extend(_sheet_records(spreadsheet))
-                elif stream.name == "sheet_values":
-                    async for values in self._sheet_value_records(client, spreadsheet):
-                        page.append(values)
-                else:
-                    raise NotImplementedError(
-                        f"googlesheets: stream {stream.name!r} has no paginate dispatch"
-                    )
-                modified = spreadsheet.get("updated_at")
+            async for visit in self._spreadsheet_visits(client, watermark=watermark):
+                listed.add(visit.file_id)
+                records, refused = await self._visit_records(client, stream, visit)
+                page.extend(records)
+                refused_ids = _settled(refused_ids, visit.file_id, refused)
+                modified = (visit.record or {}).get("updated_at")
                 if isinstance(modified, str):
                     reported = modified if reported is None else max(reported, modified)
                 if len(page) >= PAGE_SIZE:
-                    yield StreamPage(records=page, next_cursor=reported)
+                    last = _encode_cursor(reported, refused_ids, retried)
+                    yield StreamPage(records=page, next_cursor=last)
                     page = []
+            if page:
+                last = _encode_cursor(reported, refused_ids, retried)
+                yield StreamPage(records=page, next_cursor=last)
+                page = []
+            for file_id in carried:
+                if retried is not None and file_id <= retried:
+                    continue
+                retried = file_id
+                if file_id in listed:
+                    continue
+                visit = await self._carried_visit(client, file_id)
+                records, refused = await self._visit_records(client, stream, visit)
+                page.extend(records)
+                refused_ids = _settled(refused_ids, file_id, refused)
+                last = _encode_cursor(reported, refused_ids, retried)
+                yield StreamPage(records=page, next_cursor=last)
+                page = []
+            retried = None
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             if status in _REFUSAL_STATUS and not _is_quota_refusal(_error_detail(error)):
@@ -152,16 +203,17 @@ class GoogleSheetsConnector(RestConnector):
                     "Drive or Sheets"
                 ) from error
             raise
-        if page or reported != cursor:
-            yield StreamPage(records=page, next_cursor=reported)
+        checkpoint = _encode_cursor(reported, refused_ids, retried)
+        if checkpoint != last:
+            yield StreamPage(next_cursor=checkpoint)
 
     async def _iter_spreadsheet_files(
-        self, client: httpx.AsyncClient, *, cursor: str | None
+        self, client: httpx.AsyncClient, *, watermark: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         token: str | None = None
         query = f"mimeType = '{SHEET_MIME}' and trashed = false"
-        if cursor:
-            query = f"{query} and modifiedTime >= '{cursor}'"
+        if watermark:
+            query = f"{query} and modifiedTime >= '{watermark}'"
         while True:
             params: dict[str, Any] = {
                 "pageSize": DRIVE_PAGE_SIZE,
@@ -182,41 +234,85 @@ class GoogleSheetsConnector(RestConnector):
             if not isinstance(token, str) or not token:
                 return
 
-    async def _spreadsheet_records(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[dict[str, Any]]:
-        async for files in self._iter_spreadsheet_files(client, cursor=cursor):
+    async def _spreadsheet_visits(
+        self, client: httpx.AsyncClient, *, watermark: str | None
+    ) -> AsyncIterator[_FileVisit]:
+        async for files in self._iter_spreadsheet_files(client, watermark=watermark):
             for file in files:
                 spreadsheet_id = file.get("id")
                 if not isinstance(spreadsheet_id, str) or not spreadsheet_id:
                     continue
-                try:
-                    meta = await self._get(
-                        client,
-                        f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}",
-                        params={"includeGridData": "false"},
-                    )
-                except httpx.HTTPStatusError as error:
-                    if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
-                        raise
-                    meta = {
-                        "spreadsheetId": spreadsheet_id,
-                        "properties": {"title": file.get("name")},
-                    }
-                yield {
-                    **meta,
-                    "id": spreadsheet_id,
-                    "spreadsheetId": meta.get("spreadsheetId") or spreadsheet_id,
-                    "title": (meta.get("properties") or {}).get("title") or file.get("name"),
-                    "url": meta.get("spreadsheetUrl") or file.get("webViewLink"),
-                    "created_at": file.get("createdTime"),
-                    "updated_at": file.get("modifiedTime"),
-                }
+                yield await self._file_visit(client, spreadsheet_id, file)
+
+    async def _carried_visit(self, client: httpx.AsyncClient, file_id: str) -> _FileVisit:
+        try:
+            file = await self._get(
+                client,
+                f"/drive/v3/files/{file_id}",
+                params={"fields": DRIVE_CARRIED_FIELDS, "supportsAllDrives": "true"},
+            )
+        except httpx.HTTPStatusError as error:
+            if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+                raise
+            gone = error.response.status_code == 404
+            return _FileVisit(file_id=file_id, record=None, refused=not gone)
+        if file.get("trashed"):
+            return _FileVisit(file_id=file_id, record=None, refused=False)
+        return await self._file_visit(client, file_id, file)
+
+    async def _file_visit(
+        self, client: httpx.AsyncClient, file_id: str, file: dict[str, Any]
+    ) -> _FileVisit:
+        refused = False
+        try:
+            meta = await self._get(
+                client,
+                f"{SHEETS_API_URL}/spreadsheets/{file_id}",
+                params={"includeGridData": "false"},
+            )
+        except httpx.HTTPStatusError as error:
+            if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+                raise
+            refused = True
+            meta = {"spreadsheetId": file_id, "properties": {"title": file.get("name")}}
+        return _FileVisit(
+            file_id=file_id,
+            record={
+                **meta,
+                "id": file_id,
+                "spreadsheetId": meta.get("spreadsheetId") or file_id,
+                "title": (meta.get("properties") or {}).get("title") or file.get("name"),
+                "url": meta.get("spreadsheetUrl") or file.get("webViewLink"),
+                "created_at": file.get("createdTime"),
+                "updated_at": file.get("modifiedTime"),
+            },
+            refused=refused,
+        )
+
+    async def _visit_records(
+        self, client: httpx.AsyncClient, stream: StreamSpec, visit: _FileVisit
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if visit.record is None:
+            return [], visit.refused
+        match stream.name:
+            case "spreadsheets":
+                return [visit.record], visit.refused
+            case "sheets":
+                return _sheet_records(visit.record), visit.refused
+            case "sheet_values":
+                records, tab_refused = await self._sheet_value_records(client, visit.record)
+                return records, visit.refused or tab_refused
+            case _:
+                raise NotImplementedError(
+                    f"googlesheets: stream {stream.name!r} has no paginate dispatch"
+                )
 
     async def _sheet_value_records(
         self, client: httpx.AsyncClient, spreadsheet: dict[str, Any]
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         spreadsheet_id = spreadsheet["spreadsheetId"]
+        records: list[dict[str, Any]] = []
+        tab_refused = False
         tabs: list[tuple[str, Any]] = []
         for sheet in spreadsheet.get("sheets") or []:
             if not isinstance(sheet, dict):
@@ -255,8 +351,9 @@ class GoogleSheetsConnector(RestConnector):
                             tab_error.response.status_code, _error_detail(tab_error)
                         ):
                             raise
+                        tab_refused = True
                         continue
-                    yield _sheet_value_record(spreadsheet, title, sheet_id, value_range)
+                    records.append(_sheet_value_record(spreadsheet, title, sheet_id, value_range))
                 continue
             raw_ranges = data.get("valueRanges")
             if not isinstance(raw_ranges, list):
@@ -278,7 +375,10 @@ class GoogleSheetsConnector(RestConnector):
                     f"expected {sorted(expected)!r}, got {sorted(value_ranges)!r}"
                 )
             for title, sheet_id in chunk:
-                yield _sheet_value_record(spreadsheet, title, sheet_id, value_ranges[title])
+                records.append(
+                    _sheet_value_record(spreadsheet, title, sheet_id, value_ranges[title])
+                )
+        return records, tab_refused
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         match stream.name:
@@ -300,6 +400,34 @@ class GoogleSheetsConnector(RestConnector):
                 return super().render(record, stream)
         heading = f"# googlesheets {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
+
+
+def _decode_cursor(cursor: str | None) -> tuple[str | None, tuple[str, ...], str | None]:
+    if not cursor:
+        return None, (), None
+    try:
+        parsed = json.loads(cursor)
+    except ValueError:
+        return cursor, (), None
+    if not isinstance(parsed, dict):
+        return cursor, (), None
+    try:
+        checkpoint = _Checkpoint.model_validate(parsed)
+    except ValidationError as error:
+        raise RuntimeError(f"googlesheets: malformed cursor {cursor!r}") from error
+    return checkpoint.watermark, tuple(checkpoint.refused), checkpoint.retried
+
+
+def _encode_cursor(watermark: str | None, refused: set[str], retried: str | None) -> str | None:
+    if watermark is None or not refused:
+        return watermark
+    return _Checkpoint(
+        watermark=watermark, refused=sorted(refused)[:REFUSED_LIMIT], retried=retried
+    ).model_dump_json(exclude_none=True)
+
+
+def _settled(refused: set[str], file_id: str, still_refused: bool) -> set[str]:
+    return refused | {file_id} if still_refused else refused - {file_id}
 
 
 def _error_detail(error: httpx.HTTPStatusError) -> dict[str, Any]:

@@ -1,10 +1,15 @@
 """Google Sheets connector over a mock transport: the Drive-list→Sheets-get fan-out, the inclusive
 `modifiedTime` bound threaded into the Drive query of all three streams, the cursor each page
-reports and how a run whose record cap ends inside a group of tied files resumes, the request volume
-a corpus below the stored cursor and a one-file-modified corpus cost, the parent times each derived
-record carries, the reported cursor covering a file that lands no derived record, the quoted A1
-sheet range every values request names its tab by, the per-tab values read whose per-file guard
-drops only the refused tab and leaves its rows to the run that lists the file again, the `render`
+reports and how a run whose record cap ends inside a group of tied files resumes, the id every
+refused file is carried by until a grant lands its tabs, the carried retry sitting outside the
+adapter's positional resume so four consecutive capped runs neither oscillate nor re-land, the
+resume whose listing shrank below its stored count waiting for a Drive restamp, the watermark a
+carried `files.get` cannot lift, the carried id a member trashes dropping out of the set, the
+request volume a corpus below the stored cursor, a one-file-modified corpus and a corpus carrying a
+refusal cost, the parent times each derived record carries, the reported cursor covering a file
+that lands no derived record, the quoted A1 sheet range every values request names its tab by, the
+per-tab values read whose per-file guard drops only the refused tab, the cursor forms the checkpoint
+reads and refuses, the `render`
 override that lifts a spreadsheet's tab titles and a tab's grid rows, and the refusal taxonomy —
 `StreamSkipped` for a refusal naming the grant or the API, a Drive-metadata fallback for one naming
 a single file, and a raise for a quota refusal or a `404` carrying no Google error object. Offline —
@@ -185,17 +190,36 @@ def _listing_handler(
     barren: tuple[str, ...] = (),
     refused: dict[str, dict[str, Any]] | None = None,
     values_refused: dict[tuple[str, str], dict[str, Any]] | None = None,
+    drive_refused: dict[str, tuple[int, dict[str, Any]]] | None = None,
+    trashed: tuple[str, ...] = (),
+    restamped: dict[str, str] | None = None,
     paths: list[str] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         if paths is not None:
             paths.append(request.url.path)
         if request.url.host == "www.googleapis.com":
+            single = request.url.path.removeprefix("/drive/v3/files/")
+            if single != request.url.path:
+                if request.url.params.get("supportsAllDrives") != "true":
+                    return httpx.Response(404, json=NOT_FOUND_ERROR)
+                if drive_refused is not None and single in drive_refused:
+                    status, body = drive_refused[single]
+                    return httpx.Response(status, **body)
+                if single not in modified:
+                    return httpx.Response(404, json=NOT_FOUND_ERROR)
+                row = _file_row(single, (restamped or {}).get(single) or modified[single])
+                if single in trashed:
+                    row["trashed"] = True
+                return httpx.Response(200, json=_projected(row, request.url.params.get("fields")))
             query = request.url.params.get("q", "")
             if queries is not None:
                 queries.append(query)
             assert request.url.params.get("orderBy") == "modifiedTime"
-            listing = sorted(modified.items(), key=lambda item: (item[1], item[0]))
+            listing = sorted(
+                (item for item in modified.items() if item[0] not in trashed),
+                key=lambda item: (item[1], item[0]),
+            )
             bound = re.search(r"modifiedTime\s*(\S+)\s*'([^']*)'", query)
             if bound is not None:
                 if bound.group(1) != ">=":
@@ -204,15 +228,7 @@ def _listing_handler(
             return httpx.Response(
                 200,
                 json={
-                    "files": [
-                        {
-                            "id": file_id,
-                            "name": file_id,
-                            "createdTime": "2026-01-01T00:00:00.000Z",
-                            "modifiedTime": stamp,
-                        }
-                        for file_id, stamp in listing
-                    ],
+                    "files": [_file_row(file_id, stamp) for file_id, stamp in listing],
                     "nextPageToken": None,
                 },
             )
@@ -256,6 +272,20 @@ def _listing_handler(
         )
 
     return handle
+
+
+def _file_row(file_id: str, stamp: str) -> dict[str, Any]:
+    return {
+        "id": file_id,
+        "name": file_id,
+        "createdTime": "2026-01-01T00:00:00.000Z",
+        "modifiedTime": stamp,
+    }
+
+
+def _projected(row: dict[str, Any], fields: str | None) -> dict[str, Any]:
+    named = (fields or "").split(",")
+    return {key: value for key, value in row.items() if key in named}
 
 
 def _derived_refs(stream: str, file_id: str, tabs: int = 2) -> set[str]:
@@ -1027,31 +1057,47 @@ async def test_a_quota_refusal_during_tab_fallback_fails_the_run() -> None:
 REFUSED_FILES = {"v1": "2026-05-01T00:00:00.000Z", "v2": "2026-06-01T00:00:00.000Z"}
 REFUSED_TAB = ("v1", "t0")
 REFUSED_REF = "sheet_values/v1:0:values"
-RESTAMPED_TIME = "2026-07-01T00:00:00.000Z"
 
 
-async def test_a_refused_tab_lands_its_rows_the_run_drive_restamps_the_file() -> None:
+async def test_a_refused_tab_carries_its_file_until_the_grid_read_succeeds() -> None:
     every_ref = _derived_refs("sheet_values", "v1") | _derived_refs("sheet_values", "v2")
     modified = dict(REFUSED_FILES)
     queries: list[str] = []
-    first = await _fetch(
-        "sheet_values",
-        _listing_handler(modified, tabs=2, values_refused={REFUSED_TAB: PERMISSION_ERROR}),
-    )
-    widened = await _fetch(
-        "sheet_values", _listing_handler(modified, queries, tabs=2), cursor=first.next_cursor
-    )
-    modified["v1"] = RESTAMPED_TIME
-    restamped = await _fetch(
-        "sheet_values", _listing_handler(modified, tabs=2), cursor=widened.next_cursor
+    paths: list[str] = []
+    landed: set[str] = set()
+    reported: list[str] = []
+    cursor: str | None = None
+    for _ in range(3):
+        refusing = await _fetch(
+            "sheet_values",
+            _listing_handler(
+                modified,
+                queries,
+                tabs=2,
+                values_refused={REFUSED_TAB: PERMISSION_ERROR},
+                paths=paths,
+            ),
+            cursor=cursor,
+        )
+        landed |= {page.source_ref for page in refusing.pages}
+        assert refusing.next_cursor is not None
+        reported.append(refusing.next_cursor)
+        cursor = refusing.next_cursor
+    healed_paths: list[str] = []
+    healed = await _fetch(
+        "sheet_values", _listing_handler(modified, tabs=2, paths=healed_paths), cursor=cursor
     )
 
-    assert {page.source_ref for page in first.pages} == every_ref - {REFUSED_REF}
-    assert first.next_cursor == REFUSED_FILES["v2"]
-    assert f"modifiedTime >= '{REFUSED_FILES['v2']}'" in queries[-1]
-    assert REFUSED_REF not in {page.source_ref for page in widened.pages}
-    assert {page.source_ref for page in restamped.pages} == every_ref
-    assert restamped.next_cursor == RESTAMPED_TIME
+    assert landed == every_ref - {REFUSED_REF}
+    assert [json.loads(value) for value in reported] == [
+        {"watermark": REFUSED_FILES["v2"], "refused": ["v1"]}
+    ] * 3
+    assert all(f"modifiedTime >= '{REFUSED_FILES['v2']}'" in query for query in queries[1:])
+    assert not [query for query in queries if REFUSED_FILES["v1"] in query]
+    assert paths.count("/drive/v3/files/v1") == 2
+    assert {page.source_ref for page in healed.pages} == every_ref
+    assert healed_paths.count("/drive/v3/files/v1") == 1
+    assert healed.next_cursor == REFUSED_FILES["v2"]
 
 
 @pytest.mark.parametrize(
@@ -1085,29 +1131,22 @@ ARRIVED_TIME = "2026-03-01T00:00:00.000Z"
 
 
 @pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-@pytest.mark.parametrize(
-    "blocked",
-    [
-        {"barren": ("s1", "s2")},
-        {"refused": {"s1": PERMISSION_ERROR, "s2": PERMISSION_ERROR}},
-    ],
-    ids=["no-tabs", "tabs-unreadable"],
-)
 async def test_a_file_landing_no_derived_record_is_covered_by_the_reported_cursor(
-    stream: str, blocked: dict[str, Any]
+    stream: str,
 ) -> None:
+    barren = ("s1", "s2")
     modified = dict(BARREN_FILES)
-    first = await _fetch(stream, _listing_handler(modified, tabs=2, **blocked), cursor=None)
+    first = await _fetch(stream, _listing_handler(modified, tabs=2, barren=barren), cursor=None)
     modified["s2"] = ARRIVED_TIME
     queries: list[str] = []
     paths: list[str] = []
     second = await _fetch(
         stream,
-        _listing_handler(modified, queries, tabs=2, paths=paths, **blocked),
+        _listing_handler(modified, queries, tabs=2, paths=paths, barren=barren),
         cursor=first.next_cursor,
     )
     third = await _fetch(
-        stream, _listing_handler(modified, tabs=2, **blocked), cursor=second.next_cursor
+        stream, _listing_handler(modified, tabs=2, barren=barren), cursor=second.next_cursor
     )
     healed = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=third.next_cursor)
 
@@ -1121,6 +1160,721 @@ async def test_a_file_landing_no_derived_record_is_covered_by_the_reported_curso
     assert third.pages == ()
     assert third.next_cursor == second.next_cursor
     assert {page.source_ref for page in healed.pages} == _derived_refs(stream, "s2")
+
+
+@pytest.mark.parametrize(
+    ("stream", "blocked"),
+    [
+        ("sheets", {"refused": {"s1": PERMISSION_ERROR}}),
+        ("sheet_values", {"refused": {"s1": PERMISSION_ERROR}}),
+        (
+            "sheet_values",
+            {
+                "values_refused": {
+                    ("s1", "t0"): PERMISSION_ERROR,
+                    ("s1", "t1"): PERMISSION_ERROR,
+                }
+            },
+        ),
+    ],
+    ids=["sheets-metadata", "sheet_values-metadata", "sheet_values-tab"],
+)
+async def test_a_refused_file_is_carried_by_id_until_a_grant_lands_its_tabs(
+    stream: str, blocked: dict[str, Any]
+) -> None:
+    modified = dict(BARREN_FILES)
+    first = await _fetch(stream, _listing_handler(modified, tabs=2, **blocked), cursor=None)
+    modified["s2"] = ARRIVED_TIME
+    queries: list[str] = []
+    paths: list[str] = []
+    second = await _fetch(
+        stream,
+        _listing_handler(modified, queries, tabs=2, paths=paths, **blocked),
+        cursor=first.next_cursor,
+    )
+    healed_paths: list[str] = []
+    healed = await _fetch(
+        stream,
+        _listing_handler(modified, tabs=2, paths=healed_paths),
+        cursor=second.next_cursor,
+    )
+
+    assert {page.source_ref for page in first.pages} == _derived_refs(stream, "s0")
+    assert first.next_cursor is not None
+    assert json.loads(first.next_cursor) == {
+        "watermark": BARREN_FILES["s1"],
+        "refused": ["s1"],
+    }
+    assert {page.source_ref for page in second.pages} == _derived_refs(stream, "s2")
+    assert second.next_cursor is not None
+    assert json.loads(second.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
+    assert f"modifiedTime >= '{BARREN_FILES['s1']}'" in queries[-1]
+    assert paths.count("/drive/v3/files") == 1
+    assert paths.count("/drive/v3/files/s1") == 0
+    assert paths.count("/v4/spreadsheets/s1") == 1
+    assert not [path for path in paths if path.startswith("/v4/spreadsheets/s0")]
+    assert healed_paths.count("/drive/v3/files/s1") == 1
+    assert not [path for path in healed_paths if path.startswith("/v4/spreadsheets/s0")]
+    assert {page.source_ref for page in healed.pages} == _derived_refs(
+        stream, "s1"
+    ) | _derived_refs(stream, "s2")
+    assert healed.next_cursor == ARRIVED_TIME
+
+
+async def test_a_refused_spreadsheet_is_carried_by_id_until_a_grant_restores_its_tabs() -> None:
+    modified = dict(BARREN_FILES)
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    modified["s2"] = ARRIVED_TIME
+    second = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused),
+        cursor=first.next_cursor,
+    )
+    healed = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2), cursor=second.next_cursor
+    )
+
+    assert first.next_cursor is not None
+    assert json.loads(first.next_cursor) == {
+        "watermark": BARREN_FILES["s1"],
+        "refused": ["s1"],
+    }
+    assert "sheets: t0, t1" not in next(
+        page.body for page in first.pages if page.source_ref == "spreadsheets/s1"
+    )
+    assert {page.source_ref for page in second.pages} == {"spreadsheets/s1", "spreadsheets/s2"}
+    assert second.next_cursor is not None
+    assert json.loads(second.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
+    assert "sheets: t0, t1" in next(
+        page.body for page in healed.pages if page.source_ref == "spreadsheets/s1"
+    )
+    assert healed.next_cursor == ARRIVED_TIME
+
+
+async def test_a_carried_refusal_that_stays_refused_keeps_its_drive_name() -> None:
+    modified = dict(BARREN_FILES)
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    modified["s2"] = ARRIVED_TIME
+    listed = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused),
+        cursor=first.next_cursor,
+    )
+    carried = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused),
+        cursor=listed.next_cursor,
+    )
+
+    assert next(page.title for page in first.pages if page.source_ref == "spreadsheets/s1") == "s1"
+    assert (
+        next(page.title for page in carried.pages if page.source_ref == "spreadsheets/s1") == "s1"
+    )
+    assert carried.next_cursor is not None
+    assert json.loads(carried.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
+
+
+RESTAMPED_TIME = "2026-09-09T00:00:00.000Z"
+
+
+@pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
+async def test_a_carried_files_get_stamps_its_record_and_not_the_watermark(stream: str) -> None:
+    modified = dict(BARREN_FILES)
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(stream, _listing_handler(modified, tabs=2, refused=refused), cursor=None)
+    modified["s2"] = ARRIVED_TIME
+    second = await _fetch(
+        stream, _listing_handler(modified, tabs=2, refused=refused), cursor=first.next_cursor
+    )
+    restamped = await _fetch(
+        stream,
+        _listing_handler(modified, tabs=2, restamped={"s1": RESTAMPED_TIME}),
+        cursor=second.next_cursor,
+    )
+
+    assert restamped.next_cursor == ARRIVED_TIME
+    assert {page.updated_at for page in restamped.pages if "s1" in page.source_ref} == {
+        "2026-09-09T00:00:00.000000+00:00"
+    }
+
+
+DISTINCT_FILES = {f"d{index}": f"2026-0{index + 1}-01T00:00:00.000Z" for index in range(6)}
+
+
+@pytest.mark.parametrize(
+    ("stream", "sheets_reads"), [("spreadsheets", 2), ("sheets", 2), ("sheet_values", 3)]
+)
+async def test_a_carried_refusal_costs_its_own_two_reads_not_the_corpus(
+    stream: str, sheets_reads: int
+) -> None:
+    refused = {"d0": PERMISSION_ERROR}
+    first = await _fetch(
+        stream, _listing_handler(DISTINCT_FILES, tabs=2, refused=refused), cursor=None
+    )
+    paths: list[str] = []
+    second = await _fetch(
+        stream,
+        _listing_handler(DISTINCT_FILES, tabs=2, refused=refused, paths=paths),
+        cursor=first.next_cursor,
+    )
+
+    assert paths.count("/drive/v3/files") == 1
+    assert paths.count("/drive/v3/files/d0") == 1
+    assert len([path for path in paths if path.startswith("/v4/spreadsheets/")]) == sheets_reads
+    assert second.next_cursor is not None
+    assert json.loads(second.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0"],
+    }
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_a_capped_run_carrying_a_refusal_advances_its_checkpoint(
+    stream: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
+    landed: set[str] = set()
+    cursor: str | None = None
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        for _ in range(8):
+            result = await _fetch(
+                stream,
+                _listing_handler(DISTINCT_FILES, tabs=2, refused={"d0": PERMISSION_ERROR}),
+                cursor=cursor,
+            )
+            landed |= {page.source_ref for page in result.pages}
+            assert result.next_cursor is not None
+            assert BACKFILL_KEY not in result.next_cursor
+            if result.next_cursor == cursor:
+                break
+            cursor = result.next_cursor
+
+    assert landed == {
+        ref
+        for file_id in DISTINCT_FILES
+        if file_id != "d0"
+        for ref in _derived_refs(stream, file_id)
+    }
+    assert cursor is not None
+    assert json.loads(cursor) == {"watermark": DISTINCT_FILES["d5"], "refused": ["d0"]}
+    assert "source_sync.cap_overrun" not in [record.getMessage() for record in caplog.records]
+
+
+REFUSED_EDIT_TIME = "2026-07-01T00:00:00.000Z"
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_a_capped_run_carrying_an_edited_refusal_advances_on_what_it_drained(
+    stream: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
+    modified = dict(DISTINCT_FILES)
+    refused = {"d0": PERMISSION_ERROR}
+    landed: set[str] = set()
+    cursor: str | None = None
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        for index in range(10):
+            result = await _fetch(
+                stream, _listing_handler(modified, tabs=2, refused=refused), cursor=cursor
+            )
+            landed |= {page.source_ref for page in result.pages}
+            assert result.next_cursor is not None
+            assert BACKFILL_KEY not in result.next_cursor
+            if index == 0:
+                modified["d0"] = REFUSED_EDIT_TIME
+            if result.next_cursor == cursor:
+                break
+            cursor = result.next_cursor
+
+    assert landed == {
+        ref
+        for file_id in DISTINCT_FILES
+        if file_id != "d0"
+        for ref in _derived_refs(stream, file_id)
+    }
+    assert cursor is not None
+    assert json.loads(cursor) == {"watermark": REFUSED_EDIT_TIME, "refused": ["d0"]}
+    assert "source_sync.cap_overrun" not in [record.getMessage() for record in caplog.records]
+
+
+REFUSED_UNDER_A_TIE = {"c": "2026-01-01T00:00:00.000Z"} | {
+    f"a{index}": "2026-03-03T00:00:00.000Z" for index in range(1, 4)
+}
+
+
+async def test_a_carried_retry_never_falls_inside_a_stored_skip_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 1)
+    refused = {"c": PERMISSION_ERROR}
+    bodies: list[str] = []
+    cursor: str | None = None
+    for index in range(5):
+        result = await _fetch(
+            "spreadsheets",
+            _listing_handler(REFUSED_UNDER_A_TIE, tabs=2, refused=refused),
+            cursor=cursor,
+        )
+        bodies += [page.body for page in result.pages if page.source_ref == "spreadsheets/c"]
+        cursor = result.next_cursor
+        if index == 2:
+            refused.clear()
+
+    assert [body for body in bodies if "sheets: t0, t1" in body]
+    assert cursor == REFUSED_UNDER_A_TIE["a1"]
+
+
+TWO_REFUSALS_BELOW = {"d0": DISTINCT_FILES["d0"], "d1": DISTINCT_FILES["d1"]} | {
+    f"z{index}": DISTINCT_FILES["d5"] for index in range(4)
+}
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_a_capped_run_settles_one_carried_id_and_stores_where_it_stopped(
+    stream: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 4)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
+    refused = {"d0": PERMISSION_ERROR, "d1": PERMISSION_ERROR}
+    seeded = await _fetch(
+        stream, _listing_handler(TWO_REFUSALS_BELOW, tabs=2, refused=refused), cursor=None
+    )
+    first_paths: list[str] = []
+    first = await _fetch(
+        stream,
+        _listing_handler(TWO_REFUSALS_BELOW, tabs=2, refused=refused, paths=first_paths),
+        cursor=seeded.next_cursor,
+    )
+    second_paths: list[str] = []
+    second = await _fetch(
+        stream,
+        _listing_handler(TWO_REFUSALS_BELOW, tabs=2, refused=refused, paths=second_paths),
+        cursor=first.next_cursor,
+    )
+    settled: list[str] = []
+    third = await _fetch(
+        stream,
+        _listing_handler(TWO_REFUSALS_BELOW, tabs=2, refused=refused, paths=settled),
+        cursor=second.next_cursor,
+    )
+
+    assert seeded.next_cursor is not None
+    assert json.loads(seeded.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0", "d1"],
+    }
+    assert first.next_cursor is not None
+    assert json.loads(first.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0", "d1"],
+        "retried": "d0",
+    }
+    assert first_paths.count("/drive/v3/files/d0") == 1
+    assert "/drive/v3/files/d1" not in first_paths
+    assert second.next_cursor is not None
+    assert json.loads(second.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0", "d1"],
+        "retried": "d1",
+    }
+    assert second_paths.count("/drive/v3/files/d1") == 1
+    assert "/drive/v3/files/d0" not in second_paths
+    assert third.next_cursor is not None
+    assert json.loads(third.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0", "d1"],
+    }
+    assert not [path for path in settled if path.startswith("/drive/v3/files/")]
+
+
+TWELVE_FILES = {"r0": "2026-01-01T00:00:00.000Z"} | {
+    f"m{index}": f"2026-{index + 2:02d}-01T00:00:00.000Z" for index in range(11)
+}
+
+
+EIGHT_REFUSALS_UNDER_A_BARREN_TOP = {
+    f"c{index}": f"2026-{index + 1:02d}-01T00:00:00.000Z" for index in range(8)
+} | {"top": "2026-12-01T00:00:00.000Z"}
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_four_capped_runs_carrying_a_refusal_neither_oscillate_nor_re_land(
+    stream: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    refused = {
+        file_id: PERMISSION_ERROR
+        for file_id in EIGHT_REFUSALS_UNDER_A_BARREN_TOP
+        if file_id != "top"
+    }
+    seeded = await _fetch(
+        stream,
+        _listing_handler(
+            EIGHT_REFUSALS_UNDER_A_BARREN_TOP, tabs=2, barren=("top",), refused=refused
+        ),
+        cursor=None,
+    )
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
+    cursor = seeded.next_cursor
+    cursors: list[str] = []
+    landed: list[set[str]] = []
+    carried: list[list[str]] = []
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        for _ in range(4):
+            paths: list[str] = []
+            result = await _fetch(
+                stream,
+                _listing_handler(
+                    EIGHT_REFUSALS_UNDER_A_BARREN_TOP, tabs=2, barren=("top",), paths=paths
+                ),
+                cursor=cursor,
+            )
+            landed.append({page.source_ref for page in result.pages})
+            carried.append([path for path in paths if path.startswith("/drive/v3/files/")])
+            assert result.next_cursor is not None
+            cursors.append(result.next_cursor)
+            cursor = result.next_cursor
+
+    assert seeded.pages == ()
+    assert not [stored for stored in cursors if BACKFILL_KEY in stored]
+    assert len(set(cursors)) == 4
+    assert carried == [
+        ["/drive/v3/files/c0", "/drive/v3/files/c1"],
+        ["/drive/v3/files/c2", "/drive/v3/files/c3"],
+        ["/drive/v3/files/c4", "/drive/v3/files/c5"],
+        ["/drive/v3/files/c6", "/drive/v3/files/c7"],
+    ]
+    assert [json.loads(stored)["retried"] for stored in cursors[:-1]] == ["c1", "c3", "c5"]
+    assert cursors[-1] == EIGHT_REFUSALS_UNDER_A_BARREN_TOP["top"]
+    assert [len(refs) for refs in landed] == [4, 4, 4, 4]
+    assert all(refs - set().union(*landed[:index]) for index, refs in enumerate(landed) if index)
+    assert len(set().union(*landed)) == 16
+    assert "source_sync.cap_overrun" not in [record.getMessage() for record in caplog.records]
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_capped_runs_carrying_a_refusal_land_the_healed_tabs(
+    stream: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
+    refused = {"r0": PERMISSION_ERROR}
+    landed: set[str] = set()
+    carried_reads = 0
+    cursor: str | None = None
+    for index in range(12):
+        paths: list[str] = []
+        result = await _fetch(
+            stream,
+            _listing_handler(TWELVE_FILES, tabs=2, refused=refused, paths=paths),
+            cursor=cursor,
+        )
+        landed |= {page.source_ref for page in result.pages}
+        carried_reads += paths.count("/drive/v3/files/r0")
+        assert result.next_cursor is not None
+        assert BACKFILL_KEY not in result.next_cursor
+        if index == 5:
+            refused.clear()
+        cursor = result.next_cursor
+
+    assert carried_reads
+    assert _derived_refs(stream, "r0") <= landed
+    assert landed == {ref for file_id in TWELVE_FILES for ref in _derived_refs(stream, file_id)}
+    assert cursor == TWELVE_FILES["m10"]
+
+
+SECOND_REFUSAL_FILES = {
+    f"v{index + 1}": f"2026-{index + 5:02d}-01T00:00:00.000Z" for index in range(4)
+}
+SECOND_REFUSAL_TABS = {("v1", "t0"): PERMISSION_ERROR, ("v2", "t0"): PERMISSION_ERROR}
+SECOND_REFUSAL_REFS = {"sheet_values/v1:0:values", "sheet_values/v2:0:values"}
+
+
+async def test_a_second_refused_file_lands_on_the_run_that_heals_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 3)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 2)
+    every_ref = {
+        ref for file_id in SECOND_REFUSAL_FILES for ref in _derived_refs("sheet_values", file_id)
+    }
+    refusing = await _fetch(
+        "sheet_values",
+        _listing_handler(SECOND_REFUSAL_FILES, tabs=2, values_refused=SECOND_REFUSAL_TABS),
+        cursor=None,
+    )
+    queries: list[str] = []
+    paths: list[str] = []
+    widened = await _fetch(
+        "sheet_values",
+        _listing_handler(SECOND_REFUSAL_FILES, queries, tabs=2, paths=paths),
+        cursor=refusing.next_cursor,
+    )
+    steady = await _fetch(
+        "sheet_values",
+        _listing_handler(SECOND_REFUSAL_FILES, tabs=2),
+        cursor=widened.next_cursor,
+    )
+
+    assert {page.source_ref for page in refusing.pages} == every_ref - SECOND_REFUSAL_REFS
+    assert refusing.next_cursor is not None
+    assert json.loads(refusing.next_cursor) == {
+        "watermark": SECOND_REFUSAL_FILES["v4"],
+        "refused": ["v1", "v2"],
+    }
+    assert f"modifiedTime >= '{SECOND_REFUSAL_FILES['v4']}'" in queries[-1]
+    assert [path for path in paths if path.startswith("/drive/v3/files/")] == [
+        "/drive/v3/files/v1",
+        "/drive/v3/files/v2",
+    ]
+    assert SECOND_REFUSAL_REFS <= {page.source_ref for page in widened.pages}
+    assert widened.next_cursor == SECOND_REFUSAL_FILES["v4"]
+    assert {page.source_ref for page in steady.pages} == _derived_refs("sheet_values", "v4")
+    assert steady.next_cursor == SECOND_REFUSAL_FILES["v4"]
+
+
+TIED_ABOVE_A_REFUSAL = {"r0": DISTINCT_FILES["d0"]} | {
+    f"z{index}": TIED_FILES["g3a"] for index in range(4)
+}
+
+
+@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
+async def test_a_grant_landing_under_a_stored_skip_count_lands_the_carried_file(
+    stream: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refused = {"r0": PERMISSION_ERROR}
+    first = await _fetch(
+        stream, _listing_handler(TIED_ABOVE_A_REFUSAL, tabs=2, refused=refused), cursor=None
+    )
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 8)
+    capped = await _fetch(
+        stream,
+        _listing_handler(TIED_ABOVE_A_REFUSAL, tabs=2, refused=refused),
+        cursor=first.next_cursor,
+    )
+    stored = capped.next_cursor
+    assert stored is not None
+    assert json.loads(stored)[BACKFILL_KEY]["skip"] == 8
+    paths: list[str] = []
+    resumed = await _fetch(
+        stream, _listing_handler(TIED_ABOVE_A_REFUSAL, tabs=2, paths=paths), cursor=stored
+    )
+
+    assert {page.source_ref for page in resumed.pages} == _derived_refs(stream, "r0")
+    assert paths.count("/drive/v3/files/r0") == 1
+    assert resumed.next_cursor == TIED_FILES["g3a"]
+
+
+async def test_a_resume_whose_listing_shrank_waits_for_drive_to_restamp_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refused = {"r0": PERMISSION_ERROR}
+    modified = dict(TIED_ABOVE_A_REFUSAL)
+    uncapped = connector_backend.MAX_RECORDS_PER_RUN
+    first = await _fetch("sheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None)
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", 2)
+    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 8)
+    capped = await _fetch(
+        "sheets", _listing_handler(modified, tabs=2, refused=refused), cursor=first.next_cursor
+    )
+    stored = capped.next_cursor
+    assert stored is not None
+    assert json.loads(stored)[BACKFILL_KEY]["skip"] == 8
+    del modified["z3"]
+    refused.clear()
+    paths: list[str] = []
+    shrunk = await _fetch("sheets", _listing_handler(modified, tabs=2, paths=paths), cursor=stored)
+    monkeypatch.setattr(connector_backend, "MAX_RECORDS_PER_RUN", uncapped)
+    later = await _fetch("sheets", _listing_handler(modified, tabs=2), cursor=shrunk.next_cursor)
+    modified["r0"] = RESTAMPED_TIME
+    restamped = await _fetch("sheets", _listing_handler(modified, tabs=2), cursor=later.next_cursor)
+
+    assert paths.count("/drive/v3/files/r0") == 1
+    assert shrunk.pages == ()
+    assert shrunk.next_cursor == TIED_FILES["g3a"]
+    assert _derived_refs("sheets", "r0") & {page.source_ref for page in later.pages} == set()
+    assert _derived_refs("sheets", "r0") <= {page.source_ref for page in restamped.pages}
+    assert restamped.next_cursor == RESTAMPED_TIME
+
+
+async def test_the_carried_refusal_set_stays_bounded_when_every_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(googlesheets, "REFUSED_LIMIT", 2)
+    refused = {file_id: PERMISSION_ERROR for file_id in DISTINCT_FILES}
+    first = await _fetch(
+        "sheet_values", _listing_handler(DISTINCT_FILES, tabs=2, refused=refused), cursor=None
+    )
+    second = await _fetch(
+        "sheet_values",
+        _listing_handler(DISTINCT_FILES, tabs=2, refused=refused),
+        cursor=first.next_cursor,
+    )
+
+    assert first.next_cursor is not None
+    assert json.loads(first.next_cursor) == {
+        "watermark": DISTINCT_FILES["d5"],
+        "refused": ["d0", "d1"],
+    }
+    assert second.next_cursor == first.next_cursor
+
+
+async def test_a_carried_refusal_whose_file_is_gone_leaves_the_cursor() -> None:
+    modified = dict(BARREN_FILES)
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    del modified["s1"]
+    paths: list[str] = []
+    second = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused, paths=paths),
+        cursor=first.next_cursor,
+    )
+    settled: list[str] = []
+    third = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused, paths=settled),
+        cursor=second.next_cursor,
+    )
+
+    assert paths.count("/drive/v3/files/s1") == 1
+    assert second.pages == ()
+    assert second.next_cursor == BARREN_FILES["s1"]
+    assert "/drive/v3/files/s1" not in settled
+    assert third.next_cursor == second.next_cursor
+
+
+async def test_a_carried_refusal_the_member_trashes_leaves_the_cursor() -> None:
+    modified = dict(BARREN_FILES)
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    paths: list[str] = []
+    second = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused, trashed=("s1",), paths=paths),
+        cursor=first.next_cursor,
+    )
+    settled: list[str] = []
+    third = await _fetch(
+        "spreadsheets",
+        _listing_handler(modified, tabs=2, refused=refused, trashed=("s1",), paths=settled),
+        cursor=second.next_cursor,
+    )
+
+    assert paths.count("/drive/v3/files/s1") == 1
+    assert not [path for path in paths if path.startswith("/v4/spreadsheets/s1")]
+    assert second.pages == ()
+    assert second.next_cursor == BARREN_FILES["s1"]
+    assert "/drive/v3/files/s1" not in settled
+    assert third.next_cursor == second.next_cursor
+
+
+@pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
+async def test_a_healed_carried_file_lands_with_the_times_on_its_own_drive_row(
+    stream: str,
+) -> None:
+    modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
+    first = await _fetch(
+        stream, _listing_handler(modified, tabs=2, refused={"s1": PERMISSION_ERROR}), cursor=None
+    )
+    paths: list[str] = []
+    healed = await _fetch(
+        stream, _listing_handler(modified, tabs=2, paths=paths), cursor=first.next_cursor
+    )
+
+    assert first.next_cursor is not None
+    assert json.loads(first.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
+    assert paths.count("/drive/v3/files/s1") == 1
+    pages = [page for page in healed.pages if "s1" in page.source_ref]
+    assert pages
+    assert {page.created_at for page in pages} == {"2026-01-01T00:00:00.000000+00:00"}
+    assert {page.updated_at for page in pages} == {"2026-02-05T00:00:00.000000+00:00"}
+    assert healed.next_cursor == ARRIVED_TIME
+
+
+async def test_a_carried_refusal_whose_drive_row_is_refused_stays_carried() -> None:
+    modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    second = await _fetch(
+        "spreadsheets",
+        _listing_handler(
+            modified,
+            tabs=2,
+            refused=refused,
+            drive_refused={"s1": (403, {"json": PERMISSION_ERROR})},
+        ),
+        cursor=first.next_cursor,
+    )
+
+    assert {page.source_ref for page in second.pages} == {"spreadsheets/s2"}
+    assert second.next_cursor is not None
+    assert json.loads(second.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(403, {"json": QUOTA_ERROR}), (404, {"json": PROXY_ERROR})],
+    ids=["quota", "no-google-error-body"],
+)
+async def test_a_carried_files_get_neither_absorbs_a_quota_nor_drops_a_bodyless_404(
+    status: int, body: dict[str, Any]
+) -> None:
+    modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
+    refused = {"s1": PERMISSION_ERROR}
+    first = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2, refused=refused), cursor=None
+    )
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await _fetch(
+            "spreadsheets",
+            _listing_handler(modified, tabs=2, drive_refused={"s1": (status, body)}),
+            cursor=first.next_cursor,
+        )
+    healed = await _fetch(
+        "spreadsheets", _listing_handler(modified, tabs=2), cursor=first.next_cursor
+    )
+
+    assert raised.value.response.status_code == status
+    assert {page.source_ref for page in healed.pages} == {"spreadsheets/s1", "spreadsheets/s2"}
+    assert healed.next_cursor == ARRIVED_TIME
+
+
+async def test_a_cursor_object_that_is_not_a_checkpoint_raises() -> None:
+    with pytest.raises(RuntimeError):
+        await _fetch("spreadsheets", _handler(), cursor=json.dumps({"watermark": 5}))
+
+
+async def test_a_cursor_carrying_a_field_the_checkpoint_does_not_declare_raises() -> None:
+    with pytest.raises(RuntimeError):
+        await _fetch(
+            "spreadsheets",
+            _handler(),
+            cursor=json.dumps({"watermark": STEADY_CURSOR, "refused": [], "skip": 2}),
+        )
+
+
+async def test_a_cursor_that_parses_as_json_but_not_an_object_is_an_opaque_bound() -> None:
+    seen: list[str] = []
+    result = await _fetch("spreadsheets", _handler(seen), cursor="2026")
+
+    assert seen and all("modifiedTime >= '2026'" in query for query in seen)
+    assert result.next_cursor == SPREADSHEET_FILE["modifiedTime"]
 
 
 async def test_a_refused_file_with_no_modified_time_reports_no_cursor() -> None:
