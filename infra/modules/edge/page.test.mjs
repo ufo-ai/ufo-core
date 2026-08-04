@@ -85,9 +85,12 @@ const PHONE_LANDSCAPE = {
 // spread from PHONE.
 const PHONE_LANDSCAPE_SHORT = { ...PHONE, viewport: { width: 568, height: 250 } };
 
-async function open(craft = 1, device = DESKTOP) {
+// `before` runs in the page before any of its own script does, which is the only place a browser's
+// own API can be taken away from it, or already be reporting a keyboard when the page first reads it.
+async function open(craft = 1, device = DESKTOP, before, beforeArg) {
   const page = await browser.newPage(device);
   page.on("pageerror", (error) => assert.fail(`page error: ${error}`));
+  if (before) await page.addInitScript(before, beforeArg);
   await page.goto(`${origin}/?n=${craft}`);
   await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
   return page;
@@ -179,12 +182,20 @@ async function landAJoin(page, address) {
 // line: copy the cap holds back lies inside the window and outside the panel's scroll port, which
 // is what a member sees through. Every box that has to be read or pressed is measured against
 // both, and the box's own height is what wholly shown means.
+//
+// The window here is the window a member sees, which is the visual viewport: an open keyboard leaves
+// the layout viewport untouched, so a line standing behind a keyboard stands inside `innerHeight` all
+// the same. With no keyboard and no zoom the two are the same strip to the pixel on every device the
+// suite drives, so this reads what it always read there.
 const shownIn = (page, ...selectors) =>
   page.locator("#join").evaluate((panel, wanted) => {
     const to2 = (n) => Math.round(n * 100) / 100;
     const outer = panel.getBoundingClientRect();
     const clipTop = outer.top + panel.clientTop;
     const clipBottom = clipTop + panel.clientHeight;
+    const viewport = window.visualViewport;
+    const seenTop = viewport ? viewport.offsetTop : 0;
+    const seenBottom = seenTop + (viewport ? viewport.height : innerHeight);
     const spanned = (box, top, bottom) =>
       to2(Math.max(0, Math.min(box.bottom, bottom) - Math.max(box.top, top)));
     return Object.fromEntries(
@@ -195,7 +206,7 @@ const shownIn = (page, ...selectors) =>
           {
             height: to2(box.height),
             inClip: spanned(box, clipTop, clipBottom),
-            inWindow: spanned(box, 0, innerHeight),
+            inWindow: spanned(box, seenTop, seenBottom),
           },
         ];
       }),
@@ -216,13 +227,16 @@ const ackCopyShownIn = (page) =>
     const copy = { top: printed[0].top, bottom: printed.at(-1).bottom };
     const outer = panel.getBoundingClientRect();
     const clipTop = outer.top + panel.clientTop;
+    const viewport = window.visualViewport;
+    const seenTop = viewport ? viewport.offsetTop : 0;
+    const seenBottom = seenTop + (viewport ? viewport.height : innerHeight);
     const spanned = (top, bottom) =>
       to2(Math.max(0, Math.min(copy.bottom, bottom) - Math.max(copy.top, top)));
     return {
       "the ack's printed copy": {
         height: to2(copy.bottom - copy.top),
         inClip: spanned(clipTop, clipTop + panel.clientHeight),
-        inWindow: spanned(0, innerHeight),
+        inWindow: spanned(seenTop, seenBottom),
       },
     };
   });
@@ -753,6 +767,624 @@ test("the block fits a phone with nothing clipped", async () => {
   await page.close();
 });
 
+// The bite a keyboard and its accessory bar take out of the VISUAL viewport on that phone. Safari
+// leaves the layout viewport at its full height while the visual viewport drops, and it is that
+// split that matters, because position:fixed and dvh both resolve against the layout viewport and
+// so see no keyboard at all.
+const KEYBOARD_PX = 336;
+// A keyboard on a phone in landscape, the one case where 5vh of sky and the panel's cap leave less
+// room than the block needs.
+const LANDSCAPE_KEYBOARD_PX = 230;
+// Safari also pans the visual viewport to bring the focused entry into view, so the strip a member
+// can see starts this far down the layout viewport while the keyboard is up.
+const PANNED_PX = 37;
+// The accessory bar on its own, which is the smallest bite a keyboard takes. Over the 568x250 window
+// it leaves the same 200px of room the window-loss legs above take their own readings at, so a
+// keyboard's answer to printed copy and a window edge's are measured on the same room.
+const ACCESSORY_BAR_PX = 50;
+
+// A keyboard is a shorter visual viewport over an untouched layout viewport, and that is what this
+// reports to the page, through the API's own resize event: height and offsetTop overridden, and
+// everything else the browser's own — the scale included, which is what the page reads to tell a
+// keyboard from a zoom. A keyboard's bite comes out of the screen and a zoom divides what is left of
+// it, so the height is derived from the live scale rather than frozen: a pinch held over an open
+// keyboard reports what a browser reports, and reports the same thing in either order.
+// Installed two ways — into a page already standing, and into one before any of its own script runs
+// — so it is written once, at the top level, where it carries no closure to serialise. The layout
+// height is read on every get and not frozen, because at the moment an init script runs the window is
+// not yet the size the device asked for: 2121px on the phone below, against the 844px it settles at.
+function coverWithKeyboard(covers) {
+  Object.defineProperty(visualViewport, "height", {
+    get: () => (innerHeight - covers) / visualViewport.scale,
+    configurable: true,
+  });
+  Object.defineProperty(visualViewport, "offsetTop", { get: () => 0, configurable: true });
+}
+
+async function openKeyboard(page, covers) {
+  await page.evaluate(coverWithKeyboard, covers);
+  await page.evaluate(() => visualViewport.dispatchEvent(new Event("resize")));
+  await page.waitForTimeout(80);
+}
+
+// Safari brings a focused entry into view by panning the visual viewport, and the API delivers a pan
+// as a scroll and not a resize: the keyboard stays up, its bite stands, and offsetTop alone moves.
+async function panTo(page, panned) {
+  await page.evaluate((panned) => {
+    Object.defineProperty(visualViewport, "offsetTop", { get: () => panned, configurable: true });
+    visualViewport.dispatchEvent(new Event("scroll"));
+  }, panned);
+  await page.waitForTimeout(80);
+}
+
+async function closeKeyboard(page) {
+  await page.evaluate(() => {
+    delete visualViewport.height;
+    delete visualViewport.offsetTop;
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await page.waitForTimeout(80);
+}
+
+// A pinch is what a page scale factor does emulate, and emulates faithfully: the visual viewport
+// shrinks in both axes and the scale rises with it, exactly as under two fingers.
+async function pinchTo(page, cdp, scale) {
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: scale });
+  await page.waitForTimeout(300);
+}
+
+// The two-finger pan a zoomed-in member has, driven the way the browser drives one: with the page
+// itself unscrollable, a wheel pans the visual viewport, and a wheel past the bottom leaves it at
+// the furthest pan there is. The API delivers it as its own scroll, which is the event a pan arrives
+// on whether it came from a hand or from Safari.
+async function panToTheBottom(page) {
+  const { width, height } = page.viewportSize();
+  await page.mouse.move(width / 2, height / 2);
+  await page.mouse.wheel(0, 4000);
+  await page.waitForTimeout(300);
+}
+
+// The least whole-pixel scroll of the panel that stands one part whole inside its port — the same
+// rounding the page's own roll takes, and for the same reason: a need rounded down leaves the part
+// its own fraction short, which is where scrollIntoView's rounding lands it (43.59 of #email's 44px,
+// 76.41 of the ack strip's 76.8px).
+async function rollIntoThePort(page, selector) {
+  await page.locator("#join").evaluate((panel, selector) => {
+    const part = panel.querySelector(selector).getBoundingClientRect();
+    const clipBottom = panel.getBoundingClientRect().top + panel.clientTop + panel.clientHeight;
+    panel.scrollTop = Math.ceil(panel.scrollTop + part.bottom - clipBottom);
+  }, selector);
+}
+
+// Everything measured against the visual viewport's own edges, which is where a member's eyes are —
+// and read off `window` rather than off the bare name, because a browser without the API has no
+// binding to read and this suite drives that case.
+const visualPlacementOf = (page) =>
+  page.locator("#join").evaluate((el) => {
+    const viewport = window.visualViewport;
+    const block = el.getBoundingClientRect();
+    const entry = document.getElementById("email").getBoundingClientRect();
+    const button = document.getElementById("go").getBoundingClientRect();
+    const top = viewport ? viewport.offsetTop : 0;
+    const height = viewport ? viewport.height : innerHeight;
+    const scale = viewport ? viewport.scale : 1;
+    const middle = document.elementFromPoint(block.x + block.width / 2, block.y + block.height / 2);
+    const to2 = (n) => Math.round(n * 100) / 100;
+    // how far past a bottom edge each part falls: positive is behind a keyboard, or below the strip
+    // a zoom leaves
+    const pastEdge = (edge) => ({
+      block: to2(block.bottom - edge),
+      entry: to2(entry.bottom - edge),
+      button: to2(button.bottom - edge),
+    });
+    return {
+      visualHeight: to2(height),
+      layoutHeight: innerHeight,
+      offsetTop: to2(top),
+      scale,
+      gap: to2(top + height - block.bottom),
+      past: pastEdge(top + height),
+      // and the same reading in the layout viewport's own pixels, which is the frame the rects above
+      // are measured in and the frame a fixed block is laid out in: the visual height carried back
+      // through the scale is the strip a keyboard leaves whatever the zoom
+      pastTheKeyboard: pastEdge(top + height * scale),
+      clippedAbove: to2(Math.max(0, top - block.top)),
+      // the inset as the page wrote it, so a declared 0px and a measured 0.00px are two answers and
+      // not one
+      insetProp: getComputedStyle(el).getPropertyValue("--keyboard").trim(),
+      visibleProp: getComputedStyle(el).getPropertyValue("--visible").trim(),
+      keyboardInset: parseFloat(getComputedStyle(el).getPropertyValue("--keyboard")),
+      cap: getComputedStyle(el).maxHeight,
+      scrolled: el.scrollHeight > el.clientHeight + 1,
+      reachable: middle?.closest("#join") === el,
+      rolledTo: el.scrollTop,
+      box: { y: to2(block.y), height: to2(block.height) },
+    };
+  });
+
+test("the block rides above an open keyboard instead of waiting behind it", async () => {
+  const page = await open(6, PHONE);
+  const resting = await visualPlacementOf(page);
+  assert.equal(resting.visualHeight, resting.layoutHeight);
+  assert.equal(resting.keyboardInset, 0);
+
+  await openKeyboard(page, KEYBOARD_PX);
+  const lifted = await visualPlacementOf(page);
+  assert.equal(lifted.layoutHeight, PHONE.viewport.height); // the layout viewport never noticed
+  assert.equal(lifted.scale, 1); // and neither did the page scale: a keyboard, not a pinch
+  assert.equal(lifted.keyboardInset, KEYBOARD_PX);
+  for (const [part, past] of Object.entries(lifted.past)) {
+    assert.ok(past < 0, `the ${part} sits ${past}px past the visual viewport's bottom edge`);
+  }
+  assert.equal(lifted.clippedAbove, 0);
+  assert.equal(lifted.reachable, true);
+  assert.ok(
+    lifted.gap >= BOTTOM_GAP_MIN && lifted.gap <= BOTTOM_GAP_MAX,
+    `${lifted.gap}px between the block and the keyboard`,
+  );
+  // The cap is the height still visible less that sky top and bottom, so the block keeps the whole
+  // of itself inside what the member can see: 423.6px of the 508px the keyboard leaves.
+  assert.ok(
+    Math.abs(parseFloat(lifted.cap) - (lifted.visualHeight - 2 * lifted.gap)) < 0.05,
+    `the panel caps at ${lifted.cap} in ${lifted.visualHeight}px of visible viewport`,
+  );
+  assert.equal(lifted.scrolled, false);
+  // Lifted by the keyboard's height and no further, so the sky below the block is the same sky.
+  const lift = resting.box.y - lifted.box.y;
+  assert.ok(
+    Math.abs(lift - KEYBOARD_PX) < 0.5,
+    `the block rose ${lift}px for a ${KEYBOARD_PX}px bite`,
+  );
+  assert.equal(lifted.box.height, resting.box.height);
+  assert.equal(await page.locator("#join").isVisible(), true);
+
+  // and settles back onto the foot of the page when the keyboard closes
+  await closeKeyboard(page);
+  assert.deepEqual(await visualPlacementOf(page).then((p) => p.box), resting.box);
+  await page.close();
+});
+
+// A page can load with the keyboard already up — a reload from a focused entry, or a tab coming back
+// to one — and no resize announces what is already true, so the measurement the page takes on the way
+// in is the only one it gets. The bite is installed before any of the page's own script runs and no
+// event is dispatched, so what stands here is that first reading.
+test("a page that loads with the keyboard already up is lifted on the way in", async () => {
+  const page = await open(6, PHONE, coverWithKeyboard, KEYBOARD_PX);
+  const lifted = await visualPlacementOf(page);
+  assert.equal(lifted.layoutHeight, PHONE.viewport.height);
+  assert.equal(lifted.keyboardInset, KEYBOARD_PX);
+  assert.equal(lifted.clippedAbove, 0);
+  assert.ok(
+    lifted.gap >= BOTTOM_GAP_MIN && lifted.gap <= BOTTOM_GAP_MAX,
+    `${lifted.gap}px between the block and the keyboard`,
+  );
+  for (const [part, past] of Object.entries(lifted.past)) {
+    assert.ok(past < 0, `the ${part} sits ${past}px past the visual viewport's bottom edge`);
+  }
+
+  // Again with every resize taken away, on the API and on the window alike, because Chromium resizes
+  // both once on the way up — the window arrives at 2121px and settles at 844px — and a page that
+  // only ever answered an event is carried by that one. Deaf to both, the reading the page takes on
+  // the way in is the only reading there is.
+  await page.addInitScript(() => {
+    visualViewport.addEventListener = () => {};
+    const listen = window.addEventListener.bind(window);
+    window.addEventListener = (type, ...rest) => {
+      if (type !== "resize") listen(type, ...rest);
+    };
+  });
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector(".craft")?.style.opacity === "1");
+  const deaf = await visualPlacementOf(page);
+  assert.equal(deaf.keyboardInset, KEYBOARD_PX);
+  assert.deepEqual(deaf.box, lifted.box);
+  await page.close();
+});
+
+// A keyboard leaves 160px of a phone in landscape, and no arrangement of a 296.39px block fits in
+// that, so this is the one case where the cap binds and the panel scrolls its own copy. The cap has
+// to be the height a member can see: taken from the layout height less the keyboard it overshoots by
+// the pan, and the pan is driven the way Safari delivers one, as the API's own scroll. Panned or
+// not, the block's foot stands 20px above the strip's bottom edge and its head 20px inside the top:
+// the inset is measured to that bottom edge, which the pan moves, and a fixed block is painted with
+// the pan, so it comes up 37px with it rather than clipping 37px off the top.
+test("the panel's cap is the height a member can see, panned or not", async () => {
+  const page = await open(6, PHONE_LANDSCAPE);
+  const tall = PHONE_LANDSCAPE.viewport.height;
+  const visible = tall - LANDSCAPE_KEYBOARD_PX;
+  assert.equal((await visualPlacementOf(page)).cap, `${tall - 2 * BOTTOM_GAP_MIN}px`);
+  await openKeyboard(page, LANDSCAPE_KEYBOARD_PX);
+
+  for (const panned of [0, PANNED_PX]) {
+    // Where a keyboard opening on an untouched panel leaves it, which is what the strip has to hold
+    // whole, and where the hand below starts from.
+    await page.locator("#join").evaluate((el) => (el.scrollTop = 0));
+    await panTo(page, panned);
+    const under = await visualPlacementOf(page);
+    const where = `panned ${panned}px`;
+    assert.equal(under.layoutHeight, tall, where);
+    assert.equal(under.scale, 1, where);
+    assert.equal(under.keyboardInset, LANDSCAPE_KEYBOARD_PX - panned, where);
+    assert.equal(under.cap, `${visible - 2 * BOTTOM_GAP_MIN}px`, where);
+    assert.equal(under.box.height, visible - 2 * BOTTOM_GAP_MIN, where);
+    assert.equal(under.past.block, -BOTTOM_GAP_MIN, where);
+    assert.equal(under.reachable, true, where);
+    assert.equal(
+      under.clippedAbove,
+      0,
+      `the panel's head clips ${under.clippedAbove}px off the visible strip, ${where}`,
+    );
+
+    // Bound, the panel scrolls: the entry stands whole where the keyboard left the panel, and a
+    // hand's own wheel brings the button and the ack in after it. Every part is measured against the
+    // panel's port and the strip the keyboard leaves, which is what shownIn's two bounds are.
+    assert.equal(under.scrolled, true, where);
+    assertWhollyShown(await shownIn(page, "#email"), `${where}, where the keyboard left the panel`);
+    assert.ok((await rollThePanel(page, 400)) > 0, `a hand's scroll moved nothing, ${where}`);
+    for (const part of ["#email", "#go", "#ack"]) {
+      await rollIntoThePort(page, part);
+      assertWhollyShown(await shownIn(page, part), `${part} rolled into the port, ${where}`);
+    }
+  }
+
+  await closeKeyboard(page);
+  await page.close();
+});
+
+// A pinch shrinks the same viewport a keyboard does, and nothing about it is a keyboard: nothing is
+// covered, so the block stays at the foot of the page and the strip a zoom leaves is a window onto
+// the page that the member's own two fingers move. The pan a zoomed-in member already has is what
+// reaches it: wheeled to the furthest pan the block's foot stands in the strip with the same 5vh of
+// sky under it, at every scale here.
+//
+// A phone in landscape leads, at the scale that leaves the block's head the least room above it:
+// 73.61px of layout viewport there, against 525.42px on the phone upright.
+test("a pinch zoom lifts the block not at all, and a pan brings it back", async () => {
+  for (const [device, scales] of [
+    [PHONE_LANDSCAPE, [1.5]],
+    [PHONE, [2, 3]],
+    [DESKTOP, [2.5]],
+  ]) {
+    const page = await open(6, device);
+    const cdp = await page.context().newCDPSession(page);
+    const resting = await visualPlacementOf(page);
+    for (const scale of scales) {
+      await pinchTo(page, cdp, scale);
+      const zoomed = await visualPlacementOf(page);
+      const where = `at ${scale}x on ${device.viewport.width}x${device.viewport.height}`;
+      // a real pinch: the scale rose, and the visual viewport shrank with it
+      assert.ok(zoomed.scale > 1, `the scale stayed ${zoomed.scale} ${where}`);
+      assert.ok(zoomed.visualHeight < resting.visualHeight, `${zoomed.visualHeight}px ${where}`);
+      // the shrink is not a bite, so nothing is lifted and nothing is capped
+      assert.equal(zoomed.keyboardInset, 0, `the zoom's shrink was taken as a keyboard ${where}`);
+      assert.deepEqual(zoomed.box, resting.box, `the block moved ${where}`);
+      assert.equal(zoomed.cap, resting.cap, `the cap bound ${where}`);
+      assert.equal(zoomed.scrolled, false, `the panel scrolled its own copy ${where}`);
+      assert.equal(
+        zoomed.clippedAbove,
+        0,
+        `the panel's head clips ${zoomed.clippedAbove}px off the visible strip ${where}`,
+      );
+      // The block is at the foot of a page the strip no longer reaches, and the pan reaches it.
+      assert.ok(zoomed.past.block > 0, `the block stands inside the strip unpanned ${where}`);
+      await panToTheBottom(page);
+      const panned = await visualPlacementOf(page);
+      assert.ok(panned.offsetTop > 0, `the pan moved nothing ${where}`);
+      assert.equal(panned.keyboardInset, 0, `the pan was taken as a keyboard ${where}`);
+      assert.deepEqual(panned.box, resting.box, `the pan moved the block ${where}`);
+      for (const [part, past] of Object.entries(panned.past)) {
+        assert.ok(past < 0, `the ${part} is still ${past}px past the strip, panned ${where}`);
+      }
+      // The block's own sky, less what the furthest pan rounds away: Chromium clamps that pan to a
+      // whole pixel of the device's own, which leaves up to a pixel less strip under the block than
+      // the page puts there — 41.52px of a resting 42.19px at 3x. Where the block stands is the
+      // deepEqual above; this is the strip's edge, so it is bounded by the band the suite carries.
+      assert.ok(
+        panned.gap >= BOTTOM_GAP_MIN && panned.gap <= BOTTOM_GAP_MAX,
+        `${panned.gap}px of sky under the block, panned ${where}`,
+      );
+    }
+    await pinchTo(page, cdp, 1);
+    assert.deepEqual(await visualPlacementOf(page).then((p) => p.box), resting.box);
+    await page.close();
+  }
+});
+
+// The two are held at once whenever a member zooms in with the keyboard up, and a keyboard's bite is
+// still exactly its own bite under a zoom: the visible height carried back through the scale is the
+// screen's own, so the zoom divides both sides of the subtraction and cancels out of it. Either
+// order has to end in the same place, because the state is the same state whichever event arrived
+// last, and both have to end where the keyboard alone put the block — the same box, the same cap, and
+// the same 5vh of sky between its foot and the strip the keyboard covers. The cap answers the
+// keyboard whatever the scale, so the block's head stands on the strip and the panel's own scroll
+// reaches the copy below it; what the zoom leaves visible from there is the member's own pan.
+//
+// Both devices, because the cap binds on one of them: 336px of keyboard on the phone leaves the
+// 276.39px block room to stand whole, and 230px in landscape leaves 160px for a 296.39px block, so
+// there the cap holds copy back and the panel scrolls it. 1.011x is the first scale above the
+// deadband, where the cap is handed back with nothing covered, and 3x the deepest the suite drives.
+const HELD_PINCHES = [
+  { device: PHONE, covers: KEYBOARD_PX },
+  { device: PHONE_LANDSCAPE, covers: LANDSCAPE_KEYBOARD_PX },
+];
+
+test("a pinch held over an open keyboard keeps the block off it, either order", async () => {
+  for (const { device, covers } of HELD_PINCHES) {
+    const on = `${device.viewport.width}x${device.viewport.height} under a ${covers}px keyboard`;
+    const upright = await open(6, device);
+    const resting = await visualPlacementOf(upright);
+    await openKeyboard(upright, covers);
+    const keyboardAlone = await visualPlacementOf(upright);
+    await upright.close();
+
+    const held = {};
+    for (const scale of [1.011, 3]) {
+      held[scale] = {};
+      for (const order of ["keyboard first", "pinch first"]) {
+        const page = await open(6, device);
+        const cdp = await page.context().newCDPSession(page);
+        if (order === "keyboard first") {
+          await openKeyboard(page, covers);
+          await pinchTo(page, cdp, scale);
+        } else {
+          await pinchTo(page, cdp, scale);
+          await openKeyboard(page, covers);
+        }
+        const both = await visualPlacementOf(page);
+        const where = `${order}, at ${scale}x, ${on}`;
+        assert.ok(both.scale > 1, `the scale stayed ${both.scale}, ${where}`);
+        // the zoom is out of the bite, and the lift is the keyboard's own either way
+        assert.equal(both.keyboardInset, covers, where);
+        assert.deepEqual(both.box, keyboardAlone.box, `the zoom moved the block, ${where}`);
+        // the sky between the block's foot and the strip the keyboard covers, in the layout
+        // viewport's own pixels: the frame the block is laid out in, which is where its own 5vh is
+        const clearOfTheKeyboard = -both.pastTheKeyboard.block;
+        assert.ok(
+          Math.abs(clearOfTheKeyboard - resting.gap) < 0.05,
+          `${clearOfTheKeyboard}px between the block and the strip the keyboard covers, ${where}`,
+        );
+        // and the cap is the keyboard's own, so the head stands on the strip a member sees
+        assert.equal(both.cap, keyboardAlone.cap, `the cap left the keyboard's own, ${where}`);
+        assert.equal(both.visibleProp, keyboardAlone.visibleProp, where);
+        assert.equal(
+          both.clippedAbove,
+          0,
+          `the panel's head clips ${both.clippedAbove}px off the visible strip, ${where}`,
+        );
+        assert.equal(both.reachable, true, `nothing a finger lands on is the block, ${where}`);
+        assert.equal(both.scrolled, keyboardAlone.scrolled, where);
+        held[scale][order] = both;
+        await page.close();
+      }
+      assert.deepEqual(
+        held[scale]["pinch first"],
+        held[scale]["keyboard first"],
+        `the order the two arrived in changed the block at ${scale}x, ${on}`,
+      );
+    }
+  }
+});
+
+// The slack above 1 the page carries as its deadband: Safari reports a scale a hair over 1 of its
+// own accord, and a hair is covered-and-not-zoomed. Inside it the cap is still the strip the keyboard
+// leaves, taken in the layout viewport's own pixels — the same reading taken in the visual
+// viewport's stands 418.57px against the 423.6px the same keyboard leaves at 1x, holding back copy
+// that fits. With nothing covered the deadband is the whole decision: inside it the page keeps
+// measuring the window, and above it the declared 100dvh is handed back to the stylesheet.
+const IN_THE_DEADBAND = 1.01;
+const ZOOMED = 1.011;
+
+test("a scale a hair above 1 is slack and not a zoom", async () => {
+  for (const { device, covers } of HELD_PINCHES) {
+    const page = await open(6, device);
+    const cdp = await page.context().newCDPSession(page);
+    await openKeyboard(page, covers);
+    const alone = await visualPlacementOf(page);
+    await pinchTo(page, cdp, IN_THE_DEADBAND);
+    const hair = await visualPlacementOf(page);
+    const { width, height } = device.viewport;
+    const where = `a ${covers}px keyboard at ${IN_THE_DEADBAND}x on ${width}x${height}`;
+    assert.ok(hair.scale > 1, `the scale stayed ${hair.scale}, ${where}`);
+    assert.equal(hair.keyboardInset, covers, where);
+    assert.equal(hair.cap, alone.cap, `the cap left the keyboard's own ${alone.cap}, ${where}`);
+    assert.equal(hair.visibleProp, alone.visibleProp, where);
+    assert.deepEqual(hair.box, alone.box, `the hair of zoom moved the block, ${where}`);
+    assert.equal(
+      hair.clippedAbove,
+      0,
+      `the panel's head clips ${hair.clippedAbove}px off the visible strip, ${where}`,
+    );
+    assert.equal(hair.reachable, true, `nothing a finger lands on is the block, ${where}`);
+    assert.ok(hair.past.block < 0, `the block sits ${hair.past.block}px past the strip, ${where}`);
+    assert.ok(hair.pastTheKeyboard.block < 0, `${hair.pastTheKeyboard.block}px, ${where}`);
+    await page.close();
+  }
+
+  // Nothing covered, where the deadband alone decides: the same window, read as slack and then as a
+  // zoom. The cap it measures there is the window's own, which is what the declared 100dvh resolves
+  // to, so what the two answers differ in is which of them wrote it.
+  const page = await open(6, PHONE);
+  const cdp = await page.context().newCDPSession(page);
+  const resting = await visualPlacementOf(page);
+  assert.equal(resting.visibleProp, `${PHONE.viewport.height}.00px`);
+  for (const [scale, visibleProp] of [
+    [IN_THE_DEADBAND, resting.visibleProp],
+    [ZOOMED, "100dvh"],
+  ]) {
+    await pinchTo(page, cdp, scale);
+    const zoomed = await visualPlacementOf(page);
+    const where = `at ${scale}x with nothing covered`;
+    assert.equal(zoomed.keyboardInset, 0, `the zoom's shrink was taken as a keyboard ${where}`);
+    assert.equal(zoomed.visibleProp, visibleProp, where);
+    assert.equal(zoomed.cap, resting.cap, `the cap bound ${where}`);
+    assert.deepEqual(zoomed.box, resting.box, `the block moved ${where}`);
+  }
+  await page.close();
+});
+
+// A browser without the API has no binding at all, which is what deleting it leaves. The page keeps
+// the declared 0px and 100dvh, so it keeps the plain bottom anchoring — the inset is read as the
+// string the stylesheet declares, which a page that measured a keyboard writes 0.00px over.
+test("a browser with no visual viewport keeps the plain bottom anchoring", async () => {
+  const page = await open(6, PHONE, () => {
+    delete window.visualViewport;
+  });
+  const cdp = await page.context().newCDPSession(page);
+  assert.equal(await page.evaluate(() => "visualViewport" in window), false);
+  const resting = await visualPlacementOf(page);
+  assert.equal(resting.insetProp, "0px");
+  assert.equal(resting.visibleProp, "100dvh");
+  assert.ok(
+    resting.gap >= BOTTOM_GAP_MIN && resting.gap <= BOTTOM_GAP_MAX,
+    `${resting.gap}px between the block and the bottom edge`,
+  );
+  // Without the API there is nothing to measure a keyboard with, so the block keeps the plain
+  // bottom anchoring: a pinch, the one viewport change drivable without the API, moves it not at
+  // all, and nothing is thrown on the way.
+  await pinchTo(page, cdp, PHONE.viewport.height / (PHONE.viewport.height - KEYBOARD_PX));
+  const shrunk = await visualPlacementOf(page);
+  assert.deepEqual(shrunk.box, resting.box);
+  assert.equal(shrunk.insetProp, "0px");
+  assert.equal(shrunk.cap, resting.cap);
+  await page.close();
+});
+
+// The cap and the copy inside it answer to the same scarce room, and a keyboard takes that room the
+// way a window edge dragged up does — the port's bottom edge walks up past copy that has already
+// printed — except that the window fires no resize for it. Measured with a landed join standing
+// whole: an accessory bar's 50px off 568x250 leaves the same 200px of window the loss legs above
+// take their reading at, and the copy that held 44.59 of 44.59px inside the port held 0px of it,
+// scrollTop unmoved at 24 where it now needs 74; a keyboard on a phone in landscape leaves 118px of
+// port and took the same copy from 44.59px to 0px, needing 120 where it sat at 0. So the roll the
+// resize owns is the roll this runs, at the one point where the page moves the port's height itself.
+//
+// The full keyboard is walked on a landed join alone, because at 118px of port nothing else fits:
+// the room goes to the answer the member just asked for, which is the page's own rule where a port
+// cannot hold the copy and the live controls together.
+const LANDED_JOIN = REPORT_PATHS.find((path) => path.name === "a landed join");
+const ROOM_LOSING_KEYBOARDS = [
+  { device: PHONE_LANDSCAPE_SHORT, covers: ACCESSORY_BAR_PX, paths: REPORT_PATHS },
+  { device: PHONE_LANDSCAPE, covers: LANDSCAPE_KEYBOARD_PX, paths: [LANDED_JOIN] },
+];
+
+test("copy that has printed is rolled back in when a keyboard takes its room away", async () => {
+  for (const { device, covers, paths } of ROOM_LOSING_KEYBOARDS) {
+    for (const path of paths) {
+      const page = await open(6, device);
+      const { width, height } = device.viewport;
+      const where = `${width}x${height} under a ${covers}px keyboard, ${path.name}`;
+      await path.drive(page, `keyboard-${covers}`);
+      await page.waitForFunction(
+        (opening) => document.getElementById("ack").textContent.startsWith(opening),
+        path.opening,
+      );
+      assertWhollyShown(await ackCopyShownIn(page), `${width}x${height}, ${path.name}`);
+      await openKeyboard(page, covers);
+      const under = await visualPlacementOf(page);
+      assert.equal(under.keyboardInset, covers, where);
+      assert.equal(under.scrolled, true, `the cap does not bind at ${where}`);
+      assert.equal(
+        under.clippedAbove,
+        0,
+        `the panel's head clips ${under.clippedAbove}px off the visible strip at ${where}`,
+      );
+      assert.ok(
+        under.gap >= BOTTOM_GAP_MIN && under.gap <= BOTTOM_GAP_MAX,
+        `${under.gap}px between the block and the keyboard at ${where}`,
+      );
+      assertWhollyShown(await ackCopyShownIn(page), where);
+      assertWhollyShown(await shownIn(page, ...(await liveControls(page))), where);
+      await page.close();
+    }
+  }
+});
+
+// The keyboard's roll carries the resize's own gate with it, both ends of it. A keyboard closing
+// hands the room back and rolls nothing, so the head a member wheeled up to read stays where they
+// left it; the same keyboard opening again is room lost again, and rolls. At 568x250 the copy needs
+// 24px with the keyboard down and 74px with an accessory bar up, and the member is at 0.
+test("a keyboard that hands the room back leaves a member's own scroll alone", async () => {
+  const page = await open(6, PHONE_LANDSCAPE_SHORT);
+  await landAJoin(page, "keyboard-keeps@yourco.com");
+  await openKeyboard(page, ACCESSORY_BAR_PX);
+  const rolled = (await visualPlacementOf(page)).rolledTo;
+  assert.ok(rolled > 0, "the keyboard took no room to roll: nothing is at risk");
+  const theirs = await rollThePanel(page, -400);
+  assert.ok(theirs < rolled, `the wheel did not move the panel off ${rolled}`);
+  assertWhollyShown(await shownIn(page, ".head"), "as the member left it");
+
+  await closeKeyboard(page);
+  assert.equal(
+    (await visualPlacementOf(page)).rolledTo,
+    theirs,
+    `the keyboard closing moved the panel off the member's ${theirs}`,
+  );
+  assertWhollyShown(await shownIn(page, ".head"), "after the keyboard closed");
+
+  await openKeyboard(page, ACCESSORY_BAR_PX);
+  assert.equal(
+    (await visualPlacementOf(page)).rolledTo,
+    rolled,
+    "the keyboard opening again took room away and rolled nothing back in",
+  );
+  assertWhollyShown(await ackCopyShownIn(page), "the keyboard up again");
+  await page.close();
+});
+
+// The window's own resize arrives before the visual viewport's, so the cap the roll measures printed
+// copy against is the one the window's resize writes itself. What it left behind at that moment is
+// read from a listener registered after the page's own: at 568x250 → 200 the port is the new window's
+// 158px and the copy that needs 74px of scroll is already rolled in, where the window it just left
+// stood 208px of port and 24px of scroll.
+test("a window resize caps the block to the window it lands in before the roll reads it", async () => {
+  const page = await open(6, PHONE_LANDSCAPE_SHORT);
+  await landAJoin(page, "resize-cap@yourco.com");
+  await page.evaluate(() => {
+    window.__atTheResize = [];
+    addEventListener("resize", () => {
+      const el = document.getElementById("join");
+      window.__atTheResize.push({
+        innerHeight,
+        visibleProp: getComputedStyle(el).getPropertyValue("--visible").trim(),
+        cap: getComputedStyle(el).maxHeight,
+        clientHeight: el.clientHeight,
+        rolledTo: el.scrollTop,
+      });
+    });
+  });
+  await page.setViewportSize({ width: 568, height: 200 });
+  await page.waitForFunction(() => innerHeight === 200);
+  await page.waitForTimeout(120);
+  assert.deepEqual(
+    await page.evaluate(() => window.__atTheResize),
+    [{ innerHeight: 200, visibleProp: "200.00px", cap: "160px", clientHeight: 158, rolledTo: 74 }],
+  );
+  assertWhollyShown(await ackCopyShownIn(page), "568x250 → 568x200");
+  await page.close();
+});
+
+// The path a browser without the API keeps: nothing there measures a keyboard, the declared 100dvh
+// follows the window itself, and the window's own resize is the only thing that answers copy the
+// window has taken the room from. At 568x250 → 200 the ack's printed copy needs 74px of the panel's
+// own scroll where it needed 24.
+test("a browser with no visual viewport rolls printed copy back in when the window shrinks", async () => {
+  const page = await open(6, PHONE_LANDSCAPE_SHORT, () => {
+    delete window.visualViewport;
+  });
+  assert.equal(await page.evaluate(() => "visualViewport" in window), false);
+  await landAJoin(page, "no-viewport-resize@yourco.com");
+  const printed = await page.locator("#join").evaluate((el) => el.scrollTop);
+  await page.setViewportSize({ width: 568, height: 200 });
+  await page.waitForFunction(() => innerHeight === 200);
+  await page.waitForTimeout(120);
+  const where = "568x250 → 568x200 with no visual viewport";
+  const rolled = await page.locator("#join").evaluate((el) => el.scrollTop);
+  assert.ok(rolled > printed, `the panel stands at ${rolled} where the print left it at ${printed}`);
+  assertWhollyShown(await ackCopyShownIn(page), where);
+  assertWhollyShown(await shownIn(page, ...(await liveControls(page))), where);
+  await page.close();
+});
+
 // 5vh of sky under the block, and both ends of the clamp that holds it: a window tall enough for 5vh
 // to want 60px keeps the ceiling's 48, one short enough for it to want 12.5px keeps the floor's 20,
 // and the two in between keep the 5vh they measure. The two ends are stated as the constants the
@@ -772,9 +1404,10 @@ test("the sky under the block is 5vh, clamped at both ends", async () => {
       return {
         gap: to2(innerHeight - b.bottom),
         offCentreX: to2(Math.abs(b.x + b.width / 2 - innerWidth / 2)),
+        keyboardInset: parseFloat(getComputedStyle(el).getPropertyValue("--keyboard")),
       };
     });
-    assert.deepEqual(placed, { gap, offCentreX: 0 });
+    assert.deepEqual(placed, { gap, offCentreX: 0, keyboardInset: 0 });
     await page.close();
   }
 });

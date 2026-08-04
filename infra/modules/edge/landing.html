@@ -49,10 +49,12 @@
      black halo on every line keeps the copy readable while that light passes. */
   .panel{
     --gap:clamp(20px,5vh,48px);
-    position:fixed; left:50%; bottom:var(--gap);
+    --keyboard:0px;           /* an open keyboard's bite out of the viewport, measured in JS */
+    --visible:100dvh;         /* and the height left over, which is what the block is capped to */
+    position:fixed; left:50%; bottom:calc(var(--gap) + var(--keyboard));
     transform:translateX(-50%);
     width:min(92vw,30rem);
-    max-height:calc(100dvh - 2*var(--gap));
+    max-height:calc(var(--visible) - 2*var(--gap));
     overflow:auto;
     padding:clamp(18px,4vw,28px);
     border:1px solid var(--hull);
@@ -661,12 +663,16 @@ function report(message, bad){
 // hands port height back, or one that rewraps nothing, has taken nothing away, and rolling then would
 // throw away a scroll the member made themselves: the head they scrolled up to read snaps back out of
 // the port under their hand.
-addEventListener('resize', () => {
+//
+// A keyboard takes the same room the same way and the window fires no resize for it, so the roll is
+// named for the other place that moves the port's height — the cap the block writes below, which is
+// where both a keyboard and a window resize are answered — and nowhere else.
+const rollPrintedIntoPort = () => {
   const needs = scrollPrintedNeeds();
   const lost = needs > needsAnswered;
   needsAnswered = needs;
   if(lost && needs > join.scrollTop) join.scrollTop = needs;
-});
+};
 
 join.addEventListener('submit', async e => {
   e.preventDefault();
@@ -692,6 +698,63 @@ join.addEventListener('submit', async e => {
     go.disabled = false;
   }
 });
+
+// A software keyboard shrinks the VISUAL viewport and leaves the LAYOUT viewport alone, and both
+// position:fixed and dvh resolve against the layout viewport, so the visual viewport is the only
+// reading of what a member can see. It reports both halves of the answer: the strip the keyboard
+// covers, which the panel's inset lifts it clear of, and the height still visible, which is what the
+// panel caps itself to. Browsers without the API keep the declared 0px and 100dvh and the plain
+// bottom anchoring.
+//
+// The covered strip and a pinch zoom are separate facts, and every reading that crosses between the
+// two viewports crosses through the same scale in the same direction. A zoom divides the visual
+// viewport's height by its scale, so multiplying it back gives the strip the screen shows in the
+// layout viewport's own pixels — the frame a fixed block is laid out in and max-height resolves in.
+// The zoom cancels out of the subtraction, leaving the keyboard's own bite at any scale and in
+// either order, and the cap is taken from that same strip. The subtraction's own arithmetic leaves
+// hundred-thousandths of a pixel where a keyboard leaves hundreds of whole ones, so the bite is
+// rounded where it is read as well as where it is written: a hundred-thousandth is nothing covered.
+//
+// offsetTop stays in the bite. Safari pans the visual viewport to bring a focused entry into view,
+// and a fixed block is painted with the pan, so the inset is measured to the visible strip's bottom
+// edge and the block comes up with the pan.
+//
+// The cap answers what is covered, whatever the scale: the block's head stands on the strip a member
+// sees, and the panel's own scroll reaches the copy below it. With nothing covered the scale alone
+// decides — above the deadband the member is zoomed in and reading, so the declared 100dvh stands
+// and their own pan is what moves the page; inside it a hair above 1 is the browser's own slack and
+// the page keeps measuring.
+const viewport = window.visualViewport;   // named off window: a browser without it has no binding
+const PINCHED = 1.01;                     // above this the page is zoomed, not merely covered
+if(viewport){
+  const liftClearOfKeyboard = () => {
+    const shown = viewport.height * viewport.scale;
+    const covered = Math.max(0, Math.round((innerHeight - (shown + viewport.offsetTop)) * 100) / 100);
+    join.style.setProperty('--keyboard', covered.toFixed(2) + 'px');
+    if(covered > 0 || viewport.scale <= PINCHED){
+      join.style.setProperty('--visible', shown.toFixed(2) + 'px');
+    } else {
+      join.style.removeProperty('--visible');   // the declared 100dvh stands: nothing is covered
+    }
+    // The cap has just moved, and the window fired no resize for it: a keyboard walks the port's
+    // bottom edge up past copy that has already printed exactly as a window edge dragged up does,
+    // and the strip left over is the same scarce room the printed copy is measured against. So the
+    // roll runs here too, under the same gate — a keyboard closing, or a zoom handing the cap back,
+    // takes no room away and leaves a member's own scroll where it is.
+    rollPrintedIntoPort();
+  };
+  viewport.addEventListener('resize', liftClearOfKeyboard, {passive:true});
+  viewport.addEventListener('scroll', liftClearOfKeyboard, {passive:true});
+  // The window's own resize arrives first and the visual viewport's second, so the cap is written
+  // here as well: the roll at the end of it measures the printed copy against the window the page is
+  // in now — 160px of port at 568x200 — and not the one it just left, whose cap stood 50px taller.
+  addEventListener('resize', liftClearOfKeyboard);
+  liftClearOfKeyboard();
+} else {
+  // Nothing measures a keyboard here and the declared 100dvh follows the window itself, so a resize
+  // leaves the roll alone to answer the room the window took.
+  addEventListener('resize', rollPrintedIntoPort);
+}
 
 const STEPS_EACH = 12;
 const FPS = reduceMotion ? 2.2 : 7;
