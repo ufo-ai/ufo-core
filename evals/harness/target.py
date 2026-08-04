@@ -199,7 +199,9 @@ class InProcessTarget:
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         if case.seed is not None:
-            await case.seed(ws_current().workspace_id, self.agent_id)
+            if self.blob is None:
+                raise RuntimeError("a seeded capability case requires blob access")
+            await case.seed(ws_current().workspace_id, self.agent_id, self.blob)
         conversation_id = await self.conversations.open(
             case.name,
             case.member_key,

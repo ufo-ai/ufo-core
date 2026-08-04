@@ -16,7 +16,7 @@ Checking Slack's status returns one of four states. Translate them plainly:
 | --- | --- | --- |
 | `not_configured` | Install cannot proceed as asked, for one of several reasons: no one-click app on this deploy, this Slack workspace already belongs to another UFO workspace, an app of their own still missing its two secrets, or a bot token Slack would not accept. The state arrives with a hint naming which. | Translate the hint, never the state. Only the first reason means "we will use the manual app path"; a workspace already taken is one to confirm and raise, and a rejected token is one to collect again. |
 | `not_installed` | Nothing installed yet. For an admin the link is ready; for a non-admin it also covers not being allowed to mint one. | To an admin: "Here is your Add to Slack link." To anyone else: "Ask a workspace admin to connect Slack and I will confirm once it lands." |
-| `pending` | An install is in flight, or an app exists but its token is not verified yet. | "The install is partway through. Finish approving it in Slack and I will confirm." |
+| `pending` | An app identity exists, but this deploy has not verified a Slack event with the current app credentials. A new install, a manifest setup, or a signing-secret rotation can all land here. | "Slack has not reached this deploy with the current app credentials. Invite the bot to a channel and @mention it, or send it a DM. If it stays pending, ask a workspace admin to raise it with the team." |
 | `connected` | Installed and working. | "Slack is connected." |
 
 ## The unverified-app warning

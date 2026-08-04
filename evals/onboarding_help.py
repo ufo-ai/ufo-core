@@ -71,7 +71,21 @@ nothing — which is the shape of the answer that claims a cancellation the prod
 An interjection is not a question about the product, so no description reaches it; the guard has to
 be the prompt or the tool, not this corpus."""
 
-from json import dumps
+from json import dumps, loads
+from uuid import UUID
+
+import sqlalchemy as sa
+from ufo_ext_slack.surface import (
+    SLACK_BOT_TOKEN_SLOT,
+    SLACK_SIGNING_SECRET_SLOT,
+    SURFACE_SLACK,
+    SlackIdentity,
+    bot_token_fingerprint,
+    identity_blob_key,
+    signing_secret_fingerprint,
+    slack_installation_id,
+    url_verified_blob_key,
+)
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -82,8 +96,12 @@ from evals.harness.capability import (
     ToolInvocation,
 )
 from evals.harness.scorers import combine
-from ufo.loop.engine import SKILL_LOAD_TOOL
+from ufo.blob import BlobStore
+from ufo.db import workspace_tx
+from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL, SKILL_LOAD_TOOL
+from ufo.schema import tables
 from ufo.skills.runtime import SKILLS_MOUNT_DIR
+from ufo.workspace import ws_current
 
 ONBOARDING_HELP_PACKS = ("assistant_hosted",)
 CORPUS_SKILL = "customer-onboarding-help"
@@ -169,6 +187,18 @@ def catalog_scorer() -> Grader:
 
 
 SLACK_SETUP_SKILL = "slack-app-setup"
+SLACK_EVAL_BOT_TOKEN = "xoxb-eval-rotated-secret"
+SLACK_EVAL_CURRENT_SECRET = "eval-current-signing-secret"
+SLACK_EVAL_STALE_SECRET = "eval-stale-signing-secret"
+SLACK_EVAL_TEAM_ID = "TEVAL"
+SLACK_EVAL_BOT_USER_ID = "UEVAL"
+SLACK_EVAL_IDENTITY = SlackIdentity(
+    bot_token_fingerprint=bot_token_fingerprint(SLACK_EVAL_BOT_TOKEN),
+    team_id=SLACK_EVAL_TEAM_ID,
+    bot_user_id=SLACK_EVAL_BOT_USER_ID,
+)
+SLACK_EVAL_INSTALLATION_ID = slack_installation_id(SLACK_EVAL_TEAM_ID)
+SLACK_EVAL_STALE_FINGERPRINT = signing_secret_fingerprint(SLACK_EVAL_STALE_SECRET)
 
 
 def slack_setup_scorer() -> Grader:
@@ -191,6 +221,102 @@ def slack_setup_scorer() -> Grader:
         return CapabilityVerdict(False, f"never loaded {SLACK_SETUP_SKILL!r}")
 
     return DescribedGrader(f"the {SLACK_SETUP_SKILL!r} skill loads to drive the install", grade)
+
+
+def slack_rotated_secret_scorer() -> Grader:
+    setup = slack_setup_scorer()
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loaded = await setup(output)
+        if not loaded.passed:
+            return loaded
+        requests = []
+        for call in output.calls:
+            if call.name != REQUEST_CREDENTIALS_TOOL:
+                continue
+            prompts = call.input.get("prompts")
+            if not isinstance(prompts, list):
+                continue
+            if any(
+                isinstance(prompt, dict) and prompt.get("slot") == SLACK_SIGNING_SECRET_SLOT
+                for prompt in prompts
+            ):
+                requests.append(call)
+        if requests:
+            return CapabilityVerdict(True, "attempted to request the current Slack signing secret")
+        return CapabilityVerdict(
+            False, "never requested the current Slack signing secret privately"
+        )
+
+    return DescribedGrader(
+        f"the {SLACK_SETUP_SKILL!r} skill loads and attempts {REQUEST_CREDENTIALS_TOOL!r} for "
+        f"{SLACK_SIGNING_SECRET_SLOT!r}",
+        grade,
+    )
+
+
+async def seed_slack_rotated_secret(workspace_id: UUID, _agent_id: UUID, blob: BlobStore) -> None:
+    workspace = ws_current()
+    identity_key = identity_blob_key(workspace_id)
+    verified_key = url_verified_blob_key(workspace_id)
+    async with workspace_tx() as connection:
+        slots = frozenset(
+            (
+                await connection.execute(
+                    sa.select(tables.credential.c.slot).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot.in_(
+                            (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        installations = frozenset(
+            (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.installation_id).where(
+                        tables.surface_installation.c.workspace_id == workspace_id,
+                        tables.surface_installation.c.surface == SURFACE_SLACK,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    identity_exists = await blob.exists(identity_key)
+    verified_exists = await blob.exists(verified_key)
+    if slots or installations or identity_exists or verified_exists:
+        if (
+            slots != frozenset((SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT))
+            or installations not in (frozenset(), frozenset((SLACK_EVAL_INSTALLATION_ID,)))
+            or not identity_exists
+            or not verified_exists
+            or await workspace.credential(SLACK_BOT_TOKEN_SLOT) != SLACK_EVAL_BOT_TOKEN
+            or await workspace.credential(SLACK_SIGNING_SECRET_SLOT) != SLACK_EVAL_CURRENT_SECRET
+            or SlackIdentity.model_validate_json(await blob.get(identity_key))
+            != SLACK_EVAL_IDENTITY
+            or loads(await blob.get(verified_key)).get("fingerprint")
+            != SLACK_EVAL_STALE_FINGERPRINT
+        ):
+            raise RuntimeError(
+                "onboarding_help requires a disposable workspace without Slack state"
+            )
+        return
+    await workspace.put_credential(SLACK_BOT_TOKEN_SLOT, SLACK_EVAL_BOT_TOKEN)
+    await workspace.put_credential(SLACK_SIGNING_SECRET_SLOT, SLACK_EVAL_CURRENT_SECRET)
+    await blob.put(identity_key, SLACK_EVAL_IDENTITY.model_dump_json().encode())
+    await blob.put(
+        verified_key,
+        dumps(
+            {
+                "fingerprint": SLACK_EVAL_STALE_FINGERPRINT,
+                "at": 1.0,
+            }
+        ).encode(),
+    )
 
 
 def own_work_scorer() -> Grader:
@@ -234,6 +360,20 @@ CASES = (
         rubric=(
             "The answer names a few concrete things this agent can do rather than reciting a "
             "catalog of everything.",
+        ),
+    ),
+    CapabilityCase(
+        "slack-install-pending",
+        "Slack says pending. Is the install approved, and what should I do?",
+        corpus_scorer("slack-install.md"),
+        samples=3,
+        digest_tag="onboarding:slack-install-pending",
+        rubric=(
+            "The answer says this deploy has not verified a Slack event with the current app "
+            "credentials.",
+            "The answer says a new install, manifest setup, or signing-secret rotation can result "
+            "in pending.",
+            "The answer tells the customer to invite and mention the bot or send it a DM.",
         ),
     ),
     CapabilityCase(
@@ -458,6 +598,21 @@ CASES = (
         rubric=(
             "The answer is about the customer's own onboarding checklist for their customers, not "
             "about signing in to or setting up UFO.",
+        ),
+    ),
+    CapabilityCase(
+        "slack-signing-secret-rotated",
+        "I'm connecting my own Slack app. I rotated its signing secret, and Slack is still "
+        "pending. Take the next step.",
+        slack_rotated_secret_scorer(),
+        samples=3,
+        digest_tag="onboarding:slack-signing-secret-rotated",
+        seed=seed_slack_rotated_secret,
+        rubric=(
+            "The answer says the current Slack signing secret will be collected through a private "
+            "prompt and never asks the customer to paste it in chat.",
+            "The answer says that after entering it, the customer should mention the bot in a "
+            "channel or send it a DM, and the agent will confirm the connection.",
         ),
     ),
 )

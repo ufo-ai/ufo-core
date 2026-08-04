@@ -92,7 +92,12 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task("yc_recall", yc_recall.CASES),
     capability_task("yc_workflows", yc_workflows.CASES),
     capability_task("cos_workflows", cos_workflows.CASES),
-    capability_task("onboarding_help", onboarding_help.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task(
+        "onboarding_help",
+        onboarding_help.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        serial=True,
+    ),
 )
 
 

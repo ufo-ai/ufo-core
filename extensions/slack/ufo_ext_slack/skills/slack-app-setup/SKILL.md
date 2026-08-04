@@ -44,8 +44,9 @@ Slack's own pages and enters two values privately in their terminal.
 ## Step 1 — where things stand
 
 Call `slack_connect`. It walks the whole state machine idempotently: `connected` means there is
-nothing to do; `pending` means the credentials are stored and identity proven — only Slack's first
-event is missing (skip to Step 5); `not_configured` starts at Step 2.
+nothing to do; `pending` means an app identity exists, but this deploy has not verified a Slack
+event with the current app credentials; a new install, manifest setup, or signing-secret rotation
+can all land here (skip to Step 5); `not_configured` starts at Step 2.
 
 ## Step 2 — create the app from the manifest
 
@@ -141,8 +142,10 @@ remains. A rejected token means a bad copy — re-run Step 3.
 
 ## Step 5 — first contact
 
-`pending` flips to `connected` on Slack's first signed request from the workspace: the member
-invites the bot to a channel and @mentions it, or DMs it. Confirm with `slack_connect`.
+If the signing secret changed since it was entered, collect `slack_signing_secret` again through
+`request_credentials` before first contact. Then the member invites the bot to a channel and
+@mentions it, or DMs it. The first signed request flips `pending` to `connected`; confirm with
+`slack_connect`.
 
 ## Operator alternative
 

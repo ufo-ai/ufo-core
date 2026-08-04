@@ -108,6 +108,41 @@ CLAIMS = (
         pattern=r'os\.environ\.get\(ENABLED_ENV, "false"\)',
     ),
     Claim(
+        claim="pending is tied to the current Slack signing secret",
+        corpus="references/slack-install.md",
+        phrase="A new install, a manifest setup, or a signing-secret rotation can all land here",
+        source=SLACK_TOOLS,
+        pattern=(
+            r'marker\.get\("fingerprint"\) == signing_secret_fingerprint\(\n'
+            r"\s+secret\n"
+            r"\s+\)"
+        ),
+    ),
+    Claim(
+        claim="pending follows the verified-event guard and gives the first-contact remedy",
+        corpus="references/slack-install.md",
+        phrase="Invite the bot to a channel and @mention it, or send it a DM",
+        source=SLACK_TOOLS,
+        pattern=(
+            r"if await _verified\(ctx\):\n"
+            r"(?:.*\n)*?"
+            r"\s+return _state\(\n"
+            r'\s+"pending",'
+        ),
+    ),
+    Claim(
+        claim="the mounted Slack setup skill treats rotated credentials as pending",
+        corpus="references/slack-install.md",
+        phrase="A new install, a manifest setup, or a signing-secret rotation can all land here",
+        source=SLACK_SETUP_SKILL_MD,
+        pattern=(
+            r"`pending`\s+means\s+an\s+app\s+identity\s+exists,\s+but\s+this\s+deploy\s+has\s+not\s+"
+            r"verified\s+a\s+Slack\s+event\s+with\s+the\s+current\s+app\s+credentials;\s+a\s+new\s+"
+            r"install,\s+manifest\s+setup,\s+or\s+signing-secret\s+rotation\s+can\s+all\s+land\s+"
+            r"here\s+\(skip\s+to\s+Step\s+5\)"
+        ),
+    ),
+    Claim(
         claim="the overview's close is driven by the slack-app-setup skill, which must still ship",
         corpus="references/capabilities.md",
         phrase="load the `slack-app-setup` skill and let it drive the install",

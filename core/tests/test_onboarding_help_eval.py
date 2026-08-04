@@ -4,7 +4,27 @@ every case forever, and a corpus the pack stopped carrying would make the whole 
 The negative-loading control is asserted from the same trajectory shape as the positive one, so a
 grader that stopped seeing loads would pass those cases for the wrong reason."""
 
+from json import dumps, loads
 from re import findall
+from types import SimpleNamespace
+from typing import cast
+from uuid import UUID, uuid4
+
+import pytest
+import sqlalchemy as sa
+from cryptography.fernet import Fernet
+from ufo_ext_slack.surface import (
+    SLACK_BOT_TOKEN_SLOT,
+    SLACK_SIGNING_SECRET_SLOT,
+    SURFACE_SLACK,
+    SlackIdentity,
+    bot_token_fingerprint,
+    identity_blob_key,
+    signing_secret_fingerprint,
+    slack_installation_id,
+    url_verified_blob_key,
+)
+from ufo_ext_slack.tools import SlackConnectInput, slack_connect_handler
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_statement
 from evals.onboarding_help import (
@@ -12,14 +32,34 @@ from evals.onboarding_help import (
     CORPUS_SKILL,
     ONBOARDING_HELP_PACKS,
     REFERENCES_DIR,
+    SLACK_EVAL_BOT_TOKEN,
+    SLACK_EVAL_BOT_USER_ID,
+    SLACK_EVAL_CURRENT_SECRET,
+    SLACK_EVAL_IDENTITY,
+    SLACK_EVAL_STALE_FINGERPRINT,
+    SLACK_EVAL_TEAM_ID,
     SLACK_SETUP_SKILL,
     catalog_scorer,
     corpus_scorer,
     own_work_scorer,
+    seed_slack_rotated_secret,
+    slack_rotated_secret_scorer,
     slack_setup_scorer,
 )
+from ufo.blob import FilesystemBlobStore
+from ufo.credentials import CredentialStore
+from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, skill_registry
-from ufo.loop.engine import SKILL_LOAD_TOOL
+from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL, SKILL_LOAD_TOOL
+from ufo.schema import tables
+from ufo.sdk.context import (
+    CredentialAccess,
+    ExtensionContext,
+    ScopedStore,
+    SurfaceInstallationAccess,
+)
+from ufo.tools.context import ToolContext
+from ufo.workspace import init_workspace_credentials, ws
 
 GETTING_STARTED = "getting-started.md"
 BILLING = "billing-and-seats.md"
@@ -56,6 +96,40 @@ def _read(reference: str) -> ToolInvocation:
 
 def _output(*calls: ToolInvocation, response: str = "Here is your next step.") -> CapabilityOutput:
     return CapabilityOutput(response=response, calls=calls)
+
+
+def _credential_request(slot: str, is_error: bool = False) -> ToolInvocation:
+    return ToolInvocation(
+        name=REQUEST_CREDENTIALS_TOOL,
+        input={"prompts": [{"slot": slot, "prompt": "Enter it privately."}]},
+        result="[private handoff redacted]",
+        has_result=True,
+        is_error=is_error,
+    )
+
+
+async def _slack_workspace() -> tuple[UUID, UUID]:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, agent_id
 
 
 async def test_reading_the_matching_reference_passes() -> None:
@@ -171,6 +245,195 @@ async def test_a_retried_install_skill_load_is_scored_on_the_attempt_that_succee
     assert verdict.passed
 
 
+async def test_rotated_secret_recovery_loads_the_skill_and_requests_the_signing_secret() -> None:
+    verdict = await slack_rotated_secret_scorer()(
+        _output(
+            _load(SLACK_SETUP_SKILL),
+            _credential_request(SLACK_SIGNING_SECRET_SLOT),
+        )
+    )
+
+    assert verdict.passed
+
+
+async def test_rotated_secret_recovery_credits_an_attempt_even_when_no_member_can_fill_it() -> None:
+    verdict = await slack_rotated_secret_scorer()(
+        _output(
+            _load(SLACK_SETUP_SKILL),
+            _credential_request(SLACK_SIGNING_SECRET_SLOT, is_error=True),
+        )
+    )
+
+    assert verdict.passed
+
+
+async def test_rotated_secret_recovery_rejects_a_wrong_private_request() -> None:
+    wrong = await slack_rotated_secret_scorer()(
+        _output(_load(SLACK_SETUP_SKILL), _credential_request("slack_bot_token"))
+    )
+
+    assert not wrong.passed
+
+
+async def test_rotated_secret_seed_lands_pending_slack_state(db: None, tmp_path) -> None:
+    workspace_id, agent_id = await _slack_workspace()
+    store = CredentialStore(Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    init_workspace_credentials(store)
+    try:
+        with ws(workspace_id):
+            await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+            await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+            assert await store.get(workspace_id, SLACK_BOT_TOKEN_SLOT) == SLACK_EVAL_BOT_TOKEN
+            assert (
+                await store.get(workspace_id, SLACK_SIGNING_SECRET_SLOT)
+                == SLACK_EVAL_CURRENT_SECRET
+            )
+    finally:
+        init_workspace_credentials(None)
+
+    identity = SlackIdentity.model_validate_json(await blob.get(identity_blob_key(workspace_id)))
+    marker = loads(await blob.get(url_verified_blob_key(workspace_id)))
+
+    assert identity.bot_token_fingerprint == bot_token_fingerprint(SLACK_EVAL_BOT_TOKEN)
+    assert marker["fingerprint"] == SLACK_EVAL_STALE_FINGERPRINT
+    assert marker["fingerprint"] != signing_secret_fingerprint(SLACK_EVAL_CURRENT_SECRET)
+
+
+async def test_rotated_secret_seed_makes_slack_connect_pending(db: None, tmp_path) -> None:
+    workspace_id, agent_id = await _slack_workspace()
+    store = CredentialStore(Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+    init_workspace_credentials(store)
+    try:
+        with ws(workspace_id):
+            await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+            ext = ExtensionContext(
+                store=ScopedStore(extension="slack"),
+                credentials=CredentialAccess(
+                    frozenset((SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT))
+                ),
+                installations=SurfaceInstallationAccess(frozenset((SURFACE_SLACK,))),
+            )
+            ctx = cast(
+                "ToolContext",
+                SimpleNamespace(
+                    blob=blob,
+                    turn=SimpleNamespace(workspace_id=workspace_id),
+                    ext=ext,
+                    public_base_url=None,
+                ),
+            )
+            result = await slack_connect_handler(
+                ctx,
+                SlackConnectInput(
+                    method="manifest", user_description="checking the Slack connection"
+                ),
+            )
+            await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+    finally:
+        init_workspace_credentials(None)
+
+    assert loads(result.content[0].text)["state"] == "pending"
+
+
+async def test_rotated_secret_seed_refuses_every_foreign_slack_state(db: None, tmp_path) -> None:
+    store = CredentialStore(Fernet(Fernet.generate_key()))
+    blob = FilesystemBlobStore(root=tmp_path)
+
+    async def slack_state(workspace_id: UUID):
+        async with workspace_tx() as connection:
+            credentials = (
+                await connection.execute(
+                    sa.select(tables.credential.c.slot, tables.credential.c.ciphertext)
+                    .where(tables.credential.c.workspace_id == workspace_id)
+                    .order_by(tables.credential.c.slot)
+                )
+            ).all()
+            installations = (
+                await connection.execute(
+                    sa.select(
+                        tables.surface_installation.c.installation_id,
+                        tables.surface_installation.c.agent_id,
+                    ).where(
+                        tables.surface_installation.c.workspace_id == workspace_id,
+                        tables.surface_installation.c.surface == SURFACE_SLACK,
+                    )
+                )
+            ).all()
+        identity_key = identity_blob_key(workspace_id)
+        verified_key = url_verified_blob_key(workspace_id)
+        identity = await blob.get(identity_key) if await blob.exists(identity_key) else None
+        verified = await blob.get(verified_key) if await blob.exists(verified_key) else None
+        return credentials, installations, identity, verified
+
+    init_workspace_credentials(store)
+    try:
+        for mutation in (
+            "slot",
+            "installation",
+            "identity_missing",
+            "verified_missing",
+            "bot_token",
+            "signing_secret",
+            "identity",
+            "fingerprint",
+        ):
+            workspace_id, agent_id = await _slack_workspace()
+            with ws(workspace_id):
+                await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+                match mutation:
+                    case "slot":
+                        async with workspace_tx() as connection:
+                            await connection.execute(
+                                sa.delete(tables.credential).where(
+                                    tables.credential.c.workspace_id == workspace_id,
+                                    tables.credential.c.slot == SLACK_SIGNING_SECRET_SLOT,
+                                )
+                            )
+                    case "installation":
+                        async with workspace_tx() as connection:
+                            await connection.execute(
+                                sa.insert(tables.surface_installation).values(
+                                    workspace_id=workspace_id,
+                                    surface=SURFACE_SLACK,
+                                    installation_id=slack_installation_id(
+                                        f"{SLACK_EVAL_TEAM_ID}OTHER"
+                                    ),
+                                    agent_id=agent_id,
+                                    created_at=sa.func.now(),
+                                    updated_at=sa.func.now(),
+                                )
+                            )
+                    case "identity_missing":
+                        await blob.delete(identity_blob_key(workspace_id))
+                    case "verified_missing":
+                        await blob.delete(url_verified_blob_key(workspace_id))
+                    case "bot_token":
+                        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-existing")
+                    case "signing_secret":
+                        await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "existing-secret")
+                    case "identity":
+                        identity = SLACK_EVAL_IDENTITY.model_copy(
+                            update={"bot_user_id": f"{SLACK_EVAL_BOT_USER_ID}OTHER"}
+                        )
+                        await blob.put(
+                            identity_blob_key(workspace_id),
+                            identity.model_dump_json().encode(),
+                        )
+                    case "fingerprint":
+                        await blob.put(
+                            url_verified_blob_key(workspace_id),
+                            dumps({"fingerprint": "existing", "at": 1.0}).encode(),
+                        )
+                before = await slack_state(workspace_id)
+                with pytest.raises(RuntimeError, match="disposable workspace without Slack state"):
+                    await seed_slack_rotated_secret(workspace_id, agent_id, blob)
+                assert await slack_state(workspace_id) == before
+    finally:
+        init_workspace_credentials(None)
+
+
 async def test_a_companion_skill_alongside_the_corpus_passes() -> None:
     """A Slack question legitimately loads the install skill too — the corpus is what must be
     there, not what must be alone."""
@@ -229,10 +492,18 @@ def test_the_cases_are_wired_to_the_graders_their_rubrics_need() -> None:
     connectors = grading_statement(
         next(case for case in CASES if case.name == "what-can-you-connect-to").grader
     )
+    rotated = grading_statement(
+        next(case for case in CASES if case.name == "slack-signing-secret-rotated").grader
+    )
+    rotated_case = next(case for case in CASES if case.name == "slack-signing-secret-rotated")
 
     assert set(_references_of(seat)) == {BILLING, "troubleshooting.md"}
     assert "list_external_tools" in connectors
     assert "capabilities.md" in _references_of(connectors)
+    assert REQUEST_CREDENTIALS_TOOL in rotated
+    assert SLACK_SIGNING_SECRET_SLOT in rotated
+    assert rotated_case.seed is seed_slack_rotated_secret
+    assert CASES[-1] is rotated_case
 
 
 def test_sampling_follows_which_way_the_case_points() -> None:

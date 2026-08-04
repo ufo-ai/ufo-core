@@ -36,15 +36,16 @@ from evals.driver import EVAL_SURFACE
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
+    CapabilitySeed,
     CapabilityVerdict,
     DescribedGrader,
-    EvalSeed,
     Grader,
     ToolInvocation,
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.scorers import answer_text, combine, restraint_scorer
 from ufo.agent_scope import agent
+from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.loop.engine import TOOL_OUTPUT_DIR
@@ -260,7 +261,7 @@ QUERIES: dict[str, JsonObject] = {
 }
 
 
-def _seeding(query: str) -> EvalSeed:
+def _seeding(query: str) -> CapabilitySeed:
     """The seed for one case: that case's own page, and the grant that lets the turn's agent reach
     the provider. A grant must pre-exist — an eval conversation has no speaking member, so
     `connect_account` cannot run inside one — and `GrantStore.record` upserts, so cases may seed it
@@ -272,7 +273,7 @@ def _seeding(query: str) -> EvalSeed:
     harness's concurrency semaphore makes reachable at `--concurrency` 2 and up. A case owning its
     own key cannot race another, and the message asking for that query is built beside it below."""
 
-    async def seed(workspace_id: UUID, agent_id: UUID) -> None:
+    async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
         await ScopedStore(extension=NAME).put(f"{CODE_FIXTURE_PREFIX}{query}", QUERIES[query])
         conversation_id = uuid4()
         async with workspace_tx() as connection:

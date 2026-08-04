@@ -8,9 +8,10 @@ from ufo_ext_coding.connect import GIT_INSTALLATION_SLOT
 from ufo_ext_coding.manifest import GIT_SLOT
 
 from evals.driver import EVAL_SURFACE
-from evals.harness.capability import CapabilityCase, EvalSeed
+from evals.harness.capability import CapabilityCase, CapabilitySeed
 from evals.harness.scorers import attempted_tools_scorer, combine, skill_scorer
 from ufo.agent_scope import agent
+from ufo.blob import BlobStore
 from ufo.credentials import (
     CredentialRequestInvalid,
     CredentialSlotUnset,
@@ -28,8 +29,8 @@ GITHUB_INSTALLATION_ID = "123456"
 GITHUB_PROVIDER = "github"
 
 
-def _github_state(*, connector: bool, app: bool) -> EvalSeed:
-    async def seed(_workspace_id: UUID, agent_id: UUID) -> None:
+def _github_state(*, connector: bool, app: bool) -> CapabilitySeed:
+    async def seed(_workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
         workspace = ws_current()
         conversation_id = uuid4()
         async with workspace_tx() as connection:

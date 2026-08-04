@@ -16,6 +16,7 @@ from ufo_ext_eval_env.manifest import CODE_FIXTURE_PREFIX, CODE_PROVIDER, NAME
 from evals import connector_refs
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from ufo.agent_scope import agent
+from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.grants import GrantStore
 from ufo.loop.engine import OFFLOAD_NOTICE, TOOL_OUTPUT_DIR
@@ -112,7 +113,7 @@ async def _workspace_with_owner() -> tuple[UUID, UUID]:
     return workspace_id, agent_id
 
 
-async def test_every_case_seed_lands_when_they_all_run_at_once(db: None) -> None:
+async def test_every_case_seed_lands_when_they_all_run_at_once(db: None, tmp_path) -> None:
     """The harness fans cases out under the run's `--concurrency` semaphore, so every seed can run
     against one workspace at the same time. `ScopedStore.put` is check-then-act, so two seeds on one
     key would both insert and the loser would raise on `ext_store`'s primary key, crashing the whole
@@ -120,9 +121,10 @@ async def test_every_case_seed_lands_when_they_all_run_at_once(db: None) -> None
     concurrently here, on Postgres as well as SQLite: nothing raises and every page lands."""
     workspace_id, agent_id = await _workspace_with_owner()
     seeds = [case.seed for case in connector_refs.CASES if case.seed is not None]
+    blob = FilesystemBlobStore(root=tmp_path)
     assert len(seeds) == len(connector_refs.QUERIES)
     with ws(workspace_id), agent(agent_id):
-        await asyncio.gather(*(seed(workspace_id, agent_id) for seed in seeds))
+        await asyncio.gather(*(seed(workspace_id, agent_id, blob) for seed in seeds))
         store = ScopedStore(extension=NAME)
         landed = {
             query: await store.get(f"{CODE_FIXTURE_PREFIX}{query}")

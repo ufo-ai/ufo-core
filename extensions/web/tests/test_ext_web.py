@@ -3279,9 +3279,11 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
 ) -> None:
     """The panel contract end to end: a form-shaped POST admits a turn that dispatches the object
     verb verbatim — no model round — so the submitted values land exactly, the terminal frame
-    returns synchronously, and the turn row plus its transcript are the audit record."""
+    returns synchronously, and the turn row plus its transcript are the audit record. The intent
+    lane publishes that terminal frame before the transcript blob is written, so the read waits on
+    the turn's workflow, which rides the turn's own id and returns only after that write."""
     client, workspace_id, agent_id = web
-    _config, _hub, blob, _sandboxes = dbos_runtime
+    config, _hub, blob, _sandboxes = dbos_runtime
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -3318,6 +3320,13 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     assert turn.queue_key == f"intent/{agent_id}/admin@example.com"
     assert outcome["message"] == "Saved."
     assert "claude-sonnet-5" in turn.inbound
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    try:
+        handle = await dbos_client.retrieve_workflow_async(outcome["turn_id"])
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            await handle.get_result(polling_interval_sec=0.05)
+    finally:
+        dbos_client.destroy()
     recorded = await Transcript(blob=blob, conversation_id=turn.conversation_id).read()
     assert recorded is not None
     assert len(recorded.messages) == 2

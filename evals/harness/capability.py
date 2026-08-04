@@ -34,6 +34,7 @@ from evals.harness.judge import (
     visual_rubric_pass,
 )
 from evals.harness.timing import CaseTiming
+from ufo.blob import BlobStore
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
 from ufo.transcript import CompactionSummary
@@ -188,10 +189,13 @@ class CapabilityOutput:
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]
 type EvalSeed = Callable[[UUID, UUID], Awaitable[None]]
+type CapabilitySeed = Callable[[UUID, UUID, BlobStore], Awaitable[None]]
 type WorkspacePrepare = Callable[[UUID, Path], Awaitable[None]]
 
 
-def source_digest(hook: CapabilityFollowup | EvalSeed | WorkspacePrepare) -> str:
+def source_digest(
+    hook: CapabilityFollowup | EvalSeed | CapabilitySeed | WorkspacePrepare,
+) -> str:
     """A case hook's identity: its own source plus its defining module's, so editing the hook — or a
     helper the module's hooks share — moves the suite digest by itself. A hook carrying state is a
     callable object rather than a function, and its source is its class's."""
@@ -270,12 +274,12 @@ class CapabilityCase:
     `rubric` judges the answer text; `artifact_rubric` judges the Markdown files the turn shared;
     `visual_rubric` judges its rendered page images. Each reaches the model judge only after the
     deterministic grader passes and requires a judge model on the task. `seed`, when set, receives
-    (workspace_id, agent_id) before the case's conversation opens and establishes the state the case
-    runs against, resetting whatever it owns. `prepare`, when set, runs once the conversation's
-    workspace directory exists and its files are staged, and before the turn opens, receiving
-    (workspace_id, that directory) — for a case whose external environment must read the very files
-    the agent will write, which `seed` runs too early to know. `undelivered` seeds rounds the agent
-    ran before the case message arrived, so they answer the last of the `prior_messages`."""
+    (workspace_id, agent_id, blob) before the case's conversation opens and establishes the state
+    the case runs against, resetting whatever it owns. `prepare`, when set, runs once the
+    conversation's workspace directory exists and its files are staged, and before the turn opens,
+    receiving (workspace_id, that directory) — for a case whose external environment must read the
+    very files the agent will write, which `seed` runs too early to know. `undelivered` seeds the
+    agent's rounds from before the case message, so they answer the last of the `prior_messages`."""
 
     name: str
     message: str
@@ -292,7 +296,7 @@ class CapabilityCase:
     undelivered: tuple[UndeliveredRound, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
-    seed: EvalSeed | None = None
+    seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
 
     def __post_init__(self) -> None:

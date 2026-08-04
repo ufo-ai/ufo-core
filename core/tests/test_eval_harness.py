@@ -297,7 +297,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "scenario_env",
         "memory_hygiene",
     }
-    assert exclusive == scenario | {"github_connections"}
+    assert exclusive == scenario | {"github_connections", "onboarding_help"}
 
 
 async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None:
@@ -491,6 +491,7 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
     member_id = await _seed_member(workspace_id, "owner@example.com")
     fernet = Fernet(Fernet.generate_key())
     store = CredentialStore(fernet)
+    blob = FilesystemBlobStore(root=Path())
     init_workspace_credentials(store)
     install_credential_requests(
         CredentialRequests(
@@ -516,7 +517,7 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
             ):
                 assert case.seed is not None
                 with ws(workspace_id):
-                    await case.seed(workspace_id, agent_id)
+                    await case.seed(workspace_id, agent_id, blob)
                     async with workspace_tx() as connection:
                         grants = (
                             await connection.execute(
@@ -616,7 +617,7 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
                     value,
                 )
                 with pytest.raises(RuntimeError, match="without a GitHub App"):
-                    await github_connections.CASES[0].seed(workspace_id, agent_id)
+                    await github_connections.CASES[0].seed(workspace_id, agent_id, blob)
                 assert (
                     await foreign_store.get(
                         workspace_id,
@@ -633,7 +634,7 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
                     )
             await store.put(workspace_id, github_connections.GIT_SLOT, "member-token")
             with pytest.raises(RuntimeError, match="without a GitHub git token"):
-                await github_connections.CASES[0].seed(workspace_id, agent_id)
+                await github_connections.CASES[0].seed(workspace_id, agent_id, blob)
             assert (await store.get(workspace_id, github_connections.GIT_SLOT)) == "member-token"
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -669,7 +670,7 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
                     )
                 )
             with pytest.raises(RuntimeError, match="without GitHub accounts"):
-                await github_connections.CASES[0].seed(workspace_id, agent_id)
+                await github_connections.CASES[0].seed(workspace_id, agent_id, blob)
             async with workspace_tx() as connection:
                 assert (
                     await connection.execute(
@@ -689,6 +690,7 @@ async def test_github_states_without_a_credential_key_are_explicit(
 ) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=Path())
     await _seed_member(workspace_id, "owner@example.com")
     init_workspace_credentials(None)
     install_credential_requests(None)
@@ -698,7 +700,7 @@ async def test_github_states_without_a_credential_key_are_explicit(
         for case in github_connections.CASES[:2]:
             assert case.seed is not None
             with ws(workspace_id):
-                await case.seed(workspace_id, agent_id)
+                await case.seed(workspace_id, agent_id, blob)
 
         app_case = github_connections.CASES[2]
         assert app_case.seed is not None
@@ -706,7 +708,7 @@ async def test_github_states_without_a_credential_key_are_explicit(
             ws(workspace_id),
             pytest.raises(RuntimeError, match="credential authorization unavailable"),
         ):
-            await app_case.seed(workspace_id, agent_id)
+            await app_case.seed(workspace_id, agent_id, blob)
 
         fernet = Fernet(Fernet.generate_key())
         store = CredentialStore(fernet)
@@ -724,14 +726,14 @@ async def test_github_states_without_a_credential_key_are_explicit(
             )
         )
         with ws(workspace_id):
-            await app_case.seed(workspace_id, agent_id)
+            await app_case.seed(workspace_id, agent_id, blob)
 
         init_workspace_credentials(None)
         install_credential_requests(None)
         for case in github_connections.CASES:
             assert case.seed is not None
             with ws(workspace_id), pytest.raises(RuntimeError, match="without a GitHub App"):
-                await case.seed(workspace_id, agent_id)
+                await case.seed(workspace_id, agent_id, blob)
 
         init_workspace_credentials(store)
         with ws(workspace_id):
@@ -1361,7 +1363,10 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
                 case_name, member_key, workspace_files, prior_messages, undelivered
             )
 
-    async def seed(seeded_workspace: UUID, seeded_agent: UUID) -> None:
+    async def seed(
+        seeded_workspace: UUID, seeded_agent: UUID, seeded_blob: FilesystemBlobStore
+    ) -> None:
+        assert seeded_blob is blob
         order.append(f"seed:{seeded_workspace}:{seeded_agent}")
 
     target = InProcessTarget(
