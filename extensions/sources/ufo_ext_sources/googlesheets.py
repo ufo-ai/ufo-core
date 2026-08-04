@@ -7,9 +7,24 @@ file id is read through the Sheets API (`GET /v4/spreadsheets/{id}`) for its tit
 `spreadsheets` stream is incremental — the Drive query filters server-side past the stored
 `modifiedTime` watermark and each record carries that time as a flat `updated_at` the sync advances
 a cursor over. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads each
-tab's grid (`/values/{tab}`) so a synced sheet recalls as its rows. A grant that lacks the scope
-(`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure; a spreadsheet the
-grant can list but not open (`403`/`404` on the Sheets get) falls back to its Drive metadata.
+tab's grid (`/values/{tab}`) so a synced sheet recalls as its rows.
+
+A refusal is classified by what it names. One naming the grant or the API — a missing Drive or
+Sheets scope, a Sheets API disabled for the project — yields `StreamSkipped` wherever it arrives, on
+the Drive list or on any file's Sheets get, so the run records a skip with its stored cursor held.
+Google names those two ways: a `google.rpc.ErrorInfo` detail in the `googleapis.com` domain, which
+[Service Infrastructure reserves for the credential, the project and the service](https://github.com/googleapis/googleapis/blob/master/google/api/error_reason.proto)
+and never for one file, or an `errors[].reason` of `accessNotConfigured` or
+`insufficientPermissions`. One naming a single file — a `403` "The caller does not have permission",
+a deleted file's `404` `notFound` — falls back to that file's Drive metadata instead, which is all
+its tabs ever amount to, and on a tab's grid it drops that tab's rows while the rest of the stream
+lands. Only a Google API error body earns that fallback: a refusal carrying anything else comes from
+in front of the API, where nothing marks it as being about the one file the request named, so a
+`403` skips the stream as any `403` naming nothing does, and a `404` raises — a misrouted path is
+not a source the grant cannot read. A quota refusal is neither, though it arrives on the same
+statuses: it names a usage-limit reason (`RESOURCE_EXHAUSTED`, or one of Google's `usageLimits` 403
+reasons) and raises, failing the run with its stored cursor held.
+
 `render` lifts a spreadsheet's tab titles, a tab's name, and a grid's rows into a readable body. The
 credential is resolved through the auth proxy the runner threads — this connector holds no token.
 The write path is intentionally absent — the source seam only reads."""
@@ -20,7 +35,13 @@ from urllib.parse import quote
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    StreamSkipped,
+    StreamSpec,
+    dict_or_empty,
+    list_or_empty,
+)
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SHEETS_API_URL = "https://sheets.googleapis.com/v4"
@@ -28,6 +49,17 @@ DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
+_QUOTA_STATUS = "RESOURCE_EXHAUSTED"
+_QUOTA_REASONS = frozenset(
+    {
+        "dailyLimitExceeded",
+        "quotaExceeded",
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+    }
+)
+_SERVICE_ERROR_DOMAIN = "googleapis.com"
+_GRANT_REASONS = frozenset({"accessNotConfigured", "insufficientPermissions"})
 DRIVE_FIELDS = (
     "nextPageToken,files(id,name,webViewLink,createdTime,modifiedTime,"
     "owners(emailAddress,displayName))"
@@ -74,10 +106,11 @@ class GoogleSheetsConnector(RestConnector):
                     yield page
                     page = []
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _REFUSAL_STATUS:
+            status = error.response.status_code
+            if status in _REFUSAL_STATUS and not _is_quota_refusal(_error_detail(error)):
                 raise StreamSkipped(
-                    f"googlesheets: {stream.name!r} refused ({error.response.status_code}); the "
-                    "grant lacks the Drive or Sheets scope"
+                    f"googlesheets: {stream.name!r} refused ({status}); the grant cannot read "
+                    "Drive or Sheets"
                 ) from error
             raise
         if page:
@@ -125,13 +158,12 @@ class GoogleSheetsConnector(RestConnector):
                         params={"includeGridData": "false"},
                     )
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code in _METADATA_FALLBACK_STATUS:
-                        meta = {
-                            "spreadsheetId": spreadsheet_id,
-                            "properties": {"title": file.get("name")},
-                        }
-                    else:
+                    if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
                         raise
+                    meta = {
+                        "spreadsheetId": spreadsheet_id,
+                        "properties": {"title": file.get("name")},
+                    }
                 yield {
                     **meta,
                     "id": spreadsheet_id,
@@ -152,11 +184,13 @@ class GoogleSheetsConnector(RestConnector):
             sheet_id = properties.get("sheetId")
             if not isinstance(title, str) or sheet_id is None:
                 continue
-            data = await self._get(
-                client,
-                f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values/{quote(title, safe='')}",
-                params={"majorDimension": "ROWS"},
-            )
+            grid = f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values/{quote(title, safe='')}"
+            try:
+                data = await self._get(client, grid, params={"majorDimension": "ROWS"})
+            except httpx.HTTPStatusError as error:
+                if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+                    raise
+                continue
             yield {
                 **data,
                 "id": f"{spreadsheet_id}:{sheet_id}:values",
@@ -186,6 +220,37 @@ class GoogleSheetsConnector(RestConnector):
                 return super().render(record, stream)
         heading = f"# googlesheets {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
+
+
+def _error_detail(error: httpx.HTTPStatusError) -> dict[str, Any]:
+    try:
+        body = error.response.json()
+    except ValueError:
+        return {}
+    return dict_or_empty(dict_or_empty(body).get("error"))
+
+
+def _is_per_file_refusal(status: int, detail: dict[str, Any]) -> bool:
+    return (
+        status in _METADATA_FALLBACK_STATUS
+        and bool(detail)
+        and not _is_quota_refusal(detail)
+        and not _is_grant_refusal(detail)
+    )
+
+
+def _is_quota_refusal(detail: dict[str, Any]) -> bool:
+    if detail.get("status") == _QUOTA_STATUS:
+        return True
+    return any(item.get("reason") in _QUOTA_REASONS for item in list_or_empty(detail.get("errors")))
+
+
+def _is_grant_refusal(detail: dict[str, Any]) -> bool:
+    if any(item.get("reason") in _GRANT_REASONS for item in list_or_empty(detail.get("errors"))):
+        return True
+    return any(
+        item.get("domain") == _SERVICE_ERROR_DOMAIN for item in list_or_empty(detail.get("details"))
+    )
 
 
 def _sheet_records(spreadsheet: dict[str, Any]) -> list[dict[str, Any]]:
