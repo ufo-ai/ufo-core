@@ -44,25 +44,32 @@
     .craft{text-shadow:0 0 6px currentColor}
   }
 
-  /* The panel: the curl card's join, rendered for a browser — always in the layout. */
+  /* The panel: the curl card's join, rendered for a browser — always in the layout. Smoked glass,
+     so a craft drifting behind it is dimmed rather than swallowed; the black halo on every line
+     keeps the copy readable while that light passes. */
   .panel{
     position:fixed; left:50%; top:50%;
     transform:translate(-50%,-50%);
     width:min(92vw,30rem);
     padding:clamp(18px,4vw,28px);
     border:1px solid var(--hull);
-    background:#000;
+    background:rgba(0,0,0,.6);
+    backdrop-filter:blur(3px) saturate(180%);
+    -webkit-backdrop-filter:blur(3px) saturate(180%);
     box-shadow:0 0 32px #8b8fb844;
     font-family:var(--mono); font-size:14px; line-height:1.6;
     color:var(--hull);
+    text-shadow:0 0 3px #000, 0 0 6px #000, 0 0 12px #000;
   }
-  .panel .head{margin:0 0 14px; color:var(--gray); letter-spacing:.08em}
+  .panel .head{margin:0 0 14px; letter-spacing:.08em}
   .panel .field{display:flex; align-items:center; gap:.6ch; margin:0}
   .panel input{
     flex:1; min-width:0;
     padding:6px 0;
     background:none; border:0; border-bottom:1px solid var(--gray);
     font:inherit; color:var(--ice);
+    text-shadow:inherit;      /* a form control prints with no shadow of its own; the placeholder
+                                 takes this one from the entry, so it needs no rule of its own */
   }
   .panel input::placeholder{color:var(--gray)}
   .panel input:focus{outline:none; border-bottom-color:var(--gold)}
@@ -71,16 +78,20 @@
     margin-top:18px; padding:7px 16px;
     background:none; border:1px solid var(--gray);
     font:inherit; letter-spacing:.08em; color:var(--hull);
+    text-shadow:inherit;
     cursor:pointer;
     transition:border-color .2s, color .2s;
   }
   .panel .go:enabled:hover,.panel .go:focus-visible{border-color:var(--gold); color:var(--gold)}
   .panel .go:disabled{opacity:.45; cursor:default}
   .panel .ack{
-    margin:16px 0 0; min-height:1.6em;
-    white-space:pre-wrap; color:var(--green); text-shadow:0 0 10px #9dffb055;
+    /* Three lines: what the worker's ack wraps to at 320px, the narrowest phone, so the block does
+       not move under the hand when a join lands. */
+    margin:16px 0 0; min-height:4.8em;
+    white-space:pre-wrap; color:var(--green);
+    text-shadow:0 0 3px #000, 0 0 6px #000, 0 0 10px #9dffb055;
   }
-  .panel .ack.bad{color:var(--rust); text-shadow:none}
+  .panel .ack.bad{color:var(--rust); text-shadow:0 0 3px #000, 0 0 6px #000}
 
   /* iOS Safari zooms the page in whenever a focused control's text computes under 16px, which
      blows the block up and clips it the moment the entry is tapped. Keyed on the pointer rather

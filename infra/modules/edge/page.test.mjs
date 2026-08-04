@@ -118,6 +118,31 @@ function assertSizedForAFinger(measured) {
   }
 }
 
+// What the ack takes and what the strip holds for it, in lines. The ack's own lines are the distinct
+// tops of the rectangles a range over its copy covers — its line boxes — because the strip's
+// reserved height is the floor under scrollHeight and would answer for the copy otherwise.
+const ackRoom = (page) =>
+  page.locator("#ack").evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const line = Number.parseFloat(getComputedStyle(el).lineHeight);
+    return {
+      lines: new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size,
+      reserved: Math.round(Number.parseFloat(getComputedStyle(el).minHeight) / line),
+    };
+  });
+
+const boxOf = (page, selector) =>
+  page.locator(selector).evaluate((el) => {
+    const b = el.getBoundingClientRect();
+    return {
+      x: Math.round(b.x),
+      y: Math.round(b.y),
+      width: Math.round(b.width),
+      height: Math.round(b.height),
+    };
+  });
+
 // A press and a release, far enough apart to straddle a redraw, like a hand.
 async function press(page, x, y, hold = 140) {
   await page.mouse.move(x, y);
@@ -255,19 +280,318 @@ test("a craft is drawn, not a door", async () => {
   await page.close();
 });
 
+// Both glass facts are facts about luminance, so they are read off real pixels in linear light, in
+// the strip the ack reserves — which prints no copy until a join lands, so what changes there is
+// sky. What is read there is the tint and not whichever morph the clock happened to land on: craft
+// #0 is rewound to its own seed, walked to a numbered leg of its own tour, and held there with the
+// morph in flight dropped and one frame of that leg queued in its place, at both shimmer phases and
+// on whole pixels. Held that way a state repeats to the digit inside a page, and within 4% of
+// itself across processes.
+const GLASS_LEGS = 24;           // craft #0's first 24 forms of its own tour
+const GLASS_PHASES = [0, 1];
+// The floor is a fact about the tint, so it is measured against a tint that swallows the craft
+// rather than against a fixed luminance: over one held craft, the shipped pane must pass three times
+// the light an rgba(0,0,0,.9) pane passes there. Over the 48 states below the shipped pane passes
+// 4.7× to 11.0×, and the lighter pane the self-test ships 1.4× to 1.9×.
+//
+// A fixed luminance cannot carry this fact. What the pane passes is the craft's own brightness as
+// much as the glass's: 0.00600 through a bell on leg 20, 0.05861 through a tic-tac on leg 3 — and the
+// dimmest of those is 13% above the 0.00531 the .9 pane passes on its own brightest leg, so any fixed
+// number lands inside one range or the other.
+const CRAFT_THROUGH_GLASS_MIN = 3;
+// The ceiling is absolute, because legibility is: hull — the panel's own colour, read off the page
+// and turned into linear light here — must hold this much against the brightest pixel the pane
+// passes. Over the 48 states it holds 3.09:1 (that tic-tac) to 6.00:1, and the gate sits a fifteenth
+// under the worst of them because the reading moves up to 4% between processes. It is the
+// tint's own gate either way: lighten the pane to .55 and the tic-tac's light holds 2.71:1, to .5
+// and 2.38:1, and with the backdrop filter gone 2.30:1. The black halo on every line of the block
+// is what carries the copy the rest of the way.
+const COPY_CONTRAST_MIN = 2.9;
+// The strip with the fleet held away from it, which measured 0 in every reading taken — stated as a
+// gate of its own, because it is what makes the reading above the craft and nothing else.
+const GLASS_UNLIT_MAX = 0.0005;
+// The pane's own declarations, pinned: the tint, the filter as Chromium computes it and as the
+// stylesheet declares it, and the halo each line of the block prints.
+const TINT_ALPHA = 0.6;
+const BACKDROP_COMPUTED = "blur(3px) saturate(1.8)";
+const BACKDROP_DECLARED = "blur(3px) saturate(180%)";
+const HALO = "rgb(0, 0, 0) 0px 0px 3px, rgb(0, 0, 0) 0px 0px 6px, rgb(0, 0, 0) 0px 0px 12px";
+const ACK_HALO =
+  "rgb(0, 0, 0) 0px 0px 3px, rgb(0, 0, 0) 0px 0px 6px, rgba(157, 255, 176, 0.333) 0px 0px 10px";
+const ACK_BAD_HALO = "rgb(0, 0, 0) 0px 0px 3px, rgb(0, 0, 0) 0px 0px 6px";
+// The pane the floor measures against, and a lighter pane the floor must turn down all the same.
+const SWALLOWING_TINT = "rgba(0, 0, 0, 0.9)";
+const TURNED_DOWN_TINT = "rgba(0, 0, 0, 0.85)";
+
+// The WCAG relative luminance of a computed colour, and the ratio two of them hold.
+function linearLuminance(colour) {
+  const [r, g, b] = colour
+    .match(/\d+(\.\d+)?/g)
+    .slice(0, 3)
+    .map((channel) => Number(channel) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (copy, behind) => (copy + 0.05) / (behind + 0.05);
+
+// One frame to take a change and one to filter it: the pane re-samples its backdrop a frame behind
+// the paint, so a shot taken without this reads the frame before the one under test.
+const settle = (page) =>
+  page.evaluate(
+    () => new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted))),
+  );
+
+// The brightest pixel of one region of the screen, in linear light. Clipped to the region, so what
+// is decoded is the strip itself.
+async function peakUnder(page, box) {
+  const shot = (await page.screenshot({ clip: box })).toString("base64");
+  return page.evaluate(async (shot) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${shot}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    const linear = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    let peak = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      peak = Math.max(
+        peak,
+        0.2126 * linear(pixels[i] / 255) +
+          0.7152 * linear(pixels[i + 1] / 255) +
+          0.0722 * linear(pixels[i + 2] / 255),
+      );
+    }
+    return peak;
+  }, shot);
+}
+
+// Park the fleet down the left margin, further apart than the formation radius so nothing pushes
+// anything, and hold craft #0 on one leg of its own seeded tour over `box`. The page's own renderer
+// draws it and the page's own loop keeps drawing it: the morph in flight is dropped and that leg's
+// single frame is queued in its place, so the pixels stop changing without the clock being touched.
+// `box` null parks craft #0 with the rest, which is the reading with nothing behind the strip.
+const PARK_STRIDE = 150;
+const HELD_FRAMES = 400;
+
+async function holdCraftOnLeg(page, box, leg, shimmer) {
+  const held = await page.evaluate(
+    ({ target, leg, shimmer, stride, frames }) => {
+      fleet.forEach((craft, i) => {
+        craft.queue.length = 0;
+        craft.holdTimer = Infinity;   // no further leg starts
+        craft.timer = Infinity;       // and the cloak cycle never comes round
+        craft.phase = "visible";
+        craft.opacity = 1;
+        craft.vx = 0;
+        craft.vy = 0;
+        craft.x = 4;
+        craft.y = 4 + i * stride;
+      });
+      const craft = fleet[0];
+      craft.rng = mulberry32(SEED_STRIDE >>> 0);   // craft #0's own seed, ((0+1)*stride), rewound
+      craft.current = randomCraft(craft.rng);
+      for (let k = 0; k < leg; k++) nextLeg(craft);
+      const pinned = { ...craft.current, phase: (craft.current.phase + shimmer) & 1 };
+      const grid = renderGrid(pinned);
+      craft.el.innerHTML = gridToHTML(grid);
+      for (let k = 0; k < frames; k++) craft.queue.push(grid);
+      const drawn = craft.el.getBoundingClientRect();
+      craft.w = drawn.width;
+      craft.h = drawn.height;
+      if (target) {
+        // Whole pixels: the glyph raster, and with it the brightest pixel, moves with a fractional
+        // offset, and the craft's own width carries one.
+        craft.x = Math.round(target.x + target.width / 2 - craft.w / 2);
+        craft.y = Math.round(target.y + target.height / 2 - craft.h / 2);
+      }
+      for (const c of fleet) {
+        c.el.style.opacity = "1";
+        c.el.style.transform = `translate(${c.x}px,${c.y}px)`;
+      }
+      return { family: FAMILIES[pinned.family], drawn: craft.el.innerHTML };
+    },
+    { target: box, leg, shimmer, stride: PARK_STRIDE, frames: HELD_FRAMES },
+  );
+  await settle(page);
+  return held;
+}
+
+// Whether the hold outlasted the reading: the same frame still drawn, and frames still queued
+// behind it, so nothing the page did between the shots moved what was measured.
+const stillHeld = (page, held) =>
+  page.evaluate(
+    (drawn) => fleet[0].el.innerHTML === drawn && fleet[0].queue.length > 0,
+    held.drawn,
+  );
+
+const backgroundOf = (page) =>
+  page.locator("#join").evaluate((el) => getComputedStyle(el).backgroundColor);
+
+// Every line the block prints, and the ack in both of its moods.
+const haloOf = (page) =>
+  page.locator("#join").evaluate((block) => {
+    const shadow = (el, pseudo) => getComputedStyle(el, pseudo ?? null).textShadow;
+    const ack = block.querySelector("#ack");
+    const entry = block.querySelector("#email");
+    const printed = {
+      head: shadow(block.querySelector(".head")),
+      prompt: shadow(block.querySelector(".prompt")),
+      email: shadow(entry),
+      placeholder: shadow(entry, "::placeholder"),
+      go: shadow(block.querySelector("#go")),
+      ack: shadow(ack),
+    };
+    const wasBad = ack.classList.contains("bad");
+    ack.classList.add("bad");
+    printed.ackBad = shadow(ack);
+    ack.classList.toggle("bad", wasBad);
+    return printed;
+  });
+
+test("the block is glass: a craft behind it still shows, and the copy still reads", async () => {
+  const page = await open(3);
+  const glass = await page.locator("#join").evaluate((el) => {
+    const style = getComputedStyle(el);
+    return { background: style.backgroundColor, filter: style.backdropFilter, colour: style.color };
+  });
+  const tint = glass.background.match(/^rgba\(0, 0, 0, ([\d.]+)\)$/);
+  assert.ok(tint, `the panel's background is ${glass.background}: no sky passes an opaque pane`);
+  assert.equal(Number(tint[1]), TINT_ALPHA);
+  assert.equal(glass.filter, BACKDROP_COMPUTED);
+  // Chromium drops the -webkit twin: it is absent from the .panel rule's own cssText, absent from
+  // getPropertyValue and has no computed value, so the declaration Safari needs is read off the
+  // stylesheet the browser was served, where both must stand and must agree.
+  const stylesheet = await page.evaluate(() => document.querySelector("style").textContent);
+  assert.deepEqual(
+    [...stylesheet.matchAll(/\s(-webkit-)?backdrop-filter:([^;]+);/g)].map((declared) => [
+      declared[1] ?? "",
+      declared[2].trim(),
+    ]),
+    [
+      ["", BACKDROP_DECLARED],
+      ["-webkit-", BACKDROP_DECLARED],
+    ],
+  );
+  // The halo is what holds the copy up against the light the pane passes, and a form control prints
+  // with none of the block's own, so every line is read for it: the heading, the prompt, the entry,
+  // its placeholder — the dimmest copy the block prints — the button, and the ack in both moods.
+  assert.deepEqual(await haloOf(page), {
+    head: HALO,
+    prompt: HALO,
+    email: HALO,
+    placeholder: HALO,
+    go: HALO,
+    ack: ACK_HALO,
+    ackBad: ACK_BAD_HALO,
+  });
+  // The heading prints the panel's own hull: a dimmer grey has less to hold up with.
+  assert.equal(
+    await page.locator("#join .head").evaluate((el) => getComputedStyle(el).color),
+    glass.colour,
+  );
+
+  const strip = await boxOf(page, "#ack");
+  const swallowing = await page.addStyleTag({
+    content: `.panel{background:${SWALLOWING_TINT}}`,
+  });
+  const swallow = async (on) => {
+    await swallowing.evaluate((el, on) => (el.disabled = !on), on);
+    await settle(page);
+  };
+  await swallow(true);
+  assert.equal(await backgroundOf(page), SWALLOWING_TINT);
+  await swallow(false);
+  assert.equal(await backgroundOf(page), glass.background);
+
+  await holdCraftOnLeg(page, null, 0, 0);
+  const bare = await peakUnder(page, strip);
+  assert.ok(bare <= GLASS_UNLIT_MAX, `the strip printed ${bare} of light with nothing behind it`);
+
+  const copy = linearLuminance(glass.colour);
+  for (let leg = 0; leg < GLASS_LEGS; leg++) {
+    for (const shimmer of GLASS_PHASES) {
+      const held = await holdCraftOnLeg(page, strip, leg, shimmer);
+      const passed = await peakUnder(page, strip);
+      await swallow(true);
+      const swallowed = await peakUnder(page, strip);
+      await swallow(false);
+      const where = `leg ${leg} phase ${shimmer}, a ${held.family}`;
+      assert.ok(await stillHeld(page, held), `${where}: the craft moved while it was read`);
+      assert.ok(
+        contrast(copy, passed) >= COPY_CONTRAST_MIN,
+        `${where}: the pane passed ${passed.toFixed(5)} of light, which the copy holds only ${contrast(copy, passed).toFixed(2)}:1 against`,
+      );
+      assert.ok(
+        passed / swallowed >= CRAFT_THROUGH_GLASS_MIN,
+        `${where}: the pane passed ${passed.toFixed(5)}, only ${(passed / swallowed).toFixed(2)}× the ${swallowed.toFixed(5)} a ${SWALLOWING_TINT} pane leaves of it`,
+      );
+    }
+  }
+  await page.close();
+});
+
+// The floor is worth nothing if a tint it must turn down can clear it, so this ships one and puts the
+// same gate over the same held craft, leg by leg. The tint it ships is lighter than the pane the floor
+// measures against, so the two readings come off two panes: over the 48 states it passes 1.4× to 1.9×
+// what that pane passes — more on every leg, and never the floor's 3×.
+test("the glass gate turns down a tint that swallows the craft", async () => {
+  const page = await open(3);
+  await page.addStyleTag({ content: `.panel{background:${TURNED_DOWN_TINT}}` });
+  const strip = await boxOf(page, "#ack");
+  const reference = await page.addStyleTag({ content: `.panel{background:${SWALLOWING_TINT}}` });
+  const measureAgainst = async (on) => {
+    await reference.evaluate((el, on) => (el.disabled = !on), on);
+    await settle(page);
+  };
+  await measureAgainst(true);
+  assert.equal(await backgroundOf(page), SWALLOWING_TINT);
+  await measureAgainst(false);
+  assert.equal(await backgroundOf(page), TURNED_DOWN_TINT);
+  for (let leg = 0; leg < GLASS_LEGS; leg++) {
+    for (const shimmer of GLASS_PHASES) {
+      const held = await holdCraftOnLeg(page, strip, leg, shimmer);
+      const passed = await peakUnder(page, strip);
+      await measureAgainst(true);
+      const swallowed = await peakUnder(page, strip);
+      await measureAgainst(false);
+      const where = `leg ${leg} phase ${shimmer}, a ${held.family}`;
+      assert.ok(await stillHeld(page, held), `${where}: the craft moved while it was read`);
+      assert.ok(
+        passed > swallowed,
+        `${where}: the ${TURNED_DOWN_TINT} pane passed ${passed.toFixed(5)} and the ${SWALLOWING_TINT} pane ${swallowed.toFixed(5)}, so the floor is reading one pane twice`,
+      );
+      assert.ok(
+        passed / swallowed < CRAFT_THROUGH_GLASS_MIN,
+        `${where}: a ${TURNED_DOWN_TINT} pane passed ${passed.toFixed(5)}, ${(passed / swallowed).toFixed(2)}× what the floor measures against, which the floor lets through`,
+      );
+    }
+  }
+  assert.equal(await backgroundOf(page), TURNED_DOWN_TINT);   // read through that pane throughout
+  await page.close();
+});
+
 test("the panel copy is the fixed join: Title Case label, terminal prompt, join verb", async () => {
   const page = await open();
   assert.equal((await page.textContent("#join .head")).trim(), "Join Waitlist");
   assert.equal(await page.getAttribute("#join", "aria-labelledby"), "join-head");
   assert.equal(await page.getAttribute("#join .head", "id"), "join-head");
+  assert.equal(await page.getAttribute("#email", "aria-label"), "Email address");
   assert.equal(await page.getAttribute("#email", "placeholder"), "email@work.com");
   assert.equal((await page.textContent("#join .prompt")).trim(), ">");
-  // The prompt is plain terminal text: the panel's own color, no glow.
+  // The prompt is plain terminal text: the panel's own color and the panel's own black halo, with
+  // no glow of its own — the ack's green one is the only glow the block prints.
   const prompt = await page.locator("#join .prompt").evaluate((el) => ({
-    shadow: getComputedStyle(el).textShadow,
+    shadow: [...getComputedStyle(el).textShadow.matchAll(/rgba?\([^)]*\)/g)].map((m) => m[0]),
     panelColor: getComputedStyle(el).color === getComputedStyle(el.closest(".panel")).color,
   }));
-  assert.deepEqual(prompt, { shadow: "none", panelColor: true });
+  assert.deepEqual(prompt, {
+    shadow: ["rgb(0, 0, 0)", "rgb(0, 0, 0)", "rgb(0, 0, 0)"],
+    panelColor: true,
+  });
   // The entry's insertion caret carries no color of its own.
   const caret = await page.locator("#email").evaluate((el) => ({
     caret: getComputedStyle(el).caretColor,
@@ -281,6 +605,8 @@ test("the panel copy is the fixed join: Title Case label, terminal prompt, join 
 test("the join posts to the worker and renders its ack verbatim", async () => {
   const page = await open();
   const before = queued.length;
+  const block = await boxOf(page, "#join");
+  const entry = await boxOf(page, "#email");
   await page.fill("#email", "Pilot@YourCo.com");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() =>
@@ -290,10 +616,49 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
     (await page.textContent("#ack")).trim(),
     /^#\d+ on the waitlist\. We will email you when access opens\.$/,
   );
+  // The ack's room is reserved, so landing it moves nothing under the hand: two lines of ack here,
+  // three on the narrowest phone below, and a strip that holds three either way.
+  assert.deepEqual(await ackRoom(page), { lines: 2, reserved: 3 });
+  assert.deepEqual(await boxOf(page, "#join"), block);
+  assert.deepEqual(await boxOf(page, "#email"), entry);
   assert.equal(await page.locator("#email").isDisabled(), true);
   assert.equal(await page.locator("#go").isDisabled(), true);
   assert.equal(queued.length, before + 1);
   assert.equal(queued.at(-1).email, "pilot@yourco.com");
+  await page.close();
+});
+
+// The narrowest phone still in service is 320 CSS px across, and that is where the worker's success
+// ack wraps to three lines — the height the strip reserves. The desktop assertions above hold the
+// same two boxes at 1200px, where the ack takes two.
+const PHONE_NARROW = { ...PHONE, viewport: { width: 320, height: 568 } };
+
+test("a join lands on the narrowest phone without moving the block", async () => {
+  const page = await open(1, PHONE_NARROW);
+  const block = await boxOf(page, "#join");
+  const entry = await boxOf(page, "#email");
+  const button = await boxOf(page, "#go");
+  // What the reservation costs before a join lands: three lines of empty strip.
+  assert.deepEqual(await ackRoom(page), { lines: 0, reserved: 3 });
+  const strip = await boxOf(page, "#ack");
+  await page.fill("#email", "narrow@yourco.com");
+  await page.click("#go");
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.includes("waitlist"),
+  );
+  assert.deepEqual(await ackRoom(page), { lines: 3, reserved: 3 });
+  assert.deepEqual(await boxOf(page, "#join"), block);
+  assert.deepEqual(await boxOf(page, "#email"), entry);
+  assert.deepEqual(await boxOf(page, "#go"), button);
+  assert.deepEqual(await boxOf(page, "#ack"), strip);
+  const laid = await page.locator("#join").evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    return { top: box.top, bottom: box.bottom, viewport: innerHeight };
+  });
+  assert.ok(
+    laid.top >= 0 && laid.bottom <= laid.viewport,
+    `the block spans ${laid.top}-${laid.bottom}px of ${laid.viewport}px`,
+  );
   await page.close();
 });
 
