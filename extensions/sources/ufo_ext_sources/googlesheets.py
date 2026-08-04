@@ -4,12 +4,20 @@ as recallable content.
 Reads are a Drive-list→Sheets-get fan-out: `GET /drive/v3/files` enumerates the grant's
 spreadsheets (filtered to the spreadsheet mime type, untrashed, ordered by `modifiedTime`), and each
 file id is read through the Sheets API (`GET /v4/spreadsheets/{id}`) for its title and tab list. The
-`spreadsheets` stream is incremental — the Drive query filters server-side at or past the stored
-`modifiedTime`, each record carries that time as a flat `updated_at`, and each page reports as its
-own cursor the highest `modifiedTime` the run has landed, never below the stored one. `sheets`
-explodes each spreadsheet into one record per tab; `sheet_values` reads each tab's grid
-(`/values/{tab}`) so a synced sheet recalls as its rows; neither reports a cursor and both list the
-corpus whole.
+three streams are incremental on the file's Drive `modifiedTime` — the Drive query filters
+server-side at or past the stored value, each record carries that time as a flat `updated_at`, and
+each page reports as its own cursor the highest `modifiedTime` the run has landed, never below the
+stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads each
+tab's grid (`/values/{tab}`) so a synced sheet recalls as its rows; both stamp their parent file's
+times onto every derived record, and a page reports its cursor even where a file lands no derived
+record at all — an empty tab list, a tab list the grant cannot read — so the reported value covers
+that file and the corpus below it goes unlisted on the next run. A file the grant refuses is covered
+by that cursor like any other: its `spreadsheets` record is the Drive metadata fallback, the tabs
+the refusal drops land nothing. A refusal on a single tab's grid is covered the same way: the file's
+other tabs land, the reported cursor covers the file as if that tab had landed too, and the tab's
+rows land on the next run that lists the file — the run Drive stamps a fresh `modifiedTime` on it,
+or one re-listing the group it is tied in. The watermark is the file's, so a change Drive does not
+stamp on `modifiedTime` leaves that file's tabs as they last synced.
 
 The listing is ordered by `modifiedTime` and files share values, so the filter's bound is inclusive:
 a run whose record cap ends inside a group of files sharing one `modifiedTime` reports that value,
@@ -84,8 +92,20 @@ GOOGLE_SHEETS_STREAMS: list[StreamSpec] = [
         cursor_field="updated_at",
         updated_at_field="updated_at",
     ),
-    StreamSpec(name="sheets", source_object="sheets", primary_key="id", canonical=False),
-    StreamSpec(name="sheet_values", source_object="values", primary_key="id", canonical=False),
+    StreamSpec(
+        name="sheets",
+        source_object="sheets",
+        primary_key="id",
+        cursor_field="updated_at",
+        canonical=False,
+    ),
+    StreamSpec(
+        name="sheet_values",
+        source_object="values",
+        primary_key="id",
+        cursor_field="updated_at",
+        canonical=False,
+    ),
 ]
 
 
@@ -97,13 +117,10 @@ class GoogleSheetsConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[StreamPage]:
-        incremental = stream.cursor_field is not None
         page: list[dict[str, Any]] = []
-        reported = cursor if incremental else None
+        reported = cursor
         try:
-            async for spreadsheet in self._spreadsheet_records(
-                client, cursor=cursor if incremental else None
-            ):
+            async for spreadsheet in self._spreadsheet_records(client, cursor=cursor):
                 if stream.name == "spreadsheets":
                     page.append(spreadsheet)
                 elif stream.name == "sheets":
@@ -116,7 +133,7 @@ class GoogleSheetsConnector(RestConnector):
                         f"googlesheets: stream {stream.name!r} has no paginate dispatch"
                     )
                 modified = spreadsheet.get("updated_at")
-                if incremental and isinstance(modified, str):
+                if isinstance(modified, str):
                     reported = modified if reported is None else max(reported, modified)
                 if len(page) >= PAGE_SIZE:
                     yield StreamPage(records=page, next_cursor=reported)
@@ -129,7 +146,7 @@ class GoogleSheetsConnector(RestConnector):
                     "Drive or Sheets"
                 ) from error
             raise
-        if page:
+        if page or reported != cursor:
             yield StreamPage(records=page, next_cursor=reported)
 
     async def _iter_spreadsheet_files(
@@ -214,6 +231,8 @@ class GoogleSheetsConnector(RestConnector):
                 "spreadsheet_title": spreadsheet.get("title"),
                 "sheet_id": sheet_id,
                 "sheet_title": title,
+                "created_at": spreadsheet.get("created_at"),
+                "updated_at": spreadsheet.get("updated_at"),
             }
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
@@ -286,6 +305,8 @@ def _sheet_records(spreadsheet: dict[str, Any]) -> list[dict[str, Any]]:
                 "spreadsheet_id": spreadsheet_id,
                 "spreadsheet_title": spreadsheet.get("title"),
                 "title": properties.get("title"),
+                "created_at": spreadsheet.get("created_at"),
+                "updated_at": spreadsheet.get("updated_at"),
             }
         )
     return records
