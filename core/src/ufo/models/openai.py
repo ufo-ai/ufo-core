@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import openai
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -73,7 +74,11 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
-STREAM_TIMEOUT_ERRORS = (openai.APITimeoutError,)
+STREAM_TRANSPORT_ERRORS = (
+    openai.APITimeoutError,
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+)
 STREAM_STATUS_ERRORS = (openai.APIStatusError,)
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 
@@ -343,9 +348,10 @@ class OpenAIClient:
         """Yield text and tool-call events then exactly one Usage as the final event.
 
         429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
+        or a dropped connection (a raw httpx error the SDK does not wrap once streaming starts)
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
-        and re-raising the provider's APITimeoutError) — both only until the first event is
-        yielded; any failure after that raises immediately. finish_reason=length is a truncated
+        and re-raising the fault) — both only until the first event is yielded; any failure after
+        that raises immediately. finish_reason=length is a truncated
         completion and raises ModelResponseTruncated. finish_reason=tool_calls is a normal stop. An
         empty completion (no event, finish_reason=stop) is a retryable provider failure, re-issued
         up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's
@@ -395,21 +401,23 @@ class OpenAIClient:
                                 id=tool_call_ids[call.index],
                                 partial_json=call.function.arguments,
                             )
-            except STREAM_TIMEOUT_ERRORS:
+            except STREAM_TRANSPORT_ERRORS as error:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
-                        "model.provider_timeout",
+                        "model.provider_transport_error",
                         provider="openai",
                         model=request.model,
                         attempts=attempt,
+                        error_class=type(error).__name__,
                     )
                     raise
                 log(
-                    "model.provider_timeout_retry",
+                    "model.provider_transport_retry",
                     provider="openai",
                     model=request.model,
                     attempt=attempt,
+                    error_class=type(error).__name__,
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
@@ -543,16 +551,24 @@ class OpenAIClient:
                             raise RuntimeError(f"OpenAI response failed: {message}")
                         case ResponseErrorEvent(message=message):
                             raise RuntimeError(f"OpenAI response failed: {message}")
-            except STREAM_TIMEOUT_ERRORS:
+            except STREAM_TRANSPORT_ERRORS as error:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
-                        "model.provider_timeout",
+                        "model.provider_transport_error",
                         provider="openai",
                         model=request.model,
                         attempts=attempt,
+                        error_class=type(error).__name__,
                     )
                     raise
+                log(
+                    "model.provider_transport_retry",
+                    provider="openai",
+                    model=request.model,
+                    attempt=attempt,
+                    error_class=type(error).__name__,
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue

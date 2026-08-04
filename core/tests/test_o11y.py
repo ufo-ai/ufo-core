@@ -269,9 +269,9 @@ DRIVER_FAULT_ROOTS = (
     (asyncpg_errors.InternalClientError, "asyncpg"),
 )
 CAUGHT_ERROR_ROOTS = (
-    *anthropic_models.STREAM_TIMEOUT_ERRORS,
+    *anthropic_models.STREAM_TRANSPORT_ERRORS,
     *anthropic_models.STREAM_STATUS_ERRORS,
-    *openai_models.STREAM_TIMEOUT_ERRORS,
+    *openai_models.STREAM_TRANSPORT_ERRORS,
     *openai_models.STREAM_STATUS_ERRORS,
 )
 MEASURED_DRIVER_ERRORS = (ConnectionRefusedError, socket.gaierror)

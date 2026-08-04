@@ -1579,8 +1579,9 @@ class StreamTimeoutModel:
 async def test_a_streamed_rounds_timeout_keeps_the_class_the_client_retries_on(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The client retries `STREAM_TIMEOUT_ERRORS` in one clause and re-raises both arms identically,
-    and a streamed request surfaces its timeout as the raw `httpx` concrete — the common arm.
+    """The client retries `STREAM_TRANSPORT_ERRORS` in one clause and re-raises both arms
+    identically, and a streamed request surfaces its timeout as the raw `httpx` concrete — the
+    common arm.
     Folding that one while the rarer create-call arm keeps its own series would split a single
     provider fault across two buckets, the larger half indistinguishable from an extension's
     crash."""

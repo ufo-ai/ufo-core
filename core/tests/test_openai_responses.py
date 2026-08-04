@@ -2,6 +2,7 @@
 `spec.api_surface == "responses"`) — the streaming/translation/retry/truncation/refusal/empty
 contract for a model like `gpt-5.6-terra` that is called on `/v1/responses`."""
 
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from types import SimpleNamespace
@@ -193,6 +194,10 @@ def _provider_timeout() -> openai.APITimeoutError:
     return openai.APITimeoutError(
         request=httpx.Request("POST", "https://provider.invalid/v1/responses")
     )
+
+
+def _remote_protocol_error() -> httpx.RemoteProtocolError:
+    return httpx.RemoteProtocolError("peer closed incomplete response")
 
 
 async def test_responses_path_translates_images_tools_and_usage() -> None:
@@ -540,6 +545,43 @@ async def test_responses_path_retries_timeout_then_succeeds(
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
     assert events == [TextDelta(text="ok"), Usage(input_tokens=1, output_tokens=1)]
+
+
+async def test_responses_path_retries_disconnect_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    scripted = ScriptedResponses(_remote_protocol_error(), (_completed_events(), None))
+    with caplog.at_level(logging.INFO):
+        events = [event async for event in _responses_client(scripted).complete(_request())]
+    assert scripted.calls == 2
+    assert events == [TextDelta(text="ok"), Usage(input_tokens=1, output_tokens=1)]
+    retry = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.provider_transport_retry"
+    )
+    assert retry.ufo["error_class"] == "RemoteProtocolError"
+
+
+async def test_responses_path_exhausted_disconnect_logs_error_class(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    scripted = ScriptedResponses(
+        *(_remote_protocol_error() for _ in range(MAX_PROVIDER_RETRIES + 1))
+    )
+    with caplog.at_level(logging.INFO), pytest.raises(httpx.RemoteProtocolError):
+        [event async for event in _responses_client(scripted).complete(_request())]
+    assert scripted.calls == MAX_PROVIDER_RETRIES + 1
+    failure = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.provider_transport_error"
+    )
+    assert failure.ufo["error_class"] == "RemoteProtocolError"
 
 
 @pytest.mark.parametrize("tail", [_provider_error(500), _provider_timeout()])

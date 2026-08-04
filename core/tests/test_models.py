@@ -649,9 +649,20 @@ async def test_timeout_exhaustion_logs_and_reraises(
     assert create.calls == harness.max_retries + 1
     assert type(raised.value) is type(first)
     assert str(raised.value) == str(first)
-    assert any(record.getMessage() == "model.provider_timeout" for record in caplog.records)
-    retry_logs = [r for r in caplog.records if r.getMessage() == "model.provider_timeout_retry"]
+    error_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.provider_transport_error"
+    ]
+    assert len(error_logs) == 1
+    assert error_logs[0].ufo["error_class"] == type(first).__name__
+    retry_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.provider_transport_retry"
+    ]
     assert len(retry_logs) == harness.max_retries
+    assert {record.ufo["error_class"] for record in retry_logs} == {type(first).__name__}
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
@@ -666,6 +677,74 @@ async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness
             received.append(event)
     assert received == [TextDelta(text="partial")]
     assert create.calls == 1
+
+
+def remote_protocol_error() -> httpx.RemoteProtocolError:
+    """The peer-closed-mid-stream fault: a raw httpx error neither SDK wraps once streaming has
+    started, so it must ride the same retry clause as a timeout (#998)."""
+    return httpx.RemoteProtocolError(
+        "peer closed connection without sending complete message body (incomplete chunked read)"
+    )
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_remote_protocol_error_retries_then_succeeds(
+    harness: ProviderHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(remote_protocol_error(), (harness.ok_events(), None))
+    with caplog.at_level(logging.INFO):
+        events = await collect(harness.build(create))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+    retry = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.provider_transport_retry"
+    )
+    assert retry.ufo["error_class"] == "RemoteProtocolError"
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_remote_protocol_error_after_first_yield_does_not_retry(
+    harness: ProviderHarness,
+) -> None:
+    create = ScriptedCreate(
+        (harness.partial_events(), remote_protocol_error()),
+        (harness.ok_events(), None),
+    )
+    received = []
+    with pytest.raises(httpx.RemoteProtocolError):
+        async for event in harness.build(create).complete(REQUEST):
+            received.append(event)
+    assert received == [TextDelta(text="partial")]
+    assert create.calls == 1
+
+
+async def test_anthropic_iteration_remote_protocol_error_before_first_event_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact production shape (#998): the stream opens, then the peer closes the connection
+    before a single event arrives — a raw httpx error during iteration, same as a timeout."""
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(
+        ([], remote_protocol_error()),
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        ),
+    )
+    events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
 
 
 def stream_read_timeout() -> httpx.ReadTimeout:
@@ -690,6 +769,22 @@ async def test_anthropic_iteration_timeout_before_first_event_retries(
         ),
     )
     events = await collect(AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC))
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+
+
+async def test_openai_iteration_timeout_before_first_event_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """openai.APITimeoutError derives from APIConnectionError, not httpx, and the SDK wraps only
+    the create call — a read timeout during iteration arrives as the raw httpx error."""
+    zero_backoff(monkeypatch)
+    create = ScriptedCreate(
+        ([], stream_read_timeout()),
+        ([openai_text("ok"), openai_usage(prompt=1, completion=1)], None),
+    )
+    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
     assert create.calls == 2
     assert events[0] == TextDelta(text="ok")
     assert isinstance(events[-1], Usage)

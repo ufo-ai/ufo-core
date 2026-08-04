@@ -37,7 +37,11 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
-STREAM_TIMEOUT_ERRORS = (anthropic.APITimeoutError, httpx.TimeoutException)
+STREAM_TRANSPORT_ERRORS = (
+    anthropic.APITimeoutError,
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+)
 STREAM_STATUS_ERRORS = (anthropic.APIStatusError,)
 
 CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
@@ -120,11 +124,12 @@ class AnthropicClient:
         attempt's reasoning alongside the new attempt's.
 
         Every provider failure except a deterministic 4xx client error (400-499 other than 429)
-        retries with retry-after-aware exponential backoff, and request timeouts retry on the same
-        backoff and shared attempt budget (each retry logged, exhaustion logged and re-raising the
-        timeout) — both only until the first event is yielded; any failure after that raises
-        immediately. A streamed request surfaces its timeout as a raw httpx timeout during
-        iteration (the SDK wraps only the create call), so the retry catches both. A mid-stream
+        retries with retry-after-aware exponential backoff, and request timeouts or a dropped
+        connection retry on the same backoff and shared attempt budget (each retry logged,
+        exhaustion logged and re-raising the fault) — both only until the first event is yielded;
+        any failure after that raises immediately. A streamed request surfaces its timeout or a
+        peer disconnect as a raw httpx error during iteration (the SDK wraps only the create
+        call), so the retry catches both. A mid-stream
         error event (overloaded, or a transient api_error) arrives on the already-200 stream
         response and so carries status_code 200 — keying retry off the single non-retryable case
         (a deterministic 4xx) catches it where a 5xx allowlist would let a 200-coded fault through.
@@ -245,21 +250,23 @@ class AnthropicClient:
                         case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
                             output_tokens = usage.output_tokens
                             stop_reason = delta.stop_reason
-            except STREAM_TIMEOUT_ERRORS:
+            except STREAM_TRANSPORT_ERRORS as error:
                 attempt += 1
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
-                        "model.provider_timeout",
+                        "model.provider_transport_error",
                         provider="anthropic",
                         model=request.model,
                         attempts=attempt,
+                        error_class=type(error).__name__,
                     )
                     raise
                 log(
-                    "model.provider_timeout_retry",
+                    "model.provider_transport_retry",
                     provider="anthropic",
                     model=request.model,
                     attempt=attempt,
+                    error_class=type(error).__name__,
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
