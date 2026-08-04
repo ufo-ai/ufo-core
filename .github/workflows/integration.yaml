@@ -10,6 +10,10 @@ concurrency:
   group: integration-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   integration:
     runs-on: ubuntu-latest
@@ -43,6 +47,32 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
+      # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
+      # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
+      # Dockerfile, so a tag that exists was built from this commit's definition on this base: pull
+      # it and name it for the fixture. Every miss — this PR changes the definition, the base tag
+      # moved, the package was evicted, the key does not derive at all — leaves the env unset and
+      # the fixture builds exactly as before. Every call here that leaves the runner is walled — the
+      # derivation resolves the floating base tag against an unauthenticated registry, the login
+      # talks to ghcr.io, and the pull moves gigabytes — because an unwalled one that never returns
+      # burns `timeout-minutes: 45` and takes every test below down with it. Walled, each ends as a
+      # miss. Must come after the reclaim step above, whose `docker image prune -af` would delete a
+      # freshly pulled image.
+      - name: Reuse the published sandbox image when it matches this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/ufo-sandbox
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          DOCKERFILE="$RUNNER_TEMP/sandbox.Dockerfile"
+          KEY="$(timeout 300 bash .github/scripts/sandbox_image_key.sh "$DOCKERFILE")" || KEY=""
+          if [ -n "$KEY" ] \
+            && echo "$GH_TOKEN" | timeout 60 docker login ghcr.io -u "$REGISTRY_USER" --password-stdin \
+            && timeout 300 docker pull -q "$IMAGE_REPOSITORY:$KEY"; then
+            echo "UFO_SANDBOX_TEST_IMAGE=$IMAGE_REPOSITORY:$KEY" >>"$GITHUB_ENV"
+          else
+            echo "no published image for ${KEY:-an underivable key} — the fixture builds it"
+          fi
       # Serial pass: the container/image-build/live turns run one process, no xdist — the ~6-7 GB
       # sandbox image build, the fixed-name MinIO container, and the live integration turns each need
       # a single owner of their shared resource. `integration` tests needing an absent key (a live

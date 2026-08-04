@@ -1,0 +1,67 @@
+name: sandbox-image
+
+# Publish the docker-gated tests' sandbox image once per definition, so a PR pulls it instead of
+# spending ~3.3 minutes rebuilding it on the `integration` critical path. The tag is the
+# definition's cache key, so publishing is idempotent and a PR that changes the definition simply
+# misses and builds its own image.
+on:
+  push:
+    branches: [main]
+    # Every input the key moves with: the definition, the files its layers bake, and `uv.lock`,
+    # which pins the e2b SDK whose `Template.to_dockerfile` renders the text being hashed. A push
+    # that moves the key with no publish behind it makes every PR pay the build, so this list
+    # over-triggers deliberately.
+    paths:
+      - sandbox/build_template.py
+      - core/src/ufo/sandbox/image/**
+      - extensions/e2b/ufo_ext_e2b.py
+      - uv.lock
+      - .github/scripts/sandbox_image_key.sh
+      - .github/workflows/sandbox-image.yml
+  # The base is a floating `:latest` tag, so the key moves with no commit behind it.
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Same reclaim the integration job needs: the image is ~6-7 GB and its build peaks near the
+      # runner's ~14 GB free disk.
+      - name: Reclaim runner disk for the sandbox image build
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+          df -h /
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      - name: Publish the sandbox image under its definition key
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/ufo-sandbox
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          DOCKERFILE="$RUNNER_TEMP/sandbox.Dockerfile"
+          KEY="$(bash .github/scripts/sandbox_image_key.sh "$DOCKERFILE")"
+          IMAGE="$IMAGE_REPOSITORY:$KEY"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "$IMAGE already published"
+            exit 0
+          fi
+          docker build -t "$IMAGE" -f "$DOCKERFILE" .
+          docker push "$IMAGE"

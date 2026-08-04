@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import socket
 import subprocess
@@ -21,6 +22,7 @@ MINIO_OP_TIMEOUT_S = 180
 MINIO_READY_SECONDS = 60.0
 TEST_BUCKET = "ufo-test"
 SANDBOX_TEST_IMAGE = "ufo-sandbox:test"
+PREBUILT_IMAGE_ENV = "UFO_SANDBOX_TEST_IMAGE"
 IMAGE_BUILD_TIMEOUT_S = 1200
 CONTAINER_OP_TIMEOUT_S = 180
 
@@ -46,16 +48,14 @@ def docker_or_fail(argv: list[str], *, timeout: int) -> subprocess.CompletedProc
     operations on local state, so a breached wall or a nonzero exit is our own bug and fails the
     test — never skips it. Skipping is what let a container that ignored its argv, and so never ran
     the command it was given, read as an absent dependency for 21 straight runs."""
+    command = " ".join(argv)
     try:
         completed = subprocess.run(
             argv, capture_output=True, text=True, check=False, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        raise AssertionError(
-            f"docker '{argv[1]}' exceeded {timeout}s — the container never exited, so it ignored "
-            f"the command it was given: {' '.join(argv)}"
-        ) from None
-    assert completed.returncode == 0, f"docker '{argv[1]}' failed: {completed.stderr.strip()}"
+        raise AssertionError(f"`{command}` exceeded {timeout}s without returning") from None
+    assert completed.returncode == 0, f"`{command}` failed: {completed.stderr.strip()}"
     return completed
 
 
@@ -63,11 +63,18 @@ def docker_or_fail(argv: list[str], *, timeout: int) -> subprocess.CompletedProc
 def sandbox_image() -> str:
     """The real sandbox image every docker-gated test runs against, built once per session. Session
     scope is what the build actually is — one tag in one daemon, global to the run. A narrower scope
-    rebuilds it each time the `db` param reorders tests across the owning module's boundary."""
+    rebuilds it each time the `db` param reorders tests across the owning module's boundary.
+
+    `UFO_SANDBOX_TEST_IMAGE` names an image the caller already loaded, which the fixture runs
+    instead of building; unset — every local run — it builds."""
     if not integration_dependency_available(
         shutil.which("docker") is not None, "Docker executable is not available"
     ):
         pytest.skip("Docker executable is not available")
+    prebuilt = os.environ.get(PREBUILT_IMAGE_ENV)
+    if prebuilt:
+        docker_or_fail(["docker", "image", "inspect", prebuilt], timeout=CONTAINER_OP_TIMEOUT_S)
+        return prebuilt
     built = run_docker_build(
         ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
         timeout=IMAGE_BUILD_TIMEOUT_S,
