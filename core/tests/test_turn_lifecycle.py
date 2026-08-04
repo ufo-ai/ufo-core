@@ -687,10 +687,20 @@ async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
     claim fails on the terminal row, and the repair flow persists the founding inbound and returns
     superseded — the member's own message survives even if the original run crashed before writing
     its transcript. The full exchange (arrivals, answer) is written by the original run's normal
-    path, not reconstructed here."""
+    path, not reconstructed here.
+
+    The first turn publishes its terminal frame before writing its transcript, so the redelivery is
+    staged only once that turn's workflow has returned: the queue partitions on the conversation and
+    admits one turn at a time, and this replay reaches the worker entrypoint directly, so the wait
+    is what keeps the two writers of one conversation apart here as the queue does in serve."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
     seed = await _bootstrap()
     first = await surface.admit(seed, "hi")
     await surface.consume(seed, first)
+    handle = await runtime.dbos.retrieve_workflow_async(first)
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        await handle.get_result(polling_interval_sec=0.05)
     _, conversation_id = await _turn_row(first)
     crashed = uuid4()
     async with workspace_tx() as connection:
@@ -728,8 +738,6 @@ async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
                 created_at=sa.func.now(),
             )
         )
-    runtime = loop_queue._runtime
-    assert runtime is not None
     with ws(scope.workspace_id):
         outcome = await loop_queue._run_turn(runtime, str(crashed))
     assert outcome == "superseded"
