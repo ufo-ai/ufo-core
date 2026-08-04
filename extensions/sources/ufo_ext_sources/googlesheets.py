@@ -4,10 +4,20 @@ as recallable content.
 Reads are a Drive-list→Sheets-get fan-out: `GET /drive/v3/files` enumerates the grant's
 spreadsheets (filtered to the spreadsheet mime type, untrashed, ordered by `modifiedTime`), and each
 file id is read through the Sheets API (`GET /v4/spreadsheets/{id}`) for its title and tab list. The
-`spreadsheets` stream is incremental — the Drive query filters server-side past the stored
-`modifiedTime` watermark and each record carries that time as a flat `updated_at` the sync advances
-a cursor over. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads each
-tab's grid (`/values/{tab}`) so a synced sheet recalls as its rows.
+`spreadsheets` stream is incremental — the Drive query filters server-side at or past the stored
+`modifiedTime`, each record carries that time as a flat `updated_at`, and each page reports as its
+own cursor the highest `modifiedTime` the run has landed, never below the stored one. `sheets`
+explodes each spreadsheet into one record per tab; `sheet_values` reads each tab's grid
+(`/values/{tab}`) so a synced sheet recalls as its rows; neither reports a cursor and both list the
+corpus whole.
+
+The listing is ordered by `modifiedTime` and files share values, so the filter's bound is inclusive:
+a run whose record cap ends inside a group of files sharing one `modifiedTime` reports that value,
+and the next run re-lists the whole group rather than dropping the files past the split. A re-listed
+file settles on the page ref it already holds, so the repeat lands it once. Drive's `orderBy` takes
+no file id and its `name` term takes no ordering operator, so no cursor names a position inside such
+a group; the run pays for the inclusive bound by re-reading the files tied at the corpus maximum
+every run.
 
 A refusal is classified by what it names. One naming the grant or the API — a missing Drive or
 Sheets scope, a Sheets API disabled for the project — yields `StreamSkipped` wherever it arrives, on
@@ -37,6 +47,7 @@ import httpx
 
 from ufo.sdk.sources import (
     RestConnector,
+    StreamPage,
     StreamSkipped,
     StreamSpec,
     dict_or_empty,
@@ -85,11 +96,13 @@ class GoogleSheetsConnector(RestConnector):
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+    ) -> AsyncIterator[StreamPage]:
+        incremental = stream.cursor_field is not None
         page: list[dict[str, Any]] = []
+        reported = cursor if incremental else None
         try:
             async for spreadsheet in self._spreadsheet_records(
-                client, cursor=cursor if stream.name == "spreadsheets" else None
+                client, cursor=cursor if incremental else None
             ):
                 if stream.name == "spreadsheets":
                     page.append(spreadsheet)
@@ -102,8 +115,11 @@ class GoogleSheetsConnector(RestConnector):
                     raise NotImplementedError(
                         f"googlesheets: stream {stream.name!r} has no paginate dispatch"
                     )
+                modified = spreadsheet.get("updated_at")
+                if incremental and isinstance(modified, str):
+                    reported = modified if reported is None else max(reported, modified)
                 if len(page) >= PAGE_SIZE:
-                    yield page
+                    yield StreamPage(records=page, next_cursor=reported)
                     page = []
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
@@ -114,7 +130,7 @@ class GoogleSheetsConnector(RestConnector):
                 ) from error
             raise
         if page:
-            yield page
+            yield StreamPage(records=page, next_cursor=reported)
 
     async def _iter_spreadsheet_files(
         self, client: httpx.AsyncClient, *, cursor: str | None
@@ -122,7 +138,7 @@ class GoogleSheetsConnector(RestConnector):
         token: str | None = None
         query = f"mimeType = '{SHEET_MIME}' and trashed = false"
         if cursor:
-            query = f"{query} and modifiedTime > '{cursor}'"
+            query = f"{query} and modifiedTime >= '{cursor}'"
         while True:
             params: dict[str, Any] = {
                 "pageSize": DRIVE_PAGE_SIZE,

@@ -40,9 +40,10 @@ the stream.
 `snapshot = delete_missing`: only a full-snapshot stream tombstones, and it is never capped, so its
 run always enumerates the whole collection. An incremental (tier-1/tier-2) run never snapshots.
 Trades: tier 2 re-fetches the skipped prefix over HTTP each slice; the skip count
-assumes the connector enumerates in a stable order between runs — drift self-heals, since updated
-or created rows carry fresh `cursor_field` values the next incremental pass catches, and a
-cursor-less stream re-walks fully regardless.
+assumes the connector enumerates in a stable order between runs, and an edit between runs that
+reorders the enumeration moves the count off its boundary — the reordered row carries a fresh
+`cursor_field` value a later incremental pass catches, the row it displaced past the boundary
+carries none. A cursor-less stream re-walks fully regardless.
 
 The credential the proxy hands back is a broker's proxying transport (the secret never leaves the
 broker) or a member-added key read host-side from the credential store (the direct/BYOK backend) —
