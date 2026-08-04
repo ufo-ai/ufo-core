@@ -14,6 +14,7 @@ path (CRUD, field discovery) is deliberately absent — the source seam only rea
 
 import asyncio
 import math
+import random
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any, ClassVar
@@ -28,11 +29,14 @@ from ufo.sources.connector import (
     StreamSpec,
 )
 
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 8
 RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 30.0
 RETRY_AFTER_MAX_SECONDS = 60.0
+RETRY_BUDGET_SECONDS = 120.0
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+RETRY_AFTER_STATUS = frozenset({429, 503, 504})
+JITTER_MAX_FACTOR = 1.5
 TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
 ERROR_BODY_CAP = 800
@@ -104,24 +108,47 @@ def _is_retryable(error: BaseException) -> bool:
     return False
 
 
-def _retry_wait(error: BaseException, delay: float) -> float:
-    """A 429's `Retry-After` when it reads as a finite non-negative number of seconds, capped at
-    `RETRY_AFTER_MAX_SECONDS`, else the caller's `delay` — a provider telling us exactly how long to
-    back off beats our own guess, but the cap bounds each wait so a header naming a distant
-    rate-limit reset cannot park one page fetch on it, and a `nan` would poison the shared loop's
-    timer heap."""
-    if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 429:
-        return delay
+def _retry_after(error: BaseException) -> float | None:
+    """The `Retry-After` seconds a rate-limit or come-back-later response carries, when it reads as
+    a finite non-negative number, else None. Read for every status that means the resource is
+    temporarily unavailable rather than broken (`RETRY_AFTER_STATUS`) — a 503/504 behind a quota
+    proxy names its reset as usefully as a 429 does. A `500`/`502` is a fault, not a schedule, so
+    its header is ignored. A `nan` is rejected before it reaches `asyncio.sleep`, where it would
+    poison the shared loop's timer heap."""
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    if error.response.status_code not in RETRY_AFTER_STATUS:
+        return None
     header = error.response.headers.get("retry-after")
     if header is None:
-        return delay
+        return None
     try:
         wait = float(header)
     except ValueError:
-        return delay
+        return None
     if not math.isfinite(wait) or wait < 0.0:
-        return delay
-    return min(wait, RETRY_AFTER_MAX_SECONDS)
+        return None
+    return wait
+
+
+def _retry_wait(error: BaseException, delay: float) -> float:
+    """How long to wait before the next attempt: a uniform draw from a floor up to
+    `JITTER_MAX_FACTOR` times it, clamped by the cap — so workers tripping one shared quota do not
+    retry on the same grid, and a floor already at the cap draws that single value. Two candidates
+    compete for the floor, each clamped by the bound that governs it: the caller's doubling `delay`
+    by `RETRY_MAX_DELAY_SECONDS`, the response's own `Retry-After` by `RETRY_AFTER_MAX_SECONDS`. The
+    larger clamped value takes the floor and its own bound becomes the cap, a tie going to the
+    ladder — so a provider telling us how long to back off extends the wait without cutting the
+    ladder short, a stated reset is undercut only by its own cap even where the nominal delay has
+    outrun it, and a header naming a distant rate-limit reset cannot park one page fetch on it."""
+    after = _retry_after(error)
+    stated = None if after is None else min(after, RETRY_AFTER_MAX_SECONDS)
+    ladder = min(delay, RETRY_MAX_DELAY_SECONDS)
+    if stated is not None and stated > ladder:
+        floor, cap = stated, RETRY_AFTER_MAX_SECONDS
+    else:
+        floor, cap = ladder, RETRY_MAX_DELAY_SECONDS
+    return random.uniform(floor, min(floor * JITTER_MAX_FACTOR, cap))
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -225,10 +252,11 @@ class RestConnector(Connector):
 
     async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
         """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine, retrying
-        a transient/5xx response until `MAX_ATTEMPTS` attempts are spent — waiting a 429's
-        `Retry-After` when it carries a usable one, bounded by `RETRY_AFTER_MAX_SECONDS`, otherwise
-        a doubling delay."""
+        a transient/5xx response until either `MAX_ATTEMPTS` attempts or `RETRY_BUDGET_SECONDS` of
+        waiting on this one request is spent, whichever comes first — waiting the response's
+        `Retry-After` when it carries a usable one, otherwise a jittered doubling delay."""
         delay = RETRY_INITIAL_DELAY_SECONDS
+        waited = 0.0
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 response = await request()
@@ -237,7 +265,11 @@ class RestConnector(Connector):
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
                 if attempt >= MAX_ATTEMPTS or not _is_retryable(error):
                     raise
-                await asyncio.sleep(_retry_wait(error, min(delay, RETRY_MAX_DELAY_SECONDS)))
+                wait = _retry_wait(error, delay)
+                if waited + wait > RETRY_BUDGET_SECONDS:
+                    raise
+                await asyncio.sleep(wait)
+                waited += wait
                 delay *= 2
         raise AssertionError("unreachable")
 
