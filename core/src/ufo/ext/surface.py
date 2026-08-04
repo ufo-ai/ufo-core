@@ -402,6 +402,16 @@ class DeployExtensionView(BaseModel):
     sandbox_internet: bool
 
 
+class SubagentSummary(BaseModel):
+    """One typed subagent profile as a surface lists it beside the workspace's agents. `model` is
+    the model the profile pins for its children, `None` when a child inherits the model of the
+    agent that spawned it. Deploy shape, fixed at boot — a subagent belongs to no member, so no
+    audience filters this."""
+
+    name: str
+    model: str | None
+
+
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
     Slots come from installed manifests, the same declarations the `credential` object kind
@@ -690,6 +700,7 @@ class SurfaceContext:
     _models: tuple[str, ...]
     _skills: SkillRegistry
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
+    _subagents: tuple[SubagentSummary, ...]
     _declared_slots: tuple[DeclaredSlot, ...]
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
@@ -707,6 +718,13 @@ class SurfaceContext:
         """Whether this deploy's active extensions grant sandbox public internet at all — the
         ceiling a portal shows an agent's `internet_access_allowed` narrowing."""
         return self._deploy_sandbox_internet
+
+    @property
+    def subagents(self) -> tuple[SubagentSummary, ...]:
+        """The typed subagent profiles this deploy's agents delegate to, by name — the roster a
+        portal lists beside the workspace's agents, fixed at boot from the same registry
+        `spawn_subagent` dispatches against."""
+        return self._subagents
 
     @property
     def models(self) -> tuple[str, ...]:

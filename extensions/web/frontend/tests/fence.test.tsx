@@ -28,7 +28,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
   );
 
   location.hash = "#/agents/" + AGENT.id + "/skills";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await waitFor(() => expect(releaseSkills).not.toBeNull());
 
@@ -58,7 +58,7 @@ test("switching agents discards the read left behind rather than painting it", a
   );
 
   location.hash = "#/agents/" + AGENT.id + "/skills";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   await waitFor(() => expect(pending.size).toBe(1));
   const [firstUrl] = [...pending.keys()];

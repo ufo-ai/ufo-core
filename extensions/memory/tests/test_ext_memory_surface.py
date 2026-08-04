@@ -21,7 +21,7 @@ from ufo_ext_memory import store as memory_store
 from ufo_ext_memory import surface as memory_surface
 from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.store import memory_item
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -88,6 +88,7 @@ async def explorer(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client

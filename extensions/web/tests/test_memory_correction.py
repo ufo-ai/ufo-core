@@ -23,7 +23,7 @@ from ufo_ext_memory import manifest as memory_manifest_module
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory_item
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import SESSION_COOKIE
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
@@ -195,6 +195,7 @@ async def memory_web(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
         memory=memory_search(manifests, None, index, embed),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:

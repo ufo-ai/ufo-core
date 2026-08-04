@@ -32,7 +32,7 @@ beforeEach(() => {
 
 test("a disclosable conversation offers admin opening, one that is not says so", async () => {
   wire(conversations([PRIVATE, WALLED]));
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   expect(await screen.findByRole("button", { name: "Open as admin" })).toBeTruthy();
   expect(screen.getByText("not shared with you")).toBeTruthy();
@@ -40,7 +40,7 @@ test("a disclosable conversation offers admin opening, one that is not says so",
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
 
@@ -62,7 +62,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
       return json({ applied: true, message: "Recorded." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -89,7 +89,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
         release = resolve;
       }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -116,7 +116,7 @@ test("an acknowledgement in flight for one conversation never opens over another
       });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   const openers = await screen.findAllByRole("button", { name: "Open as admin" });
   await userEvent.click(openers[0]);
@@ -138,7 +138,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
     ...conversations([PRIVATE]),
     "/intents": () => json({ applied: false, message: "Only an admin may read it." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -149,7 +149,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
 
 test("leaving the acknowledgement returns to the listing without reading", async () => {
   wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
   await userEvent.click(screen.getByRole("button", { name: "All conversations" }));

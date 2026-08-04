@@ -32,7 +32,7 @@ from fastapi import FastAPI
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 from ufo_testsupport.tables import reset_workspace_data
 
 from ufo import cli
@@ -544,6 +544,7 @@ def chat_server(
             ("auto", "claude-opus-4-8", "claude-sonnet-5"),
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
+            subagents=NO_SUBAGENTS,
         )
         server = _ThreadedServer(app, port)
         server.start()

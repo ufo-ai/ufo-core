@@ -8,9 +8,11 @@ export type Agent = {
   web_audience: string[];
 };
 
+export type Subagent = { name: string; model: string | null };
+
 export type Member = { id?: string; email: string; admin: boolean; seated?: boolean };
 
-export type AgentsPayload = { agents: Agent[]; member: Member };
+export type AgentsPayload = { agents: Agent[]; subagents: Subagent[]; member: Member };
 
 export type SeatSummary = { limit: number | null; included: number | null };
 

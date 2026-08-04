@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
@@ -31,7 +31,7 @@ from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import PORTAL_FILE, PORTAL_HTML, SESSION_COOKIE, _sse, load_assets
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
@@ -78,7 +78,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import conversation_audience
-from ufo.sdk.manifest import CredentialSlot, Manifest
+from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
@@ -102,6 +102,30 @@ SLOTTED = Manifest(
             member_filled=False,
         ),
     ),
+)
+
+
+class ProbeTask(BaseModel):
+    task: str
+
+
+class ProbeResult(BaseModel):
+    result: str
+
+
+def _profile(name: str, model: str | None) -> SubagentProfile:
+    return SubagentProfile(
+        name=name,
+        prompt="be focused",
+        tool_names=("read",),
+        input_model=ProbeTask,
+        output_model=ProbeResult,
+        model=model,
+    )
+
+
+PORTAL_SUBAGENTS = SubagentRegistry(
+    (_profile("general_purpose", None), _profile("deep_research", "claude-opus-4-8"))
 )
 TOKEN_SECRET = "web-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -242,7 +266,7 @@ def dbos_runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"web-test-run-token-secret"),
             dbos=dbos_client,
-            subagents=SubagentRegistry(()),
+            subagents=PORTAL_SUBAGENTS,
             subagent_grants={},
             manifests=(
                 web_manifest(),
@@ -344,6 +368,7 @@ async def web(
             DefaultIndex(transaction=workspace_tx),
             StubEmbed(),
         ),
+        subagents=PORTAL_SUBAGENTS,
         objects=member_object_registry((web_manifest(), SLOTTED, sites_manifest())),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -492,6 +517,10 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
         "agents": [
             {"id": str(agent_id), "name": "assistant", "main": True, "model": "claude-opus-4-8"}
         ],
+        "subagents": [
+            {"name": "deep_research", "model": "claude-opus-4-8"},
+            {"name": "general_purpose", "model": None},
+        ],
     }
     empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
     assert empty_rail.status_code == 200
@@ -570,6 +599,12 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         str(agent_id),
         str(second_agent),
     ]
+    roster = [
+        {"name": "deep_research", "model": "claude-opus-4-8"},
+        {"name": "general_purpose", "model": None},
+    ]
+    assert admin_view.json()["subagents"] == roster
+    assert member_view.json()["subagents"] == roster
     reachable = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
@@ -4110,6 +4145,7 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         seen = await client.get(

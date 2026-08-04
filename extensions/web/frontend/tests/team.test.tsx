@@ -24,7 +24,7 @@ beforeEach(() => {
 
 test("the roster names each member, who administers, and who holds a seat", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   const lead = await screen.findByText("lead@example.com");
   expect(lead.closest("tr")?.textContent).toContain("Admin");
@@ -46,7 +46,7 @@ test("the roster is summed above the table: members, admins, seated", async () =
         }),
       }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await screen.findByText("lead@example.com");
   expect(screen.getByText("members").previousElementSibling?.textContent).toBe("3");
@@ -68,7 +68,7 @@ test("an admin adds a member by email, optionally as an admin, through the inten
       return json({ applied: true, message: "Added new@example.com." });
     },
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
   await userEvent.click(screen.getByRole("checkbox"));
@@ -88,7 +88,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
     "/workspace/team": () => json(ROSTER),
     "/intents": () => json({ applied: false, message: "Only an admin adds a member." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "x@example.com");
   await userEvent.click(screen.getByRole("button", { name: "Add member" }));
@@ -99,7 +99,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
 
 test("a member who may not add reads the roster with no form", async () => {
   wire({ "/workspace/team": () => json({ ...ROSTER, can_add: false }) });
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
@@ -107,14 +107,14 @@ test("a member who may not add reads the roster with no form", async () => {
 
 test("the placeholder names the workspace domain an address must match", async () => {
   wire({ "/workspace/team": () => json({ ...ROSTER, domain: null }) });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   expect(await screen.findByPlaceholderText("email@work.com")).toBeTruthy();
 });
 
 test("a roster that fails to read states the error and offers no form", async () => {
   wire({ "/workspace/team": () => new Response("no", { status: 500 }) });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
@@ -122,7 +122,7 @@ test("a roster that fails to read states the error and offers no form", async ()
 
 test("a read whose body is not json states the failure rather than hanging", async () => {
   wire({ "/workspace/team": () => new Response("<html>", { status: 200 }) });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
@@ -133,7 +133,7 @@ test("the sidebar offers the workspace, which opens on the roster", async () => 
     "/workspace/team": () => json(ROSTER),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(calls.some((url) => url.includes("/workspace/team"))).toBe(true));
@@ -158,7 +158,7 @@ test("an outcome notice does not follow the member to another view", async () =>
     "/transcript": () => json({ messages: [] }),
     "/intents": () => json({ applied: true, message: "Added member@example.com." }),
   });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
@@ -178,7 +178,7 @@ test("an outcome notice does not follow the member to another view", async () =>
 
 test("a failed roster read states the fault through the shared fence", async () => {
   wire({ "/workspace/team": () => new Response("nope", { status: 500 }) });
-  render(<App agents={[AGENT]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();

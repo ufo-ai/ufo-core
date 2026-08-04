@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -43,7 +43,7 @@ test("the overview states the agent's facts, renders its schema, and submits a s
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("main agent · installations: web · updated 2026-07-30 12:00")).toBeTruthy();
   expect(screen.getByText("digest abc123 — prompt changes go through the governed proposal path in chat")).toBeTruthy();
   expect(screen.getByText("be useful")).toBeTruthy();
@@ -68,7 +68,7 @@ test("an overview that fails to read states the error and offers no form", async
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
@@ -100,7 +100,7 @@ test("tasks list their state and pause through the intent lane", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/tasks";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("scheduled")).toBeTruthy();
   expect(screen.getByText("2026-08-01 09:00")).toBeTruthy();
 
@@ -142,7 +142,7 @@ test("a task with a hidden prompt offers only its cadence fields", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/tasks";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("private member task")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Edit" }));
 
@@ -168,7 +168,7 @@ test("skills separate member-authored from deploy, and save posts one skill file
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/skills";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByText("deploy skill")).toBeTruthy();
 
@@ -209,7 +209,7 @@ test("connections flip and revoke a grant, and a 404 usage read says it is not s
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/connections";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("private")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
@@ -242,7 +242,7 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   const label = "Shared · " + shared.slice(0, 8);
   const row = (await screen.findByText("slack")).closest("tr")!;
@@ -302,7 +302,7 @@ test("conversations open a turn tree that nests a subagent under the turn that s
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await userEvent.click(await screen.findByRole("button", { name: "Open" }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
@@ -341,7 +341,7 @@ test("a conversation nobody shared offers no opener", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect((await screen.findAllByText("not shared with you")).length).toBe(2);
   expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
   const rows = screen.getAllByText("slack").map((cell) => cell.closest("tr")!);
@@ -444,7 +444,7 @@ test("the sidebar routes agents and the workspace by hash and marks the section 
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/workspace/sites": () => json({ available: false, sites: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
   expect(location.hash).toBe("#/agents");
@@ -461,16 +461,41 @@ test("the sidebar routes agents and the workspace by hash and marks the section 
   expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
 });
 
+test("the agents view lists the deploy's subagents below the agents, opening nothing", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(
+    <App
+      agents={[AGENT]}
+      subagents={[
+        { name: "deep_research", model: "claude-opus-4-8" },
+        { name: "general_purpose", model: null },
+      ]}
+      member={MEMBER}
+    />,
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  const rows = within(screen.getByRole("main")).getAllByRole("listitem");
+  expect(rows.map((row) => row.textContent)).toEqual([
+    "assistant · main agentopusNew conversation",
+    "deep_research · subagentclaude-opus-4-8",
+    "general_purpose · subagent",
+  ]);
+  expect(within(rows[0]).getAllByRole("button").length).toBe(2);
+  expect(within(rows[1]).queryAllByRole("button").length).toBe(0);
+  expect(within(rows[2]).queryAllByRole("button").length).toBe(0);
+});
+
 test("a member who is not an admin is offered no administration control", () => {
   wire({ "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
 test("the agent tab strip opens the tab named in the hash", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/skills";
   wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("No member-authored skills for assistant.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
@@ -482,7 +507,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   const model = (await screen.findByLabelText("model")) as HTMLSelectElement;
   expect(model.tagName).toBe("SELECT");
   expect([...model.options].map((option) => option.value)).toEqual(["opus", "sonnet"]);
@@ -507,7 +532,7 @@ test("a conversation the member may not read says so instead of reporting a stat
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await userEvent.click(await screen.findByRole("button", { name: "Open" }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
@@ -538,7 +563,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/connections";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await userEvent.type(
     await screen.findByPlaceholderText("Provider (github, notion, …)"),
     "github",
@@ -585,7 +610,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
         caps: [],
       }),
   });
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("No agent-scoped caps.")).toBeTruthy();
 });
 
@@ -614,7 +639,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/connections";
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await userEvent.type(
     await screen.findByPlaceholderText("Provider (github, notion, …)"),
     "github",

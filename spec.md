@@ -406,8 +406,10 @@ workspace's main agent — the agent every surface routes an unbound member to �
 portal lists and admits exactly the non-main agents whose web audience holds the signed-in
 member — grants kept in the web extension's own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent) —
-while a workspace admin reaches and administers every agent. An out-of-audience agent is
-not-found on every portal route, the administration view (agents with their policy,
+while a workspace admin reaches and administers every agent. The deploy's typed subagent profiles
+are listed beside those agents unfiltered — a subagent belongs to no member, so no audience gates
+it and no chat route reaches it. An out-of-audience agent is not-found on every portal route,
+the administration view (agents with their policy,
 installations, and web-audience grants; members and seats; spend caps with their subjects named;
 the deploy's installed extensions and public-internet ceiling) answers a workspace admin only,
 and the signed bearer enters as a session cookie through one POST (the gateway's signed-in

@@ -68,6 +68,7 @@ from ufo.ext.manifest import (
 )
 from ufo.ext.surface import (
     DeployExtensionView,
+    SubagentSummary,
     SurfaceAuth,
     SurfaceContext,
     SurfaceIdentityContext,
@@ -281,6 +282,7 @@ def run() -> None:
         (AUTO_MODEL, *sorted(registry.specs)),
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
+        subagents=runtime.subagents,
         memory=memory,
         objects=member_object_registry(manifests, credentials, index, embed),
     )
@@ -767,6 +769,7 @@ def _mount_shared_surfaces(
     *,
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
+    subagents: SubagentRegistry,
     memory: MemorySearch | None = None,
     objects: "Mapping[str, BoundKind] | None" = None,
 ) -> None:
@@ -795,6 +798,10 @@ def _mount_shared_surfaces(
         for manifest in sorted(manifests, key=lambda manifest: manifest.name)
     )
     slots = declared_slots(manifests)
+    subagent_roster = tuple(
+        SubagentSummary(name=profile.name, model=profile.model)
+        for profile in sorted(subagents.profiles, key=lambda profile: profile.name)
+    )
     kind_schemas = {
         bound.kind.name: bound.kind.spec_model.model_json_schema()
         for bound in (*CORE_OBJECT_KINDS, *core_object_kinds(manifests, credentials))
@@ -821,6 +828,7 @@ def _mount_shared_surfaces(
             _models=models,
             _skills=skills,
             _user_skills=user_skills,
+            _subagents=subagent_roster,
             _declared_slots=slots,
             _object_schemas=kind_schemas,
             _memory=memory,

@@ -45,7 +45,7 @@ from ufo_ext_sites.tools import (
     DEPLOY_WEBSITE_TOOL,
     PUBLISH_WEBSITE_TOOL,
 )
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
@@ -180,6 +180,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             DEPLOY_MODELS,
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
+            subagents=NO_SUBAGENTS,
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 

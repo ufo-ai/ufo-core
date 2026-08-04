@@ -135,6 +135,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _artifact_token_secret="",
         _skills=EMPTY_SKILL_REGISTRY,
         _user_skills=no_user_skills,
+        _subagents=(),
         _public_base_url=None,
         _ingress_public_url=None,
         _deploy_sandbox_internet=False,

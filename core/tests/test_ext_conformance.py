@@ -25,7 +25,7 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.agent_scope import agent
 from ufo.audience import audience_subjects, conversation_audience
@@ -1293,6 +1293,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     body = json.dumps(
         {"external_id": "ext-1", "email": email, "message": "hello", "inbound_text": "note!"}
@@ -1420,6 +1421,7 @@ async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     body = json.dumps({"external_id": "ext-live-1", "message": "hello"})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:

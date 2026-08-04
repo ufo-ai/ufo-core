@@ -95,7 +95,7 @@ test("an admin is offered administration, which reads the admin projection", asy
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   expect(await screen.findByText("Members · 5 seat limit · 3 included")).toBeTruthy();
@@ -124,7 +124,7 @@ test("the admin agent row grants and revokes web access by email", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[second]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   await userEvent.type(await screen.findByPlaceholderText("email@work.com"), "new@work.com");
@@ -155,7 +155,7 @@ test("a failed administration read stays inside the scrolling frame the view own
     "/api/admin": () => new Response("no", { status: 500 }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   const message = await screen.findByText("Error 500 — reload to retry.");
@@ -174,7 +174,7 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
     "/api/admin": () => new Promise<Response>(() => {}),
   });
   location.hash = "#/admin";
-  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   const loading = await screen.findByText("Loading…");
   expect(loading.closest("main")).not.toBeNull();
@@ -204,7 +204,7 @@ test("a refused audience change tones the administration notice", async () => {
     "/intents": () => json({ applied: false, message: "Only an admin grants access." }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[second]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   await userEvent.type(await screen.findByPlaceholderText("email@work.com"), "new@work.com");

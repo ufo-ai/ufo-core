@@ -37,7 +37,7 @@ function serve() {
 
 test("the artifact viewer is torn down when the member navigates to another view", async () => {
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
@@ -53,7 +53,7 @@ test("the artifact viewer is torn down when the member navigates to another view
 
 test("the artifact viewer is torn down when the member returns to a conversation", async () => {
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));

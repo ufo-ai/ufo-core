@@ -92,7 +92,7 @@ test("the workspace hash carries its place and parses back to it", () => {
 test("a reload lands on the page and the open artifact the hash names", async () => {
   location.hash = workspaceHash("artifacts", { after: "c-older", open: OLDER_KEY });
   const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(calls.some((url) => url.includes("after=c-older"))).toBe(true);
@@ -102,7 +102,7 @@ test("a reload lands on the page and the open artifact the hash names", async ()
 test("paging writes the cursor to the hash and Back steps to the previous page", async () => {
   location.hash = workspaceHash("artifacts");
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Older" }));
 
@@ -117,7 +117,7 @@ test("paging writes the cursor to the hash and Back steps to the previous page",
 test("opening an artifact names it in the hash and closing clears it", async () => {
   location.hash = workspaceHash("artifacts", { after: "c-older" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
@@ -133,7 +133,7 @@ test("search and chip ride the hash by replacement, never as history entries", a
   location.hash = "#/agents";
   location.hash = workspaceHash("sources");
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
   await userEvent.type(screen.getByRole("searchbox"), "rss");
@@ -148,7 +148,7 @@ test("search and chip ride the hash by replacement, never as history entries", a
 test("a reloaded filter lands filtered", async () => {
   location.hash = workspaceHash("sources", { q: "rss", chip: "Shared" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("rss")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeNull();
@@ -161,7 +161,7 @@ test("a reloaded filter lands filtered", async () => {
 test("a tab click releases the filters, so returning starts unfiltered", async () => {
   location.hash = workspaceHash("sources", { q: "rss", chip: "Shared" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("rss");
 
@@ -178,7 +178,7 @@ test("closing the viewer unwinds the entry opening it pushed", async () => {
   location.hash = "#/agents";
   location.hash = workspaceHash("artifacts");
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "report.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
@@ -202,7 +202,7 @@ test("a cursor the surface refuses leaves a way back to the first page", async (
       return json({ messages: [] });
     }),
   );
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "First page" }));
 
@@ -214,7 +214,7 @@ test("a second row opened behind the sheet still closes to the listing", async (
   location.hash = "#/agents";
   location.hash = workspaceHash("artifacts", { after: "c-older" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
@@ -232,7 +232,7 @@ test("a second row opened behind the sheet still closes to the listing", async (
 test("paging away from an open row carries no dead open key", async () => {
   location.hash = workspaceHash("artifacts");
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "report.txt" }));
   expect(await screen.findByText("file body")).toBeTruthy();
@@ -276,7 +276,7 @@ test("a placement from a pane the member already left never writes its dead plac
       return json({ members: [], can_add: false, domain: null });
     }),
   );
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
   await waitFor(() => expect(release).not.toBeNull());
@@ -304,7 +304,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
       return json({ messages: [] });
     }),
   );
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "First page" }));
 
@@ -315,13 +315,13 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
 test("a hash naming a filter or a memory class that does not exist says so", async () => {
   location.hash = workspaceHash("sources", { chip: "Nonexistent" });
   serve();
-  const view = render(<App agents={[AGENT]} member={MEMBER} />);
+  const view = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("That filter is not available.")).toBeTruthy();
   view.unmount();
 
   location.hash = workspaceHash("memory", { kind: "nonexistent" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("That memory class is not available.")).toBeTruthy();
 });
 
@@ -358,7 +358,7 @@ test("an intent resolving after the member leaves never rewrites where they went
       return json({ members: [], can_add: false, domain: null });
     }),
   );
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
   await waitFor(() => expect(release).not.toBeNull());
@@ -373,7 +373,7 @@ test("an intent resolving after the member leaves never rewrites where they went
 test("a memory search and kind filter ride the hash and survive reload", async () => {
   location.hash = workspaceHash("memory");
   const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "fact" }));
   expect(location.hash).toBe("#/workspace/memory?kind=fact");
@@ -388,7 +388,7 @@ test("a memory search and kind filter ride the hash and survive reload", async (
 test("a reloaded kind filter lands on that kind and reads it", async () => {
   location.hash = workspaceHash("memory", { kind: "fact" });
   const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   const chip = await screen.findByRole("button", { name: "fact" });
   expect(chip.getAttribute("aria-current")).toBe("true");
@@ -399,7 +399,7 @@ test("a reloaded kind filter lands on that kind and reads it", async () => {
 test("a search cleared from a kind returns to that kind rather than page one", async () => {
   location.hash = workspaceHash("memory", { kind: "fact", q: "roadmap" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   const box = (await screen.findByPlaceholderText("Search memory…")) as HTMLInputElement;
   expect(box.value).toBe("roadmap");
@@ -413,7 +413,7 @@ test("a search cleared from a kind returns to that kind rather than page one", a
 test("a deep link naming a row that is not on this page says so", async () => {
   location.hash = workspaceHash("artifacts", { open: "2020-01-01T00:00:00|gone.txt" });
   serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("That item is not on this page.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
@@ -423,7 +423,7 @@ test("a deep link naming a row that is not on this page says so", async () => {
 test("opening and closing the viewer issues no second listing read", async () => {
   location.hash = workspaceHash("artifacts");
   const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await screen.findByRole("button", { name: "report.txt" });
   const reads = () => calls.filter((url) => url.includes("/workspace/artifacts")).length;
@@ -440,7 +440,7 @@ test("opening and closing the viewer issues no second listing read", async () =>
 test("a reloaded memory search prefills the box and fetches the query", async () => {
   location.hash = workspaceHash("memory", { q: "roadmap" });
   const calls = serve();
-  render(<App agents={[AGENT]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByDisplayValue("roadmap")).toBeTruthy();
   expect(calls.some((url) => url.includes("/workspace/memory?q=roadmap"))).toBe(true);

@@ -25,7 +25,7 @@ from ufo_ext_ufo.surface import (
     resolve_workspace,
     stream_directives,
 )
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -467,6 +467,7 @@ async def ufo(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
         yield client, workspace_id
@@ -499,6 +500,7 @@ async def shared_ufo(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
         yield client
@@ -789,6 +791,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     foreign = _mint(SECRET, workspace_id, "late@example.com", _future())

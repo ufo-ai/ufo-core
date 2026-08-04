@@ -30,13 +30,13 @@ import {
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent, Member, Subagent } from "@/lib/types";
 
-export type AppProps = { agents: Agent[]; member: Member };
+export type AppProps = { agents: Agent[]; subagents: Subagent[]; member: Member };
 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
 
-export function App({ agents, member }: AppProps) {
+export function App({ agents, subagents, member }: AppProps) {
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
@@ -209,6 +209,7 @@ export function App({ agents, member }: AppProps) {
         <Pane
           route={route}
           agents={agents}
+          subagents={subagents}
           member={member}
           mainAgent={mainAgent}
           rail={rail}
@@ -227,6 +228,7 @@ export function App({ agents, member }: AppProps) {
 function Pane({
   route,
   agents,
+  subagents,
   member,
   mainAgent,
   rail,
@@ -239,6 +241,7 @@ function Pane({
 }: {
   route: Route;
   agents: Agent[];
+  subagents: Subagent[];
   member: Member;
   mainAgent: Agent | null;
   rail: Rail;
@@ -254,7 +257,14 @@ function Pane({
     return <Workspace view={route.view} place={route.place} onPlace={onPlaceWorkspace} />;
   }
   if (route.kind === "agents") {
-    return <Agents agents={agents} onOpen={onOpenAgent} onNewChat={onNewChat} />;
+    return (
+      <Agents
+        agents={agents}
+        subagents={subagents}
+        onOpen={onOpenAgent}
+        onNewChat={onNewChat}
+      />
+    );
   }
   if (route.kind === "agent") {
     const agent = agents.find((entry) => entry.id === route.agentId);

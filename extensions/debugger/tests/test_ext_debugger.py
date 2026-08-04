@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_debugger import surface as debugger_surface
 from ufo_ext_debugger.manifest import manifest as debugger_manifest
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -101,6 +101,7 @@ async def debug(
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://fleet") as client:
         yield client, blob, sandboxes

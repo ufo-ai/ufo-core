@@ -57,5 +57,11 @@ export function Portal() {
       </div>
     );
   }
-  return <App agents={boot.payload.agents} member={boot.payload.member} />;
+  return (
+    <App
+      agents={boot.payload.agents}
+      subagents={boot.payload.subagents}
+      member={boot.payload.member}
+    />
+  );
 }
