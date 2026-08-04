@@ -23,6 +23,9 @@ concurrency:
   group: claude-review-${{ github.event.pull_request.number || inputs.pr || github.ref }}
   cancel-in-progress: true
 
+env:
+  AUTO_REVIEW_LIMIT: 3
+
 jobs:
   claude-review:
     # Skip drafts: a PR is reviewed once marked ready (the ready_for_review trigger above).
@@ -39,15 +42,43 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check automatic review limit
+        id: review-limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 .github/scripts/prior_findings.py "$REPOSITORY" "$PR_NUMBER" > "$RUNNER_TEMP/prior.json"
+          rounds="$(jq -r '.rounds // empty' "$RUNNER_TEMP/prior.json")"
+          if [[ -n "$rounds" && "$rounds" -lt "$AUTO_REVIEW_LIMIT" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          if [[ -n "$rounds" ]]; then
+            echo "The automatic review limit has been reached. Run Claude Code Review manually for another review." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Review history is unavailable. Run Claude Code Review manually." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - uses: astral-sh/setup-uv@v5
+        if: steps.review-limit.outputs.run == 'true'
         continue-on-error: true
         with:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
+        if: steps.review-limit.outputs.run == 'true'
         continue-on-error: true
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.review-limit.outputs.run == 'true'
         env:
           CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
         with:

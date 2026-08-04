@@ -41,6 +41,18 @@ def test_claude_code_review_uses_its_own_skill_with_permissive_bash() -> None:
     assert "fetch-depth: 0" in workflow
 
 
+def test_claude_code_review_caps_automatic_rounds_but_admits_manual_runs() -> None:
+    workflow = WORKFLOW.read_text()
+
+    assert "AUTO_REVIEW_LIMIT: 3" in workflow
+    assert "EVENT_NAME: ${{ github.event_name }}" in workflow
+    assert 'python3 .github/scripts/prior_findings.py "$REPOSITORY" "$PR_NUMBER"' in workflow
+    assert '"$EVENT_NAME" == "workflow_dispatch"' in workflow
+    assert '"$rounds" -lt "$AUTO_REVIEW_LIMIT"' in workflow
+    assert 'echo "run=false" >> "$GITHUB_OUTPUT"' in workflow
+    assert workflow.count("if: steps.review-limit.outputs.run == 'true'") == 3
+
+
 def test_claude_code_review_skill_requires_a_current_head_verdict() -> None:
     skill = SKILL.read_text()
 
