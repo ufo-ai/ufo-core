@@ -176,7 +176,7 @@ case "$URL" in
       sed -e 's/%{http_code}/302/g' -e "s|%{redirect_url}|https://app.$HOST/login|g"
     ;;
   */v1/onboard/ufo)
-    [ "$BAD_ONBOARD_HOST" != "$HOST" ] || exit 1
+    [ "$BAD_ONBOARD_HOST" != "$HOST" ] || { printf 'wrong\n'; exit; }
     printf 'x-ufo-session header is required.\n'
     ;;
   */ufo)
@@ -2310,7 +2310,7 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         'printf \'%s\\n\' "$*" >> "$CURL_CALLS"\n'
         'case "$*" in\n'
         '  *"/v1/onboard/ufo"*)\n'
-        '    [ "$BAD_RESPONSE" != onboard ] || exit 1\n'
+        "    [ \"$BAD_RESPONSE\" != onboard ] || { printf 'wrong\\n'; exit; }\n"
         "    printf 'x-ufo-session header is required.\\n'\n"
         "    ;;\n"
         "  */ufo)\n"
@@ -2716,7 +2716,8 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "$ORIGIN_CALLS"\n'
         'case "$*" in\n'
-        '  *"/v1/onboard/ufo"*) [ "$FAIL_PATH" != onboard ] || exit 1; '
+        '  *"/v1/onboard/ufo"*) [ "$FAIL_PATH" != onboard ] || '
+        "{ printf 'wrong\\n'; exit; }; "
         "printf 'x-ufo-session header is required.\\n' ;;\n"
         '  */ufo) [ "$FAIL_PATH" != ufo ] || exit 1; '
         'printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_RESPONSE_HOST" ;;\n'

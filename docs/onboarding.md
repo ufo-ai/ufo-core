@@ -46,11 +46,9 @@ browser ------>| web (ufo_session) · debug (ufo_debug)      |
 
 One worker per apex fronts `flyingobject.ai` and `testing.flyingobject.ai`. Each uses its own
 `origin_base` for gateway-backed responses — the client script, the fleet count, and the
-onboarding wire — its own D1 waitlist database, and its own confirmation queue. The wire goes to
-`origin_base` by name because the apex's own DNS record belongs to whatever answers that host, not
-to the edge terraform, and the install must not depend on it. Unmatched requests pass through to
-what that host serves. Sign-in lives on the app host, so the apex carries no signed-in state and
-the session cookie stays same-origin.
+onboarding wire — its own D1 waitlist database, and its own confirmation queue. Unmatched requests
+pass through to what that host serves. Sign-in lives on the app host, so the apex carries no
+signed-in state and the session cookie stays same-origin.
 
 ## Terminal onboarding flow
 
