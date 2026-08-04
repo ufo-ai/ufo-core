@@ -34,7 +34,6 @@ from ufo.search import (
     SearchProvider,
     SearchQuery,
     SearchResults,
-    SearchUnsupported,
 )
 from ufo.tools.context import ToolContext
 
@@ -57,9 +56,7 @@ FETCH_URL_DESCRIPTION = (
 
 class _FakeSearchProvider:
     """Records the queries and fetches the tools build and answers with canned seam objects. A
-    dependency stand-in — the tests assert the tools' marshalling, never this fake. `supports_fetch`
-    False honors the seam contract by raising `SearchUnsupported` from `fetch`, which the tool's
-    gate ensures is never reached."""
+    dependency stand-in — the tests assert the tools' marshalling, never this fake."""
 
     def __init__(self, supports_fetch: bool = True, answer: str | None = None) -> None:
         self.supports_fetch = supports_fetch
@@ -84,8 +81,6 @@ class _FakeSearchProvider:
 
     async def fetch(self, request: FetchRequest) -> FetchedPage:
         self.fetches.append(request)
-        if not self.supports_fetch:
-            raise SearchUnsupported("this fake cannot fetch")
         return FetchedPage(
             url=request.url,
             text="page text",

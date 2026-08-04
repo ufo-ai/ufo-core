@@ -6,9 +6,8 @@ when `supports_fetch`, a `FetchRequest` with a `FetchedPage`. A backend reads it
 in-process, host-side (the serve process), and reaches its API over async HTTP; core never holds the
 key and the sandbox never sees it. Every backend is an extension registering a `SearchProviderSpec`
 at the `search_providers` Manifest seam — there is no core default. The research extension's tools
-call the selected provider through the turn's `ToolContext`; a provider that cannot fetch raises
-`SearchUnsupported`, which the research `fetch_url` tool guards against by gating on
-`supports_fetch` before ever reaching it."""
+call the selected provider through the turn's `ToolContext`; the research `fetch_url` tool gates
+on `supports_fetch` before calling `fetch`."""
 
 from __future__ import annotations
 
@@ -71,17 +70,10 @@ class FetchRequest:
     force: bool = False
 
 
-class SearchUnsupported(RuntimeError):
-    """A `SearchProvider` whose `supports_fetch` is False was asked to `fetch`. The research
-    `fetch_url` tool gates on `supports_fetch` before calling, so this is the fail-loud contract for
-    a caller that bypasses the flag, never a path the tool takes."""
-
-
 class SearchProvider(Protocol):
     """Where a turn's web search comes from: `search` answers a `SearchQuery`; `fetch` reads one URL
-    when `supports_fetch` is True, else raises `SearchUnsupported`. Process-wide (built once at
-    boot), reading its provider key in-process and reaching its API host-side — never in the
-    sandbox."""
+    when `supports_fetch` is True. Process-wide (built once at boot), reading its provider key
+    in-process and reaching its API host-side — never in the sandbox."""
 
     @property
     def supports_fetch(self) -> bool: ...
