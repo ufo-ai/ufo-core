@@ -2,12 +2,13 @@
 `modifiedTime` bound threaded into the Drive query of all three streams, the cursor each page
 reports and how a run whose record cap ends inside a group of tied files resumes, the request volume
 a corpus below the stored cursor and a one-file-modified corpus cost, the parent times each derived
-record carries, the reported cursor covering a file that lands no derived record, the per-tab values
-read whose per-file guard drops only the refused tab and leaves its rows to the run that lists the
-file again, the `render` override that lifts a spreadsheet's tab titles and a tab's grid rows, and
-the refusal taxonomy — `StreamSkipped` for a refusal naming the grant or the API, a Drive-metadata
-fallback for one naming a single file, and a raise for a quota refusal or a `404` carrying no Google
-error object. Offline — a canned transport, no DB, no token, no broker."""
+record carries, the reported cursor covering a file that lands no derived record, the quoted A1
+sheet range every values request names its tab by, the per-tab values read whose per-file guard
+drops only the refused tab and leaves its rows to the run that lists the file again, the `render`
+override that lifts a spreadsheet's tab titles and a tab's grid rows, and the refusal taxonomy —
+`StreamSkipped` for a refusal naming the grant or the API, a Drive-metadata fallback for one naming
+a single file, and a raise for a quota refusal or a `404` carrying no Google error object. Offline —
+a canned transport, no DB, no token, no broker."""
 
 import json
 import logging
@@ -19,7 +20,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from ufo_ext_sources import googlesheets
-from ufo_ext_sources.googlesheets import VALUES_BATCH_SIZE, GoogleSheetsConnector, _range_title
+from ufo_ext_sources.googlesheets import (
+    VALUES_BATCH_SIZE,
+    GoogleSheetsConnector,
+    _quoted_sheet_range,
+    _range_title,
+)
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
@@ -66,6 +72,15 @@ SPREADSHEET_META = {
         {"properties": {"sheetId": 1, "title": "Detail"}},
     ],
 }
+
+
+def _tab_of(value: str) -> str:
+    assert value.startswith("'") and value.endswith("'"), f"unquoted A1 sheet range {value!r}"
+    return value[1:-1].replace("''", "'")
+
+
+def _requested_tabs(request: httpx.Request) -> list[str]:
+    return [_tab_of(value) for value in request.url.params.get_list("ranges")]
 
 
 def _handler(
@@ -204,7 +219,7 @@ def _listing_handler(
         resource = request.url.path.removeprefix("/v4/spreadsheets/")
         if resource.endswith("/values:batchGet"):
             file_id = resource.removesuffix("/values:batchGet")
-            requested = request.url.params.get_list("ranges")
+            requested = _requested_tabs(request)
             if values_refused is not None:
                 refused_tab = next(
                     (title for title in requested if (file_id, title) in values_refused), None
@@ -219,10 +234,11 @@ def _listing_handler(
                     ]
                 },
             )
-        file_id, _, tab = resource.partition("/values/")
+        file_id, _, quoted = resource.partition("/values/")
         if refused is not None and file_id in refused:
             return httpx.Response(403, json=refused[file_id])
-        if tab:
+        if quoted:
+            tab = _tab_of(quoted)
             if values_refused is not None and (file_id, tab) in values_refused:
                 return httpx.Response(403, json=values_refused[(file_id, tab)])
             return httpx.Response(200, json={"range": tab, "values": [[tab, file_id]]})
@@ -310,7 +326,7 @@ async def test_sheet_values_reads_every_tab_in_one_batched_request() -> None:
     await _fetch("sheet_values", _handler(value_requests=value_requests))
 
     assert len(value_requests) == 1
-    assert value_requests[0].url.params.get_list("ranges") == ["Summary", "Detail"]
+    assert value_requests[0].url.params.get_list("ranges") == ["'Summary'", "'Detail'"]
 
 
 async def test_sheet_values_skips_the_batch_endpoint_for_a_spreadsheet_without_tabs() -> None:
@@ -349,7 +365,7 @@ async def test_sheet_values_skips_malformed_tabs_and_reads_the_valid_one() -> No
         ),
     )
 
-    assert value_requests[0].url.params.get_list("ranges") == ["Valid"]
+    assert value_requests[0].url.params.get_list("ranges") == ["'Valid'"]
     assert [page.source_ref for page in result.pages] == ["sheet_values/s1:2:values"]
 
 
@@ -365,7 +381,7 @@ async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title
     value_requests: list[httpx.Request] = []
 
     def reversed_ranges(request: httpx.Request) -> httpx.Response:
-        requested = request.url.params.get_list("ranges")
+        requested = _requested_tabs(request)
         return httpx.Response(
             200,
             json={
@@ -413,6 +429,78 @@ async def test_sheet_values_matches_a_quoted_returned_range_to_its_tab() -> None
 
     assert result.pages[0].source_ref == "sheet_values/s1:7:values"
     assert "mine" in result.pages[0].body
+
+
+AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
+REFERENCE_SHAPED_TABS = ("Summary", "Q1")
+UNPARSEABLE_RANGE = {
+    "error": {
+        "code": 400,
+        "message": "Unable to parse range",
+        "errors": [{"domain": "global", "reason": "badRequest"}],
+    }
+}
+_CELL_RANGE_RE = re.compile(r"[A-Za-z]{1,3}[1-9][0-9]*")
+_BARE_TITLE_RE = re.compile(r"\w+")
+
+
+def _a1_parsing_handler(titles: tuple[str, ...]) -> Callable[[httpx.Request], httpx.Response]:
+    metadata = {
+        **SPREADSHEET_META,
+        "sheets": [
+            {"properties": {"sheetId": index, "title": title}} for index, title in enumerate(titles)
+        ],
+    }
+
+    def resolve(requested: str) -> str | None:
+        if requested.startswith("'") and requested.endswith("'"):
+            return requested[1:-1].replace("''", "'")
+        if _CELL_RANGE_RE.fullmatch(requested):
+            return titles[0]
+        return requested if _BARE_TITLE_RE.fullmatch(requested) else None
+
+    def echoed(tab: str) -> str:
+        escaped = tab.replace("'", "''")
+        return f"'{escaped}'!A1:A1"
+
+    def values(request: httpx.Request) -> httpx.Response:
+        resolved = [resolve(value) for value in request.url.params.get_list("ranges")]
+        if None in resolved:
+            return httpx.Response(400, json=UNPARSEABLE_RANGE)
+        return httpx.Response(
+            200,
+            json={
+                "valueRanges": [
+                    {"range": echoed(tab), "values": [[f"row of {tab}"]]} for tab in resolved
+                ]
+            },
+        )
+
+    return _handler(spreadsheet_meta=metadata, values_response=values)
+
+
+async def test_sheet_values_reads_tabs_whose_titles_a1_notation_would_claim() -> None:
+    result = await _fetch("sheet_values", _a1_parsing_handler(AMBIGUOUS_TABS))
+
+    assert [page.source_ref for page in result.pages] == [
+        f"sheet_values/s1:{index}:values" for index in range(len(AMBIGUOUS_TABS))
+    ]
+    for page, title in zip(result.pages, AMBIGUOUS_TABS, strict=True):
+        assert f"row of {title}" in page.body
+
+
+async def test_sheet_values_reads_a_reference_shaped_tab_from_its_own_tab() -> None:
+    result = await _fetch("sheet_values", _a1_parsing_handler(REFERENCE_SHAPED_TABS))
+
+    assert [page.body.splitlines()[-1] for page in result.pages] == [
+        f"row of {title}" for title in REFERENCE_SHAPED_TABS
+    ]
+
+
+@pytest.mark.parametrize("title", (*AMBIGUOUS_TABS, "Summary", "Hot!Stuff", "2026"))
+def test_a_quoted_sheet_range_round_trips_its_title(title: str) -> None:
+    assert _range_title(_quoted_sheet_range(title)) == title
+    assert _range_title(f"{_quoted_sheet_range(title)}!A1:B2") == title
 
 
 def test_unqualified_quoted_range_unescapes_its_title() -> None:
@@ -806,9 +894,9 @@ def _first_tab_refusing_handler(
             return httpx.Response(200, json=SPREADSHEET_META)
         if request.url.path == "/v4/spreadsheets/s1/values:batchGet":
             return httpx.Response(status, json=error)
-        if request.url.path == "/v4/spreadsheets/s1/values/Summary":
+        if request.url.path == "/v4/spreadsheets/s1/values/'Summary'":
             return httpx.Response(status, json=tab_error if tab_error is not None else error)
-        if request.url.path == "/v4/spreadsheets/s1/values/Detail":
+        if request.url.path == "/v4/spreadsheets/s1/values/'Detail'":
             return httpx.Response(200, json={"range": "Detail", "values": [["Region", "West"]]})
         return httpx.Response(404, json={"path": request.url.path})
 

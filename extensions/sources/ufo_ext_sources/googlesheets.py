@@ -8,7 +8,11 @@ three streams are incremental on the file's Drive `modifiedTime` — the Drive q
 server-side at or past the stored value, each record carries that time as a flat `updated_at`, and
 each page reports as its own cursor the highest `modifiedTime` the run has landed, never below the
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
-grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows; both stamp their
+grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
+its tab as a quoted A1 sheet reference with each apostrophe doubled so the returned range matches
+back to the tab that was asked for — an unquoted title is a different request, one carrying a space
+or punctuation failing to parse at all, one that reads as a cell reference resolving against the
+first visible sheet, one a named range also carries resolving to that range; both stamp their
 parent file's times onto every derived record, and a page reports its cursor even where a file lands
 no derived record at all — an empty tab list, a tab list the grant cannot read — so the reported
 value covers that file and the corpus below it goes unlisted on the next run. A file the grant
@@ -230,7 +234,7 @@ class GoogleSheetsConnector(RestConnector):
                     client,
                     f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values:batchGet",
                     params={
-                        "ranges": [title for title, _ in chunk],
+                        "ranges": [_quoted_sheet_range(title) for title, _ in chunk],
                         "majorDimension": "ROWS",
                     },
                 )
@@ -240,7 +244,7 @@ class GoogleSheetsConnector(RestConnector):
                 for title, sheet_id in chunk:
                     grid = (
                         f"{SHEETS_API_URL}/spreadsheets/{spreadsheet_id}/values/"
-                        f"{quote(title, safe='')}"
+                        f"{quote(_quoted_sheet_range(title), safe='')}"
                     )
                     try:
                         value_range = await self._get(
@@ -369,13 +373,14 @@ def _sheet_value_record(
     }
 
 
+def _quoted_sheet_range(title: str) -> str:
+    escaped = title.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def _range_title(value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"googlesheets: invalid value range {value!r}")
-    if "!" not in value:
-        if value.startswith("'") and value.endswith("'"):
-            return value[1:-1].replace("''", "'")
-        return value
     if not value.startswith("'"):
         return value.split("!", 1)[0]
     title: list[str] = []
@@ -390,7 +395,7 @@ def _range_title(value: Any) -> str:
             title.append("'")
             index += 2
             continue
-        if index + 1 < len(value) and value[index + 1] == "!":
+        if index + 1 == len(value) or value[index + 1] == "!":
             return "".join(title)
         break
     raise ValueError(f"googlesheets: invalid value range {value!r}")
