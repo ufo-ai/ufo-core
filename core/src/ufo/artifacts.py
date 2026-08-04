@@ -120,6 +120,8 @@ class ArtifactObjects:
                 fields={
                     "filename": shares[0].filename,
                     "subject": shares[0].subject or "",
+                    "conversation": str(shares[0].conversation_id),
+                    "shared_at": shares[0].created_at.isoformat(),
                 },
             )
             for name, shares in await self._groups(ctx)
@@ -308,7 +310,9 @@ ARTIFACT_OBJECT = ObjectKind(
         "carries the name), so one session's artifacts share a prefix and the same filename "
         "from different sessions stays distinct. Re-sharing a filename in the same conversation "
         "adds a version — get, status, and the workspace copy reflect the latest share. Reads stay "
-        "inside the selected agent and acting audience. "
+        "inside the selected agent and acting audience. Listings filter and order on `filename`, "
+        "`subject`, `conversation`, and `shared_at` — filter on a conversation id for that "
+        "session's files, or order by `shared_at` desc for the most recent. "
         "object_get copies the latest bytes back into the conversation workspace at "
         "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
         "status carries a fresh member download link (valid one hour), the share time, the "
@@ -321,6 +325,6 @@ ARTIFACT_OBJECT = ObjectKind(
     ),
     spec_model=ArtifactSpec,
     store=ArtifactObjects(),
-    list_fields=frozenset({"filename", "subject"}),
+    list_fields=frozenset({"filename", "subject", "conversation", "shared_at"}),
     agent_target_verbs=frozenset({"list", "get", "delete"}),
 )

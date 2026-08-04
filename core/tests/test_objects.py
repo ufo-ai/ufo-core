@@ -51,16 +51,18 @@ from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
 from ufo.models.interface import Message, TextBlock, ToolUseBlock
+from ufo.object_name import (
+    OBJECT_NAME_MAX_LENGTH,
+    OBJECT_NAME_PATTERN,
+    InvalidName,
+)
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
     OBJECT_LIST_PAGE,
-    OBJECT_NAME_MAX_LENGTH,
-    OBJECT_NAME_PATTERN,
     AdminRequired,
     BoundKind,
     GeneratedObjectOwner,
     InvalidManifest,
-    InvalidName,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
@@ -776,8 +778,19 @@ def test_boot_fails_on_a_gate_violating_kind() -> None:
         validate_ext_tools((kind_of(_SecretSpec),), None)
     with pytest.raises(ValueError, match="JSON-representable"):
         validate_ext_tools((kind_of(_UnrenderableSpec),), None)
-    with pytest.raises(ValueError, match="list fields are not spec fields"):
-        validate_ext_tools((kind_of(sample.WidgetSpec, frozenset({"weight"})),), None)
+    validate_ext_tools((kind_of(sample.WidgetSpec, frozenset({"weight"})),), None)
+
+
+def test_a_declared_field_no_row_produces_reads_as_null() -> None:
+    """`list_fields` is the kind's own vocabulary, so a field its rows never carry is admitted at
+    boot and reads null in a listing — filterable and orderable, matching nothing."""
+    rows = (ObjectRow(name="widget", summary="teal widget"),)
+    query = ObjectListQuery(supported_fields=frozenset({"weight"}))
+    assert [row.name for row in object_page(rows, query).rows] == ["widget"]
+    assert object_page(rows, replace(query, filters={"weight": 3})).rows == ()
+    assert [row.name for row in object_page(rows, replace(query, order_by="weight")).rows] == [
+        "widget"
+    ]
 
 
 async def _agent_row(
@@ -912,6 +925,59 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
         )
         with pytest.raises(VerbNotSupported, match="proposal path"):
             await apply_tool.handler(owner_ctx, prompt_write)
+
+
+async def test_a_child_agent_is_scoped_to_the_main_agent(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        main = await _agent_row(workspace_id, name="ufo", is_main=True)
+        await _agent_row(workspace_id, name="research")
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=main)
+
+        child = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
+        )
+        parent = yaml.safe_load(await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="ufo"))
+    assert child["links"] == [
+        {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "ufo"}}
+    ]
+    assert parent["links"] == [], "the main agent is the scope, so it links to none"
+
+
+async def test_agent_creation_refuses_a_name_no_link_can_express(db: None) -> None:
+    """`agent.name` is plain text but every agent-named link carries it as an `ObjectRef` name, so a
+    name outside that grammar would raise out of a later read instead of at the write. Creation
+    refuses it, and never coerces it into a conforming name."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        main = await _agent_row(workspace_id, name="ufo", is_main=True)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=main)
+        with pytest.raises(InvalidName):
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": "candidate:8f14e45f",
+                        "spec": {"prompt": "be helpful"},
+                    }
+                ),
+            )
+        async with workspace_tx() as connection:
+            names = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).where(
+                        tables.agent.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalars()
+    assert set(names) == {"ufo"}
 
 
 async def test_agent_kind_refuses_an_effort_outside_the_enum(db: None) -> None:
@@ -1326,6 +1392,68 @@ def test_artifact_object_names_prefix_the_conversation_and_slug_the_filename() -
     long = artifact_object_names([(conv_a, long_filename)])[(conv_a, long_filename)]
     assert len(long) <= OBJECT_NAME_MAX_LENGTH
     assert OBJECT_NAME_PATTERN.fullmatch(long)
+
+
+async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
+    db: None, tmp_path: Path
+) -> None:
+    """`conversation` and `shared_at` ride the listing rows beside `filename` and `subject`, so one
+    session's files are reachable by filter and the newest share by order."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
+        first = await _turn_row(workspace_id, agent_id=agent_id)
+        second = await _turn_row(workspace_id, agent_id=agent_id)
+        first_ctx, _ = await _workspace_context(first, tmp_path / "one")
+        second_ctx, _ = await _workspace_context(second, tmp_path / "two")
+        await first_ctx.sandbox.bash("printf 'older' > alpha.txt")
+        await second_ctx.sandbox.bash("printf 'newer' > beta.txt")
+        await _text(tools, "share_file", first_ctx, file_path="alpha.txt")
+        await _text(tools, "share_file", second_ctx, file_path="beta.txt")
+        async with workspace_tx() as connection:
+            for filename, day in (("alpha.txt", 3), ("beta.txt", 4)):
+                await connection.execute(
+                    sa.update(tables.shared_artifact)
+                    .where(tables.shared_artifact.c.filename == filename)
+                    .values(created_at=datetime(2026, 7, day, tzinfo=UTC))
+                )
+        alpha = f"{first.conversation_id.hex[:8]}-alpha-txt"
+        beta = f"{second.conversation_id.hex[:8]}-beta-txt"
+
+        listing = json.loads(
+            await _agent_text(agent_id, tools, "object_list", first_ctx, kind=ARTIFACT_KIND)
+        )
+        by_conversation = json.loads(
+            await _agent_text(
+                agent_id,
+                tools,
+                "object_list",
+                first_ctx,
+                kind=ARTIFACT_KIND,
+                filters={"conversation": str(second.conversation_id)},
+            )
+        )
+        newest_first = json.loads(
+            await _agent_text(
+                agent_id,
+                tools,
+                "object_list",
+                first_ctx,
+                kind=ARTIFACT_KIND,
+                order_by="shared_at",
+                order="desc",
+            )
+        )
+    rows = {row["name"]: row for row in listing["objects"]}
+    assert rows[alpha]["conversation"] == str(first.conversation_id)
+    assert rows[alpha]["filename"] == "alpha.txt"
+    assert rows[alpha]["subject"] == ""
+    assert datetime.fromisoformat(rows[alpha]["shared_at"]).replace(tzinfo=UTC) == datetime(
+        2026, 7, 3, tzinfo=UTC
+    )
+    assert [row["name"] for row in by_conversation["objects"]] == [beta]
+    assert [row["name"] for row in newest_first["objects"]] == [beta, alpha]
 
 
 async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_back(

@@ -25,8 +25,10 @@ CREDENTIAL_REQUEST_TTL_SECONDS = 900
 NAME_DIGEST_LENGTH = 8
 
 
-def _slug(raw: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+def credential_object_name(slot: str) -> str:
+    """The `credential` object name one declared slot renders as, so a kind whose row authenticates
+    through a slot names the instance the credential kind serves."""
+    return re.sub(r"[^a-z0-9]+", "-", slot.lower()).strip("-")
 
 
 def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
@@ -35,7 +37,7 @@ def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
     collision across extensions gains a stable digest qualifier."""
     grouped: dict[str, list[DeclaredSlot]] = {}
     for slot in slots:
-        grouped.setdefault(_slug(slot.name), []).append(slot)
+        grouped.setdefault(credential_object_name(slot.name), []).append(slot)
     named: dict[str, DeclaredSlot] = {}
     for plain, group in grouped.items():
         if len(group) == 1:

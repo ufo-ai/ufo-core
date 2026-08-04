@@ -39,13 +39,16 @@ from pydantic.errors import PydanticInvalidForJsonSchema
 
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.object_name import (
+    OBJECT_NAME_MAX_LENGTH,
+    OBJECT_NAME_PATTERN,
+    validate_object_name,
+)
 from ufo.object_scope import ObjectAgent, object_agent
 from ufo.schema import tables
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 
-OBJECT_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
-OBJECT_NAME_MAX_LENGTH = 64
 KIND_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
@@ -56,7 +59,15 @@ AGENT_TARGET_DESCRIPTION = (
     "agent may target another agent, on an exact member-requested call."
 )
 
-type Relation = Literal["created_from", "synced_by", "created_in", "reports_to", "superseded_by"]
+type Relation = Literal[
+    "created_from",
+    "synced_by",
+    "created_in",
+    "reports_to",
+    "superseded_by",
+    "access_to",
+    "scoped_to",
+]
 type AgentTargetVerb = Literal["list", "get", "create", "update", "delete"]
 
 type _SortRank = Literal[0, 1, 2, 3]
@@ -100,7 +111,8 @@ class ObjectLink(BaseModel):
     """One typed outgoing link on an object: a relation from the closed vocabulary and the target's
     ref. Stored on the owning row and rendered forward-only — the reverse direction is a structured
     query over the forward column, never a stored edge. A link never grants visibility: the target
-    stays gated by its own kind's read."""
+    stays gated by its own kind's read. `scoped_to` names the row's one owning agent, and a parent
+    edge takes it only where no narrower relation already names that scope."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -129,10 +141,6 @@ class UnknownKind(ValueError):
 
 class UnknownObject(ValueError):
     """A get or delete addressed a name that does not exist in its kind."""
-
-
-class InvalidName(ValueError):
-    """The object name violates the one grammar every kind shares."""
 
 
 class InvalidManifest(ValueError):
@@ -361,11 +369,13 @@ class GeneratedObjectOwner(ObjectOwner):
 
 @dataclass(frozen=True)
 class OwnedRow[OwnerT: ObjectOwner]:
-    """One row a member-owned kind hands the gate: its name, one-line summary, and owner."""
+    """One row a member-owned kind hands the gate: its name, one-line summary, owner, and the
+    lightweight fields its kind declared for filtering and ordering."""
 
     name: str
     summary: str
     owner: OwnerT
+    fields: Mapping[str, JsonValue] = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -400,7 +410,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         is_admin = await ctx.speaker_is_admin()
         acting = ctx.acting_member_id
         rows = tuple(
-            ObjectRow(name=row.name, summary=row.summary)
+            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._owned_rows(ctx)
             if self._visible(row.owner, acting, is_admin)
         )
@@ -419,7 +429,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         producing its rows from its extension context alone (`_member_rows`), which is also where
         `_owned_rows` delegates so the two listings can never diverge."""
         rows = tuple(
-            ObjectRow(name=row.name, summary=row.summary)
+            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._member_rows(ext)
             if self._visible(row.owner, member_id, admin)
         )
@@ -578,8 +588,12 @@ class ObjectKind[SpecT: BaseModel]:
     what mutations the kind accepts and by whom, the guidance `object_explain` returns verbatim —
     a kind that replaces bespoke tools carries their tuned descriptions ~verbatim there, so no
     instruction is lost with the tool — the model every authored spec validates against, and the
-    store whose handlers do the work. `list_fields` declares every lightweight field its rows
-    produce, so filter and order validation is independent of whether any rows currently exist."""
+    store whose handlers do the work. `list_fields` is the kind's own filter and order vocabulary —
+    whatever scalar its rows carry, spec field or not, so a read-only kind exposes a filterable
+    column without widening the spec its apply refuses — and declaring it makes filter and order
+    validation independent of whether any rows currently exist. A row carrying a field the kind
+    never declared is refused; a declared field its rows never produce reads as null, so each
+    kind's own listing proof is what holds declaration and rows in step."""
 
     name: str
     description: str
@@ -628,9 +642,6 @@ def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]:
 
 def _validate_spec_model(owner: str, kind: ObjectKind) -> None:
     label = f"{owner!r} object kind {kind.name!r}"
-    unknown_list_fields = kind.list_fields.difference(kind.spec_model.model_fields)
-    if unknown_list_fields:
-        raise ValueError(f"{label}: list fields are not spec fields: {sorted(unknown_list_fields)}")
     for model in _reachable_models(kind.spec_model):
         if model.model_config.get("extra") != "forbid":
             raise ValueError(f'{label}: spec model {model.__name__} must set extra="forbid"')
@@ -908,7 +919,7 @@ class ObjectVerbs:
             args.agent,
             frozenset({"create", "update"}),
         )
-        _validate_name(name)
+        validate_object_name(name)
         try:
             spec = bound.kind.spec_model.model_validate(spec_mapping)
         except ValidationError as error:
@@ -1044,14 +1055,6 @@ def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object]]:
     if not isinstance(spec, dict):
         raise InvalidManifest("spec must be a mapping")
     return kind, name, spec
-
-
-def _validate_name(name: str) -> None:
-    if len(name) > OBJECT_NAME_MAX_LENGTH or not OBJECT_NAME_PATTERN.fullmatch(name):
-        raise InvalidName(
-            f"object name {name!r} must match {OBJECT_NAME_PATTERN.pattern} "
-            f"(at most {OBJECT_NAME_MAX_LENGTH} chars)"
-        )
 
 
 def _json_result(payload: Mapping[str, object]) -> ToolResult:

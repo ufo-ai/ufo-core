@@ -1346,7 +1346,8 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
 async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response:
     """The hosted sites this member may see, answered through the site kind's own visibility gate
     — shared sites plus their own private ones, every site for an admin — or `available: false`
-    when the deploy installs no sites extension."""
+    when the deploy installs no sites extension. Each row carries the kind's declared list fields
+    beside its name and summary."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1357,7 +1358,9 @@ async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(
         {
             "available": True,
-            "sites": [{"name": row.name, "summary": row.summary} for row in page.rows],
+            "sites": [
+                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
+            ],
         }
     )
 

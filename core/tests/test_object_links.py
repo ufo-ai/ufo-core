@@ -29,6 +29,7 @@ from ufo_ext_sources.registry import SOURCE_KIND
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.agent_scope import agent
+from ufo.agents import AGENT_KIND, AGENT_OBJECT
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
@@ -232,6 +233,7 @@ def _verbs() -> dict[str, ToolDef]:
             BoundKind(kind=PAGE_OBJECT, extension="sources", context=sources_ctx),
             BoundKind(kind=SOURCE_OBJECT, extension="sources", context=sources_ctx),
             BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
+            BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
         )
     )
     return {tool.name: tool for tool in ObjectVerbs(registry=registry).tools()}
@@ -362,7 +364,9 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
         with agent(agent_id):
             shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
             assert shared["spec"] == {"surface": "slack", "audience": "shared"}
-            assert shared["links"] == []
+            assert shared["links"] == [
+                {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": agent_id.hex[:8]}}
+            ]
             assert shared["created_at"] is not None
 
             mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
@@ -564,7 +568,7 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
         stale = await _get(tools, ctx, MEMORY_KIND, str(old_id))
         assert stale["links"] == [
             {"relation": "superseded_by", "target": {"kind": MEMORY_KIND, "name": str(new_id)}}
-        ]
+        ], "a workspace-shared item is scoped to no member"
         replacement = await _get(tools, ctx, MEMORY_KIND, str(new_id))
         assert replacement["spec"]["body"] == "the fleet migration landed and is verified"
         assert replacement["links"] == []
@@ -624,9 +628,33 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
 
         owner_ctx = _tool_ctx(workspace_id, blob, member_id=member_id, ext=memory_ext)
         mine = await _get(tools, owner_ctx, MEMORY_KIND, str(item_id))
-        for link in mine["links"]:
-            resolved = await _get(tools, owner_ctx, link["target"]["kind"], link["target"]["name"])
-            assert resolved["spec"] is not None
+        assert [link["relation"] for link in mine["links"]] == ["created_from"]
+
+        async def walk(kind: str, name: str) -> set[str]:
+            """Every link the caller who saw a row carries must open for that same caller, and so
+            must every link the target carries — a forward link points at equal-or-wider
+            visibility, so the closure never narrows."""
+            seen: set[tuple[str, str]] = set()
+            relations: set[str] = set()
+            pending = [(kind, name)]
+            while pending:
+                at = pending.pop()
+                if at in seen:
+                    continue
+                seen.add(at)
+                opened = await _get(tools, owner_ctx, *at)
+                assert opened["spec"] is not None, f"{at} opened without a spec"
+                for link in opened["links"]:
+                    relations.add(link["relation"])
+                    pending.append((link["target"]["kind"], link["target"]["name"]))
+            return relations
+
+        assert await walk(MEMORY_KIND, str(item_id)) == {"created_from", "synced_by"}
+
+        agent_id = await _agent(workspace_id)
+        conversation_id = await _conversation(workspace_id, member_id, agent_id)
+        with agent(agent_id):
+            assert await walk(CONVERSATION_KIND, str(conversation_id)) == {"scoped_to"}
 
         get_tool = tools["object_get"]
         with pytest.raises(UnknownObject):

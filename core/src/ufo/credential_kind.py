@@ -81,6 +81,7 @@ class CredentialObjects:
                     f"{slot.extension}: {slot.description or slot.name} — "
                     f"{'filled' if slot.name in filled else 'empty'}"
                 ),
+                fields={"extension": slot.extension, "filled": slot.name in filled},
             )
             for name, slot in sorted(named.items())
         ]
@@ -189,7 +190,9 @@ CREDENTIAL_DESCRIPTION = (
 )
 CREDENTIAL_GUIDANCE = (
     "The BYOK secret slots installed extensions declare, filled or empty; values never appear "
-    "in any read. Create and update are refused — filling or rotating a secret goes through "
+    "in any read. Listings filter and order on `extension` and `filled` — filter "
+    "`filled: false` for the slots still to fill, or `extension` for one extension's. "
+    "Create and update are refused — filling or rotating a secret goes through "
     "request_credentials, a private handoff a workspace admin authorizes. Delete clears a "
     "stored value (workspace admin only); the slot stays listed as empty because its "
     "declaration lives in the extension, not the row."

@@ -24,7 +24,7 @@ from ufo_ext_sites.tools import (
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import subagent_system_prompt
-from ufo.objects import OBJECT_NAME_MAX_LENGTH
+from ufo.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.sandbox.session import ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience

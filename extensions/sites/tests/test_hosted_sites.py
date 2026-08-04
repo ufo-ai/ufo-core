@@ -991,6 +991,67 @@ async def test_the_site_kind_reads_and_regates_a_hosted_site(db: None) -> None:
     assert row.visibility == "workspace"
 
 
+async def test_the_site_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
+    """Every field `site` declares rides its listing rows, so a filter and an order on each one
+    answers from the live listing — the only place the declaration is checked against the rows."""
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    first_conversation = await _seed_conversation(workspace, audience, creator_id)
+    second_conversation = await _seed_conversation(workspace, audience, creator_id)
+    await _deploy(workspace, first_conversation, audience, creator_id)
+    await _deploy(workspace, second_conversation, audience, creator_id, visibility="workspace")
+    first_name = site_object_name(first_conversation, SITE)
+    second_name = site_object_name(second_conversation, SITE)
+    async with workspace_tx() as connection:
+        for conversation_id, day in ((first_conversation, 3), (second_conversation, 4)):
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(hosted_site.c.conversation_id == conversation_id)
+                .values(created_at=datetime(2026, 7, day, tzinfo=UTC))
+            )
+
+    with ws(workspace.id):
+        listed = await _verb(
+            "object_list", workspace, first_conversation, creator_id, kind=SITE_KIND
+        )
+        by_conversation = await _verb(
+            "object_list",
+            workspace,
+            first_conversation,
+            creator_id,
+            kind=SITE_KIND,
+            filters={"conversation": str(second_conversation)},
+        )
+        by_visibility = await _verb(
+            "object_list",
+            workspace,
+            first_conversation,
+            creator_id,
+            kind=SITE_KIND,
+            filters={"visibility": "private"},
+        )
+        newest_first = await _verb(
+            "object_list",
+            workspace,
+            first_conversation,
+            creator_id,
+            kind=SITE_KIND,
+            order_by="created_at",
+            order="desc",
+        )
+
+    first_row = {row["name"]: row for row in listed["objects"]}[first_name]
+    assert first_row["conversation"] == str(first_conversation)
+    assert first_row["visibility"] == "private"
+    assert datetime.fromisoformat(first_row["created_at"]).replace(tzinfo=UTC) == datetime(
+        2026, 7, 3, tzinfo=UTC
+    )
+    assert [row["name"] for row in by_conversation["objects"]] == [second_name]
+    assert [row["name"] for row in by_visibility["objects"]] == [first_name]
+    assert [row["name"] for row in newest_first["objects"]] == [second_name, first_name]
+
+
 async def test_the_site_kind_refuses_create_naming_the_deploy(db: None) -> None:
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)

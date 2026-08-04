@@ -28,6 +28,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
 from ufo.governance import prompt_digest
 from ufo.loop.engine import DispatchResult
+from ufo.object_name import validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import PENDING, ReasoningEffort
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -35,7 +36,7 @@ from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, 
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
-CANDIDATE_AGENT_NAME = "candidate:{proposal_id}"
+CANDIDATE_AGENT_NAME = "candidate-{proposal_id}"
 POLL_INTERVAL_SECONDS = 1.0
 WORKFLOW_WAIT_SECONDS = 300.0
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
@@ -76,12 +77,13 @@ async def seed_candidate_agent(
     arm the harness runs to measure a self-improvement proposal's cross-suite impact. The candidate
     varies only the prompt body; model, reasoning effort, workspace, and the suites stay fixed
     against the baseline run, so the before/after diff isolates the proposal. Upsert by name: a
-    re-run against the same proposal reseeds one stable `candidate:<proposal>` agent rather than
+    re-run against the same proposal reseeds one stable `candidate-<proposal>` agent rather than
     accreting rows."""
     if workspace_id is None:
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
     name = CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
+    validate_object_name(name)
     with ws(workspace_id):
         async with workspace_tx() as connection:
             proposal = (

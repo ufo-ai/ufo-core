@@ -115,7 +115,7 @@ Constraints and where each is enforced — none of them free:
 | constraint | site |
 |---|---|
 | `intent` unique across tools *and* kinds | `validate_ext_tools` (`core/src/ufo/ext/loader.py:648`) — the only deploy-boot site that sees both sets; `object_registry` sees only kinds (`objects.py:603`) and `ToolRegistry.__post_init__` only tools (`registry.py:62-71`), and the latter is rebuilt per turn |
-| `submit_model` JSON-representable, secret-free, `extra="forbid"` | a new check; `_validate_spec_model` (`objects.py:629`) is kind-only, takes `(owner, kind)`, and additionally cross-checks `list_fields`, so it is a model to copy, not a function to reuse. The tool registry has no JSON or secret check at all |
+| `submit_model` JSON-representable, secret-free, `extra="forbid"` | a new check; `_validate_spec_model` (`objects.py:629`) is kind-only and takes `(owner, kind)`, so it is a model to copy, not a function to reuse. The tool registry has no JSON or secret check at all |
 | `label` and `confirm` non-empty when present | the same boot site |
 
 A declaration whose callee has no member-reachable authority gate is not detectable at boot; the

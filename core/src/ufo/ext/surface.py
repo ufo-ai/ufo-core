@@ -1650,7 +1650,10 @@ class SurfaceContext:
         if not isinstance(store, MemberOwnedObjects):
             raise RuntimeError(f"object kind {kind!r} does not list for a member")
         return await store.member_page(
-            bound.context, member_id=member_id, admin=admin, query=ObjectListQuery()
+            bound.context,
+            member_id=member_id,
+            admin=admin,
+            query=ObjectListQuery(supported_fields=bound.kind.list_fields),
         )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:

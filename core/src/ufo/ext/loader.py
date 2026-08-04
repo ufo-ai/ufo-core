@@ -486,6 +486,7 @@ def core_object_kinds(
         guidance=CREDENTIAL_GUIDANCE,
         spec_model=CredentialSpec,
         store=CredentialObjects(slots=slots, credentials=credential_store),
+        list_fields=frozenset({"extension", "filled"}),
     )
     return (BoundKind(kind=kind, extension=None, context=None),)
 

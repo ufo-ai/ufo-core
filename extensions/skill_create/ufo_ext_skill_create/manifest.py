@@ -13,10 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.objects import (
+    AGENT_KIND,
     ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectListQuery,
     ObjectPage,
+    ObjectRef,
     ObjectRow,
     object_page,
 )
@@ -134,6 +137,12 @@ class SkillObjects:
             ),
             created_at=created_at,
             updated_at=updated_at,
+            links=(
+                ObjectLink(
+                    relation="scoped_to",
+                    target=ObjectRef(kind=AGENT_KIND, name=await ctx.agent_name()),
+                ),
+            ),
         )
 
     async def status(
@@ -248,7 +257,8 @@ SKILL_OBJECT = ObjectKind(
         "name matching the object name and a description; a workspace file rides as "
         "{from: <path>} and is inlined on save, and any bundled files are saved with it. The "
         "skill is validated before saving and a bad SKILL.md is reported as an error. Skills "
-        "belong to this agent; another agent may use the same name for its own skill. Get "
+        "belong to this agent — the `scoped_to` link names it; another agent may use the same "
+        "name for its own skill. Get "
         "returns each file as {sha256, size}, never inline content — read a saved skill's "
         "content with load_skill, which mounts the files; on re-apply, keep an unchanged file "
         "by passing its {sha256: <digest>} back. Load the create-skill skill first for the "

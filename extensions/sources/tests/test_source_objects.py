@@ -23,6 +23,7 @@ from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
+    CONNECTION_OBJECT_KIND,
     SOURCE_KIND,
     SourceObjects,
     SourceSpec,
@@ -32,11 +33,13 @@ from ufo_ext_sources.tools import (
 )
 
 from ufo.agent_scope import agent
-from ufo.credentials import CredentialStore
+from ufo.credential_kind import CREDENTIAL_KIND
+from ufo.credentials import CredentialStore, credential_object_name, named_slots
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue, context_for
 from ufo.ext.loader import turn_tools
-from ufo.grants import GrantStore
+from ufo.ext.manifest import declared_slots
+from ufo.grants import GrantStore, account_object_name
 from ufo.objects import UnknownObject
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -260,6 +263,18 @@ async def _apply(ctx: ToolContext, manifest_text: str) -> dict[str, object]:
     )
     assert result.is_error is False
     return json.loads(result.content[0].text)
+
+
+async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
+    tool = _TOOLS["object_get"]
+    result = await tool.handler(
+        ctx,
+        tool.input_model.model_validate(
+            {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+        ),
+    )
+    assert result.is_error is False
+    return yaml.safe_load(result.content[0].text)
 
 
 async def _rows(state: _Workspace, backend: str) -> list[sa.RowMapping]:
@@ -973,6 +988,63 @@ async def test_direct_provider_requires_its_credential_then_registers(
     assert registered["result"] == "created"
     [row] = await _rows(state, GREENHOUSE)
     assert row["config"] == {"account": "default", "stream": "jobs", "base_url": None}
+
+
+async def test_a_private_brokered_binding_links_to_the_connection_it_uses(db: None) -> None:
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name))
+        fetched = await _get(ctx, name)
+    assert fetched["links"] == [
+        {
+            "relation": "access_to",
+            "target": {
+                "kind": CONNECTION_OBJECT_KIND,
+                "name": account_object_name(ASANA, "acct-one"),
+            },
+        },
+    ]
+
+
+async def test_a_shared_brokered_binding_names_no_connection(db: None) -> None:
+    """A shared source is workspace-readable while its connection stays owner-or-admin, so naming
+    the connection would point at narrower visibility — spec.md demands equal-or-wider. `_status`
+    withholds `owner_member_id` on a shared row for the same reason."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name, shared=True))
+        fetched = await _get(ctx, name)
+    assert fetched["links"] == []
+    assert "owner_member_id" not in fetched["status"]
+
+
+async def test_a_direct_binding_links_to_its_workspace_credential_slot(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    state = await _workspace()
+    ctx = _context(state, None)
+    name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
+        fetched = await _get(ctx, name)
+    assert fetched["links"] == [
+        {
+            "relation": "access_to",
+            "target": {"kind": CREDENTIAL_KIND, "name": credential_object_name(GREENHOUSE)},
+        },
+    ]
+    assert {credential_object_name(provider) for provider in CONNECTORS} == set(
+        named_slots(declared_slots((manifest(),)))
+    )
 
 
 async def test_missing_or_ambiguous_broker_account_refuses_with_repair(db: None) -> None:

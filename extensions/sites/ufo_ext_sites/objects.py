@@ -107,6 +107,11 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
                 owner=ObjectOwner(
                     member_id=site.creator_member_id, shared=site.visibility != "private"
                 ),
+                fields={
+                    "conversation": str(site.conversation_id),
+                    "created_at": site.created_at.isoformat(),
+                    "visibility": site.visibility,
+                },
             )
             for name, site in _named(await sites.all()).items()
         )
@@ -186,6 +191,9 @@ SITE_OBJECT = ObjectKind(
         "Sites a deploy left hosted, one object per site and conversation, named "
         "<site-name>-<conversation-digest> (the deploy result carries the name). A site is visible "
         "to the member who deployed it, and to every member once it is workspace or public. "
+        "Listings filter and order on `conversation`, `created_at`, and `visibility` — filter on "
+        "this conversation's id for the sites it hosts, or order by `created_at` desc for the "
+        "newest. "
         "object_get returns its visibility, and its status carries the hosted site_url, the "
         "sandbox port serving it, and its creator; the `created_in` link names the conversation "
         "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
@@ -197,4 +205,5 @@ SITE_OBJECT = ObjectKind(
     ),
     spec_model=SiteSpec,
     store=SiteObjects(),
+    list_fields=frozenset({"conversation", "created_at", "visibility"}),
 )

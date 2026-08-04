@@ -11,6 +11,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.agents import AGENT_KIND
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
@@ -20,8 +21,10 @@ from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
     ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectListQuery,
     ObjectPage,
+    ObjectRef,
     ObjectRow,
     UnknownObject,
     VerbNotSupported,
@@ -73,6 +76,12 @@ class ConversationObjects:
             ),
             created_at=row.created_at,
             updated_at=row.updated_at,
+            links=(
+                ObjectLink(
+                    relation="scoped_to",
+                    target=ObjectRef(kind=AGENT_KIND, name=row.agent_name),
+                ),
+            ),
         )
 
     async def status(
@@ -170,16 +179,25 @@ class ConversationObjects:
         return tuple(rows)
 
     def _visible(self, ctx: ToolContext) -> sa.Select:
-        return sa.select(
-            tables.conversation.c.id,
-            tables.conversation.c.surface,
-            tables.conversation.c.audience,
-            tables.conversation.c.created_at,
-            tables.conversation.c.updated_at,
-        ).where(
-            tables.conversation.c.workspace_id == ws_current().workspace_id,
-            tables.conversation.c.agent_id == object_agent_id(),
-            tables.conversation.c.audience.in_(ctx.read_subjects),
+        return (
+            sa.select(
+                tables.conversation.c.id,
+                tables.conversation.c.surface,
+                tables.conversation.c.audience,
+                tables.conversation.c.created_at,
+                tables.conversation.c.updated_at,
+                tables.agent.c.name.label("agent_name"),
+            )
+            .select_from(
+                tables.conversation.join(
+                    tables.agent, tables.conversation.c.agent_id == tables.agent.c.id
+                )
+            )
+            .where(
+                tables.conversation.c.workspace_id == ws_current().workspace_id,
+                tables.conversation.c.agent_id == object_agent_id(),
+                tables.conversation.c.audience.in_(ctx.read_subjects),
+            )
         )
 
 
@@ -191,7 +209,8 @@ CONVERSATION_OBJECT = ObjectKind(
     ),
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
-        "one by its id to see which surface and audience it runs on and when it started. Reads "
+        "one by its id to see which surface and audience it runs on and when it started; its own "
+        "`scoped_to` link names the agent it runs with. Reads "
         "show the selected agent's conversations visible to the conversation and exact requester. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."

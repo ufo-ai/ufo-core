@@ -149,6 +149,10 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                     shared=False,
                     generation=task.id,
                 ),
+                fields={
+                    "next_run_at": task.next_run_at.isoformat(),
+                    "paused": task.paused,
+                },
             )
             for task in await _require_scheduler(ctx).list()
         )
@@ -303,13 +307,17 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
-        "Listing returns each task's name, schedule, and description; get shows where it reports "
-        "and the latest run's response. A run's per-run output is not durable memory — it belongs "
+        "Listing returns each task's name, schedule, and description, and filters and orders on "
+        "`next_run_at` and `paused` — order by `next_run_at` asc for what fires next, or filter "
+        "`paused: true` for what is stopped; get shows the latest run's response and a "
+        "`reports_to` link naming the conversation it posts into. A run's per-run output is not "
+        "durable memory — it belongs "
         "in the reply the run posts, not in a saved fact; keep in-task state in files or todo "
         "items. Load the task-scheduling skill before scheduling."
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
+    list_fields=frozenset({"next_run_at", "paused"}),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )
 

@@ -1249,6 +1249,12 @@ async def test_sites_view_answers_through_the_kinds_own_gate(
         "draft",
         "landing",
     ]
+    by_name = {site["name"].split("-")[0]: site for site in m_view["sites"]}
+    assert by_name["landing"]["visibility"] == "workspace"
+    assert by_name["draft"]["visibility"] == "private"
+    for site in m_view["sites"]:
+        assert site["conversation"] == str(conversation_id)
+        assert site["created_at"]
 
 
 async def test_revoking_web_access_ends_streaming_too(

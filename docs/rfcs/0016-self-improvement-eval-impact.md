@@ -211,7 +211,7 @@ an `EvalReport` **digest-comparable** to the baseline agent's run; the existing
 The hard-to-vary fact: the turn engine reads the prompt from the agent **row** (`queue.py:371-396`),
 so overriding `driver.agent_prompt` alone changes nothing the turn sees. The arm is therefore a
 **real agent row** — a scratch agent (base agent's model, candidate prompt) seeded in the target
-workspace, upserted by a stable `candidate:<proposal>` name so a re-run reseeds one row.
+workspace, upserted by the stable `CANDIDATE_AGENT_NAME` so a re-run reseeds one row.
 
 ```
 python -m evals --only basics tool_calling web_research \
@@ -225,8 +225,8 @@ Seams, all in `evals/` (operator package — imports core directly, is not an ex
 
 | Seam | What it does |
 |---|---|
-| `evals/driver.py:seed_candidate_agent` | Resolves the pending proposal's `body.prompt` and its base agent's model, upserts the `candidate:<proposal>` scratch agent, returns `(workspace_id, name)`. Fails loud on a missing / non-pending proposal or an empty prompt body. |
-| `evals/__main__.py:--candidate-from-proposal` | Seeds the scratch agent before resolving the target and runs the selected suites against it; the run is labelled `candidate:<proposal>` and carries the candidate prompt. Rejected against corpus-backed evals (those pin their own workspace/agent semantics). |
+| `evals/driver.py:seed_candidate_agent` | Resolves the pending proposal's `body.prompt` and its base agent's model, upserts the `CANDIDATE_AGENT_NAME` scratch agent, returns `(workspace_id, name)`. Fails loud on a missing / non-pending proposal or an empty prompt body. |
+| `evals/__main__.py:--candidate-from-proposal` | Seeds the scratch agent before resolving the target and runs the selected suites against it; the run is labelled with that agent's name and carries the candidate prompt. Rejected against corpus-backed evals (those pin their own workspace/agent semantics). |
 | digest | Task digests are unchanged (they pin *cases*, `harness.py:156-158`), so after/baseline reports compare directly; `pin_runtime` already folds `agentPromptDigest` into the runtime digest, so the arms are legibly distinct where it matters. |
 
 The loop then closes without new core (not yet built): the `self_improvement` extension already
@@ -351,7 +351,7 @@ pooling (the portable bundle is built; pooling is a DPA conversation, not a defa
    suite run per candidate is far more expensive than replay.) Recommend: replay is the gate; the
    eval impact is attached evidence the approver reads — until we have data that replay-passing
    candidates regress suites often enough to justify the spend.
-3. **Scratch-agent cleanup.** A settled proposal's `candidate:<proposal>` agent has no further
+3. **Scratch-agent cleanup.** A settled proposal's scratch agent has no further
    use; nothing removes it today beyond discarding the disposable workspace. Whether that stays
    the answer or a settle-time delete is worth wiring is open until candidate runs happen
    anywhere longer-lived.

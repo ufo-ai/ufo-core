@@ -134,6 +134,7 @@ from evals.response_register import (
     split_delivery_scorer,
 )
 from ufo.accounting import Pricing
+from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import (
@@ -167,6 +168,8 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.registry import ModelRegistry
+from ufo.object_name import validate_object_name
+from ufo.objects import ObjectRef
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, Usage
 from ufo.transcript import (
@@ -770,6 +773,8 @@ async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) ->
     resolved_workspace, name = await seed_candidate_agent(proposal_id, workspace_id)
     assert resolved_workspace == workspace_id
     assert name == CANDIDATE_AGENT_NAME.format(proposal_id=proposal_id)
+    validate_object_name(name)
+    assert ObjectRef(kind=AGENT_KIND, name=name).name == name
 
     (
         _,

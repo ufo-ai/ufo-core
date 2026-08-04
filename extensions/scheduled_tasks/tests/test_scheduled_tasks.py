@@ -260,6 +260,49 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
+async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
+    """`next_run_at` and `paused` ride the listing rows, so the agent reads what fires next and
+    what is stopped without opening every task."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    listing = _object_tool("object_list")
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest("daily", DAILY_9AM, "morning"),
+        )
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": SCHEDULED_TASK_KIND,
+                    "name": "weekly",
+                    "spec": {"schedule": "0 17 * * 1", "prompt": "digest", "paused": True},
+                }
+            ),
+        )
+        tasks = {task.name: task for task in await ScheduleStore().list()}
+        listed = json.loads(await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND))
+        stopped = json.loads(
+            await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND, filters={"paused": True})
+        )
+        soonest_first = json.loads(
+            await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND, order_by="next_run_at")
+        )
+
+    rows = {row["name"]: row for row in listed["objects"]}
+    assert rows["daily"]["paused"] is False
+    assert rows["daily"]["next_run_at"] == tasks["daily"].next_run_at.isoformat()
+    assert rows["weekly"]["paused"] is True
+    assert [row["name"] for row in stopped["objects"]] == ["weekly"]
+    assert [row["name"] for row in soonest_first["objects"]] == sorted(
+        ("daily", "weekly"), key=lambda name: tasks[name].next_run_at
+    )
+
+
 async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
@@ -1484,7 +1527,7 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
             {
                 "relation": "reports_to",
                 "target": {"kind": "conversation", "name": str(conversation_id)},
-            }
+            },
         ]
         assert fetched["updated_at"] is not None
         status = fetched["status"]
@@ -3164,9 +3207,10 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
     assert private_prompt not in admin_rendered
     assert private_description not in admin_rendered
     assert private_response not in admin_rendered
-    assert admin_listing["objects"] == [
-        {"name": "digest", "summary": f"{DAILY_9AM} — private member task"}
-    ]
+    [admin_row] = admin_listing["objects"]
+    assert admin_row["name"] == "digest"
+    assert admin_row["summary"] == f"{DAILY_9AM} — private member task"
+    assert admin_row["paused"] is False
     assert admin_get["spec"] is None
     assert admin_get["status"]["last_run"] == {
         "turn_id": str(completed_turn_id),
@@ -3275,8 +3319,9 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                     agent=child_name,
                 )
             )
+            reports_to = next(link for link in fetched["links"] if link["relation"] == "reports_to")
             linked_conversation = yaml.safe_load(
-                await _dispatch(get, main_ctx, **fetched["links"][0]["target"])
+                await _dispatch(get, main_ctx, **reports_to["target"])
             )
             bob_listing = json.loads(
                 await _dispatch(
@@ -3377,7 +3422,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                 "name": str(child_conversation),
                 "agent": child_name,
             },
-        }
+        },
     ]
     assert linked_conversation["agent"] == child_name
     assert linked_conversation["name"] == str(child_conversation)
@@ -3399,9 +3444,10 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
         "turn_status": "done",
     }
     assert admin_updated["result"] == "updated"
-    assert admin_after["objects"] == [
-        {"name": "digest", "summary": "0 8 * * * — private member task"}
-    ]
+    [after_row] = admin_after["objects"]
+    assert after_row["name"] == "digest"
+    assert after_row["summary"] == "0 8 * * * — private member task"
+    assert after_row["paused"] is False
     assert remaining == ()
 
 

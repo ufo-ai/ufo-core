@@ -265,6 +265,50 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
     assert remaining == 0
 
 
+async def test_the_credential_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
+    """`extension` and `filled` ride the listing rows, so an admin reads which extension declared a
+    slot and which slots still need a value without opening each one."""
+    workspace_id = await _workspace()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    probe = Manifest(
+        name="probe",
+        version="1",
+        credentials=(
+            CredentialSlot(name="probe_api_key", description="Probe API key."),
+            CredentialSlot(name="probe_api_host", description="Probe site."),
+        ),
+    )
+    tools, _ = turn_tools((probe,), store, audience=conversation_audience(None))
+    listing = next(tool for tool in tools if tool.name == "object_list")
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        await store.put(workspace_id, "probe_api_key", "probe-secret")
+        listed = json.loads(await _text(listing, ctx, kind=CREDENTIAL_KIND))
+        empty = json.loads(
+            await _text(listing, ctx, kind=CREDENTIAL_KIND, filters={"filled": False})
+        )
+        by_extension = json.loads(
+            await _text(listing, ctx, kind=CREDENTIAL_KIND, filters={"extension": "probe"})
+        )
+        elsewhere = json.loads(
+            await _text(listing, ctx, kind=CREDENTIAL_KIND, filters={"extension": "sample"})
+        )
+        filled_last = json.loads(await _text(listing, ctx, kind=CREDENTIAL_KIND, order_by="filled"))
+
+    rows = {row["name"]: row for row in listed["objects"]}
+    assert rows["probe-api-key"] == {
+        "name": "probe-api-key",
+        "summary": "probe: Probe API key. — filled",
+        "extension": "probe",
+        "filled": True,
+    }
+    assert [row["name"] for row in empty["objects"]] == ["probe-api-host"]
+    assert [row["name"] for row in by_extension["objects"]] == ["probe-api-host", "probe-api-key"]
+    assert elsewhere["objects"] == []
+    assert [row["name"] for row in filled_last["objects"]] == ["probe-api-host", "probe-api-key"]
+
+
 async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: None) -> None:
     """The agent reads a slot through `object_get`, so what matters is the text the verb
     serializes — and until now the only slot driven through dispatch had a plain-string host, so

@@ -5,6 +5,7 @@ hook; each is driven here over an `ExtensionContext` carrying the deploy index/e
 exactly as core threads them onto a turn. The headline: a fact committed in one context is recalled
 in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,14 +18,14 @@ from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
-from ufo_ext_memory.objects import MEMORY_OBJECT, MemoryObjects
+from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import MemoryIndexer, SourceMatch, memory_item
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.indexing import TextChunker
-from ufo.objects import ObjectListQuery
+from ufo.objects import BoundKind, ObjectListQuery, ObjectVerbs, object_registry
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -811,6 +812,67 @@ async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
     assert str(stored["alice private roadmap"][0]) in listed_ids
     assert fetched_shared is None
     assert fetched_own is not None
+
+
+async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
+    db: None, tmp_path: Path
+) -> None:
+    """Every field `memory` declares rides its listing rows, so a filter and an order on each one
+    answers from the live listing — the only place the declaration is checked against the rows."""
+    workspace_id = await _workspace()
+    alice = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    alice_dm = conversation_audience(alice)
+    alice_ctx = _tool_ctx(
+        _ext(index, embed, alice_dm), alice, tmp_path, workspace_id=workspace_id, audience=alice_dm
+    )
+    verbs = ObjectVerbs(
+        registry=object_registry(
+            (BoundKind(kind=MEMORY_OBJECT, extension="memory", context=alice_ctx.ext),)
+        )
+    )
+
+    async def listed(**args: object) -> list[dict]:
+        tool = next(tool for tool in verbs.tools() if tool.name == "object_list")
+        result = await tool.handler(
+            alice_ctx,
+            tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": MEMORY_KIND, **args}
+            ),
+        )
+        assert result.is_error is False
+        return json.loads(result.content[0].text)["objects"]
+
+    with ws(workspace_id):
+        await _run(
+            "memory_update",
+            alice_ctx,
+            body="alice prefers plaintext email",
+            item_class="semantic",
+            memory_kind="preference",
+        )
+        await _run(
+            "memory_update",
+            alice_ctx,
+            body="alice shipped the billing migration",
+            item_class="fact",
+            memory_kind="event",
+        )
+
+        rows = await listed()
+        by_kind = await listed(filters={"memory_kind": "preference"})
+        by_class = await listed(filters={"item_class": "fact"})
+        by_subject = await listed(filters={"subject": member_subject(alice)})
+        ordered = await listed(order_by="memory_kind")
+
+    assert {row["memory_kind"] for row in rows} == {"preference", "event"}
+    assert {row["item_class"] for row in rows} == {"semantic", "fact"}
+    assert {row["subject"] for row in rows} == {member_subject(alice)}
+    assert [row["memory_kind"] for row in by_kind] == ["preference"]
+    assert [row["item_class"] for row in by_class] == ["fact"]
+    assert len(by_subject) == 2
+    assert [row["memory_kind"] for row in ordered] == ["event", "preference"]
 
 
 async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(

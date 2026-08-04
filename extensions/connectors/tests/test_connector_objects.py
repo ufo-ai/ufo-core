@@ -19,19 +19,23 @@ from ufo_ext_connectors.objects import (
 )
 
 from ufo.agent_scope import agent
+from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
 from ufo.grants import (
     GrantStore,
+    account_object_name,
     connection_summaries,
     grant_summaries,
     workspace_grant_summaries,
 )
+from ufo.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.objects import (
     AdminRequired,
     GeneratedObjectOwner,
     ObjectDetail,
+    ObjectRef,
     UnknownObject,
     VerbNotSupported,
 )
@@ -229,6 +233,144 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         assert datetime.fromisoformat(fetched["updated_at"]).replace(tzinfo=UTC) == datetime(
             2026, 7, 11, tzinfo=UTC
         )
+
+
+async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        ctx = _tool_context(workspace_id, agent_id, grantor_id)
+        fetched = yaml.safe_load(
+            await _text(
+                _object_tool("object_get"),
+                ctx,
+                kind=CONNECTOR_GRANT_KIND,
+                name=GMAIL_ALICE_NAME,
+            )
+        )
+        assert fetched["links"] == [
+            {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "assistant"}},
+            {
+                "relation": "access_to",
+                "target": {
+                    "kind": CONNECTION_KIND,
+                    "name": account_object_name("gmail", "alice@example.com"),
+                },
+            },
+        ]
+        _scope, link = fetched["links"]
+        opened = yaml.safe_load(
+            await _text(
+                _object_tool("object_get"),
+                ctx,
+                kind=link["target"]["kind"],
+                name=link["target"]["name"],
+            )
+        )
+        assert opened["spec"] == {"provider": "gmail", "account_id": "alice@example.com"}
+        assert opened["links"] == []
+
+
+async def test_a_shared_grant_drops_the_link_to_its_owner_only_connection(db: None) -> None:
+    """A shared grant is readable by every member while its connection stays owner-or-admin, so the
+    `access_to` edge would point at narrower visibility — spec.md demands equal-or-wider. Sharing
+    withdraws the edge and making the grant private again restores it."""
+    workspace_id, agent_id, conversation_id, _admin_id, grantor_id, other_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        owner = _tool_context(workspace_id, agent_id, grantor_id)
+
+        async def relations(ctx) -> list[str]:
+            fetched = yaml.safe_load(
+                await _text(
+                    _object_tool("object_get"),
+                    ctx,
+                    kind=CONNECTOR_GRANT_KIND,
+                    name=GMAIL_ALICE_NAME,
+                )
+            )
+            return [link["relation"] for link in fetched["links"]]
+
+        assert await relations(owner) == ["scoped_to", "access_to"]
+
+        await _text(
+            _object_tool("object_apply"),
+            owner,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": CONNECTOR_GRANT_KIND,
+                    "name": GMAIL_ALICE_NAME,
+                    "spec": {
+                        "provider": "gmail",
+                        "account_id": "alice@example.com",
+                        "shared": True,
+                    },
+                }
+            ),
+        )
+        assert await relations(owner) == ["scoped_to"]
+        assert await relations(_tool_context(workspace_id, agent_id, other_id)) == ["scoped_to"]
+
+        await _text(
+            _object_tool("object_apply"),
+            owner,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": CONNECTOR_GRANT_KIND,
+                    "name": GMAIL_ALICE_NAME,
+                    "spec": {
+                        "provider": "gmail",
+                        "account_id": "alice@example.com",
+                        "shared": False,
+                    },
+                }
+            ),
+        )
+        assert await relations(owner) == ["scoped_to", "access_to"]
+
+
+LONG_ACCOUNT = "anna.rodriguez-fernandez@platform-engineering.example.com"
+
+
+async def test_a_long_account_still_names_a_connection_a_link_can_express(db: None) -> None:
+    """`account_id` is unbounded, so an account whose slug overruns the object-name limit would make
+    the grant's `access_to` ref raise out of `object_get`. The name is bounded by construction, and
+    the read that renders the link is what proves it."""
+    workspace_id, agent_id, conversation_id, _admin_id, grantor_id, _other_id = await _seed()
+    name = account_object_name("gmail", LONG_ACCOUNT)
+    assert len(name) == OBJECT_NAME_MAX_LENGTH
+    assert ObjectRef(kind=CONNECTION_KIND, name=name).name == name
+
+    with ws(workspace_id), agent(agent_id):
+        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", LONG_ACCOUNT)
+        ctx = _tool_context(workspace_id, agent_id, grantor_id)
+        fetched = yaml.safe_load(
+            await _text(_object_tool("object_get"), ctx, kind=CONNECTOR_GRANT_KIND, name=name)
+        )
+        opened = yaml.safe_load(
+            await _text(_object_tool("object_get"), ctx, kind=CONNECTION_KIND, name=name)
+        )
+    assert {
+        "relation": "access_to",
+        "target": {"kind": CONNECTION_KIND, "name": name},
+    } in fetched["links"]
+    assert opened["spec"] == {"provider": "gmail", "account_id": LONG_ACCOUNT}
+
+
+def test_two_accounts_sharing_a_truncated_head_stay_distinct() -> None:
+    """Truncation drops slug characters, so the digest is the only thing left separating two
+    accounts identical up to the cut — it stays whole at the end of the name."""
+    first = account_object_name("gmail", f"{LONG_ACCOUNT}.extra1")
+    second = account_object_name("gmail", f"{LONG_ACCOUNT}.extra2")
+    assert first != second
+    for name in (first, second):
+        assert len(name) == OBJECT_NAME_MAX_LENGTH
+        assert ObjectRef(kind=CONNECTION_KIND, name=name).name == name
+    assert first.rsplit("-", 1)[0] == second.rsplit("-", 1)[0], "the heads are identical"
 
 
 async def test_colliding_account_slugs_never_rename_objects(db: None) -> None:

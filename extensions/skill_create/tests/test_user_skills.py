@@ -28,6 +28,7 @@ from ufo_ext_skill_create.store import (
 )
 
 from ufo.agent_scope import AgentUnbound, agent
+from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
@@ -390,6 +391,24 @@ async def test_applied_skill_resolves_files_and_mounts(db: None, tmp_path) -> No
     assert fetched["updated_at"] is not None
     assert [entry.skill.name for entry in merged.closure("greet")] == ["greet"]
     assert ("references/tone.md", b"warm") in merged.named("greet").files
+
+
+async def test_a_saved_skill_links_to_the_agent_it_belongs_to(db: None, tmp_path) -> None:
+    workspace_id, agent_id = await _workspace_agent(name="research")
+    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
+    inline = _skill_md("greet", "greets people").decode()
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_skill_manifest("greet", {"SKILL.md": inline}),
+        )
+        fetched = yaml.safe_load(
+            await _dispatch(_object_tool("object_get"), ctx, kind=SKILL_KIND, name="greet")
+        )
+    assert fetched["links"] == [
+        {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "research"}}
+    ]
 
 
 async def test_reapplied_skill_updates_and_delete_removes(db: None, tmp_path) -> None:

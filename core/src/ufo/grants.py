@@ -25,6 +25,7 @@ from starlette.requests import Request
 
 from ufo.agent_scope import agent, agent_current
 from ufo.db import workspace_tx
+from ufo.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.workspace import ws, ws_current
@@ -708,16 +709,19 @@ def connect_bridge_workspace(request: Request) -> UUID | None:
 
 
 ACCOUNT_NAME_DIGEST_LENGTH = 8
+ACCOUNT_NAME_HEAD_MAX = OBJECT_NAME_MAX_LENGTH - ACCOUNT_NAME_DIGEST_LENGTH - 1
 
 
 def account_object_name(provider: str, account_id: str) -> str:
     """The stable object name a provider account renders as — for both the `connection` and
     `connector_grant` kinds and the portal's prepared intents, so every surface names one edge
     the same way: slugged provider and account with a digest qualifier that keeps two accounts
-    whose slugs collide distinct."""
+    whose slugs collide distinct. `account_id` is unbounded, so the slugged head is truncated to
+    leave the digest whole — it is what separates two accounts sharing a prefix."""
     identity = f"{provider}\0{account_id}".encode()
     qualifier = hashlib.sha256(identity).hexdigest()[:ACCOUNT_NAME_DIGEST_LENGTH]
-    return f"{_slug(provider)}-{_slug(account_id)}-{qualifier}"
+    head = f"{_slug(provider)}-{_slug(account_id)}".strip("-")[:ACCOUNT_NAME_HEAD_MAX].strip("-")
+    return f"{head}-{qualifier}" if head else qualifier
 
 
 def _slug(raw: str) -> str:

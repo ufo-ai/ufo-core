@@ -6,12 +6,19 @@ from typing import ClassVar, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.context import JsonValue
-from ufo.sdk.grants import account_object_name, connection_summaries, grant_summaries
+from ufo.sdk.grants import (
+    account_object_name,
+    connection_summaries,
+    grant_summaries,
+)
 from ufo.sdk.objects import (
+    AGENT_KIND,
     GeneratedObjectOwner,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
+    ObjectLink,
+    ObjectRef,
     OwnedRow,
     VerbNotSupported,
 )
@@ -169,6 +176,25 @@ class ConnectorGrantObjects(MemberOwnedObjects[ConnectorGrantSpec, GeneratedObje
             ),
             created_at=row.granted_at,
             updated_at=row.updated_at,
+            links=(
+                ObjectLink(
+                    relation="scoped_to",
+                    target=ObjectRef(kind=AGENT_KIND, name=row.agent),
+                ),
+                *(
+                    ()
+                    if row.shared
+                    else (
+                        ObjectLink(
+                            relation="access_to",
+                            target=ObjectRef(
+                                kind=CONNECTION_KIND,
+                                name=account_object_name(row.provider, row.account_id),
+                            ),
+                        ),
+                    )
+                ),
+            ),
         )
 
     async def _status(
@@ -262,7 +288,10 @@ CONNECTOR_GRANT_OBJECT = ObjectKind(
         "Use this kind to manage the current agent's connection access. Create is refused; "
         "connect_account creates the edge. Its connection owner may share or make it private; a "
         "workspace admin may only make it private. Its owner or an admin may delete it, revoking "
-        "only this agent's edge while leaving the connection and other agents' edges intact."
+        "only this agent's edge while leaving the connection and other agents' edges intact. Its "
+        "`scoped_to` link names the agent holding the edge; while it is private its `access_to` "
+        "link names the connection the edge opens — object_get that for the account's owner and "
+        "every agent holding it."
     ),
     spec_model=ConnectorGrantSpec,
     store=ConnectorGrantObjects(),

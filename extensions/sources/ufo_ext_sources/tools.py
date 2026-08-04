@@ -33,13 +33,18 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import CredentialSlotUnset, ExtensionContext, SourceReader
+from ufo.sdk.credentials import credential_object_name
+from ufo.sdk.grants import account_object_name
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
+    CREDENTIAL_KIND,
     AdminRequired,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectOwner,
+    ObjectRef,
     OwnedRow,
     UnknownObject,
     VerbNotSupported,
@@ -55,6 +60,7 @@ from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
+CONNECTION_OBJECT_KIND = "connection"
 SUMMARY_MAX = 120
 SUBSCRIBERS_PREFIX = "subscribers:"
 ALERT_NAMED_MAX = 5
@@ -174,6 +180,21 @@ class _Binding:
     @property
     def updated_at(self) -> datetime:
         return max(stream.updated_at for stream in self.streams)
+
+    def links(self) -> tuple[ObjectLink, ...]:
+        """What the binding authenticates through: the workspace credential slot a direct provider
+        spends, or the connection its account handle resolves to. A shared binding is
+        workspace-readable while its connection stays owner-or-admin, so only a private binding
+        names the connection."""
+        if self.account == DIRECT_ACCOUNT:
+            access = ObjectRef(kind=CREDENTIAL_KIND, name=credential_object_name(self.provider))
+        elif self.subject == SHARED_SUBJECT:
+            return ()
+        else:
+            access = ObjectRef(
+                kind=CONNECTION_OBJECT_KIND, name=account_object_name(self.provider, self.account)
+            )
+        return (ObjectLink(relation="access_to", target=access),)
 
     def spec(self, subscribers: tuple[str, ...] = ()) -> SourceSpec:
         return SourceSpec(
@@ -404,6 +425,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             spec=binding.spec(subscribers=subscribers),
             created_at=binding.created_at,
             updated_at=binding.updated_at,
+            links=binding.links(),
         )
 
     async def _status(
@@ -812,7 +834,9 @@ SOURCE_OBJECT = ObjectKind(
         "memory instead, only when the member's words say the source is for the team. "
         "Unsharing is delete-and-recreate; a source's identity is otherwise its config, so "
         "changing streams is delete and recreate too. Delete is registrar-or-admin. Reads show "
-        "shared sources plus the member's own — a workspace admin sees all. To be alerted when a "
+        "shared sources plus the member's own — a workspace admin sees all. Its `access_to` link "
+        "names the workspace credential slot a direct provider spends, or — while the source is "
+        "private — the connection a brokered one resolves to. To be alerted when a "
         "source you can see changes, object_get it, then object_apply the same manifest with your "
         "own conversation id (shown as status.subscriber_id) added to `subscribers`; remove it to "
         "stop. You may only add or remove your own id, and subscribing is not admin-gated."

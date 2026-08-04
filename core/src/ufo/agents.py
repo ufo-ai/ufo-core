@@ -25,8 +25,10 @@ from ufo.objects import (
     AdminRequired,
     ObjectDetail,
     ObjectKind,
+    ObjectLink,
     ObjectListQuery,
     ObjectPage,
+    ObjectRef,
     ObjectRow,
     UnknownObject,
     VerbNotSupported,
@@ -138,6 +140,16 @@ class AgentObjects:
                 ),
                 created_at=row.created_at,
                 updated_at=row.updated_at,
+                links=(
+                    ()
+                    if row.is_main
+                    else (
+                        ObjectLink(
+                            relation="scoped_to",
+                            target=ObjectRef(kind=AGENT_KIND, name=row.main_agent),
+                        ),
+                    )
+                ),
             )
         )
 
@@ -231,6 +243,9 @@ class AgentObjects:
         raise VerbNotSupported(AGENT_UNDELETABLE)
 
     async def _row(self, name: str) -> sa.Row | None:
+        """The named agent plus the workspace main agent's name, so a child agent's owning-scope
+        link costs no second round trip."""
+        main = tables.agent.alias("main_agent")
         async with workspace_tx() as connection:
             return (
                 await connection.execute(
@@ -243,6 +258,13 @@ class AgentObjects:
                         tables.agent.c.reasoning,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
+                        sa.select(main.c.name)
+                        .where(
+                            main.c.workspace_id == ws_current().workspace_id,
+                            main.c.is_main.is_(True),
+                        )
+                        .scalar_subquery()
+                        .label("main_agent"),
                     ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,
                         tables.agent.c.name == name,
@@ -269,7 +291,8 @@ AGENT_OBJECT = ObjectKind(
         "one write that is not an edit; a new agent starts empty, inheriting no grants, "
         "credentials, sources, or memory. An existing agent's prompt is read-only here: changes "
         "use the governed proposal path, and status carries its current value and digest. The "
-        "main agent may manage other agents; a child agent may only manage itself. Delete is "
+        "main agent may manage other agents; a child agent may only manage itself, and its "
+        "`scoped_to` link names the main agent it runs under. Delete is "
         "refused. Confirm before changing settings."
     ),
     spec_model=AgentSpec,

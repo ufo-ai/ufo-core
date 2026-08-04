@@ -5,10 +5,16 @@ internals.
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.agents import (
+    AGENT_KIND as AGENT_KIND,
+)
+from ufo.agents import (
     AgentSpec as AgentSpec,
 )
 from ufo.conversations import (
     CONVERSATION_KIND as CONVERSATION_KIND,
+)
+from ufo.credential_kind import (
+    CREDENTIAL_KIND as CREDENTIAL_KIND,
 )
 from ufo.objects import (
     OBJECT_LIST_PAGE as OBJECT_LIST_PAGE,
