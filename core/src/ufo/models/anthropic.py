@@ -28,7 +28,7 @@ from ufo.models.interface import (
     ToolUseBlock,
     trim_images,
 )
-from ufo.models.spec import ModelSpec
+from ufo.models.spec import KEY_REJECTED_STATUS, ModelSpec
 from ufo.o11y import log
 from ufo.schema.records import Usage
 
@@ -133,6 +133,9 @@ class AnthropicClient:
         error event (overloaded, or a transient api_error) arrives on the already-200 stream
         response and so carries status_code 200 — keying retry off the single non-retryable case
         (a deterministic 4xx) catches it where a 5xx allowlist would let a 200-coded fault through.
+        A 401 is the provider refusing the key this spec resolved, so it raises that spec's
+        credential fault instead of the SDK's auth error — the round says which slot or env to
+        replace, and the verdict is deterministic per key, so nothing retries it.
         stop_reason=max_tokens is a truncated completion and raises ModelResponseTruncated;
         stop_reason=refusal raises ModelRefusal (deterministic per request — never retried, never
         an empty success). stop_reason=tool_use is a normal stop. An empty completion (no text and
@@ -272,6 +275,8 @@ class AnthropicClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if error.status_code == KEY_REJECTED_STATUS:
+                    raise self.spec.key_rejected() from error
                 attempt += 1
                 deterministic_client_error = (
                     400 <= error.status_code < 500 and error.status_code != 429

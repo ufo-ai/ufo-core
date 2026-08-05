@@ -65,7 +65,7 @@ from ufo.models.interface import (
     ToolUseBlock,
     trim_images,
 )
-from ufo.models.spec import ModelSpec
+from ufo.models.spec import KEY_REJECTED_STATUS, ModelSpec
 from ufo.o11y import log
 from ufo.schema.records import Usage
 
@@ -351,11 +351,14 @@ class OpenAIClient:
         or a dropped connection (a raw httpx error the SDK does not wrap once streaming starts)
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
         and re-raising the fault) — both only until the first event is yielded; any failure after
-        that raises immediately. finish_reason=length is a truncated
-        completion and raises ModelResponseTruncated. finish_reason=tool_calls is a normal stop. An
-        empty completion (no event, finish_reason=stop) is a retryable provider failure, re-issued
-        up to MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's
-        nudge — a tool-call-only response has yielded and never degrades.
+        that raises immediately. A 401 is the provider refusing the key this spec resolved, so it
+        raises that spec's credential fault instead of the SDK's auth error — the round says which
+        slot or env to replace, and the verdict is deterministic per key, so nothing retries it.
+        finish_reason=length is a truncated completion and raises ModelResponseTruncated.
+        finish_reason=tool_calls is a normal stop. An empty completion (no event,
+        finish_reason=stop) is a retryable provider failure, re-issued up to
+        MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's nudge —
+        a tool-call-only response has yielded and never degrades.
         """
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
@@ -423,6 +426,8 @@ class OpenAIClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if error.status_code == KEY_REJECTED_STATUS:
+                    raise self.spec.key_rejected() from error
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
@@ -573,6 +578,8 @@ class OpenAIClient:
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
+                if error.status_code == KEY_REJECTED_STATUS:
+                    raise self.spec.key_rejected() from error
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:

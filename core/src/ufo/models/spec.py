@@ -10,11 +10,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from ufo.credentials import CredentialValueInvalid
 from ufo.models.interface import ModelClient, ToolSchema
 from ufo.models.pricing import ModelPrice
 from ufo.schema.records import ReasoningEffort
 
 KNOWLEDGE_CUTOFF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+KEY_REJECTED_STATUS = 401
 
 ApiSurface = Literal["chat", "responses"]
 
@@ -60,6 +62,18 @@ class ModelSpec:
             raise ValueError(
                 f"model {self.id!r} declares tools_with_reasoning without reasoning support"
             )
+
+    def key_rejected(self) -> CredentialValueInvalid:
+        """The credential fault a provider's 401 is: the key this spec resolved is not one it
+        accepts. Typed here rather than left as the provider's own auth error because the verdict is
+        deterministic per key — every turn the workspace runs repeats it until that value changes,
+        and a generic stream failure attributes it to nothing anyone can replace. The round cannot
+        tell which of the two sources the registry read, so the message names both."""
+        needed = self.key_env or self.key_slot.upper()
+        return CredentialValueInvalid(
+            f"model {self.id!r} key was rejected by the provider: env {needed} or the workspace's "
+            f"{self.key_slot!r} BYOK slot holds a key {self.provider} does not accept. Replace it."
+        )
 
     def default_reasoning(
         self, requested: ReasoningEffort, tools: tuple[ToolSchema, ...]

@@ -598,6 +598,55 @@ async def test_client_error_does_not_retry(harness: ProviderHarness) -> None:
     assert create.calls == 1
 
 
+KEYED_ANTHROPIC_SPEC = replace(
+    ANTHROPIC_SPEC, key_slot="anthropic_api_key", key_env="ANTHROPIC_API_KEY"
+)
+KEYED_OPENAI_SPEC = replace(OPENAI_SPEC, key_slot="openai_api_key", key_env="OPENAI_API_KEY")
+REJECTED_KEY_CLIENTS = [
+    pytest.param(
+        lambda create: AnthropicClient(client=anthropic_sdk(create), spec=KEYED_ANTHROPIC_SPEC),
+        anthropic.APIStatusError,
+        r"model 'claude-opus-4-8' key was rejected by the provider: env ANTHROPIC_API_KEY or the "
+        r"workspace's 'anthropic_api_key' BYOK slot holds a key anthropic does not accept\. "
+        r"Replace it\.",
+        id="anthropic",
+    ),
+    pytest.param(
+        lambda create: OpenAIClient(client=openai_sdk(create), spec=KEYED_OPENAI_SPEC),
+        openai.APIStatusError,
+        r"model 'gpt-5\.5' key was rejected by the provider: env OPENAI_API_KEY or the workspace's "
+        r"'openai_api_key' BYOK slot holds a key openai does not accept\. Replace it\.",
+        id="openai-chat",
+    ),
+    pytest.param(
+        lambda create: OpenAIClient(
+            client=SimpleNamespace(responses=SimpleNamespace(create=create)),
+            spec=replace(KEYED_OPENAI_SPEC, api_surface="responses"),
+        ),
+        openai.APIStatusError,
+        r"model 'gpt-5\.5' key was rejected by the provider: env OPENAI_API_KEY or the workspace's "
+        r"'openai_api_key' BYOK slot holds a key openai does not accept\. Replace it\.",
+        id="openai-responses",
+    ),
+]
+
+
+@pytest.mark.parametrize(("build", "error_type", "message"), REJECTED_KEY_CLIENTS)
+async def test_rejected_key_names_the_slot_and_env_it_came_from(
+    build: Callable[[ScriptedCreate], AnthropicClient | OpenAIClient],
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    """The #928 fix: a 401 is the provider's verdict on the key the registry resolved, so the round
+    raises the credential fault naming both places that key can come from — where the SDK's own auth
+    error left the turn recording `AuthenticationError: 401 Invalid bearer token`, which attributes
+    the fault to neither and tells a member nothing to do. Deterministic per key, so one call."""
+    create = ScriptedCreate(provider_error(error_type, 401), provider_error(error_type, 401))
+    with pytest.raises(CredentialValueInvalid, match=message):
+        await collect(build(create))
+    assert create.calls == 1
+
+
 @pytest.mark.parametrize("harness", PROVIDERS)
 async def test_retries_exhaust_after_max(harness: ProviderHarness) -> None:
     errors = [provider_error(harness.error_type, 429) for _ in range(harness.max_retries + 1)]

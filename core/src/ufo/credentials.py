@@ -66,7 +66,8 @@ class CredentialRequestInvalid(ValueError):
 
 
 class CredentialValueInvalid(ValueError):
-    """A credential value cannot be represented on its provider wire."""
+    """A credential value cannot serve its provider wire: unrepresentable on it, or refused by the
+    provider that read it."""
 
 
 CREDENTIAL_REQUEST_PURPOSE = "credential-request"
