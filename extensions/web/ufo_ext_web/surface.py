@@ -1024,7 +1024,7 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def _readable_conversation(
-    ctx: SurfaceContext, request: Request
+    ctx: SurfaceContext, request: Request, conversation_id: UUID | None = None
 ) -> tuple[UUID, UUID] | Response:
     """The agent and conversation a content read is authorized for, or the 404 every unreadable
     case answers: an agent outside the audience, a malformed id, another agent's conversation, a
@@ -1034,10 +1034,11 @@ async def _readable_conversation(
     if isinstance(gated, Response):
         return gated
     member_id, _email, audience, agent_id = gated
-    try:
-        conversation_id = UUID(request.path_params["conversation_id"])
-    except ValueError:
-        return Response("no such conversation", status_code=404)
+    if conversation_id is None:
+        try:
+            conversation_id = UUID(request.path_params["conversation_id"])
+        except ValueError:
+            return Response("no such conversation", status_code=404)
     if not await ctx.readable_conversation(
         conversation_id, agent_id, member_id, admin=audience.admin
     ):
@@ -1050,6 +1051,8 @@ def _turn_row(turn: Turn) -> dict[str, object]:
     member wrote and never the elements a surface named around them."""
     return {
         "id": str(turn.id),
+        "agent_id": str(turn.agent_id),
+        "conversation_id": str(turn.conversation_id),
         "seq": turn.seq,
         "status": turn.status,
         "inbound": member_message_text(turn.inbound),
@@ -1178,7 +1181,25 @@ def _conversation_changes(
 
 async def conversation_changes(ctx: SurfaceContext, request: Request) -> Response:
     """Successful file changes in the conversation's durable execution."""
-    authorized = await _readable_conversation(ctx, request)
+    root = request.query_params.get("root")
+    if root is None:
+        authorized = await _readable_conversation(ctx, request)
+    else:
+        try:
+            conversation_id = UUID(request.path_params["conversation_id"])
+            root_id = UUID(root)
+        except ValueError:
+            return Response("no such conversation", status_code=404)
+        authorized = await _readable_conversation(ctx, request, root_id)
+        if not isinstance(authorized, Response):
+            agent_id, _root_id = authorized
+            spawned = await ctx.conversation_subagent_turns(root_id)
+            if not any(
+                turn.agent_id == agent_id and turn.conversation_id == conversation_id
+                for turn in spawned
+            ):
+                return Response("no such conversation", status_code=404)
+            authorized = agent_id, conversation_id
     if isinstance(authorized, Response):
         return authorized
     _agent_id, conversation_id = authorized

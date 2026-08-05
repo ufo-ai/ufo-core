@@ -5239,6 +5239,8 @@ async def test_conversation_turns_nest_subagents_and_fail_closed(
     assert payload["turns"][0]["inbound"] == "research"
     assert payload["turns"][0]["outcome"] == "ok"
     assert [entry["id"] for entry in payload["subagent_turns"]] == [str(child)]
+    assert payload["subagent_turns"][0]["agent_id"] == str(agent_id)
+    assert payload["subagent_turns"][0]["conversation_id"] == str(child_conversation)
     assert payload["subagent_turns"][0]["parent_turn_id"] == str(parent)
     assert payload["subagent_turns"][0]["subagent_profile"] == "researcher"
 
@@ -5279,12 +5281,10 @@ async def _acknowledge(
 
 async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_read(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """The disclosure path end to end: an admin's turn read is not-found until they acknowledge on
-    the intent lane, the acknowledgement writes exactly one row naming reader and subject, and the
-    turns and files then answer. A non-admin's acknowledgement is refused by the tool and writes
-    nothing, so the lane records a read the role already allows rather than granting one."""
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -5295,12 +5295,46 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         audience=f"member:{member_m}",
         member_id=member_m,
     )
-    await _seed_listed_turn(workspace_id, theirs, agent_id, seq=1, inbound="private question")
+    parent_turn = await _seed_listed_turn(
+        workspace_id, theirs, agent_id, seq=1, inbound="private question"
+    )
+    child_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=str(parent_turn),
+        audience=f"member:{member_m}",
+        member_id=member_m,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        child_conversation,
+        agent_id,
+        seq=1,
+        inbound="private child task",
+        parent_turn_id=parent_turn,
+        subagent_profile="coding",
+    )
+    await Transcript(blob=blob, conversation_id=child_conversation).write(
+        Conversation(
+            seq=1,
+            messages=_change_messages(1, lambda _index: "+private child change\n"),
+        )
+    )
+    unrelated = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="unrelated",
+        audience="shared",
+        member_id=None,
+    )
     turns = f"/surface/web/agents/{agent_id}/conversations/{theirs}/turns"
     admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
 
     blocked = await client.get(turns, headers=admin_cookie)
     assert blocked.status_code == 404
+    child_changes = f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/changes"
+    assert (await client.get(child_changes, headers=admin_cookie)).status_code == 404
 
     refused = await _acknowledge(client, agent_id, theirs, token_n)
     assert refused.status_code == 200
@@ -5322,6 +5356,14 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     opened = await client.get(turns, headers=admin_cookie)
     assert opened.status_code == 200
     assert [entry["inbound"] for entry in opened.json()["turns"]] == ["private question"]
+    assert [entry["inbound"] for entry in opened.json()["subagent_turns"]] == ["private child task"]
+    assert (await client.get(child_changes, headers=admin_cookie)).status_code == 404
+    rooted_changes = await client.get(f"{child_changes}?root={theirs}", headers=admin_cookie)
+    assert rooted_changes.status_code == 200
+    assert rooted_changes.json()["changes"][0]["patch"] == "+private child change\n"
+    assert (
+        await client.get(f"{child_changes}?root={unrelated}", headers=admin_cookie)
+    ).status_code == 404
     files = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{theirs}/files", headers=admin_cookie
     )

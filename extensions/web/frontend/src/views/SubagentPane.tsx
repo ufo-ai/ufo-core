@@ -221,7 +221,13 @@ function RunDetail({ base, run, onBack }: { base: string; run: Run; onBack: () =
         {(payload) => (
           <div className="my-lg flex flex-col gap-lg">
             {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-              <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
+              <TurnLine
+                key={entry.turn.id}
+                turn={entry.turn}
+                depth={entry.depth}
+                showChanges={entry.first}
+                rootConversationId={entry.turn.conversation_id === run.id ? undefined : run.id}
+              />
             ))}
           </div>
         )}

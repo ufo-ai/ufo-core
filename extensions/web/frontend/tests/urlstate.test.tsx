@@ -95,6 +95,13 @@ test("the changes hash names its conversation", () => {
     agentId: AGENT.id,
     conversationId: CONVO_ID,
   });
+  const root = "99999999-9999-4999-8999-999999999999";
+  expect(parseHash(changesHash(AGENT.id, CONVO_ID, root))).toEqual({
+    kind: "changes",
+    agentId: AGENT.id,
+    conversationId: CONVO_ID,
+    rootConversationId: root,
+  });
 });
 
 test("a reload lands on the page and the open artifact the hash names", async () => {

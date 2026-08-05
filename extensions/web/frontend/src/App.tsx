@@ -325,6 +325,7 @@ function Pane({
       <ChangesPane
         agent={agent}
         conversationId={route.conversationId}
+        rootConversationId={route.rootConversationId}
         onOpenAgent={onOpenAgent}
       />
     );

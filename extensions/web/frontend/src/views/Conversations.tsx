@@ -8,6 +8,7 @@ import { formatSize } from "@/views/Chat";
 import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { changesHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
@@ -25,6 +26,8 @@ type Conversation = {
 
 export type Turn = {
   id: string;
+  agent_id: string;
+  conversation_id: string;
   seq: number;
   status: string;
   created_at: string;
@@ -37,17 +40,23 @@ export type Turn = {
 
 type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
 
-export function turnTree(turns: Turn[], spawned: Turn[]): { turn: Turn; depth: number }[] {
+export function turnTree(
+  turns: Turn[],
+  spawned: Turn[],
+): { turn: Turn; depth: number; first: boolean }[] {
   const children = new Map<string | null, Turn[]>();
   for (const turn of spawned) {
     const siblings = children.get(turn.parent_turn_id) ?? [];
     siblings.push(turn);
     children.set(turn.parent_turn_id, siblings);
   }
-  const rows: { turn: Turn; depth: number }[] = [];
+  const rows: { turn: Turn; depth: number; first: boolean }[] = [];
   const placed = new Set<string>();
+  const conversations = new Set<string>();
   const walk = (turn: Turn, depth: number) => {
-    rows.push({ turn, depth });
+    const first = !conversations.has(turn.conversation_id);
+    rows.push({ turn, depth, first });
+    conversations.add(turn.conversation_id);
     placed.add(turn.id);
     for (const child of children.get(turn.id) ?? []) walk(child, depth + 1);
   };
@@ -235,7 +244,15 @@ function ConversationDetail({
         {(payload) => (
           <div className="my-lg flex flex-col gap-lg">
             {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-              <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
+              <TurnLine
+                key={entry.turn.id}
+                turn={entry.turn}
+                depth={entry.depth}
+                showChanges={entry.first}
+                rootConversationId={
+                  entry.turn.conversation_id === conversation.id ? undefined : conversation.id
+                }
+              />
             ))}
           </div>
         )}
@@ -245,7 +262,17 @@ function ConversationDetail({
   );
 }
 
-export function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
+export function TurnLine({
+  turn,
+  depth,
+  showChanges,
+  rootConversationId,
+}: {
+  turn: Turn;
+  depth: number;
+  showChanges: boolean;
+  rootConversationId?: string;
+}) {
   const answer = turn.outcome || turn.error_class;
   return (
     <div
@@ -255,12 +282,17 @@ export function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
       )}
       style={{ marginLeft: depth * 16 + "px" }}
     >
-      <div className="font-mono text-mono">
-        {(turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq) +
-          " · " +
-          turn.status +
-          " · " +
-          (day(turn.created_at) || "")}
+      <div className="flex gap-md font-mono text-mono">
+        <span>
+          {(turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq) +
+            " · " +
+            turn.status +
+            " · " +
+            (day(turn.created_at) || "")}
+        </span>
+        {showChanges ? (
+          <a href={changesHash(turn.agent_id, turn.conversation_id, rootConversationId)}>Changes</a>
+        ) : null}
       </div>
       <div className="max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm">
         {turn.inbound}

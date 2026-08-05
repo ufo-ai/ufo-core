@@ -177,9 +177,11 @@ test("changes refresh after another file result lands", async () => {
 
 test("a changes URL opens a conversation absent from the chat rail", async () => {
   const child = "66666666-6666-4666-8666-666666666666";
-  location.hash = "#/agents/" + AGENT.id + "/conversations/" + child + "/changes";
+  const root = "77777777-7777-4777-8777-777777777777";
+  location.hash =
+    "#/agents/" + AGENT.id + "/conversations/" + child + "/changes?root=" + root;
   wire({
-    ["/conversations/" + child + "/changes"]: () =>
+    ["/conversations/" + child + "/changes?root=" + root]: () =>
       json({
         changes: [{ path: "/workspace/repo/child.py", patch: "+child\n", truncated: false }],
         truncated: false,

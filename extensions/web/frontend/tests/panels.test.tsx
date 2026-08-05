@@ -281,13 +281,16 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
 });
 
 test("conversations open a turn tree that nests a subagent under the turn that spawned it", async () => {
+  const rootConversation = "11111111-1111-4111-8111-111111111111";
   wire({
-    "/conversations/c1/turns": () =>
+    ["/conversations/" + rootConversation + "/turns"]: () =>
       json({
         turns: [
           {
             id: "t1",
-            seq: 1,
+            agent_id: AGENT_ID,
+            conversation_id: rootConversation,
+            seq: 2,
             status: "done",
             created_at: "2026-07-30T10:00:00",
             inbound: "parent ask",
@@ -296,10 +299,25 @@ test("conversations open a turn tree that nests a subagent under the turn that s
             subagent_profile: null,
             parent_turn_id: null,
           },
+          {
+            id: "t3",
+            agent_id: AGENT_ID,
+            conversation_id: rootConversation,
+            seq: 3,
+            status: "done",
+            created_at: "2026-07-30T10:00:02",
+            inbound: "parent follow-up",
+            outcome: "follow-up answer",
+            error_class: null,
+            subagent_profile: null,
+            parent_turn_id: null,
+          },
         ],
         subagent_turns: [
           {
             id: "t2",
+            agent_id: AGENT_ID,
+            conversation_id: "22222222-2222-4222-8222-222222222222",
             seq: 1,
             status: "done",
             created_at: "2026-07-30T10:00:01",
@@ -311,12 +329,12 @@ test("conversations open a turn tree that nests a subagent under the turn that s
           },
         ],
       }),
-    "/conversations/c1/files": () => json({ files: [] }),
+    ["/conversations/" + rootConversation + "/files"]: () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [
           {
-            id: "c1",
+            id: rootConversation,
             surface: "web",
             member_email: "member@example.com",
             turn_count: 2,
@@ -334,9 +352,22 @@ test("conversations open a turn tree that nests a subagent under the turn that s
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("child answer")).toBeTruthy();
-  const parent = screen.getByText(/^turn 1 ·/);
+  const parent = screen.getByText(/^turn 2 ·/);
   const child = screen.getByText(/^subagent research ·/);
   expect(parent.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(
+    screen.getAllByRole("link", { name: "Changes" }).map((link) => link.getAttribute("href")),
+  ).toEqual([
+    "#/agents/" +
+      AGENT_ID +
+      "/conversations/" +
+      rootConversation +
+      "/changes",
+    "#/agents/" +
+      AGENT_ID +
+      "/conversations/22222222-2222-4222-8222-222222222222/changes?root=" +
+      rootConversation,
+  ]);
   expect(await screen.findByText("No files in this conversation's workspace.")).toBeTruthy();
 });
 

@@ -10,15 +10,22 @@ type ChangesPayload = { changes: Change[]; truncated: boolean };
 export function ChangesPane({
   agent,
   conversationId,
+  rootConversationId,
   onOpenAgent,
 }: {
   agent: Agent;
   conversationId: string;
+  rootConversationId?: string;
   onOpenAgent: (agentId: string) => void;
 }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<ChangesPayload>(
-    "/agents/" + agent.id + "/conversations/" + conversationId + "/changes",
+    "/agents/" +
+      agent.id +
+      "/conversations/" +
+      conversationId +
+      "/changes" +
+      (rootConversationId ? "?root=" + rootConversationId : ""),
     reloads,
   );
   return (
