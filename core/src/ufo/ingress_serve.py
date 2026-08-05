@@ -78,15 +78,27 @@ CACHE_DIRECTIVE_HEADERS = frozenset(
 is the one a browser reads; the CDN-targeted fields outrank it *at the edge*, which is the cache
 that matters here — the sites wildcard is proxied, so an origin sending `cdn-cache-control: max-age`
 would have the edge store an access-controlled site's bytes however `cache-control` was set."""
+CONTENT_SECURITY_POLICY = "content-security-policy"
+FRAME_ANCESTORS_DIRECTIVE = "frame-ancestors"
 ORIGIN_RESPONSE_DROPPED_HEADERS = (
-    HOP_BY_HOP_HEADERS | CACHE_DIRECTIVE_HEADERS | frozenset({"date", "server", "alt-svc", "via"})
+    HOP_BY_HOP_HEADERS
+    | CACHE_DIRECTIVE_HEADERS
+    | frozenset({"date", "server", "alt-svc", "via", "x-frame-options"})
 )
 """What never comes back off the origin's response: the hop-by-hop set; the `date` and `server` the
 ASGI server writes on every response it sends, since relaying the origin's own would put two of each
 on the wire and RFC 9110 forbids a second `date`; `alt-svc`, which advertises another origin's
 alternative services against this hostname, so a viewer would try that protocol here for the
-lifetime the header names; `via`, which tells the viewer our own hop chain; and every
-`CACHE_DIRECTIVE_HEADERS` field, replaced by `UNCACHEABLE` rather than relayed."""
+lifetime the header names; `via`, which tells the viewer our own hop chain; every
+`CACHE_DIRECTIVE_HEADERS` field, replaced by `UNCACHEABLE` rather than relayed; and
+`x-frame-options`, the origin's veto over being framed.
+
+A hosted site is read inside the frame, at the app origin, and that frame is the only page which
+embeds one — so whether a site may be framed is core's answer and not the site's. The site is
+agent-authored code, and an agent hardening its own server with a header it has every ordinary
+reason to send would otherwise break the link its own deliverable is handed out as, leaving a
+browser-generated refusal no reply can explain. `frame-ancestors` says the same thing inside
+`CONTENT_SECURITY_POLICY` and is cut from it by `_unframed_policy`."""
 UNCACHEABLE = "private, no-store"
 """The cache directive every proxied response carries, whatever the origin said.
 
@@ -361,9 +373,15 @@ class IngressServe:
                 )
                 response.headers["cache-control"] = UNCACHEABLE
                 for name, value in upstream.headers.multi_items():
-                    if name.lower() in ORIGIN_RESPONSE_DROPPED_HEADERS:
+                    lowered = name.lower()
+                    if lowered in ORIGIN_RESPONSE_DROPPED_HEADERS:
                         continue
-                    if name.lower() == "set-cookie":
+                    if lowered == CONTENT_SECURITY_POLICY:
+                        policy = self._unframed_policy(value)
+                        if policy:
+                            response.headers.append(name, policy)
+                        continue
+                    if lowered == "set-cookie":
                         confined = self._confined_cookie(value)
                         if confined is not None:
                             response.headers.append(name, confined)
@@ -426,6 +444,20 @@ class IngressServe:
                     continue
             forwarded.append((lowered, value))
         return forwarded + [(name.lower(), value) for name, value in dial_headers.items()]
+
+    def _unframed_policy(self, policy: str) -> str:
+        """One relayed `Content-Security-Policy` minus the origin's say over who may frame it, or
+        empty to drop the header. The directive is cut out rather than the header dropped whole,
+        because the rest of the policy is the site's own defence against the scripts it loads and
+        solving framing must not take that with it. An empty policy is not a permissive one — a
+        browser reads it as allowing nothing — so nothing is relayed when `frame-ancestors` was all
+        the policy said. Repeats are rewritten one by one: several policies combine restrictively,
+        so a `frame-ancestors` left in any one of them still refuses the frame."""
+        return "; ".join(
+            directive
+            for directive in (part.strip() for part in policy.split(";"))
+            if directive and directive.split()[0].lower() != FRAME_ANCESTORS_DIRECTIVE
+        )
 
     def _confined_cookie(self, header: str) -> str | None:
         """One relayed `Set-Cookie`, confined to the origin that sent it, or None to drop it.

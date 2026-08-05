@@ -84,6 +84,12 @@ SMUGGLED_COOKIES = (
     " =ufo_session=FORGED",
     "=bare",
 )
+REFUSE_FRAMING_PATH = "/refuse-framing"
+REFUSED_POLICY = "default-src 'self'; frame-ancestors 'none'; img-src *"
+REFUSED_POLICY_KEPT = "default-src 'self'; img-src *"
+REPORT_ONLY_POLICY = "frame-ancestors 'none'"
+FRAMING_ONLY_PATH = "/framing-only"
+FRAMING_ONLY_POLICY = "  frame-ancestors 'self' ;  "
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -114,6 +120,12 @@ class _OriginHandler(BaseHTTPRequestHandler):
         if self.path.startswith(SMUGGLE_COOKIES_PATH):
             for smuggled in SMUGGLED_COOKIES:
                 self.send_header("set-cookie", smuggled)
+        if self.path.startswith(REFUSE_FRAMING_PATH):
+            self.send_header("x-frame-options", "SAMEORIGIN")
+            self.send_header("content-security-policy", REFUSED_POLICY)
+            self.send_header("content-security-policy-report-only", REPORT_ONLY_POLICY)
+        if self.path.startswith(FRAMING_ONLY_PATH):
+            self.send_header("content-security-policy", FRAMING_ONLY_POLICY)
         if self.path.startswith(CACHEABLE_PATH):
             self.send_header("cache-control", "public, max-age=31536000, immutable")
             self.send_header("cdn-cache-control", "max-age=31536000")
@@ -627,6 +639,37 @@ async def test_a_nameless_cookie_cannot_smuggle_a_reserved_name(db, ingress) -> 
     got = await ingress.get(f"{_origin(conversation_id)}{SMUGGLE_COOKIES_PATH}")
     assert got.status_code == 200
     assert got.headers.get_list("set-cookie") == ["a=1", "b=2"]
+
+
+async def test_a_site_cannot_refuse_to_be_framed(db, ingress) -> None:
+    """A site is read inside the frame at the app origin, and that frame is the only page which
+    embeds one — so who may frame a site is core's answer, not the site's. `X-Frame-Options` and a
+    `frame-ancestors` directive are the two ways an origin overrides it, and a site is
+    agent-authored code: an agent hardening its own server breaks the link its deliverable is,
+    leaving a browser-generated refusal no reply can explain. Measured live — a site sending
+    `SAMEORIGIN` rendered as `refused to connect` where two siblings on the same build framed.
+
+    The rest of the policy is the site's own and survives: `default-src` is its defence against the
+    scripts it loads, and dropping the header whole to solve framing would take that with it. The
+    report-only header is left alone — it cannot block a frame, only describe one."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}{REFUSE_FRAMING_PATH}")
+    assert got.status_code == 200
+    assert "x-frame-options" not in got.headers
+    assert got.headers["content-security-policy"] == REFUSED_POLICY_KEPT
+    assert got.headers["content-security-policy-report-only"] == REPORT_ONLY_POLICY
+
+
+async def test_a_policy_of_nothing_but_framing_is_dropped_whole(db, ingress) -> None:
+    """Removing the only directive leaves an empty policy, and an empty `Content-Security-Policy` is
+    not a permissive one — a browser reads it as a policy that allows nothing. The header goes
+    instead of being relayed blank."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}{FRAMING_ONLY_PATH}")
+    assert got.status_code == 200
+    assert "content-security-policy" not in got.headers
 
 
 async def test_a_tls_target_is_dialed_over_https(db, origin_port, monkeypatch) -> None:
