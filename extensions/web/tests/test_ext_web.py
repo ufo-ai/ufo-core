@@ -2429,6 +2429,42 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     assert malformed.json() == {"chats": []}
 
 
+async def test_a_readable_slack_conversation_resolves_by_permalink(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience="shared",
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_listed_turn(workspace_id, conversation_id, agent_id, seq=1, inbound="from Slack")
+
+    resolved = await client.get(
+        f"/surface/web/api/chats?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert resolved.status_code == 200
+    target = resolved.json()["conversation"]
+    assert resolved.json()["chats"] == []
+    assert target == {
+        "id": str(conversation_id),
+        "agent_id": str(agent_id),
+        "surface": "slack",
+        "member_email": None,
+        "turn_count": 1,
+        "created_at": target["created_at"],
+        "last_turn_at": target["last_turn_at"],
+        "readable": True,
+        "disclosable": False,
+    }
+
+
 async def test_an_orphaned_chat_row_is_inert(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

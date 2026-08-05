@@ -683,6 +683,7 @@ SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 DEBUG_SURFACE_PATH = "/surface/debug"
+WEB_SURFACE_PATH = "/surface/web"
 
 SLACK_API_TIMEOUT_SECONDS = 20
 MAX_RETRY_AFTER_DIGITS = 9
@@ -2418,21 +2419,6 @@ def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
     return f"- {name} ({artifact.size_bytes} bytes)"
 
 
-async def _debug_link(ctx: SurfaceContext, writeback: Writeback) -> str | None:
-    """The operator session debugger's view of this thread's conversation, the delivered turn
-    selected — the footer's link target. None when the deploy has no public base URL; who may
-    open the link is the debug surface's own operator gate, never this footer's concern."""
-    if ctx.public_base_url is None:
-        return None
-    conversation_id = await ctx.find_conversation(writeback.queue_key)
-    if conversation_id is None:
-        return None
-    return (
-        f"{ctx.public_base_url.rstrip('/')}{DEBUG_SURFACE_PATH}"
-        f"?ws={ctx.workspace_id}&c={conversation_id}&t={writeback.turn_id}"
-    )
-
-
 async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | None:
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
@@ -2468,14 +2454,13 @@ async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
-    Only the operator workspace's replies carry the accounting footer, linking to the session
-    debugger's view of the thread when the deploy has a public base URL — and even there only when
-    the destination channel is internal, so a Slack Connect or org-shared thread with an outside
-    guest never shows a customer the turn's cost or the debugger link. An `invalid_blocks` rejection
-    is deterministic, so the reply re-posts once — as conservative section blocks when it carries an
-    ask or connect handoff (the affordance survives the markdown blocks Slack rejected), as plain
-    text otherwise — rather than the poller retrying the identical Block Kit body until it ages
-    out."""
+    Every reply links to its web conversation and agent configuration when the deploy has a public
+    base URL. The operator workspace's internal replies add accounting and a session-debugger link;
+    a Slack Connect or org-shared thread never exposes those operator fields. An `invalid_blocks`
+    rejection is deterministic, so the reply re-posts once — as conservative section blocks when
+    it carries an ask or connect handoff (the affordance survives the markdown blocks Slack
+    rejected), as plain text otherwise — rather than the poller retrying the identical Block Kit
+    body until it ages out."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -2483,7 +2468,14 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     actions = slack_ask_blocks(writeback.question) or slack_connect_blocks(
         writeback.connect_request, writeback.turn_id
     )
-    metadata = None
+    web_links = None
+    if ctx.public_base_url is not None:
+        web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}#"
+        web_links = (
+            f"<{web_base}/c/{writeback.conversation_id}|view on web> · "
+            f"<{web_base}/agents/{writeback.agent_id}|config>"
+        )
+    metadata = web_links
     if await ctx.is_operator_workspace() and not await _channel_is_externally_shared(
         bot_token, channel
     ):
@@ -2494,9 +2486,14 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
             f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
             f"{model}{params}"
         )
-        debug_url = await _debug_link(ctx, writeback)
-        if debug_url is not None:
+        if ctx.public_base_url is not None:
+            debug_url = (
+                f"{ctx.public_base_url.rstrip('/')}{DEBUG_SURFACE_PATH}"
+                f"?ws={ctx.workspace_id}&c={writeback.conversation_id}&t={writeback.turn_id}"
+            )
             metadata = f"{metadata} · <{debug_url}|debug>"
+        if web_links is not None:
+            metadata = f"{metadata} · {web_links}"
         metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         payload = await _chat_post(

@@ -586,18 +586,35 @@ FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
 
 async def _debug_footer(workspace_id: UUID, queue_key: str, turn_id: UUID) -> str:
     async with workspace_tx() as connection:
-        conversation_id = (
+        target = (
             await connection.execute(
-                sa.select(tables.conversation.c.id).where(
+                sa.select(tables.conversation.c.id, tables.conversation.c.agent_id).where(
                     tables.conversation.c.workspace_id == workspace_id,
                     tables.conversation.c.queue_key == queue_key,
                 )
             )
-        ).scalar_one()
+        ).one()
     return (
         f"{FOOTER_LABEL} · "
-        f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={conversation_id}&t={turn_id}"
-        f"|debug>"
+        f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={target.id}&t={turn_id}"
+        f"|debug> · <{PUBLIC_BASE_URL}/surface/web#/c/{target.id}|view on web> · "
+        f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
+    )
+
+
+async def _web_footer(workspace_id: UUID, queue_key: str) -> str:
+    async with workspace_tx() as connection:
+        target = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id, tables.conversation.c.agent_id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.queue_key == queue_key,
+                )
+            )
+        ).one()
+    return (
+        f"<{PUBLIC_BASE_URL}/surface/web#/c/{target.id}|view on web> · "
+        f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
     )
 
 
@@ -3077,7 +3094,7 @@ async def test_footer_stays_plain_without_a_public_base_url(
 
 
 @pytest.mark.parametrize("member_email", ["owner@customer.example", None])
-async def test_footer_is_absent_outside_the_operator_workspace(
+async def test_footer_links_to_web_outside_the_operator_workspace(
     db: None, tmp_path, monkeypatch, member_email: str | None
 ) -> None:
     workspace_id, _ = await _seed(member_email=member_email)
@@ -3089,7 +3106,13 @@ async def test_footer_is_absent_outside_the_operator_workspace(
 
     posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
     assert len(posts) == 1
-    assert json.loads(posts[0].content)["blocks"] == [{"type": "markdown", "text": "hi"}]
+    assert json.loads(posts[0].content)["blocks"] == [
+        {"type": "markdown", "text": "hi"},
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": await _web_footer(workspace_id, "C5:200.0")}],
+        },
+    ]
 
 
 @pytest.mark.parametrize(
@@ -3105,12 +3128,12 @@ async def test_footer_is_absent_outside_the_operator_workspace(
     ],
     ids=["ext_shared", "pending_ext_shared", "org_shared", "is_shared", "info_unavailable"],
 )
-async def test_footer_is_absent_on_a_shared_channel_in_the_operator_workspace(
+async def test_footer_only_links_to_web_on_a_shared_channel_in_the_operator_workspace(
     db: None, tmp_path, monkeypatch, info_response: httpx.Response
 ) -> None:
     """The operator workspace withholds the accounting footer and debugger link on a Slack Connect
     or org-shared thread, where an outside guest would otherwise see the turn's cost — and fails
-    closed, dropping the footer when conversations.info cannot prove the channel internal."""
+    closed, leaving only the web link when conversations.info cannot prove the channel internal."""
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
 
@@ -3132,7 +3155,13 @@ async def test_footer_is_absent_on_a_shared_channel_in_the_operator_workspace(
 
     posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
     assert len(posts) == 1
-    assert json.loads(posts[0].content)["blocks"] == [{"type": "markdown", "text": "hi"}]
+    assert json.loads(posts[0].content)["blocks"] == [
+        {"type": "markdown", "text": "hi"},
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": await _web_footer(workspace_id, "C5:200.0")}],
+        },
+    ]
     info = [r for r in recorder if str(r.url).split("?")[0] == slack.SLACK_CONVERSATIONS_INFO_URL]
     assert len(info) == 1
 

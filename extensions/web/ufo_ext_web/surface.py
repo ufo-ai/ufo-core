@@ -66,6 +66,7 @@ from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
+    ListedConversation,
     PortalKind,
     SubagentDetail,
     SubagentRun,
@@ -742,7 +743,7 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     store = web_extension().store
     requested = request.query_params.get("conversation", "").strip()
     if requested:
-        return await _resolve_chat(ctx, store, audience, email, requested)
+        return await _resolve_chat(ctx, store, audience, member_id, email, requested)
     rows: list[dict[str, object]] = []
     for agent in audience.agents:
         listed = await ctx.list_agent_conversations(
@@ -771,13 +772,13 @@ async def _resolve_chat(
     ctx: SurfaceContext,
     store: ScopedStore,
     audience: WebAudience,
+    member_id: UUID,
     email: str,
     requested: str,
 ) -> Response:
-    """One rail row by conversation id — how a `#/c/<id>` link resolves when the conversation's
-    activity has fallen past the rail's bound. The same ownership gate as the chat POST answers;
-    anything else, a malformed id included, is an empty list, and a turnless conversation stays
-    as absent as the rail's own read keeps it."""
+    """The readable conversation a `#/c/<id>` permalink names: a web chat returns its rail row;
+    another surface returns its read-only conversation projection. The same audience gates as
+    their ordinary views answer; a malformed, turnless, or unreadable conversation is absent."""
     try:
         named = UUID(requested)
     except ValueError:
@@ -805,7 +806,28 @@ async def _resolve_chat(
                 ]
             }
         )
-    return JSONResponse({"chats": []})
+    agent_id = await ctx.conversation_agent(named)
+    target_agent = next((agent for agent in audience.agents if agent.id == agent_id), None)
+    if target_agent is None:
+        return JSONResponse({"chats": []})
+    listed = await ctx.list_agent_conversations(
+        target_agent.id,
+        member_id,
+        admin=False,
+        limit=1,
+        conversation_id=named,
+    )
+    if not listed:
+        return JSONResponse({"chats": []})
+    return JSONResponse(
+        {
+            "chats": [],
+            "conversation": {
+                **_conversation_row(listed[0]),
+                "agent_id": str(target_agent.id),
+            },
+        }
+    )
 
 
 async def _panel_gate(
@@ -1005,23 +1027,20 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     listed = await ctx.list_agent_conversations(
         agent_id, member_id, admin=audience.admin, limit=CONVERSATION_LIST_LIMIT
     )
-    return JSONResponse(
-        {
-            "conversations": [
-                {
-                    "id": str(entry.summary.id),
-                    "surface": entry.summary.surface,
-                    "member_email": entry.summary.member_email,
-                    "turn_count": entry.summary.turn_count,
-                    "created_at": _iso(entry.summary.created_at),
-                    "last_turn_at": _iso(entry.summary.last_turn_at),
-                    "readable": entry.readable,
-                    "disclosable": entry.disclosable,
-                }
-                for entry in listed
-            ]
-        }
-    )
+    return JSONResponse({"conversations": [_conversation_row(entry) for entry in listed]})
+
+
+def _conversation_row(entry: ListedConversation) -> dict[str, object]:
+    return {
+        "id": str(entry.summary.id),
+        "surface": entry.summary.surface,
+        "member_email": entry.summary.member_email,
+        "turn_count": entry.summary.turn_count,
+        "created_at": _iso(entry.summary.created_at),
+        "last_turn_at": _iso(entry.summary.last_turn_at),
+        "readable": entry.readable,
+        "disclosable": entry.disclosable,
+    }
 
 
 async def _readable_conversation(

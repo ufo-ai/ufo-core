@@ -265,13 +265,16 @@ class SharedArtifact:
 
 @dataclass(frozen=True)
 class Writeback:
-    """One terminal turn ready for delivery: the conversation's `queue_key` (the surface decodes its
-    own channel/thread from it), the terminal outcome and its accounting/model metadata, the files
-    the turn shared, and any structured final handoff. A surface renders the reply and metadata,
-    uploads `artifacts`, renders `question` as its own answer affordance, collects credentials
-    privately, or exposes `connect_request` only through its authenticated member channel."""
+    """One terminal turn ready for delivery: its agent and conversation, the conversation's
+    `queue_key` (the surface decodes its own channel/thread from it), the terminal outcome and its
+    accounting/model metadata, the files the turn shared, and any structured final handoff. A
+    surface renders the reply and metadata, uploads `artifacts`, renders `question` as its own
+    answer affordance, collects credentials privately, or exposes `connect_request` only through
+    its authenticated member channel."""
 
     turn_id: UUID
+    conversation_id: UUID
+    agent_id: UUID
     queue_key: str
     status: TerminalStatus
     text: str
@@ -1055,6 +1058,21 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         return None if found is None else found.id
+
+    async def conversation_agent(self, conversation_id: UUID) -> UUID | None:
+        """The agent this workspace's conversation is permanently bound to, or None when the id
+        names no conversation here — how a surface resolves an opaque conversation permalink to
+        the agent wall before reading its content."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                    )
+                )
+            ).one_or_none()
+        return None if found is None else found.agent_id
 
     async def conversation_for(
         self,
@@ -1876,6 +1894,7 @@ class SurfaceContext:
         admin: bool,
         limit: int,
         surface: str | None = None,
+        conversation_id: UUID | None = None,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
@@ -1884,7 +1903,8 @@ class SurfaceContext:
         entry carries `readable` (content this viewer reads now) and `disclosable` (an admin may
         acknowledge and read another member's private one — `record_transcript_access` is the
         act). Subagent conversations are absent: they are the agent's own work on a request,
-        listed nested under the turn that spawned them, never beside it."""
+        listed nested under the turn that spawned them, never beside it. `conversation_id` selects
+        one exact row before the bound for a durable permalink."""
         activity = (
             sa.select(
                 tables.turn.c.conversation_id,
@@ -1923,6 +1943,8 @@ class SurfaceContext:
         )
         if surface is not None:
             query = query.where(tables.conversation.c.surface == surface)
+        if conversation_id is not None:
+            query = query.where(tables.conversation.c.id == conversation_id)
         if not admin:
             query = query.where(
                 tables.conversation.c.audience.in_(_readable_audience_values(member_id))
@@ -2813,6 +2835,8 @@ class WritebackPoller:
                 await connection.execute(
                     sa.select(
                         tables.turn.c.terminal,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
                         tables.conversation.c.queue_key,
                         tables.conversation.c.surface,
                     )
@@ -2843,6 +2867,8 @@ class WritebackPoller:
         terminal = TerminalFrame.model_validate(row.terminal)
         writeback = Writeback(
             turn_id=turn_id,
+            conversation_id=row.conversation_id,
+            agent_id=row.agent_id,
             queue_key=row.queue_key,
             status=terminal.status,
             text=terminal.text,

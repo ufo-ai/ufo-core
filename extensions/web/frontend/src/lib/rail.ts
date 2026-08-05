@@ -1,3 +1,5 @@
+import type { Conversation } from "@/lib/types";
+
 export type ChatRow = {
   conversation_id: string;
   agent_id: string;
@@ -6,7 +8,9 @@ export type ChatRow = {
   last_at: string;
 };
 
-export type ChatsPayload = { chats: ChatRow[] };
+export type LinkedConversation = Conversation & { agent_id: string };
+
+export type ChatsPayload = { chats: ChatRow[]; conversation?: LinkedConversation };
 
 export type RailGroup = { label: string; rows: ChatRow[] };
 

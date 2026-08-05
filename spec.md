@@ -460,12 +460,13 @@ with the grant list inside it the admin's), and its rolling-window spend beside 
 caps — the ledger spans every member's turns, so spend answers an admin or a member whose
 explicit grant holds the agent, never the main-agent default alone. Beside the per-agent reads,
 `api/chats` lists the member's own web conversations across their audience agents — the rail's
-projection, each row titled from its first message. The conversations view lists
-the member's own plus the workspace-shared ones and opens each as its turns, the turns those
-spawned nested beneath them (a subagent runs in its own conversation carrying the parent's
-audience, in the spawning turn's sandbox), and the live workspace files; an admin lists every
-conversation of the agent and reads another member's private one only by acknowledging first that
-it may hold private information.
+projection, each row titled from its first message. A `#/c/<conversation_id>` permalink opens a web
+chat normally and opens another surface's readable conversation in that same conversation view,
+read-only. The conversations view lists the member's own plus the workspace-shared ones and opens
+each as its turns, the turns those spawned nested beneath them (a subagent runs in its own
+conversation carrying the parent's audience, in the spawning turn's sandbox), and the live
+workspace files; an admin lists every conversation of the agent and reads another member's private
+one only by acknowledging first that it may hold private information.
 The acknowledgement is a granting act, so it rides the prepared-intent lane like every other panel
 mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
 writes names the reader, the subject, and the moment before any content is served, and is what the
@@ -593,9 +594,11 @@ never direct the member's browser to fetch an attacker-chosen host. A reply the 
 handle renders as its raw text rather than failing the page. A conversation's Changes view renders
 bounded file deltas from its durable tool results. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
-Slack renders terminal accounting and model metadata as the reply's final context block only in
-the operator's own workspace — the one whose first member's email domain is `OPERATOR_EMAIL_DOMAIN`, the
-fleet-level constant naming us, never a tenant-level role.
+Slack renders links to the exact web conversation and its agent configuration as the reply's final
+context block for every workspace when the deploy has a public base URL. In the operator's own
+workspace — the one whose first member's email domain is `OPERATOR_EMAIL_DOMAIN`, the fleet-level
+constant naming us, never a tenant-level role — an internal channel's block also renders terminal
+accounting, model metadata, and a debugger link.
 
 Slack installs by either of two paths in chat, both landing the same per-workspace bot token and
 identity. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing

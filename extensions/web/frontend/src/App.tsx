@@ -6,6 +6,7 @@ import { Agents } from "@/views/Agents";
 import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
 import { ChangesPane } from "@/views/ChangesPane";
+import { ConversationDetail } from "@/views/Conversations";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -18,6 +19,7 @@ import {
   stampIso,
   type ChatRow,
   type ChatsPayload,
+  type LinkedConversation,
 } from "@/lib/rail";
 import {
   AGENT_TABS,
@@ -47,6 +49,7 @@ export function App({ agents, subagents, member }: AppProps) {
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<readonly string[]>([]);
+  const [linked, setLinked] = useState<Record<string, LinkedConversation>>({});
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
   routeRef.current = route;
@@ -164,8 +167,13 @@ export function App({ agents, subagents, member }: AppProps) {
     getJson<ChatsPayload>("/api/chats?conversation=" + wanted).then((result) => {
       if (!live) return;
       setSought((current) => current.concat(wanted));
-      if (result.ok && result.payload.chats.length) {
+      if (!result.ok) return;
+      if (result.payload.chats.length) {
         setRail((current) => ({ ...current, rows: mergeChats(current.rows, result.payload.chats) }));
+      }
+      const conversation = result.payload.conversation;
+      if (conversation) {
+        setLinked((current) => ({ ...current, [wanted]: conversation }));
       }
     });
     return () => {
@@ -241,6 +249,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
           sought={sought}
+          linked={linked}
         />
       </div>
     </MainAgentProvider>
@@ -262,6 +271,7 @@ function Pane({
   onNewChat,
   onPlaceWorkspace,
   sought,
+  linked,
 }: {
   route: Route;
   agents: Agent[];
@@ -277,6 +287,7 @@ function Pane({
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: readonly string[];
+  linked: Readonly<Record<string, LinkedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
   if (route.kind === "workspace") {
@@ -333,6 +344,18 @@ function Pane({
   }
   if (route.kind === "chat") {
     const row = rail.rows.find((entry) => entry.conversation_id === route.conversationId);
+    const linkedConversation = linked[route.conversationId];
+    if (!row && linkedConversation) {
+      const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent_id);
+      if (!linkedAgent) return <PaneNote>No such agent.</PaneNote>;
+      return (
+        <ConversationDetail
+          agent={linkedAgent}
+          conversation={linkedConversation}
+          onBack={() => onOpenAgent(linkedAgent.id, "conversations")}
+        />
+      );
+    }
     const agent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
     if (!row || !agent) {
       if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;

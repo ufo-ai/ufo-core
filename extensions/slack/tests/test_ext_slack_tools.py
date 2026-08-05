@@ -794,6 +794,8 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
     the member's own terminal, where the member asks again and the prompts render privately."""
     writeback = Writeback(
         turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
         queue_key="C1:1.0",
         status="done",
         text="I need a value from Slack.",
@@ -822,6 +824,8 @@ def test_reply_text_renders_a_cancelled_turns_reason() -> None:
     that reason to the thread; the static marker covers only a reasonless cancellation."""
     refusal = Writeback(
         turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
         queue_key="C1:1.0",
         status="cancelled",
         text="This workspace has no open seat for you yet — ask a workspace admin.",

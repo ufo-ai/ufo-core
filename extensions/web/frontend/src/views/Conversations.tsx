@@ -9,20 +9,9 @@ import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotic
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { changesHash } from "@/lib/route";
-import type { Agent } from "@/lib/types";
+import type { Agent, Conversation } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
-
-type Conversation = {
-  id: string;
-  surface: string;
-  member_email: string | null;
-  turn_count: number;
-  created_at: string;
-  last_turn_at: string | null;
-  readable: boolean;
-  disclosable: boolean;
-};
 
 export type Turn = {
   id: string;
@@ -206,7 +195,7 @@ export function Conversations({ agent }: { agent: Agent }) {
   );
 }
 
-function ConversationDetail({
+export function ConversationDetail({
   agent,
   conversation,
   onBack,

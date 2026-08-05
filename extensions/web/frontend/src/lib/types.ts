@@ -12,6 +12,17 @@ export type Subagent = { name: string; model: string | null };
 
 export type Member = { id?: string; email: string; admin: boolean; seated?: boolean };
 
+export type Conversation = {
+  id: string;
+  surface: string;
+  member_email: string | null;
+  turn_count: number;
+  created_at: string;
+  last_turn_at: string | null;
+  readable: boolean;
+  disclosable: boolean;
+};
+
 export type AgentsPayload = { agents: Agent[]; subagents: Subagent[]; member: Member };
 
 export type SeatSummary = { limit: number | null; included: number | null };

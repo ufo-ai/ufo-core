@@ -231,6 +231,54 @@ test("a conversation the rail does not hold says so", async () => {
   expect(await screen.findByText("No such conversation.")).toBeTruthy();
 });
 
+test("a Slack conversation permalink opens its read-only transcript", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({
+            chats: [],
+            conversation: {
+              id: CONVO_ID,
+              agent_id: AGENT_ID,
+              surface: "slack",
+              member_email: null,
+              turn_count: 1,
+              created_at: "2026-08-01T08:00:00Z",
+              last_turn_at: "2026-08-01T08:01:00Z",
+              readable: true,
+              disclosable: false,
+            },
+          })
+        : json({ chats: [] }),
+    ["/conversations/" + CONVO_ID + "/turns"]: () =>
+      json({
+        turns: [
+          {
+            id: TURN_ID,
+            agent_id: AGENT_ID,
+            conversation_id: CONVO_ID,
+            seq: 1,
+            status: "done",
+            created_at: "2026-08-01T08:01:00Z",
+            inbound: "from Slack",
+            outcome: "reply in Slack",
+            error_class: null,
+            subagent_profile: null,
+            parent_turn_id: null,
+          },
+        ],
+        subagent_turns: [],
+      }),
+    ["/conversations/" + CONVO_ID + "/files"]: () => json({ files: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("from Slack")).toBeTruthy();
+  expect(screen.getByText("reply in Slack")).toBeTruthy();
+  expect(screen.queryByLabelText("Message the agent")).toBeNull();
+});
+
 test("the new-conversation control targets the main agent, or picks among several", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);

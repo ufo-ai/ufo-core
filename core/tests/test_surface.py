@@ -115,11 +115,13 @@ class RecordingSurface:
     fail_post: bool = False
     fail_attach_attempts: int = 0
     posted: list[UUID] = field(default_factory=list)
+    targets: list[tuple[UUID, UUID]] = field(default_factory=list)
     attach_attempts: int = 0
     attached: list[tuple[UUID, str, tuple[str, ...]]] = field(default_factory=list)
 
     async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
         self.posted.append(writeback.turn_id)
+        self.targets.append((writeback.conversation_id, writeback.agent_id))
         if self.fail_post:
             raise RuntimeError("post failed")
         return self.ref
@@ -507,7 +509,7 @@ async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path
 
 
 async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
+    workspace_id, agent_id, _ = await _seed()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert await context.find_conversation("C1:1.0") is None
     async with workspace_tx() as connection:
@@ -517,7 +519,15 @@ async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> N
     assert created == 0
     conversation_id = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
     assert await context.find_conversation("C1:1.0") == conversation_id
+    assert await context.conversation_agent(conversation_id) == agent_id
     assert await replace(context, surface="other").find_conversation("C1:1.0") is None
+    other_workspace, _, _ = await _seed()
+    assert (
+        await _context(
+            other_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path)
+        ).conversation_agent(conversation_id)
+        is None
+    )
 
 
 async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_path) -> None:
@@ -1226,6 +1236,15 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
     assert row.status == WRITEBACK_DELIVERED
     assert row.reply_ref == "C5:9.9"
     assert surface.attached == [(turn_id, "C5:9.9", ("report.pdf",))]
+    async with workspace_tx() as connection:
+        target = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id, tables.turn.c.agent_id).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert surface.targets == [(target.conversation_id, target.agent_id)]
 
 
 async def test_poller_attaches_same_instant_files_in_key_order(db: None, tmp_path) -> None:
@@ -2302,6 +2321,14 @@ async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_pat
     assert all(entry.summary.last_turn_at is not None for entry in listed)
     bounded = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=1)
     assert [entry.summary.id for entry in bounded] == [newer]
+    linked = await context.list_agent_conversations(
+        agent_id,
+        member_id,
+        admin=False,
+        limit=1,
+        conversation_id=older,
+    )
+    assert [entry.summary.id for entry in linked] == [older]
 
 
 async def test_readable_conversation_holds_the_audience_and_the_wall(db: None, tmp_path) -> None:
