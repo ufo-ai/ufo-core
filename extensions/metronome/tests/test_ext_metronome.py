@@ -225,12 +225,9 @@ def test_manifest_declares_four_cron_jobs_four_tools_two_sections() -> None:
     assert [tool.name for tool in declared.tools] == [
         "grant_seat",
         "revoke_seat",
-        "list_seats",
         "manage_billing",
     ]
-    assert all(tool.side_effecting for tool in declared.tools[:2])
-    assert not declared.tools[2].side_effecting
-    assert declared.tools[3].side_effecting
+    assert all(tool.side_effecting for tool in declared.tools)
     assert [section.name for section in declared.prompt_sections] == ["seats", "billing"]
     (slot,) = declared.credentials
     assert slot.name == "anthropic_api_key"
@@ -644,16 +641,6 @@ async def test_revoking_the_owner_is_refused(db: None, tmp_path: Path) -> None:
         await _run_tool(
             workspace_id, tmp_path, owner_id, metronome.REVOKE_SEAT_TOOL, email="owner@example.com"
         )
-
-
-async def test_any_member_lists_seats(db: None, tmp_path: Path) -> None:
-    workspace_id, _, joiner_id = await _seat_seed()
-    payload = await _run_tool(workspace_id, tmp_path, joiner_id, metronome.LIST_SEATS_TOOL)
-    assert payload["seat_limit"] == 2
-    assert [entry["email"] for entry in payload["members"]] == [
-        "owner@example.com",
-        "late@example.com",
-    ]
 
 
 def _seat_shipper(recorder: _Recorder) -> metronome.SeatShipper:

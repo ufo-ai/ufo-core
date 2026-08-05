@@ -28,6 +28,7 @@ SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
 SEATS = "core/src/ufo/seats.py"
+WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
 SCHEDULING = "core/src/ufo/scheduling.py"
 
@@ -201,12 +202,12 @@ CLAIMS = (
         claim="any member can list who holds a seat",
         corpus="references/billing-and-seats.md",
         phrase="Any member can list who currently holds one",
-        source=METRONOME,
+        source=WORKSPACE_KIND,
         pattern=(
-            r"async def list_seats\(.*\n"
-            r"\s+assert ctx\.ext is not None\n"
-            r"\s+async with ctx\.ext\.transaction\(\) as connection:\n"
-            r"\s+snapshot = await Seats\(ctx\.turn\.workspace_id\)\.snapshot\(connection\)"
+            r"async def status\(\n"
+            r"(?:.*\n)*?"
+            r'\s+"roster": \[\n'
+            r'\s+\{"email": holder\.email, "seated": holder\.seated, "admin": holder\.admin\}'
         ),
     ),
     Claim(

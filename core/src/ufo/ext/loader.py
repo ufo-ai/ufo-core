@@ -40,6 +40,14 @@ from ufo.credential_kind import (
 )
 from ufo.credentials import CredentialStore, HostChoice
 from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.extension_kind import (
+    EXTENSION_DESCRIPTION,
+    EXTENSION_GUIDANCE,
+    EXTENSION_KIND,
+    ExtensionObjects,
+    ExtensionSpec,
+    named_extensions,
+)
 from ufo.ext.manifest import (
     CredentialSlot,
     Deny,
@@ -73,12 +81,14 @@ from ufo.skills.runtime import (
 )
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.workspace_kind import WORKSPACE_OBJECT
 
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
     BoundKind(kind=ARTIFACT_OBJECT, extension=None, context=None),
     BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
+    BoundKind(kind=WORKSPACE_OBJECT, extension=None, context=None),
 )
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"
 PACK_ENTRY_POINT_GROUP = "ufo.pack"
@@ -476,19 +486,31 @@ def member_object_registry(
 def core_object_kinds(
     manifests: tuple[Manifest, ...], credential_store: CredentialStore | None = None
 ) -> tuple[BoundKind, ...]:
-    """The kinds core itself registers, bound with no extension context — their handlers read the
-    ambient workspace directly. `credential` projects every active manifest's declared slots, and
-    reads a keyed slot's live host through the store so a read reports the host the wire uses."""
-    slots = declared_slots(manifests)
-    kind = ObjectKind(
+    """The kinds core itself registers over the active manifest set, bound with no extension
+    context — their handlers read the ambient workspace directly. `credential` projects every
+    manifest's declared slots, and reads a keyed slot's live host through the store so a read
+    reports the host the wire uses; `extension` projects the manifests themselves, so two rendering
+    one object name fail loud here at boot."""
+    credential = ObjectKind(
         name=CREDENTIAL_KIND,
         description=CREDENTIAL_DESCRIPTION,
         guidance=CREDENTIAL_GUIDANCE,
         spec_model=CredentialSpec,
-        store=CredentialObjects(slots=slots, credentials=credential_store),
+        store=CredentialObjects(slots=declared_slots(manifests), credentials=credential_store),
         list_fields=frozenset({"extension", "filled"}),
     )
-    return (BoundKind(kind=kind, extension=None, context=None),)
+    extension = ObjectKind(
+        name=EXTENSION_KIND,
+        description=EXTENSION_DESCRIPTION,
+        guidance=EXTENSION_GUIDANCE,
+        spec_model=ExtensionSpec,
+        store=ExtensionObjects(extensions=named_extensions(manifests)),
+        list_fields=frozenset({"version", "tool_count", "credential_slot_count"}),
+    )
+    return (
+        BoundKind(kind=credential, extension=None, context=None),
+        BoundKind(kind=extension, extension=None, context=None),
+    )
 
 
 def skill_registry(

@@ -1264,6 +1264,7 @@ async def _turn_row(
     agent_id: UUID | None = None,
     member_id: UUID | None = None,
     audience: Audience | None = None,
+    surface_label: str | None = None,
 ) -> Turn:
     if agent_id is None:
         agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
@@ -1276,6 +1277,7 @@ async def _turn_row(
                 agent_id=agent_id,
                 surface="cli",
                 queue_key=f"objects-{conversation_id.hex[:8]}",
+                surface_label=surface_label,
                 member_id=member_id,
                 audience=str(conversation_audience(member_id) if audience is None else audience),
                 created_at=sa.func.now(),
@@ -2593,6 +2595,109 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
     }
     assert room_get["status"]["messages"] == 2
     assert mine_get["status"]["messages"] == 2
+
+
+async def test_conversation_surface_label_lists_filters_and_orders(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        general = await _turn_row(workspace_id, surface_label="#general")
+        zebra = await _turn_row(workspace_id, agent_id=general.agent_id, surface_label="#zebra")
+        unlabelled = await _turn_row(workspace_id, agent_id=general.agent_id)
+        ctx, _ = await _workspace_context(unlabelled, tmp_path)
+
+        listing = yaml.safe_load(
+            await _agent_text(general.agent_id, tools, "object_list", ctx, kind=CONVERSATION_KIND)
+        )
+        filtered = yaml.safe_load(
+            await _agent_text(
+                general.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+                filters={"surface_label": "#general"},
+            )
+        )
+        ordered = yaml.safe_load(
+            await _agent_text(
+                general.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=CONVERSATION_KIND,
+                order_by="surface_label",
+            )
+        )
+        fetched = yaml.safe_load(
+            await _agent_text(
+                general.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(general.conversation_id),
+            )
+        )
+        bare = yaml.safe_load(
+            await _agent_text(
+                general.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(unlabelled.conversation_id),
+            )
+        )
+
+    rows = {row["name"]: row for row in listing["objects"]}
+    assert rows[str(general.conversation_id)]["surface_label"] == "#general"
+    assert rows[str(general.conversation_id)]["summary"].startswith("#general on cli, created ")
+    assert "surface_label" not in rows[str(unlabelled.conversation_id)]
+    assert rows[str(unlabelled.conversation_id)]["summary"].startswith("cli conversation, created ")
+    assert [row["name"] for row in filtered["objects"]] == [str(general.conversation_id)]
+    assert [row["name"] for row in ordered["objects"]] == [
+        str(unlabelled.conversation_id),
+        str(general.conversation_id),
+        str(zebra.conversation_id),
+    ]
+    assert fetched["spec"]["surface_label"] == "#general"
+    assert bare["spec"]["surface_label"] is None
+
+
+async def test_foreign_channel_label_never_reaches_the_workspace(db: None, tmp_path: Path) -> None:
+    """A Slack Connect channel's name can name another organization, so the label rides the row's
+    own audience gate: a workspace-shared caller never lists the sealed conversation at all."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    foreign = foreign_room_audience("slack", "CCONNECT")
+    with ws(workspace_id):
+        shared = await _turn_row(workspace_id, surface_label="#internal")
+        sealed = await _turn_row(
+            workspace_id,
+            agent_id=shared.agent_id,
+            audience=foreign,
+            surface_label="#acme-partner",
+        )
+        ctx, _ = await _workspace_context(shared, tmp_path, speaker_member_id=uuid4())
+
+        listing = yaml.safe_load(
+            await _agent_text(shared.agent_id, tools, "object_list", ctx, kind=CONVERSATION_KIND)
+        )
+        with pytest.raises(UnknownObject):
+            await _agent_text(
+                shared.agent_id,
+                tools,
+                "object_get",
+                ctx,
+                kind=CONVERSATION_KIND,
+                name=str(sealed.conversation_id),
+            )
+
+    assert [row["name"] for row in listing["objects"]] == [str(shared.conversation_id)]
+    assert "#acme-partner" not in yaml.safe_dump(listing)
 
 
 async def test_foreign_conversation_cannot_see_shared_metadata(db: None, tmp_path: Path) -> None:

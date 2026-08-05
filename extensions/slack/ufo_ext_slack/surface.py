@@ -696,6 +696,8 @@ MAX_INBOUND_FILES = 10
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 SLACK_INBOUND_FILE_MAX_BYTES = 25 * 1024 * 1024
 PRIVATE_ROOM_CHANNEL_TYPES = frozenset({"group", "mpim"})
+CHANNEL_LABEL_PREFIX = "#"
+DIRECT_MESSAGE_LABEL = "Direct message"
 
 SLACK_TURN_FAILED_TEXT = "⚠️ Something went wrong handling your message."
 SLACK_TURN_CANCELLED_TEXT = "\U0001f6d1 That request was cancelled."
@@ -745,6 +747,7 @@ class Inbound:
     ts: str
     is_dm: bool
     audience: Audience | None
+    surface_label: str | None
     body: str
     files: tuple[InboundFile, ...]
     conversation_id: UUID | None
@@ -1213,7 +1216,9 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
-    conversation_id = await ctx.conversation_for(inbound.queue_key, audience)
+    conversation_id = await ctx.conversation_for(
+        inbound.queue_key, audience, label=inbound.surface_label
+    )
     attachments = (
         files_note(await _download_files(ctx, conversation_id, bot_token, inbound.files))
         if inbound.files
@@ -1243,36 +1248,55 @@ def _author_is_foreign(event: Mapping[str, object], team_id: str) -> bool:
     return isinstance(author_team, str) and author_team != team_id
 
 
-async def _room_audience(
+@dataclass(frozen=True)
+class ChannelOrigin:
+    """Where a message came from: the disclosure audience the channel's kind settles, and the label
+    a member recognizes that channel by. `label` is None unless the audience decision itself
+    already read the channel's metadata — the label never earns a Slack call of its own, so a
+    channel whose kind is settled from the event alone stays unlabelled until a message that does
+    read metadata names it. A group DM's Slack name spells out its members, so only a channel's
+    name becomes a label."""
+
+    audience: Audience | None
+    label: str | None
+
+
+async def _channel_origin(
     ctx: SurfaceContext,
     payload: Mapping[str, object],
     event: Mapping[str, object],
     channel: str,
     audience_known: bool,
-) -> Audience | None:
+) -> ChannelOrigin:
     channel_type = event.get("channel_type")
     if channel_type == "im":
-        return None
+        return ChannelOrigin(None, DIRECT_MESSAGE_LABEL)
     if payload.get("is_ext_shared_channel") is True:
-        return foreign_room_audience(SURFACE_SLACK, channel)
+        return ChannelOrigin(foreign_room_audience(SURFACE_SLACK, channel), None)
     if channel_type in PRIVATE_ROOM_CHANNEL_TYPES:
-        return room_audience(SURFACE_SLACK, channel)
+        return ChannelOrigin(room_audience(SURFACE_SLACK, channel), None)
     if channel_type not in (None, "channel"):
         raise SlackAudienceUnknown
     info = await _channel_info(await ctx.credential(SLACK_BOT_TOKEN_SLOT), channel)
     if info is None:
         if audience_known:
-            return conversation_audience(None)
+            return ChannelOrigin(conversation_audience(None), None)
         raise SlackAudienceUnknown
+    name = info.get("name")
+    label = (
+        f"{CHANNEL_LABEL_PREFIX}{name}"
+        if isinstance(name, str) and name and info.get("is_mpim") is not True
+        else None
+    )
     if any(
         info.get(flag) is True
         for flag in ("is_ext_shared", "is_pending_ext_shared", "is_org_shared", "is_shared")
     ):
-        return foreign_room_audience(SURFACE_SLACK, channel)
+        return ChannelOrigin(foreign_room_audience(SURFACE_SLACK, channel), label)
     if info.get("is_private") is True or info.get("is_mpim") is True:
-        return room_audience(SURFACE_SLACK, channel)
+        return ChannelOrigin(room_audience(SURFACE_SLACK, channel), label)
     if info.get("is_channel") is True and info.get("is_private") is False:
-        return conversation_audience(None)
+        return ChannelOrigin(conversation_audience(None), label)
     raise SlackAudienceUnknown
 
 
@@ -1302,15 +1326,15 @@ async def _to_inbound(
     conversation_id = None if is_dm else await _participating_conversation(ctx, queue_key)
     if not addressed and conversation_id is None:
         return None
-    audience = _room_audience(
+    origin = _channel_origin(
         ctx, payload, event, channel, audience_known=conversation_id is not None
     )
     files = _inbound_files(event)
     if files or event.get("type") != "app_mention":
-        resolved = await audience
+        resolved = await origin
     else:
         resolved, files = await asyncio.gather(
-            audience,
+            origin,
             _declared_files(await ctx.credential(SLACK_BOT_TOKEN_SLOT), channel, ts, root_ts),
         )
     return Inbound(
@@ -1319,7 +1343,8 @@ async def _to_inbound(
         message_id=f"{channel}:{ts}",
         ts=ts,
         is_dm=is_dm,
-        audience=resolved,
+        audience=resolved.audience,
+        surface_label=resolved.label,
         body=str(event.get("text") or ""),
         files=files,
         conversation_id=conversation_id,

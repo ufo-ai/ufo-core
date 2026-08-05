@@ -1,9 +1,9 @@
 """The core-registered `conversation` object kind: past conversations as read-only objects.
 
 Artifacts and scheduled tasks link to the conversation they came from or report into; this kind is
-what those links resolve to — the surface, audience, row timestamps, and, through status, the text
-exchange written into the turn's workspace. Surfaces create conversations, so every mutation is
-refused."""
+what those links resolve to — the surface, the origin label that surface wrote, audience, row
+timestamps, and, through status, the text exchange written into the turn's workspace. Surfaces
+create conversations, so every mutation is refused."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -45,6 +45,13 @@ CONVERSATIONS_ARE_SURFACE_MADE = (
 class ConversationSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     surface: str = Field(description="The chat surface the conversation runs on.")
+    surface_label: str | None = Field(
+        default=None,
+        description=(
+            "What the surface calls the conversation's origin, in its own grammar — a Slack "
+            "channel as `#general`. Null when the surface names none."
+        ),
+    )
     audience: str = Field(description="The conversation's disclosure audience.")
 
 
@@ -55,15 +62,24 @@ class ConversationObjects:
     refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = tuple(
-            ObjectRow(
-                name=str(row.id),
-                summary=f"{row.surface} conversation, created {row.created_at.date().isoformat()}",
-                fields={"surface": row.surface},
+        rows = []
+        for row in await self._visible_rows(ctx):
+            origin = (
+                f"{row.surface} conversation"
+                if row.surface_label is None
+                else f"{row.surface_label} on {row.surface}"
             )
-            for row in await self._visible_rows(ctx)
-        )
-        return object_page(rows, query)
+            fields: dict[str, JsonValue] = {"surface": row.surface}
+            if row.surface_label is not None:
+                fields["surface_label"] = row.surface_label
+            rows.append(
+                ObjectRow(
+                    name=str(row.id),
+                    summary=f"{origin}, created {row.created_at.date().isoformat()}",
+                    fields=fields,
+                )
+            )
+        return object_page(tuple(rows), query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None:
         row = await self._find(ctx, name)
@@ -72,6 +88,7 @@ class ConversationObjects:
         return ObjectDetail(
             spec=ConversationSpec(
                 surface=row.surface,
+                surface_label=row.surface_label,
                 audience=row.audience,
             ),
             created_at=row.created_at,
@@ -183,6 +200,7 @@ class ConversationObjects:
             sa.select(
                 tables.conversation.c.id,
                 tables.conversation.c.surface,
+                tables.conversation.c.surface_label,
                 tables.conversation.c.audience,
                 tables.conversation.c.created_at,
                 tables.conversation.c.updated_at,
@@ -204,19 +222,22 @@ class ConversationObjects:
 CONVERSATION_OBJECT = ObjectKind(
     name=CONVERSATION_KIND,
     description=(
-        "A past conversation: its surface, audience, timestamps, and text transcript. "
-        "Created by surfaces; every mutation is refused."
+        "A past conversation: its surface, origin label, audience, timestamps, and text "
+        "transcript. Created by surfaces; every mutation is refused."
     ),
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
         "one by its id to see which surface and audience it runs on and when it started; its own "
         "`scoped_to` link names the agent it runs with. Reads "
         "show the selected agent's conversations visible to the conversation and exact requester. "
+        "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
+        "where the conversation runs — a Slack channel as `#general`, a Slack DM as `Direct "
+        "message`. A conversation whose surface names no origin carries no `surface_label`. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
     ),
     spec_model=ConversationSpec,
     store=ConversationObjects(),
-    list_fields=frozenset({"surface"}),
+    list_fields=frozenset({"surface", "surface_label"}),
     agent_target_verbs=frozenset({"list", "get"}),
 )

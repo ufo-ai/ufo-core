@@ -120,7 +120,6 @@ BILLING_ACTIVE_PROMPT = (
 
 GRANT_SEAT_TOOL = "grant_seat"
 REVOKE_SEAT_TOOL = "revoke_seat"
-LIST_SEATS_TOOL = "list_seats"
 MANAGE_BILLING_TOOL = "manage_billing"
 
 GRANT_SEAT_DESCRIPTION = (
@@ -134,7 +133,6 @@ REVOKE_SEAT_DESCRIPTION = (
     "member's next message is refused immediately, and a running turn of theirs holds at its "
     "next model round."
 )
-LIST_SEATS_DESCRIPTION = "Show the workspace's seat limit and who holds a seat."
 MANAGE_BILLING_DESCRIPTION = (
     "Set up or inspect the workspace's billing plan. Admin-only. 'setup' returns a short-lived "
     "Stripe link for saving a payment method and records the plan to activate once it is saved; "
@@ -148,8 +146,9 @@ SEATS_SECTION_BODY = (
     "included seat is open; beyond the included allowance they stay unseated, their messages are "
     "refused, and an admin receives a seat approval request — if they approve, call "
     "grant_seat with the member's email and note the seat bills as overage; if they decline, do "
-    "nothing. Only a workspace admin can change seats (grant_seat / revoke_seat); list_seats "
-    "shows the limit, the included allowance, billed overage seats, and who holds one."
+    "nothing. Only a workspace admin can change seats (grant_seat / revoke_seat); getting the "
+    "`workspace` object shows the limit, the included allowance, billed overage seats, and who "
+    "holds one."
 )
 
 BILLING_SECTION_NAME = "billing"
@@ -491,13 +490,6 @@ class RevokeSeatInput(BaseModel):
     )
 
 
-class ListSeatsInput(BaseModel):
-    user_description: str = Field(
-        description="What you are checking about the team's access, in plain language for the "
-        "activity timeline."
-    )
-
-
 class ManageBillingInput(BaseModel):
     action: Literal["setup", "status", "portal"] = Field(
         description=(
@@ -531,13 +523,6 @@ async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult:
         f"{SEAT_APPROVAL_KEY_PREFIX}{args.email.strip().lower()}",
         datetime.now(UTC).isoformat(),
     )
-    return _snapshot_result(snapshot)
-
-
-async def list_seats(ctx: ToolContext, args: ListSeatsInput) -> ToolResult:
-    assert ctx.ext is not None
-    async with ctx.ext.transaction() as connection:
-        snapshot = await Seats(ctx.turn.workspace_id).snapshot(connection)
     return _snapshot_result(snapshot)
 
 
@@ -689,12 +674,6 @@ REVOKE_SEAT_TOOL_DEF = ToolDef(
     input_model=RevokeSeatInput,
     handler=revoke_seat,
     side_effecting=True,
-)
-LIST_SEATS_TOOL_DEF = ToolDef(
-    name=LIST_SEATS_TOOL,
-    description=LIST_SEATS_DESCRIPTION,
-    input_model=ListSeatsInput,
-    handler=list_seats,
 )
 MANAGE_BILLING_TOOL_DEF = ToolDef(
     name=MANAGE_BILLING_TOOL,
@@ -963,7 +942,6 @@ def manifest() -> Manifest:
         tools=(
             GRANT_SEAT_TOOL_DEF,
             REVOKE_SEAT_TOOL_DEF,
-            LIST_SEATS_TOOL_DEF,
             MANAGE_BILLING_TOOL_DEF,
         ),
         jobs=(

@@ -1911,6 +1911,170 @@ async def test_slack_transport_scopes_public_private_group_dm_and_connect_rooms(
     assert [request.url.params["channel"] for request in info] == ["CPUBLIC"]
 
 
+async def _loaded_labels(workspace_id: UUID) -> dict[str, str | None]:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.queue_key, tables.conversation.c.surface_label
+                    ).where(tables.conversation.c.workspace_id == workspace_id)
+                )
+            ).all()
+    return {row.queue_key: row.surface_label for row in rows}
+
+
+async def test_origin_labels_come_from_metadata_the_audience_decision_already_read(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The channel name rides the `conversations.info` the audience decision already fetches, so a
+    labelled conversation costs no extra Slack call and a channel kind settled from the event alone
+    carries no label. A DM's label names its kind, never its member: an unresolved Slack user
+    leaves the DM workspace-shared, where a member's name would be a disclosure, and a group DM's
+    Slack name spells out the same members."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    transport = _mock_transport(
+        recorder,
+        {},
+        channels={
+            "CPUBLIC": {"name": "general"},
+            "GMPIM": {"name": "mpdm-ada--bee-1", "is_mpim": True},
+        },
+    )
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    events = (
+        _event_body(
+            type="message",
+            channel_type="channel",
+            user="U1",
+            channel="CPUBLIC",
+            ts="1.0",
+            text=f"<@{BOT_USER_ID}> public",
+        ),
+        _event_body(
+            type="message",
+            channel_type="group",
+            user="U1",
+            channel="CPRIVATE",
+            ts="2.0",
+            text=f"<@{BOT_USER_ID}> private",
+        ),
+        _event_body(
+            type="message",
+            channel_type="im",
+            user="U1",
+            channel="D1",
+            ts="3.0",
+            text="direct",
+        ),
+        _event_body(
+            is_ext_shared_channel=True,
+            type="message",
+            channel_type="channel",
+            user="U1",
+            channel="CCONNECT",
+            ts="4.0",
+            text=f"<@{BOT_USER_ID}> connect",
+        ),
+        _event_body(
+            type="app_mention",
+            user="U1",
+            channel="GMPIM",
+            ts="5.0",
+            text=f"<@{BOT_USER_ID}> group dm",
+        ),
+    )
+
+    async with client:
+        for body in events:
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+
+    assert await _loaded_labels(workspace_id) == {
+        "CPUBLIC:1.0": "#general",
+        "CPRIVATE:2.0": None,
+        "D1": slack.DIRECT_MESSAGE_LABEL,
+        "CCONNECT:4.0": None,
+        "GMPIM:5.0": None,
+    }
+    assert await _loaded_audiences(workspace_id) == {
+        "CPUBLIC:1.0": str(SHARED_AUDIENCE),
+        "CPRIVATE:2.0": str(room_audience(slack.SURFACE_SLACK, "CPRIVATE")),
+        "D1": str(SHARED_AUDIENCE),
+        "CCONNECT:4.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CCONNECT")),
+        "GMPIM:5.0": str(room_audience(slack.SURFACE_SLACK, "GMPIM")),
+    }
+    info = _fetches(recorder, slack.SLACK_CONVERSATIONS_INFO_URL)
+    assert [request.url.params["channel"] for request in info] == ["CPUBLIC", "GMPIM"]
+
+
+async def test_a_renamed_channel_relabels_and_a_nameless_message_leaves_the_label(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    channels: dict[str, dict[str, object] | None] = {
+        "CPUBLIC": {"name": "general"},
+        "CPRIVATE": {"name": "plans", "is_private": True},
+    }
+    transport = _mock_transport(recorder, {}, channels=channels)
+    _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
+    opened = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CPUBLIC",
+        ts="1.0",
+        text=f"<@{BOT_USER_ID}> start",
+    )
+    after_rename = _event_body(
+        type="message",
+        channel_type="channel",
+        user="U1",
+        channel="CPUBLIC",
+        ts="2.0",
+        thread_ts="1.0",
+        text=f"<@{BOT_USER_ID}> again",
+    )
+    private_mention = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="CPRIVATE",
+        ts="3.0",
+        text=f"<@{BOT_USER_ID}> start",
+    )
+    private_reply = _event_body(
+        type="message",
+        channel_type="group",
+        user="U1",
+        channel="CPRIVATE",
+        ts="4.0",
+        thread_ts="3.0",
+        text=f"<@{BOT_USER_ID}> again",
+    )
+
+    async with client:
+        for body in (opened, private_mention):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+        channels["CPUBLIC"] = {"name": "general-eng"}
+        for body in (after_rename, private_reply):
+            response = await client.post(
+                EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+            )
+            assert response.json() == {"ok": True}
+
+    assert await _loaded_labels(workspace_id) == {
+        "CPUBLIC:1.0": "#general-eng",
+        "CPRIVATE:3.0": "#plans",
+    }
+
+
 @pytest.mark.parametrize(
     "flag",
     ("is_ext_shared", "is_pending_ext_shared", "is_org_shared", "is_shared"),
@@ -1920,7 +2084,9 @@ async def test_channel_live_external_flags_seal_foreign_room(
 ) -> None:
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
-    transport = _mock_transport(recorder, {}, channels={"CEXTERNAL": {flag: True}})
+    transport = _mock_transport(
+        recorder, {}, channels={"CEXTERNAL": {"name": "acme-partner", flag: True}}
+    )
     _, client, _ = await _mount_transport(monkeypatch, workspace_id, tmp_path, transport)
     event = _event_body(
         type="message",
@@ -1940,6 +2106,7 @@ async def test_channel_live_external_flags_seal_foreign_room(
     assert await _loaded_audiences(workspace_id) == {
         "CEXTERNAL:1.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CEXTERNAL"))
     }
+    assert await _loaded_labels(workspace_id) == {"CEXTERNAL:1.0": "#acme-partner"}
 
 
 async def test_known_channel_survives_a_transient_audience_lookup_failure(

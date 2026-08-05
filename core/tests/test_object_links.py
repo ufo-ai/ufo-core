@@ -161,6 +161,7 @@ async def _conversation(
     member_id: UUID | None,
     agent_id: UUID,
     surface: str = "cli",
+    surface_label: str | None = None,
     created_at: datetime | None = None,
 ) -> UUID:
     conversation_id = uuid4()
@@ -172,6 +173,7 @@ async def _conversation(
                 agent_id=agent_id,
                 surface=surface,
                 queue_key=conversation_id.hex,
+                surface_label=surface_label,
                 member_id=member_id,
                 created_at=created_at if created_at is not None else sa.func.now(),
                 updated_at=created_at if created_at is not None else sa.func.now(),
@@ -364,7 +366,9 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
         other_id = await _member(workspace_id)
         agent_id = await _agent(workspace_id)
         other_agent_id = await _agent(workspace_id)
-        shared_conversation = await _conversation(workspace_id, None, agent_id, surface="slack")
+        shared_conversation = await _conversation(
+            workspace_id, None, agent_id, surface="slack", surface_label="#general"
+        )
         private_conversation = await _conversation(workspace_id, member_id, agent_id)
         other_agent_conversation = await _conversation(workspace_id, member_id, other_agent_id)
 
@@ -373,14 +377,22 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
         get_tool = tools["object_get"]
         with agent(agent_id):
             shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
-            assert shared["spec"] == {"surface": "slack", "audience": "shared"}
+            assert shared["spec"] == {
+                "surface": "slack",
+                "surface_label": "#general",
+                "audience": "shared",
+            }
             assert shared["links"] == [
                 {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": agent_id.hex[:8]}}
             ]
             assert shared["created_at"] is not None
 
             mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
-            assert mine["spec"] == {"surface": "cli", "audience": f"member:{member_id}"}
+            assert mine["spec"] == {
+                "surface": "cli",
+                "surface_label": None,
+                "audience": f"member:{member_id}",
+            }
 
             for hidden in (_tool_ctx(workspace_id, blob, member_id=other_id), anyone):
                 with pytest.raises(UnknownObject):
@@ -451,6 +463,7 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
             other_mine = await _get(tools, own, CONVERSATION_KIND, str(other_agent_conversation))
             assert other_mine["spec"] == {
                 "surface": "cli",
+                "surface_label": None,
                 "audience": f"member:{member_id}",
             }
 

@@ -1038,6 +1038,7 @@ class SurfaceContext:
             tables.conversation.c.id,
             tables.conversation.c.member_id,
             tables.conversation.c.audience,
+            tables.conversation.c.surface_label,
         ).where(
             tables.conversation.c.workspace_id == self.workspace_id,
             tables.conversation.c.surface == self.surface,
@@ -1058,6 +1059,7 @@ class SurfaceContext:
         audience: Audience,
         agent_id: UUID | None = None,
         conversation_id: UUID | None = None,
+        label: str | None = None,
     ) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
         transaction; a lost creation race re-reads the surviving row. A caller may name the new
@@ -1069,7 +1071,13 @@ class SurfaceContext:
         installation binding when one exists, else the workspace's main agent — and admission
         derives every turn's agent from that binding. A shared conversation is narrowed when the
         surface learns its exact member or room; an audience is never widened, and a room becoming
-        externally shared seals as foreign."""
+        externally shared seals as foreign.
+
+        `label` is what a member calls this conversation's origin — the channel a Slack thread runs
+        in — in the surface's own grammar, which core stores and renders but never reads. It is
+        rewritten whenever the surface names a different one, so a renamed origin corrects itself
+        on the next message; a surface that does not know one passes None and leaves the stored
+        label standing."""
         audience = parse_audience(audience)
         member_id = audience_member(audience)
         async with workspace_tx() as connection:
@@ -1090,7 +1098,14 @@ class SurfaceContext:
                             updated_at=sa.func.now(),
                         )
                     )
-                return await self.conversation_for(queue_key, audience)
+                return await self.conversation_for(queue_key, audience, label=label)
+            if label is not None and label != found.surface_label:
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.conversation)
+                        .where(tables.conversation.c.id == found.id)
+                        .values(surface_label=label, updated_at=sa.func.now())
+                    )
             return found.id
         conversation_id = conversation_id or uuid4()
         if agent_id is None:
@@ -1116,6 +1131,7 @@ class SurfaceContext:
                         agent_id=agent_id,
                         surface=self.surface,
                         queue_key=queue_key,
+                        surface_label=label,
                         member_id=member_id,
                         audience=str(audience),
                         created_at=sa.func.now(),
@@ -1130,7 +1146,7 @@ class SurfaceContext:
                 ).one_or_none()
             if found is None:
                 raise
-            return await self.conversation_for(queue_key, audience)
+            return await self.conversation_for(queue_key, audience, label=label)
         return conversation_id
 
     async def _surface_agent(self) -> UUID:

@@ -57,7 +57,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `source` | One member-owned, agent-neutral synced dataset. `shared` widens its member audience; it never grants an agent access. Sync uses the owner's connection independently of agent grants and stores one physical copy. |
 | `source_grant` | One source → agent recall edge. Registration grants the agent it names, whether the feed is new or already live and syncing; removing the source deletes every edge. The main agent may read an owned source without an edge only while that source's exact owner is the live speaker; a scheduled run or subagent carries its initiator's authority but never this exception. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
-| `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session), permanently bound to one agent at creation — its surface's installation binding, else the workspace's main agent. Admission derives every turn's agent from that binding; a caller-supplied agent id is an assertion admission refuses on mismatch. Its persisted `Audience` atom is `shared`, `member:<uuid>`, `room:<surface>:<room>`, or sealed `foreign:<surface>:<room>` and is carried unchanged through the turn. |
+| `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session), permanently bound to one agent at creation — its surface's installation binding, else the workspace's main agent. Admission derives every turn's agent from that binding; a caller-supplied agent id is an assertion admission refuses on mismatch. Its persisted `Audience` atom is `shared`, `member:<uuid>`, `room:<surface>:<room>`, or sealed `foreign:<surface>:<room>` and is carried unchanged through the turn. `surface_label` is the origin in the surface's own grammar (Slack: `#general`, `Direct message`), written by the surface that owns the encoding and never parsed by core; a surface that names none leaves it null, and a rename corrects on the next message that carries the name. The `conversation` object exposes it as a spec field and a filter/order field, under the same audience gate as the row. |
 | `turn`, `transcript` | The loop's durable log: lifecycle, per-member-inbound `speaker_member_id` distinct from the conversation's `Audience`, full-conversation transcript + compaction records. A turn's speaker attributes its founding message; authority binds per inbound message. Timer, system, and subagent turns carry no speaker. `on_behalf_of_member_id` is the initiating member a speakerless scheduled fire or subagent acts on behalf of for capability use — distinct from message attribution and conversation audience; scheduled fires derive it from `scheduled_task.created_by_member_id`, subagents copy the bound requester at spawn, and a member takeover clears it. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
 | `memory_item` (memory extension) | Memory scoped to one exact audience subject. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
 | `ledger` | Metered usage: every model and tool call, priced. |
@@ -244,6 +244,13 @@ An extension is a Python package exposing one entry point (`ufo.extension`) that
 `Manifest`. Extensions import only the public SDK (`ufo.sdk`); a CI gate forbids reaching
 into core internals.
 
+The active manifest set reads back as the core-registered `extension` kind: one object per
+extension, named lowercase and hyphenated, whose spec names what a member can encounter of it —
+tools, object kinds, credential slots, surfaces, jobs, hook events, source backends, subagents,
+named and never valued — and whose status carries what it asks of the deploy (`sandbox_internet`,
+`requires`). Instances are declarations rather than rows, so their envelope timestamps are null,
+and every mutation refuses: installing and removing an extension is a lockfile act (`ufoctl ext`).
+
 Manifest registers (each optional):
 
 | Point | Contract |
@@ -404,7 +411,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 |---|---|---|---|---|
 | CLI | core | live (hub tail) | member token | session (private) |
 | Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent) |
-| Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign |
+| Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 
@@ -581,8 +588,14 @@ table per model; BYOK usage still meters (visibility without billing). Seats gat
 agent answers: `workspace.included_seats` bounds silent auto-seating, `workspace.seat_limit` the
 grantable ceiling; core owns the rules (admission refusal — including a member-surface speaker
 who never resolved to a member, per-round park on revocation, the last seated admin's irrevocable
-seat), and a billing extension's tools drive grants, ask an admin to approve overage seats, and report
-counts.
+seat), and a billing extension's tools drive grants and ask an admin to approve overage seats. The
+core-registered `workspace` kind is the shape itself as one read-only object — one instance per
+workspace, named by its id, listing both bounds beside the member and seated counts and reporting
+those with `billed_overage_seats` and a `roster` naming who holds a seat, readable by any member
+and withheld from an externally shared channel exactly as the `member` roster is. Its spec carries no
+field, because nothing it reports is authored: both bounds are the plan's, the counts are derived,
+and seating one member is the `member` kind's admin-gated apply, so create, update, and delete all
+refuse.
 
 An external billing vendor is an extension draining the usage-export seam
 (`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta
