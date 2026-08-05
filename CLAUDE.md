@@ -61,7 +61,7 @@ capitalization and end punctuation (one ending in a URL, path, or address drops 
 headings and labels are cased normally — Title Case or sentence case, one convention per surface —
 never lowercase-as-aesthetic (`Join Waitlist`); placeholder values are neutral (`email@work.com`).
 Commands, addresses, and header names render verbatim (`curl`, `gmail.com`, `x-ufo-session`) even
-at sentence start; the landing panel's `>` prompt and `join` verb are terminal chrome fixed by
+at sentence start; the landing panel's `>` prompt and `submit` verb are terminal chrome fixed by
 test, not labels. Letter-spacing spelled in spaces (`u f o`) and decorative punctuation do not
 ship — visual character lives in CSS and the drawn craft, never in the characters of the words.
 

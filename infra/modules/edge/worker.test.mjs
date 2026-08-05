@@ -186,7 +186,7 @@ test("the join is a block in the page, submittable with nothing to open", () => 
   );
   assert.match(LANDING_PAGE, /<p class="head" id="join-head">Join Waitlist<\/p>/);
   assert.match(LANDING_PAGE, /<input id="email" name="email" type="email" required maxlength="254"/);
-  assert.match(LANDING_PAGE, /<button id="go" class="go" type="submit">join<\/button>/);
+  assert.match(LANDING_PAGE, /<button id="go" class="go" type="submit">submit<\/button>/);
   assert.match(LANDING_PAGE, /<p id="ack" class="ack" role="status"><\/p>/);
 });
 

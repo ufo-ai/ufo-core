@@ -51,6 +51,7 @@
     --gap:clamp(20px,5vh,48px);
     --keyboard:0px;           /* an open keyboard's bite out of the viewport, measured in JS */
     --visible:100dvh;         /* and the height left over, which is what the block is capped to */
+    --line:1.6;               /* the block's own line; the ack strip below reserves three of them */
     position:fixed; left:50%; bottom:calc(var(--gap) + var(--keyboard));
     transform:translateX(-50%);
     width:min(92vw,30rem);
@@ -62,7 +63,7 @@
     backdrop-filter:blur(3px) saturate(180%);
     -webkit-backdrop-filter:blur(3px) saturate(180%);
     box-shadow:0 0 32px #8b8fb844;
-    font-family:var(--mono); font-size:14px; line-height:1.6;
+    font-family:var(--mono); font-size:14px; line-height:var(--line);
     color:var(--hull);
     text-shadow:0 0 3px #000, 0 0 6px #000, 0 0 12px #000;
   }
@@ -90,9 +91,10 @@
   .panel .go:enabled:hover,.panel .go:focus-visible{border-color:var(--gold); color:var(--gold)}
   .panel .go:disabled{opacity:.45; cursor:default}
   .panel .ack{
-    /* Three lines: what the worker's ack wraps to at 320px, the narrowest phone, so the block does
-       not move under the hand when a join lands. */
-    margin:16px 0 0; min-height:4.8em;
+    /* Three lines: what the worker's ack wraps to at 320px, the narrowest phone, so a landed join
+       prints into room the block already has. Counted in the block's own line, so the closer lines
+       a phone sets reserve those three and no empty fraction of a fourth. */
+    margin:16px 0 0; min-height:calc(3 * var(--line) * 1em);
     white-space:pre-wrap; color:var(--green);
     text-shadow:0 0 3px #000, 0 0 6px #000, 0 0 10px #9dffb055;
   }
@@ -107,6 +109,33 @@
     .panel{font-size:16px}
     .panel input,.panel .go{min-height:44px}   /* a fingertip's worth of target */
   }
+
+  /* A phone is where the block has the least sky to stand in, so it rests at 107.59px there: the
+     entry and the button ride one row, the lines and the padding are a hair, and an empty strip
+     reserves nothing — the three lines the rule above holds for the ack are two thirds of what a
+     phone would otherwise stand in empty glass before a member has typed anything.
+
+     The strip takes those three lines the moment anything prints in it, and the first print is
+     `Joining…`, which the submit handler prints under the press itself. So the block's one growth
+     to 172.39px lands with the press that caused it, and everything that prints after — the ack off
+     the wire, either refusal, a resubmit from any of them — prints into room the block already has
+     and moves no control under a thumb.
+
+     Keyed on the pointer for the same reason the rule above is, and nothing here is bought from
+     the fingertip: the type stays 16px and the targets 44px. */
+  @media (pointer: coarse){
+    .panel{
+      --line:1.35;
+      display:flex; flex-wrap:wrap; align-items:center;
+      column-gap:.8ch; row-gap:8px;
+      padding:12px 14px;
+    }
+    .panel .head{flex:1 0 100%; margin:0}
+    .panel .field{flex:1; min-width:0}   /* the entry takes the row, the button what it needs */
+    .panel .go{margin-top:0}
+    .panel .ack{flex:1 0 100%; margin:0}
+    .panel .ack:empty{min-height:0}     /* nothing printed reserves nothing */
+  }
 </style>
 </head>
 <body>
@@ -119,7 +148,7 @@
              placeholder="email@work.com" autocomplete="email" spellcheck="false"
              aria-label="Email address" />
     </p>
-    <button id="go" class="go" type="submit">join</button>
+    <button id="go" class="go" type="submit">submit</button>
     <p id="ack" class="ack" role="status"></p>
   </form>
   <span hidden aria-hidden="true">Terminal interface: curl https://__HOSTNAME__</span>
@@ -640,8 +669,8 @@ let needsAnswered = 0;
 // of the entry's and the button's room, which every path but a landed join leaves a member to act in.
 // The copy's own need is the least scroll that reads it whole, so it is also the most room left to the
 // controls above it, and wherever the port can hold the copy and those controls together this stands
-// both whole. Under 188px of window on a coarse pointer it cannot hold both: at 560x180 the port
-// measures 138px against the 144px from the entry's top to the copy's foot, and there the room goes to
+// both whole. Under 136px of window on a coarse pointer it cannot hold both: at 568x130 the port
+// measures 88px against the 93.6px from the entry's top to the copy's foot, and there the room goes to
 // the answer the member has just asked for.
 //
 // The panel stands where the print needs it, and not merely no further back than that: two of the four

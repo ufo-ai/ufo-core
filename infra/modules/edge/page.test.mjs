@@ -77,13 +77,20 @@ const PHONE_LANDSCAPE = {
   ...PHONE,
   viewport: { width: PHONE.viewport.height, height: PHONE.viewport.width },
 };
-// A landscape window 568px across, with Safari's own chrome taking its share of the height: the
-// shortest window the page is served in, and 76px inside the band where the block's copy is taller
-// than the room the window leaves it — at this width the block wants 285.83px and the sky takes
-// 20px above and below it, so every window under 326px caps. The width is load-bearing as much as
-// the height — the panel's padding is a share of it — so both are stated outright rather than
-// spread from PHONE.
-const PHONE_LANDSCAPE_SHORT = { ...PHONE, viewport: { width: 568, height: 250 } };
+// A landscape window 568px across, shorter than any phone is served in: the block a coarse pointer
+// gets stands 172.39px once a print has armed the ack's strip, and stands whole in the 250px window
+// Safari's own chrome leaves, so the band where the cap binds lies below that — the sky takes
+// 20px above and below the block, so every window under 212px caps a block that has printed, and
+// under 177px the ack's own printed copy is part of what the cap holds back. The compact 107.59px
+// the block rests at clears every window in the band, which is why the legs below read the cap after
+// a report and not before one. This is the top of the band the three cap legs walk, and the height
+// the roll is read at. The width is load-bearing as much as the height — the ack wraps to two lines
+// here and to three at 320px — so both are stated outright rather than spread from PHONE.
+const PHONE_LANDSCAPE_SHORT = { ...PHONE, viewport: { width: 568, height: 170 } };
+// The narrowest phone still in service is 320 CSS px across, which is where the worker's success ack
+// wraps to three lines — the height the strip reserves — and where the row has the least width to
+// divide between the entry and the button.
+const PHONE_NARROW = { ...PHONE, viewport: { width: 320, height: 568 } };
 
 // `before` runs in the page before any of its own script does, which is the only place a browser's
 // own API can be taken away from it, or already be reporting a keyboard when the page first reads it.
@@ -355,8 +362,8 @@ test("the desktop panel keeps its 14px terminal size", async () => {
   await page.close();
 });
 
-// Both short viewports, because the coarse-pointer rules carry 16px type and 44px targets: a phone
-// in landscape is the one holding the tallest block.
+// Both short viewports, because the coarse-pointer rules carry 16px type and 44px targets on the
+// one and the desktop panel keeps its own looser spacing — and so the taller block — on the other.
 test("a short viewport shows the whole block, entry included", async () => {
   for (const device of [DESKTOP_SHORT, PHONE_LANDSCAPE]) {
     const page = await open(6, device);
@@ -381,10 +388,12 @@ test("a short viewport shows the whole block, entry included", async () => {
   }
 });
 
-// Shorter than the block, the window is where the plain cap earns itself: uncapped the block's head
-// hangs 55.83px off the top of a 568x250 window, and capped it stands 20px inside it. What the cap
-// holds back a hand can still roll into view, and what lands in the ack the page rolls in itself.
-test("a window shorter than the block caps it, and a hand rolls the rest into view", async () => {
+// Shorter than the block a print leaves, the window is where the plain cap earns itself: the compact
+// block rests inside a 568x170 window with nothing held back — 107.59px of the cap's 130px — and the
+// print that arms the ack's strip is what makes the cap bind. Uncapped the block would then hang
+// 22.39px off the top of that window; capped it stands 20px inside it. What the cap holds back a hand
+// can still roll into view, and what lands in the ack the page rolls in itself.
+test("a window shorter than the printed block caps it, and a hand rolls in the rest", async () => {
   const page = await open(6, PHONE_LANDSCAPE_SHORT);
   const { width, height } = page.viewportSize();
   const where = `${width}x${height}`;
@@ -394,14 +403,14 @@ test("a window shorter than the block caps it, and a hand rolls the rest into vi
     placed.gap >= BOTTOM_GAP_MIN && placed.gap <= BOTTOM_GAP_MAX,
     `${placed.gap}px between the block and the bottom edge`,
   );
-  assert.equal(placed.scrolled, true, "the cap did not bind on the shortest window the page serves");
+  // Nothing has printed, so the strip reserves nothing and the cap has nothing to hold back: every
+  // part of the block, the empty strip included, stands whole on the shortest window driven here.
+  assert.equal(placed.scrolled, false, `the cap binds before anything printed at ${where}`);
   assert.equal(placed.reachable, true);
-  // What the cap holds back here is 76px, the ack's reserved strip bar a fraction, so the two
-  // controls a hand acts on stand whole inside it before anything lands.
-  assertWhollyShown(await shownIn(page, "#email", "#go"), where);
+  assertWhollyShown(await shownIn(page, "#email", "#go", "#ack"), where);
   await landAJoin(page, "capped@yourco.com");
   const landed = await placementOf(page);
-  assert.equal(landed.scrolled, true, "the cap stopped binding once the ack landed");
+  assert.equal(landed.scrolled, true, "the cap did not bind once the print armed the strip");
   assert.ok(landed.top >= 0, `the block's head hangs ${-landed.top}px off the top after a join`);
   assert.ok(
     landed.gap >= BOTTOM_GAP_MIN && landed.gap <= BOTTOM_GAP_MAX,
@@ -412,10 +421,10 @@ test("a window shorter than the block caps it, and a hand rolls the rest into vi
   assertWhollyShown(await shownIn(page, "#email", "#go"), `${where} after a join`);
   assertWhollyShown(await ackCopyShownIn(page), `${where} after a join`);
   // The rest of the strip the cap holds back is what the wheel has to reach, and the print has
-  // already spent part of it: standing the copy whole takes 24 of the panel's 76px and leaves
-  // 47.69 of 76.8px of the ack's box inside the port, so the hand's own 52 is what carries the
-  // whole box in — which is why the wheel is measured against where the print left the panel and
-  // not against zero.
+  // already spent part of it: standing the two printed lines whole takes 8 of the panel's 42px and
+  // leaves the ack's box short of standing whole, so the hand's own scroll is what carries the whole
+  // box in — which is why the wheel is measured against where the print left the panel and not
+  // against zero.
   const printRolledTo = await page.locator("#join").evaluate((el) => el.scrollTop);
   assert.ok((await rollThePanel(page, 200)) > printRolledTo, "a hand's scroll moved nothing");
   assertWhollyShown(await shownIn(page, "#ack"), `${where} after a hand rolled the panel`);
@@ -469,31 +478,28 @@ const REPORT_PATHS = [
   },
 ];
 
-// Safari's chrome takes a different share of the screen from phone to phone, so the cap binds across
-// a band of window heights rather than at one, and these are the shortest window the page is served
-// in and two deeper caps still. Wherever it binds the ack is the copy held back, and the room the
-// page spends to roll it in comes out of the heading: the block's own head keeps standing 20px
+// The cap binds across a band of window heights rather than at one, and these are three inside it.
+// It binds on the report itself: the print arms the ack's strip, which is the room that takes the
+// block past every cap in the band. Wherever it binds the ack is the copy held back, and the room
+// the page spends to roll it in comes out of the heading: the block's own head keeps standing 20px
 // inside the window, and so does every control the path left enabled. Nothing here rests on the
 // entry being disabled — three of the four paths leave it live, which is why each is walked.
 //
-// Two things the page cannot buy back at 568x200, both measured: before anything lands, 158px of
-// port holds 168.31px of head, entry and button, so the button stands 10.31px short until a hand
-// rolls it in; and on a landed join the entry gives up 11.69px of itself to the copy — the one path
-// that has taken it away by then.
+// The port holds both at every height here: 108px of port at 568x150 stands the entry, the button
+// beside it and a landed join's two printed lines together.
 test("wherever the cap binds, what a report prints reads whole and live controls stay whole", async () => {
-  for (const height of [250, 220, 200]) {
+  for (const height of [170, 160, 150]) {
     for (const path of REPORT_PATHS) {
       const { viewport } = PHONE_LANDSCAPE_SHORT;
       const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { ...viewport, height } });
       const where = `${viewport.width}x${height}, ${path.name}`;
-      assert.equal((await placementOf(page)).scrolled, true, `the cap does not bind at ${where}`);
       await path.drive(page, height);
       await page.waitForFunction(
         (opening) => document.getElementById("ack").textContent.startsWith(opening),
         path.opening,
       );
       const reported = await placementOf(page);
-      assert.equal(reported.scrolled, true, `the cap stopped binding at ${where}`);
+      assert.equal(reported.scrolled, true, `the cap does not bind at ${where}`);
       assert.ok(
         reported.top >= 0,
         `the block's head hangs ${-reported.top}px off the top at ${where}`,
@@ -512,16 +518,16 @@ test("wherever the cap binds, what a report prints reads whole and live controls
 });
 
 // Two of the four paths hand the button back, so a member can wheel wherever they like and press it
-// again — and the ack that prints then lands wherever the panel is standing, not at the head. A roll
-// that never moved the panel back would leave that copy read and a control the refusal handed back
-// clipped: measured at 568x200, the wheel leaves the panel at 126, the resubmit's own focus scroll at
-// 124, the print needs 49, and #email shows 0 of 44px inside the port until the print stands the
-// panel at what the copy needs. The band is walked because the gap between the two is the cap's, and
-// the cap binds across it — 76 against a need of −1 at 250, 106 against 29 at 220.
+// again — and the ack that prints then lands wherever the panel is standing, not at the head. A
+// roll that never moved the panel back would leave that copy read and a control the refusal handed
+// back clipped: measured at 568x150, the wheel leaves the panel at its foot 62px down, where #email
+// shows 23.59 of its 44px, and the print needs 6 — so the report the resubmit prints is what stands
+// the entry whole again. The band is walked because the gap between the wheel's reach and the need
+// is the cap's own — 42px against a need of 0 at 170, 62px against 6 at 150.
 const REFUSED_ADDRESS = REPORT_PATHS.find((path) => path.name === "a refused address");
 
 test("a report stands its copy and live controls whole from a member's own scroll", async () => {
-  for (const height of [250, 220, 200]) {
+  for (const height of [170, 160, 150]) {
     const { viewport } = PHONE_LANDSCAPE_SHORT;
     const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { ...viewport, height } });
     const where = `${viewport.width}x${height}, a refused address resubmitted from the panel's foot`;
@@ -560,25 +566,27 @@ test("a report stands its copy and live controls whole from a member's own scrol
   }
 });
 
-// Room lost after a report is the same clip arriving from the other side, and the window takes it two
-// ways. Its bottom edge dragged up walks the port's bottom edge under copy that has already printed
-// and changes nothing about the copy: measured on a page that rolled only as it printed, at
-// 568x250 → 200 a landed ack held 44.59 of 44.59px inside the port and then 0px of it, 15.69px of it
-// still inside the window; at 1200x240 → 180 its 38.39px left the port and the window both,
-// `scrollTop` unmoved at 24 and 16. Its side edge dragged in takes the same room without moving the
-// port at all: at 568x250 → 320x250 that ack rewraps from two lines onto three, its 44.59px of copy
-// becomes 70.19px, and 49.41px is all of it left inside a port that is still 208px, `scrollTop` stuck
-// at 24 where the copy now needs 45. A phone whose URL bar comes back, a window edge dragged up and a
-// window edge dragged in, because what changed is the room and not the copy.
+// Room lost after a report is the same clip arriving from the other side, and the window takes it
+// two ways. Its bottom edge dragged up walks the port's bottom edge under copy that has already
+// printed and changes nothing about the copy: measured on a page that rolled only as it printed, at
+// 568x170 → 150 a landed ack stood whole on a scroll of 8 and needs 28 of a port that fell from
+// 128px to 108px; at 1200x240 → 180 its 38.39px left the port and the window both, `scrollTop`
+// unmoved at 24 and 16. Its side edge dragged in takes the same room without moving the port at
+// all: at 568x170 → 320x170 that ack rewraps from two lines onto three, and the copy needs 29 of a
+// port that is still 128px, `scrollTop` stuck at the 8 the print left it at. A phone whose URL bar
+// comes back, a window edge dragged up and a window edge dragged in, because what changed is the
+// room and not the copy.
 //
-// The room the roll spends is the heading's, as it is when the copy lands: what the resize cannot buy
-// back is measured too — at 568x200 a landed join leaves the disabled entry 32.31 of 44px and at
-// 1200x180, 23.78 of 35.39px, which is why the controls asserted are the ones the path left live.
+// The room the roll spends is the heading's, as it is when the copy lands: what the resize cannot
+// buy back is measured too — at 1200x180 a landed join leaves the disabled entry 23.78 of 35.39px,
+// which is why the controls asserted are the ones the path left live. The compact block a coarse
+// pointer gets buys the phone legs out of that: 108px of port stands the entry, the button beside
+// it and the two lines a join prints together.
 const ROOM_LOSING_RESIZES = [
   {
     device: PHONE_LANDSCAPE_SHORT,
-    from: { width: 568, height: 250 },
-    to: { width: 568, height: 200 },
+    from: { width: 568, height: 170 },
+    to: { width: 568, height: 150 },
   },
   {
     device: DESKTOP,
@@ -587,8 +595,8 @@ const ROOM_LOSING_RESIZES = [
   },
   {
     device: PHONE_LANDSCAPE_SHORT,
-    from: { width: 568, height: 250 },
-    to: { width: 320, height: 250 },
+    from: { width: 568, height: 170 },
+    to: { width: 320, height: 170 },
   },
 ];
 
@@ -627,31 +635,29 @@ test("copy that has printed is rolled back in when the window takes its room awa
 });
 
 // A resize is not a loss, and only room lost takes anything from copy that has already printed. A
-// window narrowed 568 → 560 at the same height rewraps none of it, so the copy needs the scroll it
-// needed before — 74px on a landed join, 49px falling to 48px on the reports that print one line —
-// and one grown 200 → 210 hands 10px of port back. In neither may the roll throw away a scroll the
-// member made themselves. Both ends are walked on each: the move that must not roll, and then a real
-// loss on the same page, which must. 568x200 is a height every one of the four paths rolls from, so on
-// each of them the member has somewhere of their own to wheel to. The loss after the growth stops 5px
-// above the height the print rolled at — the copy needs 69px at 205 against the 74px it needed at 200
-// — so nothing rolls there unless the page took the growth in. Each loss is also taken at a height
-// whose port can hold the printed copy and the controls the path left live at once, which is what the
-// leg asserts: 560x190 leaves 148px of port, where 560x180 leaves 138px against the 144px from the
-// entry's top to the copy's foot and no scroll shows both — 188px is the first height that does, and
-// there #email has 1.98px to spare.
+// window narrowed 568 → 560 at the same height rewraps none of it — the block is 30rem wide at
+// both, so not a character moves — and the copy needs the scroll it needed before: 28px on a landed
+// join, 6px on the reports that print one line. One grown 150 → 160 hands 10px of port back, which
+// is more than a one-line report needed and less than a landed join does, and neither is a loss. In
+// neither may the roll throw away a scroll the member made themselves. Both ends are walked on
+// each: the move that must not roll, and then a real loss on the same page, which must. 568x150 is
+// a height every one of the four paths rolls from, so on each of them the member has somewhere of
+// their own to wheel to. Each loss is also taken at a height whose port can hold the printed copy
+// and the controls the path left live at once: 140px of window leaves 98px of port against the 72px
+// from the entry's top to a one-line report's foot, and the 93.6px to a landed join's.
 const ROOM_KEEPING_RESIZES = [
   {
     name: "the window narrows at the same height",
-    to: { width: 560, height: 200 },
-    shrunkTo: 190,
+    to: { width: 560, height: 150 },
+    shrunkTo: 140,
   },
   {
     name: "the window grows 10px, short of clearing the copy",
-    to: { width: 568, height: 210 },
-    shrunkTo: 205,
+    to: { width: 568, height: 160 },
+    shrunkTo: 155,
   },
 ];
-const ROOM_KEEPING_FROM = { width: 568, height: 200 };
+const ROOM_KEEPING_FROM = { width: 568, height: 150 };
 
 test("a resize that takes no room away leaves a member's own scroll alone", async () => {
   for (const { name, to, shrunkTo } of ROOM_KEEPING_RESIZES) {
@@ -698,13 +704,13 @@ test("a resize that takes no room away leaves a member's own scroll alone", asyn
 });
 
 // The other end of the same rule: a print stands the panel at what the copy needs from wherever the
-// member left it, and a resize only ever rolls forward from there. Room the window takes away has to
-// come from somewhere, but a member already sitting past what the copy needs is reading it, and
-// pulling the panel back to the need would throw their own scroll away. At 568x200 → 180 the copy's
-// need goes 49 → 69 while the wheel has left them at 126, so the loss is real and it is behind them.
+// member left it, and a resize only ever rolls forward from there. Room the window takes away has
+// to come from somewhere, but a member already sitting past what the copy needs is reading it, and
+// pulling the panel back to the need would throw their own scroll away. At 568x150 → 140 the copy's
+// need goes 6 → 16 while the wheel has left them at 62, so the loss is real and it is behind them.
 test("a resize rolls the panel forward or not at all", async () => {
-  const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { width: 568, height: 200 } });
-  const where = "568x200 → 568x180, a refused address, the member at the panel's foot";
+  const page = await open(6, { ...PHONE_LANDSCAPE_SHORT, viewport: { width: 568, height: 150 } });
+  const where = "568x150 → 568x140, a refused address, the member at the panel's foot";
   await REFUSED_ADDRESS.drive(page, "forward-only");
   await page.waitForFunction(
     (opening) => document.getElementById("ack").textContent.startsWith(opening),
@@ -716,10 +722,10 @@ test("a resize rolls the panel forward or not at all", async () => {
     theirs > rolled,
     `the wheel did not move the panel past the report's ${rolled} at ${where}`,
   );
-  await page.setViewportSize({ width: 568, height: 180 });
+  await page.setViewportSize({ width: 568, height: 140 });
   await page.waitForFunction(
     ([width, height]) => innerWidth === width && innerHeight === height,
-    [568, 180],
+    [568, 140],
   );
   await page.waitForTimeout(120);
   assert.equal(
@@ -778,9 +784,9 @@ const LANDSCAPE_KEYBOARD_PX = 230;
 // Safari also pans the visual viewport to bring the focused entry into view, so the strip a member
 // can see starts this far down the layout viewport while the keyboard is up.
 const PANNED_PX = 37;
-// The accessory bar on its own, which is the smallest bite a keyboard takes. Over the 568x250 window
-// it leaves the same 200px of room the window-loss legs above take their own readings at, so a
-// keyboard's answer to printed copy and a window edge's are measured on the same room.
+// The accessory bar on its own, which is the smallest bite a keyboard takes. Over the 568x170
+// window it leaves 120px of room, deeper than any of the window-loss legs above reach, so a
+// keyboard's answer to printed copy is read where the bite is the smallest one there is.
 const ACCESSORY_BAR_PX = 50;
 
 // A keyboard is a shorter visual viewport over an untouched layout viewport, and that is what this
@@ -846,8 +852,7 @@ async function panToTheBottom(page) {
 
 // The least whole-pixel scroll of the panel that stands one part whole inside its port — the same
 // rounding the page's own roll takes, and for the same reason: a need rounded down leaves the part
-// its own fraction short, which is where scrollIntoView's rounding lands it (43.59 of #email's 44px,
-// 76.41 of the ack strip's 76.8px).
+// its own fraction short, which is where scrollIntoView's rounding lands it.
 async function rollIntoThePort(page, selector) {
   await page.locator("#join").evaluate((panel, selector) => {
     const part = panel.querySelector(selector).getBoundingClientRect();
@@ -901,6 +906,104 @@ const visualPlacementOf = (page) =>
       box: { y: to2(block.y), height: to2(block.height) },
     };
   });
+
+// An iPhone with the URL bar showing, which is the shortest window a phone is served upright in: the
+// block rests there at the compact height and stands at the printed one once a report has armed the
+// ack's strip, and what a member sees is what is asserted rather than that arithmetic — the entry and
+// the button ride one row, the fleet keeps the greater part of the sky, and nothing is capped behind
+// the block's own scroll.
+const PHONE_WITH_URL_BAR = { ...PHONE, viewport: { width: 390, height: 664 } };
+// The two heights the block has on a coarse pointer: what it rests at with the strip empty, and what
+// the strip's three lines take it to on the first print. One figure apiece at every phone width,
+// because the entry and the button share a row at all of them.
+const PHONE_RESTING_BLOCK_PX = 107.59;
+const PHONE_PRINTED_BLOCK_PX = 172.39;
+// What the block may take of the window it stands in, resting and printed: those two heights against
+// the window, largest upright on the shortest upright window served, and larger again in landscape,
+// where the same heights stand over a 390px window.
+const PHONE_BLOCK_SHARE_MAX = { resting: 0.17, printed: 0.27 };
+const PHONE_NARROW_BLOCK_SHARE_MAX = { resting: 0.2, printed: 0.31 };
+const PHONE_LANDSCAPE_BLOCK_SHARE_MAX = { resting: 0.29, printed: 0.45 };
+
+// The third figure is the width the entry is left with, and it is what holds the row honest: the row
+// can never wrap — `.field` flexes and the entry's min-width is 0 — so a button that grew would take
+// its width out of the entry rather than a line of its own, and one row would still read as one row.
+// It is the panel's inner width less the prompt, the row's gap and the button, so 320px is where the
+// entry has the least to give.
+test("the block a phone gets is compact, and stays compact with the keyboard up", async () => {
+  for (const [device, shareMax, entryWidth] of [
+    [PHONE_WITH_URL_BAR, PHONE_BLOCK_SHARE_MAX, 206.2],
+    [PHONE, PHONE_BLOCK_SHARE_MAX, 206.2],
+    [PHONE_LANDSCAPE, PHONE_LANDSCAPE_BLOCK_SHARE_MAX, 327.41],
+    [PHONE_NARROW, PHONE_NARROW_BLOCK_SHARE_MAX, 141.8],
+  ]) {
+    const page = await open(6, device);
+    const { width, height } = device.viewport;
+    const where = `${width}x${height}`;
+    const measure = () =>
+      page.locator("#join").evaluate((el) => {
+        const block = el.getBoundingClientRect();
+        const entry = el.querySelector("#email").getBoundingClientRect();
+        const button = el.querySelector("#go").getBoundingClientRect();
+        return {
+          height: Math.round(block.height * 100) / 100,
+          share: Math.round((block.height / innerHeight) * 100) / 100,
+          oneRow: Math.round(entry.top) === Math.round(button.top) && button.left >= entry.right,
+          entryWidth: Math.round(entry.width * 100) / 100,
+        };
+      });
+    const laid = await measure();
+    assert.equal(laid.oneRow, true, `the entry and the button are stacked at ${where}`);
+    assert.equal(laid.entryWidth, entryWidth, `the entry takes ${laid.entryWidth}px of ${where}`);
+    assert.equal(laid.height, PHONE_RESTING_BLOCK_PX, `the block rests at ${laid.height}px, ${where}`);
+    assert.deepEqual(
+      await ackRoom(page),
+      { lines: 0, reserved: 0 },
+      `the strip reserves room before anything printed at ${where}`,
+    );
+    assert.ok(laid.share <= shareMax.resting, `the block takes ${laid.share} of ${where}`);
+    const placed = await visualPlacementOf(page);
+    assert.equal(placed.scrolled, false, `the block caps its own copy at ${where}`);
+    assertSizedForAFinger(await controls(page));
+    // And with the strip armed, which is the tallest the block ever stands: the row is still a row,
+    // the copy is inside the port, and nothing is capped behind the block's own scroll.
+    await landAJoin(page, `compact-${width}x${height}@yourco.com`);
+    const printed = await measure();
+    assert.equal(printed.oneRow, true, `a landed join stacked the entry and the button at ${where}`);
+    assert.equal(printed.entryWidth, entryWidth, `the entry takes ${printed.entryWidth}px, ${where}`);
+    assert.equal(printed.height, PHONE_PRINTED_BLOCK_PX, `the print left ${printed.height}px, ${where}`);
+    assert.ok(printed.share <= shareMax.printed, `the printed block takes ${printed.share} of ${where}`);
+    assert.equal(
+      (await visualPlacementOf(page)).scrolled,
+      false,
+      `the printed block caps its own copy at ${where}`,
+    );
+    assertWhollyShown(await ackCopyShownIn(page), `${where} after a join`);
+    await page.close();
+  }
+
+  // Upright under a keyboard: the block stands whole in the strip the keyboard leaves, at the height
+  // it stands at with the keyboard down, and the entry and the button stand in there with it. Read
+  // with a join landed, because the armed strip is the block the keyboard has the least room for.
+  const page = await open(6, PHONE_WITH_URL_BAR);
+  await landAJoin(page, "keyboard-compact@yourco.com");
+  const resting = await visualPlacementOf(page);
+  assert.equal(resting.box.height, PHONE_PRINTED_BLOCK_PX);
+  await openKeyboard(page, KEYBOARD_PX);
+  const lifted = await visualPlacementOf(page);
+  const where = `390x664 under a ${KEYBOARD_PX}px keyboard`;
+  assert.equal(lifted.keyboardInset, KEYBOARD_PX, where);
+  assert.equal(lifted.box.height, resting.box.height, `the keyboard shrank the block, ${where}`);
+  assert.equal(lifted.scrolled, false, `the cap holds the block's copy back at ${where}`);
+  assert.equal(lifted.clippedAbove, 0, `the block's head clips ${lifted.clippedAbove}px, ${where}`);
+  assert.ok(
+    lifted.gap >= BOTTOM_GAP_MIN && lifted.gap <= BOTTOM_GAP_MAX,
+    `${lifted.gap}px between the block and the keyboard`,
+  );
+  assertWhollyShown(await shownIn(page, "#email", "#go", "#ack"), where);
+  assertWhollyShown(await ackCopyShownIn(page), where);
+  await page.close();
+});
 
 test("the block rides above an open keyboard instead of waiting behind it", async () => {
   const page = await open(6, PHONE);
@@ -981,18 +1084,21 @@ test("a page that loads with the keyboard already up is lifted on the way in", a
   await page.close();
 });
 
-// A keyboard leaves 160px of a phone in landscape, and no arrangement of a 296.39px block fits in
-// that, so this is the one case where the cap binds and the panel scrolls its own copy. The cap has
-// to be the height a member can see: taken from the layout height less the keyboard it overshoots by
-// the pan, and the pan is driven the way Safari delivers one, as the API's own scroll. Panned or
-// not, the block's foot stands 20px above the strip's bottom edge and its head 20px inside the top:
-// the inset is measured to that bottom edge, which the pan moves, and a fixed block is painted with
-// the pan, so it comes up 37px with it rather than clipping 37px off the top.
+// A keyboard leaves 160px of a phone in landscape, and no arrangement of the 172.39px block a print
+// leaves fits in that, so this is the one case where the cap binds and the panel scrolls its own
+// copy. A join is landed first for that reason: the compact 107.59px the block rests at stands whole
+// in the 120px the cap allows there, and the strip the print arms is what the cap has to hold back.
+// The cap has to be the height a member can see: taken from the layout height less the keyboard it
+// overshoots by the pan, and the pan is driven the way Safari delivers one, as the API's own scroll.
+// Panned or not, the block's foot stands 20px above the strip's bottom edge and its head 20px inside
+// the top: the inset is measured to that bottom edge, which the pan moves, and a fixed block is
+// painted with the pan, so it comes up 37px with it rather than clipping 37px off the top.
 test("the panel's cap is the height a member can see, panned or not", async () => {
   const page = await open(6, PHONE_LANDSCAPE);
   const tall = PHONE_LANDSCAPE.viewport.height;
   const visible = tall - LANDSCAPE_KEYBOARD_PX;
   assert.equal((await visualPlacementOf(page)).cap, `${tall - 2 * BOTTOM_GAP_MIN}px`);
+  await landAJoin(page, "landscape-keyboard@yourco.com");
   await openKeyboard(page, LANDSCAPE_KEYBOARD_PX);
 
   for (const panned of [0, PANNED_PX]) {
@@ -1090,28 +1196,33 @@ test("a pinch zoom lifts the block not at all, and a pan brings it back", async 
   }
 });
 
-// The two are held at once whenever a member zooms in with the keyboard up, and a keyboard's bite is
-// still exactly its own bite under a zoom: the visible height carried back through the scale is the
-// screen's own, so the zoom divides both sides of the subtraction and cancels out of it. Either
+// The two are held at once whenever a member zooms in with the keyboard up, and a keyboard's bite
+// is still exactly its own bite under a zoom: the visible height carried back through the scale is
+// the screen's own, so the zoom divides both sides of the subtraction and cancels out of it. Either
 // order has to end in the same place, because the state is the same state whichever event arrived
-// last, and both have to end where the keyboard alone put the block — the same box, the same cap, and
-// the same 5vh of sky between its foot and the strip the keyboard covers. The cap answers the
+// last, and both have to end where the keyboard alone put the block — the same box, the same cap,
+// and the same 5vh of sky between its foot and the strip the keyboard covers. The cap answers the
 // keyboard whatever the scale, so the block's head stands on the strip and the panel's own scroll
 // reaches the copy below it; what the zoom leaves visible from there is the member's own pan.
 //
 // Both devices, because the cap binds on one of them: 336px of keyboard on the phone leaves the
-// 276.39px block room to stand whole, and 230px in landscape leaves 160px for a 296.39px block, so
-// there the cap holds copy back and the panel scrolls it. 1.011x is the first scale above the
-// deadband, where the cap is handed back with nothing covered, and 3x the deepest the suite drives.
+// 172.39px block a print leaves room to stand whole, and 230px in landscape leaves 160px for that
+// same block, so there the cap holds copy back and the panel scrolls it. 1.011x is the first scale
+// above the deadband, where the cap is handed back with nothing covered, and 3x the deepest the suite
+// drives.
 const HELD_PINCHES = [
   { device: PHONE, covers: KEYBOARD_PX },
   { device: PHONE_LANDSCAPE, covers: LANDSCAPE_KEYBOARD_PX },
 ];
 
+// A join is landed on every page here, which is what makes the landscape leg the bound case: the
+// ack's strip reserves nothing until a report prints, and the 107.59px the block rests at stands
+// whole in the 120px that keyboard's cap allows.
 test("a pinch held over an open keyboard keeps the block off it, either order", async () => {
   for (const { device, covers } of HELD_PINCHES) {
     const on = `${device.viewport.width}x${device.viewport.height} under a ${covers}px keyboard`;
     const upright = await open(6, device);
+    await landAJoin(upright, `held-upright-${covers}@yourco.com`);
     const resting = await visualPlacementOf(upright);
     await openKeyboard(upright, covers);
     const keyboardAlone = await visualPlacementOf(upright);
@@ -1123,6 +1234,7 @@ test("a pinch held over an open keyboard keeps the block off it, either order", 
       for (const order of ["keyboard first", "pinch first"]) {
         const page = await open(6, device);
         const cdp = await page.context().newCDPSession(page);
+        await landAJoin(page, `held-${covers}-${scale}-${order.split(" ")[0]}@yourco.com`);
         if (order === "keyboard first") {
           await openKeyboard(page, covers);
           await pinchTo(page, cdp, scale);
@@ -1252,15 +1364,15 @@ test("a browser with no visual viewport keeps the plain bottom anchoring", async
 // The cap and the copy inside it answer to the same scarce room, and a keyboard takes that room the
 // way a window edge dragged up does — the port's bottom edge walks up past copy that has already
 // printed — except that the window fires no resize for it. Measured with a landed join standing
-// whole: an accessory bar's 50px off 568x250 leaves the same 200px of window the loss legs above
-// take their reading at, and the copy that held 44.59 of 44.59px inside the port held 0px of it,
-// scrollTop unmoved at 24 where it now needs 74; a keyboard on a phone in landscape leaves 118px of
-// port and took the same copy from 44.59px to 0px, needing 120 where it sat at 0. So the roll the
-// resize owns is the roll this runs, at the one point where the page moves the port's height itself.
+// whole: an accessory bar's 50px off 568x170 leaves 120px of window, and the copy that stood whole
+// on a scroll of 8 needs 58 of the 78px of port that leaves; a keyboard on a phone in landscape
+// leaves 118px of port and takes the same copy from a scroll of 0 to one of 18. So the roll the
+// resize owns is the roll this runs, at the one point where the page moves the port's height
+// itself.
 //
-// The full keyboard is walked on a landed join alone, because at 118px of port nothing else fits:
-// the room goes to the answer the member just asked for, which is the page's own rule where a port
-// cannot hold the copy and the live controls together.
+// The full keyboard is walked on a landed join alone, because it is the deepest bite the suite
+// drives and a join's is the longest copy the block prints: what a shorter report leaves standing
+// under a keyboard the accessory bar's own legs read on all four paths.
 const LANDED_JOIN = REPORT_PATHS.find((path) => path.name === "a landed join");
 const ROOM_LOSING_KEYBOARDS = [
   { device: PHONE_LANDSCAPE_SHORT, covers: ACCESSORY_BAR_PX, paths: REPORT_PATHS },
@@ -1301,8 +1413,8 @@ test("copy that has printed is rolled back in when a keyboard takes its room awa
 
 // The keyboard's roll carries the resize's own gate with it, both ends of it. A keyboard closing
 // hands the room back and rolls nothing, so the head a member wheeled up to read stays where they
-// left it; the same keyboard opening again is room lost again, and rolls. At 568x250 the copy needs
-// 24px with the keyboard down and 74px with an accessory bar up, and the member is at 0.
+// left it; the same keyboard opening again is room lost again, and rolls. At 568x170 the copy needs
+// 8px with the keyboard down and 58px with an accessory bar up, and the member is at 0.
 test("a keyboard that hands the room back leaves a member's own scroll alone", async () => {
   const page = await open(6, PHONE_LANDSCAPE_SHORT);
   await landAJoin(page, "keyboard-keeps@yourco.com");
@@ -1331,11 +1443,11 @@ test("a keyboard that hands the room back leaves a member's own scroll alone", a
   await page.close();
 });
 
-// The window's own resize arrives before the visual viewport's, so the cap the roll measures printed
-// copy against is the one the window's resize writes itself. What it left behind at that moment is
-// read from a listener registered after the page's own: at 568x250 → 200 the port is the new window's
-// 158px and the copy that needs 74px of scroll is already rolled in, where the window it just left
-// stood 208px of port and 24px of scroll.
+// The window's own resize arrives before the visual viewport's, so the cap the roll measures
+// printed copy against is the one the window's resize writes itself. What it left behind at that
+// moment is read from a listener registered after the page's own: at 568x170 → 150 the port is the
+// new window's 108px and the copy that needs 28px of scroll is already rolled in, where the window
+// it just left stood 128px of port and 8px of scroll.
 test("a window resize caps the block to the window it lands in before the roll reads it", async () => {
   const page = await open(6, PHONE_LANDSCAPE_SHORT);
   await landAJoin(page, "resize-cap@yourco.com");
@@ -1352,21 +1464,21 @@ test("a window resize caps the block to the window it lands in before the roll r
       });
     });
   });
-  await page.setViewportSize({ width: 568, height: 200 });
-  await page.waitForFunction(() => innerHeight === 200);
+  await page.setViewportSize({ width: 568, height: 150 });
+  await page.waitForFunction(() => innerHeight === 150);
   await page.waitForTimeout(120);
   assert.deepEqual(
     await page.evaluate(() => window.__atTheResize),
-    [{ innerHeight: 200, visibleProp: "200.00px", cap: "160px", clientHeight: 158, rolledTo: 74 }],
+    [{ innerHeight: 150, visibleProp: "150.00px", cap: "110px", clientHeight: 108, rolledTo: 28 }],
   );
-  assertWhollyShown(await ackCopyShownIn(page), "568x250 → 568x200");
+  assertWhollyShown(await ackCopyShownIn(page), "568x170 → 568x150");
   await page.close();
 });
 
 // The path a browser without the API keeps: nothing there measures a keyboard, the declared 100dvh
 // follows the window itself, and the window's own resize is the only thing that answers copy the
-// window has taken the room from. At 568x250 → 200 the ack's printed copy needs 74px of the panel's
-// own scroll where it needed 24.
+// window has taken the room from. At 568x170 → 150 the ack's printed copy needs 28px of the panel's
+// own scroll where it needed 8.
 test("a browser with no visual viewport rolls printed copy back in when the window shrinks", async () => {
   const page = await open(6, PHONE_LANDSCAPE_SHORT, () => {
     delete window.visualViewport;
@@ -1374,10 +1486,10 @@ test("a browser with no visual viewport rolls printed copy back in when the wind
   assert.equal(await page.evaluate(() => "visualViewport" in window), false);
   await landAJoin(page, "no-viewport-resize@yourco.com");
   const printed = await page.locator("#join").evaluate((el) => el.scrollTop);
-  await page.setViewportSize({ width: 568, height: 200 });
-  await page.waitForFunction(() => innerHeight === 200);
+  await page.setViewportSize({ width: 568, height: 150 });
+  await page.waitForFunction(() => innerHeight === 150);
   await page.waitForTimeout(120);
-  const where = "568x250 → 568x200 with no visual viewport";
+  const where = "568x170 → 568x150 with no visual viewport";
   const rolled = await page.locator("#join").evaluate((el) => el.scrollTop);
   assert.ok(rolled > printed, `the panel stands at ${rolled} where the print left it at ${printed}`);
   assertWhollyShown(await ackCopyShownIn(page), where);
@@ -1734,7 +1846,7 @@ test("the glass gate turns down a tint that swallows the craft", async () => {
   await page.close();
 });
 
-test("the panel copy is the fixed join: Title Case label, terminal prompt, join verb", async () => {
+test("the panel copy is the fixed join: Title Case label, terminal prompt, submit verb", async () => {
   const page = await open();
   assert.equal((await page.textContent("#join .head")).trim(), "Join Waitlist");
   assert.equal(await page.getAttribute("#join", "aria-labelledby"), "join-head");
@@ -1758,7 +1870,7 @@ test("the panel copy is the fixed join: Title Case label, terminal prompt, join 
     color: getComputedStyle(el).color,
   }));
   assert.ok(caret.caret === "auto" || caret.caret === caret.color, caret.caret);
-  assert.equal((await page.textContent("#go")).trim(), "join");
+  assert.equal((await page.textContent("#go")).trim(), "submit");
   await page.close();
 });
 
@@ -1776,8 +1888,9 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
     (await page.textContent("#ack")).trim(),
     /^#\d+ on the waitlist\. We will email you when access opens\.$/,
   );
-  // The ack's room is reserved, so landing it moves nothing under the hand: two lines of ack here,
-  // three on the narrowest phone below, and a strip that holds three either way.
+  // A desktop strip reserves its three lines from rest, so landing an ack moves nothing under the
+  // hand: two lines of copy here, three on the narrowest phone below, and a strip that holds three
+  // either way. A phone reserves nothing until something prints, which the test below walks.
   assert.deepEqual(await ackRoom(page), { lines: 2, reserved: 3 });
   assert.deepEqual(await boxOf(page, "#join"), block);
   assert.deepEqual(await boxOf(page, "#email"), entry);
@@ -1788,21 +1901,38 @@ test("the join posts to the worker and renders its ack verbatim", async () => {
   await page.close();
 });
 
-// The narrowest phone still in service is 320 CSS px across, and that is where the worker's success
-// ack wraps to three lines — the height the strip reserves. The desktop assertions above hold the
-// same two boxes at 1200px, where the ack takes two.
-const PHONE_NARROW = { ...PHONE, viewport: { width: 320, height: 568 } };
-
-test("a join lands on the narrowest phone without moving the block", async () => {
+// The desktop assertions above hold the same two boxes from rest at 1200px, where the ack takes two
+// lines rather than the three it wraps to at 320px. A phone holds them from the press instead: the
+// strip reserves nothing while it is empty, and the `Joining…` the submit handler prints takes the
+// whole three lines under the press itself — the block's one growth, and the last of them. So the
+// wire is held open here to read the block the press leaves, and the ack that answers has to land in
+// it without moving a box: three lines of copy at 320px, into the three the press reserved.
+test("on the narrowest phone the press reserves the strip, and the ack lands in it", async () => {
   const page = await open(1, PHONE_NARROW);
+  assert.deepEqual(await ackRoom(page), { lines: 0, reserved: 0 });
+  const rested = await page.locator("#join").evaluate((el) => el.getBoundingClientRect().height);
+  assert.equal(Math.round(rested * 100) / 100, PHONE_RESTING_BLOCK_PX);
+  assert.equal((await boxOf(page, "#ack")).height, 0);
+  // The wire answers when this releases it, so the press's own print stands to be measured alone.
+  await page.evaluate(() => {
+    const wire = window.fetch;
+    window.__answer = null;
+    window.fetch = (...call) =>
+      new Promise((resolve) => (window.__answer = () => resolve(wire(...call))));
+  });
+  await page.fill("#email", "narrow@yourco.com");
+  await page.click("#go");
+  await page.waitForFunction(() =>
+    document.getElementById("ack").textContent.startsWith("Joining"),
+  );
+  assert.deepEqual(await ackRoom(page), { lines: 1, reserved: 3 });
+  const pressed = await page.locator("#join").evaluate((el) => el.getBoundingClientRect().height);
+  assert.equal(Math.round(pressed * 100) / 100, PHONE_PRINTED_BLOCK_PX);
   const block = await boxOf(page, "#join");
   const entry = await boxOf(page, "#email");
   const button = await boxOf(page, "#go");
-  // What the reservation costs before a join lands: three lines of empty strip.
-  assert.deepEqual(await ackRoom(page), { lines: 0, reserved: 3 });
   const strip = await boxOf(page, "#ack");
-  await page.fill("#email", "narrow@yourco.com");
-  await page.click("#go");
+  await page.evaluate(() => window.__answer());
   await page.waitForFunction(() =>
     document.getElementById("ack").textContent.includes("waitlist"),
   );
