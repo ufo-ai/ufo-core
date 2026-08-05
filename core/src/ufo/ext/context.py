@@ -29,6 +29,7 @@ from ufo.accounting import (
     mint_usage_exports,
     read_pending_usage_exports,
 )
+from ufo.agent_scope import agent_current
 from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
@@ -690,6 +691,21 @@ class ExtensionContext:
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
+
+    async def agent_name(self) -> str:
+        """The bound agent's stable name — the `agent` object kind's own object name, so an
+        agent-scoped kind can link to the agent it belongs to. Reads the agent the caller bound,
+        which is the turn's agent inside a turn and the agent a portal read names outside one."""
+        scope = agent_current()
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).where(
+                        tables.agent.c.id == scope.agent_id,
+                        tables.agent.c.workspace_id == scope.workspace_id,
+                    )
+                )
+            ).scalar_one()
 
     async def page_states(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]:
         """Current subject and revision for this workspace's live named pages."""

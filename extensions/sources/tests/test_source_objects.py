@@ -50,7 +50,7 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
-from ufo.sdk.objects import AdminRequired, VerbNotSupported
+from ufo.sdk.objects import AdminRequired, ObjectListQuery, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.tools import ToolContext
 from ufo.sources.sync import SyncDriver
@@ -738,6 +738,50 @@ async def test_read_verbs_hide_other_members_private_sources(
             )
             assert fetched["spec"]["provider"] == GREENHOUSE
             assert set(fetched["status"]["streams"]) == {"jobs"}
+
+
+async def test_portal_reads_hide_other_members_private_sources(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The portal reads a source through the same registrar-or-shared-or-admin gate the turn does:
+    a stranger's index carries only the shared binding and their detail read of the private one
+    answers nothing, while the registrar and a workspace admin read both."""
+    monkeypatch.setenv("GREENHOUSE", "secret")
+    monkeypatch.setenv("FRESHDESK", "secret")
+    state = await _workspace()
+    stranger_id = await _stranger(state)
+    member_ctx = _context(state, None, speaker_id=state.member_id)
+    private_name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
+    shared_name = binding_name(FRESHDESK, DIRECT_ACCOUNT, "https://acme.freshdesk.com")
+    store = SourceObjects()
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), private_name))
+        await _apply(
+            member_ctx,
+            _manifest_text(
+                FRESHDESK,
+                ("tickets",),
+                shared_name,
+                base_url="https://acme.freshdesk.com",
+                shared=True,
+            ),
+        )
+        ext = member_ctx.ext
+        stranger_page = await store.member_page(
+            ext, member_id=stranger_id, admin=False, query=ObjectListQuery()
+        )
+        assert [row.name for row in stranger_page.rows] == [shared_name]
+        assert (
+            await store.member_detail(ext, private_name, member_id=stranger_id, admin=False)
+        ) is None
+        for member_id, admin in ((state.member_id, False), (state.owner_id, True)):
+            page = await store.member_page(
+                ext, member_id=member_id, admin=admin, query=ObjectListQuery()
+            )
+            assert {row.name for row in page.rows} == {private_name, shared_name}
+            read = await store.member_detail(ext, private_name, member_id=member_id, admin=admin)
+            assert read is not None
+            assert read.detail.spec.provider == GREENHOUSE
 
 
 async def test_registration_requires_a_speaking_member(

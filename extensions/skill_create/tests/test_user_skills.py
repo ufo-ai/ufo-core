@@ -18,7 +18,7 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
-from ufo_ext_skill_create.manifest import SKILL_KIND, manifest
+from ufo_ext_skill_create.manifest import NAME, SKILL_KIND, SKILL_OBJECT, SkillObjects, manifest
 from ufo_ext_skill_create.store import (
     InvalidSkillName,
     SkillCollidesWithCoreSkill,
@@ -37,7 +37,7 @@ from ufo.ext.loader import turn_runtime_skills, turn_tools
 from ufo.loop.profiles import GENERAL_PURPOSE_PROFILE
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import subagent_system_prompt
-from ufo.objects import UnknownObject
+from ufo.objects import ObjectLink, ObjectListQuery, ObjectRef, UnknownObject
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ProxyEndpoint,
@@ -684,6 +684,75 @@ async def test_object_get_resolves_same_named_skills_per_agent(db: None, tmp_pat
     assert (
         datetime.fromisoformat(str(second_get["updated_at"])).replace(tzinfo=UTC) == second_updated
     )
+
+
+async def test_portal_reads_stay_inside_the_agent_that_saved_the_skill(db: None, tmp_path) -> None:
+    """The portal reads a saved skill behind the one wall the turn reads behind — the bound agent.
+    A skill only the first agent saved is absent from the second agent's index and not-found by
+    name there, and the detail's `scoped_to` link names the agent whose set answered."""
+    workspace_id, first_agent = await _workspace_agent("first")
+    second_agent = await _agent(workspace_id, "second")
+    ctx = _tool_ctx(workspace_id, None, tmp_path, first_agent)
+    member_id = uuid4()
+    store = SkillObjects()
+    ext = context_for(NAME, frozenset())
+    query = ObjectListQuery(supported_fields=SKILL_OBJECT.list_fields)
+    with ws(workspace_id), agent(first_agent):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_skill_manifest(
+                "greet", {"SKILL.md": _skill_md("greet", "first agent").decode()}
+            ),
+        )
+        owner_rows = (
+            await store.member_page(ext, member_id=member_id, admin=False, query=query)
+        ).rows
+        owner_read = await store.member_detail(ext, "greet", member_id=member_id, admin=False)
+    with ws(workspace_id), agent(second_agent):
+        other_rows = (
+            await store.member_page(ext, member_id=member_id, admin=True, query=query)
+        ).rows
+        other_read = await store.member_detail(ext, "greet", member_id=member_id, admin=True)
+    assert [(row.name, row.summary) for row in owner_rows] == [("greet", "first agent")]
+    assert owner_read is not None
+    assert owner_read.detail.links == (
+        ObjectLink(relation="scoped_to", target=ObjectRef(kind=AGENT_KIND, name="first")),
+    )
+    assert other_rows == ()
+    assert other_read is None
+
+
+async def test_a_corrupt_skill_is_not_found_in_the_portal_rather_than_raised(db: None) -> None:
+    """The index skips a skill whose stored bundle no longer parses, so the detail must answer
+    not-found for the same name — the row decides, and a member reading the name the index never
+    offered gets a 404 rather than a parse escaping the read."""
+    workspace_id, agent_id = await _workspace_agent()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.save("alpha", {"SKILL.md": _skill_md("alpha", "A")}, frozenset())
+        await store.save("beta", {"SKILL.md": _skill_md("beta", "B")}, frozenset())
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(user_skill)
+            .values(content="{ not valid json")
+            .where(
+                user_skill.c.workspace_id == workspace_id,
+                user_skill.c.agent_id == agent_id,
+                user_skill.c.name == "alpha",
+            )
+        )
+    objects = SkillObjects()
+    ext = context_for(NAME, frozenset())
+    query = ObjectListQuery(supported_fields=SKILL_OBJECT.list_fields)
+    member_id = uuid4()
+    with ws(workspace_id), agent(agent_id):
+        page = await objects.member_page(ext, member_id=member_id, admin=True, query=query)
+        corrupt = await objects.member_detail(ext, "alpha", member_id=member_id, admin=True)
+        intact = await objects.member_detail(ext, "beta", member_id=member_id, admin=True)
+    assert [row.name for row in page.rows] == ["beta"]
+    assert corrupt is None
+    assert intact is not None
 
 
 async def test_list_orders_and_filters(db: None, tmp_path) -> None:

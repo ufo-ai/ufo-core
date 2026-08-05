@@ -5,8 +5,9 @@ inputs beside its provenance links: `created_from` names the synced page a deriv
 from, `superseded_by` the item consolidation replaced it with. Search excludes superseded items,
 so the link is the recovery path when an old id arrives through a stale reference; `get` resolves
 any visible row while `list` shows only live ones. Reads follow the caller's audience; foreign
-rooms are sealed from shared memory. `memory_update` stays the write path, and there is no delete:
-index chunks are derived by jobs and no cleanup path exists for one item's chunks."""
+rooms are sealed from shared memory, and a signed-in member reads the same rows in the portal on
+the subjects their own conversation carries. `memory_update` stays the write path, and there is no
+delete: index chunks are derived by jobs and no cleanup path exists for one item's chunks."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -14,8 +15,10 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.context import ExtensionContext, JsonValue
+from ufo.sdk.audience import audience_subjects, conversation_audience
+from ufo.sdk.context import ExtensionContext, JsonValue, SourceReader, agent_current
 from ufo.sdk.objects import (
+    MemberObject,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -54,10 +57,29 @@ class MemorySpec(BaseModel):
     as_of: str | None = Field(description="When the source information was current, ISO-8601.")
 
 
-def _require_ext(ctx: ToolContext) -> ExtensionContext:
-    if ctx.ext is None:
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
+    if ext is None:
         raise RuntimeError("memory objects dispatched without their ExtensionContext")
-    return ctx.ext
+    return ext
+
+
+def _row(name: str, body: str, subject: str, item_class: str, memory_kind: str) -> ObjectRow:
+    return ObjectRow(
+        name=name,
+        summary=body[:SUMMARY_MAX],
+        fields={"subject": subject, "item_class": item_class, "memory_kind": memory_kind},
+    )
+
+
+def _member_reader(member_id: UUID) -> SourceReader:
+    """Who a signed-in member reads memory as outside a turn: the bound agent, themselves as the
+    live requester, and the subjects their own conversation carries. The same three a turn's
+    `source_reader` carries, taken from the portal read instead of the turn."""
+    return SourceReader(
+        agent_id=agent_current().agent_id,
+        requesting_member_id=member_id,
+        subjects=audience_subjects(conversation_audience(member_id)),
+    )
 
 
 @dataclass(frozen=True)
@@ -67,8 +89,50 @@ class MemoryObjects:
     superseded one, whose `superseded_by` link names its replacement. Both mutations refuse."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        ext = _require_ext(ctx)
-        subjects = ctx.read_subjects
+        return await self._page(_require_ext(ctx.ext), ctx.source_reader(), query)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The live memory a signed-in member reads outside a turn: the rows `list` produces, on
+        the subjects their own conversation carries — their own and the workspace-shared. Another
+        member's private memory and a foreign room's are absent here for everyone, an admin
+        included; a shared item distilled from a page the reader may no longer read drops out
+        exactly as it does in a turn."""
+        return await self._page(_require_ext(ext), _member_reader(member_id), query)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[MemorySpec] | None:
+        """One memory item as the portal reads it — the row `list` renders beside the detail `get`
+        reads, on the same subjects `member_page` lists under. A superseded item still answers, so
+        a stale reference lands on the `superseded_by` link that names its replacement."""
+        detail = await self._item(_require_ext(ext), _member_reader(member_id), name)
+        if detail is None:
+            return None
+        spec = detail.spec
+        return MemberObject(
+            row=_row(name, spec.body, spec.subject, spec.item_class, spec.memory_kind),
+            detail=detail,
+        )
+
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemorySpec] | None:
+        return await self._item(_require_ext(ctx.ext), ctx.source_reader(), name)
+
+    async def _page(
+        self, ext: ExtensionContext, reader: SourceReader, query: ObjectListQuery
+    ) -> ObjectPage:
+        subjects = reader.subjects
         async with ext.transaction() as connection:
             rows = (
                 (
@@ -97,17 +161,15 @@ class MemoryObjects:
         page_ids = tuple(
             row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
         )
-        current = await ext.readable_page_states(page_ids, ctx.source_reader())
+        current = await ext.readable_page_states(page_ids, reader)
         return object_page(
             tuple(
-                ObjectRow(
-                    name=str(row["id"]),
-                    summary=row["body"][:SUMMARY_MAX],
-                    fields={
-                        "subject": row["subject"],
-                        "item_class": row["item_class"],
-                        "memory_kind": row["memory_kind"],
-                    },
+                _row(
+                    str(row["id"]),
+                    row["body"],
+                    row["subject"],
+                    row["item_class"],
+                    row["memory_kind"],
                 )
                 for row in rows
                 if row["created_from_page_id"] is None
@@ -121,13 +183,14 @@ class MemoryObjects:
             query,
         )
 
-    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemorySpec] | None:
+    async def _item(
+        self, ext: ExtensionContext, reader: SourceReader, name: str
+    ) -> ObjectDetail[MemorySpec] | None:
         try:
             item_id = UUID(name)
         except ValueError:
             return None
-        ext = _require_ext(ctx)
-        subjects = ctx.read_subjects
+        subjects = reader.subjects
         async with ext.transaction() as connection:
             row = (
                 (
@@ -148,7 +211,7 @@ class MemoryObjects:
             state = (
                 await ext.readable_page_states(
                     (row["created_from_page_id"],),
-                    ctx.source_reader(),
+                    reader,
                 )
             ).get(row["created_from_page_id"])
             if (

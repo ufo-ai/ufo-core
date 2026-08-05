@@ -39,7 +39,7 @@ from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
     CREDENTIAL_KIND,
     AdminRequired,
-    MemberOwnedObjects,
+    MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -217,10 +217,10 @@ class _ResolvedAccount:
     connection_id: UUID | None
 
 
-def _require_ext(ctx: ToolContext) -> ExtensionContext:
-    if ctx.ext is None:
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
+    if ext is None:
         raise RuntimeError("source objects dispatched without their ExtensionContext")
-    return ctx.ext
+    return ext
 
 
 def _require_connectors(ctx: ToolContext) -> ConnectorRegistry:
@@ -307,14 +307,15 @@ RESYNC_GATE = "only the registering member or a workspace admin may resync a sou
 
 
 @dataclass(frozen=True)
-class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
+class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
     """The kind's handlers over the workspace's registered source rows: get/list reconstruct
     bindings by grouping rows on (provider, account, base_url); apply validates provider, streams,
     tenant URL, and auth exactly as registration always has, then registers one row per stream
     (the first sync is scheduled immediately) — private to the registering member unless the
     model asks for `shared`; delete removes the binding's rows and their synced pages follow
     through the page-tombstone pipeline. The per-member visibility and registrar-or-admin gate is
-    the base's; this kind supplies the bindings, their specs, and the register/share/remove acts."""
+    the base's, in a turn and in the portal alike; this kind supplies the bindings, their specs,
+    and the register/share/remove acts."""
 
     kind_name: ClassVar[str] = SOURCE_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
@@ -370,10 +371,10 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         if not self._owned(owner, ctx.acting_member_id) and not is_admin:
             raise AdminRequired(RESYNC_GATE)
-        binding = await self._find(ctx, name)
+        binding = await self._find(ctx.ext, name)
         if binding is None:
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
-        await _require_ext(ctx).schedule_source_sync(
+        await _require_ext(ctx.ext).schedule_source_sync(
             tuple(stream.source_id for stream in binding.streams)
         )
 
@@ -390,18 +391,20 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
         binding.
         Bounded to `SHARED_SUBJECT` pages by the alert filter, so it is stale state rather than
         disclosure; closing it needs the map to live in the source rows."""
-        ext = _require_ext(ctx)
+        ext = _require_ext(ctx.ext)
         mapping = await _subscribers_map(ext, name)
         if caller in desired:
             mapping[caller] = agent.hex
         else:
             mapping.pop(caller, None)
         await _store_subscribers(ext, name, mapping)
-        if await self._find(ctx, name) is None:
+        if await self._find(ctx.ext, name) is None:
             await _store_subscribers(ext, name, {})
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[ObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=binding.name,
@@ -411,16 +414,21 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
                     shared=binding.subject == SHARED_SUBJECT,
                 ),
             )
-            for binding in await self._bindings(ctx)
+            for binding in await _bindings_from_ext(_require_ext(ext))
         )
 
-    async def _detail(
-        self, ctx: ToolContext, name: str, _owner: ObjectOwner
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: ObjectOwner,
+        *,
+        member_id: UUID | None,
     ) -> ObjectDetail[SourceSpec] | None:
-        binding = await self._find(ctx, name)
+        binding = await self._find(ext, name)
         if binding is None:
             return None
-        subscribers = tuple(sorted((await _subscribers_map(_require_ext(ctx), name)).keys()))
+        subscribers = tuple(sorted((await _subscribers_map(_require_ext(ext), name)).keys()))
         return ObjectDetail(
             spec=binding.spec(subscribers=subscribers),
             created_at=binding.created_at,
@@ -431,12 +439,12 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
     async def _status(
         self, ctx: ToolContext, name: str, _owner: ObjectOwner
     ) -> dict[str, JsonValue] | None:
-        binding = await self._find(ctx, name)
+        binding = await self._find(ctx.ext, name)
         if binding is None:
             return None
         shared = binding.subject == SHARED_SUBJECT
         caller = ctx.turn.conversation_id.hex
-        subscribers = await _subscribers_map(_require_ext(ctx), name)
+        subscribers = await _subscribers_map(_require_ext(ctx.ext), name)
         status: dict[str, JsonValue] = {
             "shared": shared,
             "subscriber_id": caller,
@@ -461,7 +469,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
         old: SourceSpec | None,
         owner: ObjectOwner | None,
     ) -> None:
-        ext = _require_ext(ctx)
+        ext = _require_ext(ctx.ext)
         if ctx.speaker_member_id is None:
             raise ValueError("registering a source requires a speaking member")
         if old is None and spec.subscribers:
@@ -499,7 +507,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             base_url=base_url or "",
             shared=spec.shared,
         )
-        binding = await self._find(ctx, name)
+        binding = await self._find(ctx.ext, name)
         if binding is not None:
             old_spec = binding.spec()
             if resolved != old_spec:
@@ -532,8 +540,8 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
-        ext = _require_ext(ctx)
-        binding = await self._find(ctx, name)
+        ext = _require_ext(ctx.ext)
+        binding = await self._find(ctx.ext, name)
         if binding is None:
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         for stream in binding.streams:
@@ -552,7 +560,7 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
         A provider the broker serves with neither is asked to connect an account, never to add a
         workspace key; a provider the direct path is the only path for refuses a named `account_id`
         as the contradiction it is, key set or not."""
-        ext = _require_ext(ctx)
+        ext = _require_ext(ctx.ext)
         registry = _require_connectors(ctx)
         explicit = spec.provider in registry.entries
         accounts: tuple[str, ...] = ()
@@ -615,13 +623,15 @@ class SourceObjects(MemberOwnedObjects[SourceSpec, ObjectOwner]):
             f"(request_credentials for slot {spec.provider!r})"
         )
 
-    async def _find(self, ctx: ToolContext, name: str) -> _Binding | None:
+    async def _find(self, ext: ExtensionContext | None, name: str) -> _Binding | None:
         return next(
-            (binding for binding in await self._bindings(ctx) if binding.name == name), None
+            (
+                binding
+                for binding in await _bindings_from_ext(_require_ext(ext))
+                if binding.name == name
+            ),
+            None,
         )
-
-    async def _bindings(self, ctx: ToolContext) -> tuple[_Binding, ...]:
-        return await _bindings_from_ext(_require_ext(ctx))
 
 
 async def on_page_change(ctx: HookContext) -> HookOutcome:

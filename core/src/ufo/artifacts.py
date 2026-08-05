@@ -11,7 +11,9 @@ appears only when distinct shares still collide on one name. Get renders the lat
 through status, copies its bytes back into the conversation workspace so a turn can reuse a file
 an earlier turn produced; status also mints a fresh TTL download link. Create and update raise
 `VerbNotSupported` naming `share_file`; delete removes every version's row and blob, after which
-already-minted links stop serving (the download route 404s an absent blob)."""
+already-minted links stop serving (the download route 404s an absent blob). A signed-in member
+reads the same rows in the portal under the same two scopes — the selected agent and the subjects
+their own conversation carries — with the bytes left behind the turn."""
 
 import hashlib
 import re
@@ -29,13 +31,15 @@ from ufo.artifact_token import (
     ARTIFACT_TOKEN_TTL_SECONDS,
     mint_artifact_token,
 )
+from ufo.audience import audience_subjects, conversation_audience
 from ufo.blob import BlobNotFound
 from ufo.conversations import CONVERSATION_KIND
 from ufo.db import workspace_tx
-from ufo.ext.context import JsonValue
+from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
+    MemberObject,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -113,41 +117,44 @@ class ArtifactObjects:
     workspace as a side effect."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = tuple(
-            ObjectRow(
-                name=name,
-                summary=_summary(shares),
-                fields={
-                    "filename": shares[0].filename,
-                    "subject": shares[0].subject or "",
-                    "conversation": str(shares[0].conversation_id),
-                    "shared_at": shares[0].created_at.isoformat(),
-                },
-            )
-            for name, shares in await self._groups(ctx)
-        )
-        return object_page(rows, query)
+        groups = await self._groups(ctx.read_subjects)
+        return object_page(tuple(_row(name, shares) for name, shares in groups), query)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The shared files a signed-in member reads outside a turn: the rows `list` renders, over
+        the same two scopes it reads under — the selected agent, bound by the caller, and the
+        subjects a member's own conversation carries (their own and the workspace-shared). A file
+        shared into a room, or into another member's private conversation, is absent here for
+        everyone, an admin included."""
+        groups = await self._groups(audience_subjects(conversation_audience(member_id)))
+        return object_page(tuple(_row(name, shares) for name, shares in groups), query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None:
-        shares = await self._find(ctx, name)
+        shares = await self._find(ctx.read_subjects, name)
+        return None if shares is None else _detail(shares)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[ArtifactSpec] | None:
+        """One shared file as the portal reads it — the row `list` renders beside the detail `get`
+        reads, on the same agent and subjects `member_page` lists under. Bytes stay behind the
+        turn: the workspace copy and the download link `status` mints are not this read."""
+        shares = await self._find(audience_subjects(conversation_audience(member_id)), name)
         if shares is None:
             return None
-        latest = shares[0]
-        return ObjectDetail(
-            spec=ArtifactSpec(
-                filename=latest.filename,
-                media_type=latest.media_type,
-                subject=latest.subject or "",
-            ),
-            created_at=shares[-1].created_at,
-            updated_at=latest.created_at,
-            links=(
-                ObjectLink(
-                    relation="created_in",
-                    target=ObjectRef(kind=CONVERSATION_KIND, name=str(latest.conversation_id)),
-                ),
-            ),
-        )
+        return MemberObject(row=_row(name, shares), detail=_detail(shares))
 
     async def status(
         self,
@@ -156,7 +163,7 @@ class ArtifactObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        shares = await self._find(ctx, name)
+        shares = await self._find(ctx.read_subjects, name)
         if shares is None:
             return None
         latest = shares[0]
@@ -211,7 +218,7 @@ class ArtifactObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        shares = await self._find(ctx, name)
+        shares = await self._find(ctx.read_subjects, name)
         if shares is None:
             raise ValueError(f"no artifact named {name!r}")
         async with workspace_tx() as connection:
@@ -239,11 +246,13 @@ class ArtifactObjects:
             tables.conversation.c.audience.in_(ctx.read_subjects),
         )
 
-    async def _find(self, ctx: ToolContext, name: str) -> tuple[sa.Row, ...] | None:
-        matched = [shares for candidate, shares in await self._groups(ctx) if candidate == name]
+    async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None:
+        matched = [
+            shares for candidate, shares in await self._groups(subjects) if candidate == name
+        ]
         return matched[0] if matched else None
 
-    async def _groups(self, ctx: ToolContext) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
+    async def _groups(self, subjects: frozenset[str]) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -269,7 +278,7 @@ class ArtifactObjects:
                     .where(
                         tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
                         tables.turn.c.agent_id == object_agent_id(),
-                        tables.conversation.c.audience.in_(ctx.read_subjects),
+                        tables.conversation.c.audience.in_(subjects),
                     )
                 )
             ).all()
@@ -285,6 +294,39 @@ class ArtifactObjects:
             for identity, shares in by_identity.items()
         ]
         return sorted(groups, key=lambda pair: pair[0])
+
+
+def _row(name: str, shares: tuple[sa.Row, ...]) -> ObjectRow:
+    latest = shares[0]
+    return ObjectRow(
+        name=name,
+        summary=_summary(shares),
+        fields={
+            "filename": latest.filename,
+            "subject": latest.subject or "",
+            "conversation": str(latest.conversation_id),
+            "shared_at": latest.created_at.isoformat(),
+        },
+    )
+
+
+def _detail(shares: tuple[sa.Row, ...]) -> ObjectDetail[ArtifactSpec]:
+    latest = shares[0]
+    return ObjectDetail(
+        spec=ArtifactSpec(
+            filename=latest.filename,
+            media_type=latest.media_type,
+            subject=latest.subject or "",
+        ),
+        created_at=shares[-1].created_at,
+        updated_at=latest.created_at,
+        links=(
+            ObjectLink(
+                relation="created_in",
+                target=ObjectRef(kind=CONVERSATION_KIND, name=str(latest.conversation_id)),
+            ),
+        ),
+    )
 
 
 def _summary(shares: tuple[sa.Row, ...]) -> str:

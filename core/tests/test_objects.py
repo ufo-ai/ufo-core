@@ -25,16 +25,24 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
+from ufo_ext_memory.objects import MEMORY_OBJECT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.objects import SITE_OBJECT
+from ufo_ext_skill_create.manifest import SKILL_OBJECT
+from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 import ufo.artifacts as artifacts
 import ufo.conversations as conversations
 from ufo.agent_scope import agent
-from ufo.agents import AGENT_KIND, AgentObjects, AgentSpec
+from ufo.agents import AGENT_KIND, AGENT_OBJECT, AgentObjects, AgentSpec
 from ufo.artifact_token import verify_artifact_token
-from ufo.artifacts import ARTIFACT_KIND, ArtifactObjects, artifact_object_names
+from ufo.artifacts import (
+    ARTIFACT_KIND,
+    ARTIFACT_OBJECT,
+    ArtifactObjects,
+    artifact_object_names,
+)
 from ufo.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -44,6 +52,7 @@ from ufo.audience import (
 )
 from ufo.blob import FilesystemBlobStore
 from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.credential_kind import CredentialObjects
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue, context_for
@@ -51,6 +60,7 @@ from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.governance import Governance, prompt_digest
 from ufo.loop.transcript import Transcript
+from ufo.members import MEMBER_OBJECT
 from ufo.models.interface import Message, TextBlock, ToolUseBlock
 from ufo.object_name import (
     OBJECT_NAME_MAX_LENGTH,
@@ -560,16 +570,24 @@ def test_member_owned_kinds_gate_through_the_shared_base() -> None:
 def test_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> None:
     """The portal's two projections are implemented, not declared: a kind answering a signed-in
     member outside a turn is `MemberReadable`, one answering a whole page is `MemberListable`, and
-    a kind that does neither — every member-owned kind that has not opted in, and the read-only
-    conversation kind for listing — is absent from both, so the portal's routes refuse it by name
-    instead of raising from inside it."""
+    a kind absent from a projection is refused by name by the portal's routes instead of raising
+    from inside it."""
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberListable)
     assert isinstance(SITE_OBJECT.store, MemberListable)
+    assert isinstance(SOURCE_OBJECT.store, MemberListable)
+    assert isinstance(CONNECTION_OBJECT.store, MemberListable)
+    assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberListable)
+    assert isinstance(CredentialObjects(slots=()), MemberListable)
+    assert isinstance(MEMBER_OBJECT.store, MemberListable)
+    assert isinstance(ARTIFACT_OBJECT.store, MemberListable)
+    assert isinstance(MEMORY_OBJECT.store, MemberListable)
+    assert isinstance(SKILL_OBJECT.store, MemberListable)
     assert isinstance(CONVERSATION_OBJECT.store, MemberReadable)
     assert not isinstance(CONVERSATION_OBJECT.store, MemberListable)
-    for unlisted in (CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT, SOURCE_OBJECT):
-        assert not isinstance(unlisted.store, MemberReadable)
-        assert not isinstance(unlisted.store, MemberListable)
+    assert not isinstance(AGENT_OBJECT.store, MemberReadable)
+    assert not isinstance(AGENT_OBJECT.store, MemberListable)
+    assert not isinstance(PAGE_OBJECT.store, MemberReadable)
+    assert not isinstance(PAGE_OBJECT.store, MemberListable)
 
 
 def test_boot_fails_on_a_colliding_kind() -> None:

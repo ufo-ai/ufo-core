@@ -1,4 +1,7 @@
-"""Agent-owned member-authored skills as objects and loadable runtime skills."""
+"""Agent-owned member-authored skills as objects and loadable runtime skills.
+
+A skill belongs to the agent that saved it, never to a member: the saved set answers every speaker
+in a turn and every signed-in member in the portal, each behind the agent the caller bound."""
 
 import base64
 import hashlib
@@ -14,6 +17,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.objects import (
     AGENT_KIND,
+    MemberObject,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -92,10 +96,10 @@ class UserSkillSpec(BaseModel):
     )
 
 
-def _require_ext(ctx: ToolContext) -> ExtensionContext:
-    if ctx.ext is None:
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
+    if ext is None:
         raise RuntimeError("the skill kind dispatched without its ExtensionContext")
-    return ctx.ext
+    return ext
 
 
 def _text(path: str, content: bytes) -> str:
@@ -112,18 +116,56 @@ class SkillObjects:
     """Skill object handlers scoped by the ambient turn agent."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        ext = _require_ext(ctx)
-        rows = tuple(
+        return object_page(await self._rows(_require_ext(ctx.ext)), query)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The saved skills a signed-in member reads outside a turn — the rows `list` produces. A
+        skill belongs to an agent, not to a member: the whole saved set answers every speaker in a
+        turn and every member here, and the agent the caller bound is the only wall either read
+        stands behind."""
+        return object_page(await self._rows(_require_ext(ext)), query)
+
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
+        return await self._skill(_require_ext(ctx.ext), name)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[UserSkillSpec] | None:
+        """One saved skill as the portal reads it — the row `list` renders beside the digests `get`
+        reads, on the agent the caller bound. The row decides: a skill the index skipped is
+        not-found here rather than a parse raised from the detail. File content stays out of both:
+        the spec carries a sha256 and a size per file, never bytes."""
+        scoped = _require_ext(ext)
+        row = next((row for row in await self._rows(scoped) if row.name == name), None)
+        if row is None:
+            return None
+        detail = await self._skill(scoped, name)
+        if detail is None:
+            return None
+        return MemberObject(row=row, detail=detail)
+
+    async def _rows(self, ext: ExtensionContext) -> tuple[ObjectRow, ...]:
+        return tuple(
             ObjectRow(name=skill.name, summary=skill.description[:SUMMARY_MAX])
             for skill in await UserSkillStore(ext).load_all()
         )
-        return object_page(rows, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
-        files = await self._files(ctx, name)
+    async def _skill(self, ext: ExtensionContext, name: str) -> ObjectDetail[UserSkillSpec] | None:
+        files = await UserSkillStore(ext).files(name)
         if files is None:
             return None
-        ext = _require_ext(ctx)
         timestamps = await UserSkillStore(ext).timestamps(name)
         if timestamps is None:
             return None
@@ -140,7 +182,7 @@ class SkillObjects:
             links=(
                 ObjectLink(
                     relation="scoped_to",
-                    target=ObjectRef(kind=AGENT_KIND, name=await ctx.agent_name()),
+                    target=ObjectRef(kind=AGENT_KIND, name=await ext.agent_name()),
                 ),
             ),
         )
@@ -152,7 +194,7 @@ class SkillObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        files = await self._files(ctx, name)
+        files = await UserSkillStore(_require_ext(ctx.ext)).files(name)
         if files is None:
             return None
         return {
@@ -170,7 +212,7 @@ class SkillObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        ext = _require_ext(ctx)
+        ext = _require_ext(ctx.ext)
         if len(spec.files) > MAX_SKILL_FILES:
             raise ValueError(f"a skill holds at most {MAX_SKILL_FILES} files")
         resolved = await self._resolve(ctx, name, spec)
@@ -186,15 +228,11 @@ class SkillObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        ext = _require_ext(ctx)
+        ext = _require_ext(ctx.ext)
         await UserSkillStore(ext).delete(name)
 
-    async def _files(self, ctx: ToolContext, name: str) -> dict[str, bytes] | None:
-        ext = _require_ext(ctx)
-        return await UserSkillStore(ext).files(name)
-
     async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]:
-        stored = await self._files(ctx, name) or {}
+        stored = await UserSkillStore(_require_ext(ctx.ext)).files(name) or {}
         kept: dict[str, bytes] = {}
         for path, value in spec.files.items():
             if not isinstance(value, FileRef):

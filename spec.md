@@ -535,9 +535,14 @@ row answers this member, so a scheduled task's `reports_to` lands on its convers
 as plain text where it does not, since a link's kind reading for members is not that row reading
 for this one — and the row's timestamps. Where the prepared-intent lane does not accept the kind,
 the page offers no control at all; where the kind elided the spec, it offers no form to edit what
-this member cannot read. Scheduled tasks and hosted sites are the kinds that list this way today,
-so the portal and chat's `object_list` cannot disagree; conversations read one row at a time, as
-the target of the links that reach them. A shared connection or source names
+this member cannot read. A kind lists this way once its gate is derived from a member and an agent
+alone, so the portal and chat's `object_list` cannot disagree; conversations read one row at a time,
+as the target of the links that reach them. A kind whose gate cannot leave a turn stays refused by
+name — `agent`, whose listing reports the concrete model an `auto` agent resolves to and takes that
+resolution off the reading turn, and `page`, whose detail reads the body through the turn's blob
+capability and whose listing scans every readable page. A
+gate is never widened to admit a kind — the kind stays refused by name until its read no longer
+needs a turn. A shared connection or source names
 its owner only to an admin or the owner: the roster tells every member who their colleagues are,
 but which colleague registered a given binding is the owner's to disclose, and chat names it to
 nobody else either, so neither does a panel. A panel mutation

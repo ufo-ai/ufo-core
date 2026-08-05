@@ -21,6 +21,7 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import MemoryIndexer, SourceMatch, memory_item
 
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
@@ -873,6 +874,143 @@ async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
     assert [row["item_class"] for row in by_class] == ["fact"]
     assert len(by_subject) == 2
     assert [row["memory_kind"] for row in ordered] == ["event", "preference"]
+
+
+async def test_portal_reads_hold_the_subject_and_source_gates_the_turn_holds(
+    db: None, tmp_path: Path
+) -> None:
+    """The portal reads memory on the subjects a member's own conversation carries and behind the
+    bound agent's source grant: another member's private item is absent from the index and
+    not-found by name, and a shared page-derived item answers only under an agent granted its
+    source."""
+    workspace_id = await _workspace()
+    alice, bob = uuid4(), uuid4()
+    granted_agent, ungranted_agent = uuid4(), uuid4()
+    source_id, page_id, item_id = uuid4(), uuid4(), uuid4()
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+    index = DefaultIndex(transaction=workspace_tx)
+    embed = StubEmbed(vec((0, 1.0)))
+    alice_dm = conversation_audience(alice)
+    alice_ctx = _tool_ctx(
+        _ext(index, embed, alice_dm), alice, tmp_path, workspace_id=workspace_id, audience=alice_dm
+    )
+    async with workspace_tx() as connection:
+        for agent_id, name in ((granted_agent, "granted"), (ungranted_agent, "ungranted")):
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name=name,
+                    prompt="p",
+                    model="m",
+                    is_main=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={},
+                subject="shared",
+                next_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                agent_id=granted_agent,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:page",
+                body_ref=f"pages/{page_id}",
+                stream="notes",
+                title="Page",
+                subject="shared",
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=item_id,
+                workspace_id=workspace_id,
+                subject="shared",
+                body="the vault code is 8842",
+                item_class="fact",
+                memory_kind="fact",
+                confidence=5,
+                created_from_page_id=page_id,
+                created_from_page_revision=revision,
+                source_id=source_id,
+                embedding_digest="sha256:seeded",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    store = MemoryObjects()
+    ext = alice_ctx.ext
+    query = ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
+    with ws(workspace_id):
+        await _run("memory_update", alice_ctx, body="alice private roadmap")
+        async with workspace_tx() as connection:
+            private_id = (
+                await connection.execute(
+                    sa.select(memory_item.c.id).where(
+                        memory_item.c.subject == member_subject(alice)
+                    )
+                )
+            ).scalar_one()
+        with agent(granted_agent):
+            alice_names = {
+                row.name
+                for row in (
+                    await store.member_page(ext, member_id=alice, admin=False, query=query)
+                ).rows
+            }
+            bob_names = {
+                row.name
+                for row in (
+                    await store.member_page(ext, member_id=bob, admin=True, query=query)
+                ).rows
+            }
+            bob_read = await store.member_detail(ext, str(private_id), member_id=bob, admin=True)
+            granted_read = await store.member_detail(ext, str(item_id), member_id=bob, admin=False)
+        with agent(ungranted_agent):
+            ungranted_names = {
+                row.name
+                for row in (
+                    await store.member_page(ext, member_id=bob, admin=False, query=query)
+                ).rows
+            }
+            ungranted_read = await store.member_detail(
+                ext, str(item_id), member_id=bob, admin=False
+            )
+    assert {str(private_id), str(item_id)} <= alice_names
+    assert bob_names == {str(item_id)}
+    assert bob_read is None
+    assert granted_read is not None
+    assert granted_read.row.fields["subject"] == "shared"
+    assert ungranted_names == set()
+    assert ungranted_read is None
 
 
 async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(

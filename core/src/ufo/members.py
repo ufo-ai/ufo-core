@@ -1,5 +1,10 @@
 """The core-registered `member` object kind: workspace membership, admin role, and seat, plus
-`add_member`, the one verb that mints a member ahead of their first contact."""
+`add_member`, the one verb that mints a member ahead of their first contact.
+
+The roster is the main agent's: a read off any other agent narrows to the reader's own row, and a
+channel another organization sits in narrows the same way. The portal reads through that one rule —
+`member_page`/`member_detail` answer on the agent the request names, with the signed-in member as
+the reader."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -8,11 +13,13 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.agent_scope import agent_current
 from ufo.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.db import workspace_tx
-from ufo.ext.context import JsonValue
+from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.objects import (
     AdminRequired,
+    MemberObject,
     ObjectDetail,
     ObjectKind,
     ObjectListQuery,
@@ -55,31 +62,49 @@ class MemberSpec(BaseModel):
 @dataclass(frozen=True)
 class MemberObjects:
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = await self._visible_rows(ctx)
         return object_page(
-            tuple(
-                ObjectRow(
-                    name=str(row.id),
-                    summary=(
-                        f"{row.email}, "
-                        f"{'workspace admin' if row.is_admin else 'workspace member'}, "
-                        f"{'seated' if row.seated_at is not None else 'unseated'}"
-                    ),
-                )
-                for row in rows
-            ),
+            tuple(_row(row) for row in await self._visible_rows(ctx)),
+            query,
+        )
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The roster a signed-in member reads outside a turn, on the rule `list` answers by: the
+        whole workspace off the main agent, the reader's own row alone off any other. The reader
+        is the speaker — a portal read is always live and member-made — and its audience is that
+        member's own, never a channel another organization sits in, so the foreign narrowing
+        `list` also applies has nothing to catch here."""
+        return object_page(
+            tuple(_row(row) for row in await self._member_rows(member_id)),
             query,
         )
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[MemberSpec] | None:
         row = await self._visible_row(ctx, name)
-        if row is None:
-            return None
-        return ObjectDetail(
-            spec=MemberSpec(admin=row.is_admin, seated=row.seated_at is not None),
-            created_at=row.created_at,
-            updated_at=row.updated_at,
+        return None if row is None else _detail(row)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[MemberSpec] | None:
+        """One member as the portal reads them — the row `list` renders beside the detail `get`
+        reads, behind the same main-agent rule. A colleague's row is absent off a child agent for
+        everyone, an admin included: the roster is the main agent's."""
+        row = next(
+            (row for row in await self._member_rows(member_id) if str(row.id) == name),
+            None,
         )
+        return None if row is None else MemberObject(row=_row(row), detail=_detail(row))
 
     async def status(
         self,
@@ -189,6 +214,37 @@ class MemberObjects:
         raise VerbNotSupported(MEMBER_DELETE)
 
     async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]:
+        if ctx.speaker_member_id is None:
+            return ()
+        if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+            return await self._roster(ctx.speaker_member_id, whole=False)
+        return await self._roster(ctx.speaker_member_id, whole=await ctx.agent_is_main())
+
+    async def _visible_row(self, ctx: ToolContext, name: str) -> sa.Row | None:
+        return next(
+            (row for row in await self._visible_rows(ctx) if str(row.id) == name),
+            None,
+        )
+
+    async def _member_rows(self, member_id: UUID) -> tuple[sa.Row, ...]:
+        async with workspace_tx() as connection:
+            is_main = bool(
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.is_main).where(
+                            tables.agent.c.workspace_id == ws_current().workspace_id,
+                            tables.agent.c.id == agent_current().agent_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            )
+        return await self._roster(member_id, whole=is_main)
+
+    async def _roster(self, member_id: UUID, *, whole: bool) -> tuple[sa.Row, ...]:
+        """The membership rows a reader may see: the workspace's whole roster, or their own row
+        alone. One derivation for the turn's `list`/`get` and the portal's
+        `member_page`/`member_detail`, so the roster a member reads in the portal is the roster the
+        agent would tell them."""
         query = (
             sa.select(
                 tables.member.c.email,
@@ -201,18 +257,29 @@ class MemberObjects:
             .where(tables.member.c.workspace_id == ws_current().workspace_id)
             .order_by(tables.member.c.email)
         )
-        if ctx.speaker_member_id is None:
-            return ()
-        if not await ctx.agent_is_main() or ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
-            query = query.where(tables.member.c.id == ctx.speaker_member_id)
+        if not whole:
+            query = query.where(tables.member.c.id == member_id)
         async with workspace_tx() as connection:
             return tuple((await connection.execute(query)).all())
 
-    async def _visible_row(self, ctx: ToolContext, name: str) -> sa.Row | None:
-        return next(
-            (row for row in await self._visible_rows(ctx) if str(row.id) == name),
-            None,
-        )
+
+def _row(row: sa.Row) -> ObjectRow:
+    return ObjectRow(
+        name=str(row.id),
+        summary=(
+            f"{row.email}, "
+            f"{'workspace admin' if row.is_admin else 'workspace member'}, "
+            f"{'seated' if row.seated_at is not None else 'unseated'}"
+        ),
+    )
+
+
+def _detail(row: sa.Row) -> ObjectDetail[MemberSpec]:
+    return ObjectDetail(
+        spec=MemberSpec(admin=row.is_admin, seated=row.seated_at is not None),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 class AddMemberInput(BaseModel):

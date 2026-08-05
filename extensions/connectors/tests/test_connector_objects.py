@@ -35,6 +35,7 @@ from ufo.objects import (
     AdminRequired,
     GeneratedObjectOwner,
     ObjectDetail,
+    ObjectListQuery,
     ObjectRef,
     UnknownObject,
     VerbNotSupported,
@@ -1191,6 +1192,65 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
             )
             assert fetched["spec"]["account_id"] == "alice@example.com"
             assert fetched["status"]["owner_member_id"] == str(grantor_id)
+
+
+async def test_portal_reads_hide_other_members_private_connectors(db: None) -> None:
+    """The portal answers connections and grants through the same owner gate the verbs do: another
+    member's index carries only the shared grant and their detail read of the private one and of
+    its connection answers nothing, while the grantor and a workspace admin read both."""
+    workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "asana", "bob@example.com"
+        )
+        await _text(
+            _object_tool("object_apply"),
+            _tool_context(workspace_id, agent_id, grantor_id),
+            manifest=yaml.safe_dump(
+                {
+                    "kind": CONNECTOR_GRANT_KIND,
+                    "name": ASANA_BOB_NAME,
+                    "spec": {"provider": "asana", "account_id": "bob@example.com", "shared": True},
+                }
+            ),
+        )
+        grants, connections = ConnectorGrantObjects(), ConnectionObjects()
+        stranger = await grants.member_page(
+            None, member_id=other_id, admin=False, query=ObjectListQuery()
+        )
+        assert [row.name for row in stranger.rows] == [ASANA_BOB_NAME]
+        assert (
+            await grants.member_detail(None, GMAIL_ALICE_NAME, member_id=other_id, admin=False)
+        ) is None
+        assert (
+            await connections.member_detail(None, GMAIL_ALICE_NAME, member_id=other_id, admin=False)
+        ) is None
+        assert [
+            row.name
+            for row in (
+                await connections.member_page(
+                    None, member_id=other_id, admin=False, query=ObjectListQuery()
+                )
+            ).rows
+        ] == []
+        for member_id, admin in ((grantor_id, False), (admin_id, True)):
+            listed = await grants.member_page(
+                None, member_id=member_id, admin=admin, query=ObjectListQuery()
+            )
+            assert {row.name for row in listed.rows} == {GMAIL_ALICE_NAME, ASANA_BOB_NAME}
+            read = await grants.member_detail(
+                None, GMAIL_ALICE_NAME, member_id=member_id, admin=admin
+            )
+            assert read is not None
+            assert read.detail.spec.account_id == "alice@example.com"
+            opened = await connections.member_detail(
+                None, GMAIL_ALICE_NAME, member_id=member_id, admin=admin
+            )
+            assert opened is not None
+            assert opened.detail.spec.provider == "gmail"
 
 
 async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:

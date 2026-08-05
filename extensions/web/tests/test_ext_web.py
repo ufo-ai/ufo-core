@@ -98,7 +98,7 @@ from ufo.schema.records import (
     TerminalFrame,
     Usage,
 )
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
@@ -1789,6 +1789,201 @@ async def test_a_task_detail_links_to_the_conversation_it_reports_into(
     )
     assert unseen.status_code == 404
     assert "conversation" in unseen.text
+
+
+async def test_the_credential_index_lists_every_declared_slot_and_no_value(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A credential slot is a declaration, not a member's row: every member reads the same index
+    and the same declaration, filled or empty, and no read carries a value. A slot no manifest
+    declares is not-found for a plain member and for an admin alike."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    with ws(workspace_id):
+        await CredentialStore(fernet=CREDENTIAL_FERNET).put(workspace_id, "acme_api_key", "s3cret")
+    index = f"/surface/web/objects/credential?agent={agent_id}"
+    for token_value in (token, admin_token):
+        cookie = {"cookie": f"{SESSION_COOKIE}={token_value}"}
+        listed = (await client.get(index, headers=cookie)).json()
+        assert {row["name"]: row["filled"] for row in listed["objects"]} == {
+            "acme-api-key": True,
+            "acme-install-seal": False,
+        }
+        assert "s3cret" not in json.dumps(listed)
+        read = await client.get(
+            f"/surface/web/objects/credential/acme-api-key?agent={agent_id}", headers=cookie
+        )
+        assert read.status_code == 200
+        assert read.json()["spec"]["description"] == "ACME API key"
+        assert "s3cret" not in read.text
+        missing = await client.get(
+            f"/surface/web/objects/credential/nonesuch?agent={agent_id}", headers=cookie
+        )
+        assert missing.status_code == 404
+        assert "credential" in missing.text
+
+
+async def test_the_roster_answers_off_the_main_agent_and_narrows_to_self_off_another(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The `member` kind's own rule, one read at a time: off the main agent every member reads the
+    whole roster, off a child agent the reader gets their own row alone and a colleague's row is
+    not-found — for an admin too, since the roster belongs to the main agent, not to a role."""
+    client, workspace_id, agent_id = web
+    child_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=child_agent,
+                workspace_id=workspace_id,
+                name="ops",
+                prompt="be operational",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    colleague_id, _colleague_token = await _seed_member(workspace_id, "n@example.com")
+    admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    for email in ("m@example.com", "boss@example.com"):
+        await _grant_web_access(workspace_id, child_agent, email)
+    for token_value, reader in ((token, member_id), (admin_token, admin_id)):
+        cookie = {"cookie": f"{SESSION_COOKIE}={token_value}"}
+        roster = (
+            await client.get(f"/surface/web/objects/member?agent={agent_id}", headers=cookie)
+        ).json()
+        assert {row["name"] for row in roster["objects"]} == {
+            str(member_id),
+            str(colleague_id),
+            str(admin_id),
+        }
+        read = await client.get(
+            f"/surface/web/objects/member/{colleague_id}?agent={agent_id}", headers=cookie
+        )
+        assert read.status_code == 200
+        assert read.json()["spec"] == {"admin": False, "seated": False}
+
+        narrowed = (
+            await client.get(f"/surface/web/objects/member?agent={child_agent}", headers=cookie)
+        ).json()
+        assert [row["name"] for row in narrowed["objects"]] == [str(reader)]
+        hidden = await client.get(
+            f"/surface/web/objects/member/{colleague_id}?agent={child_agent}", headers=cookie
+        )
+        assert hidden.status_code == 404
+        assert "member" in hidden.text
+
+
+async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A shared file answers on the subjects the reading member's own conversation carries: their
+    own private conversations plus the workspace-shared. A file shared into a workspace-shared
+    conversation answers every member; another member's private file is absent from the index and
+    not-found by name — for an admin too, since audience is not a role."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    names: dict[str, str] = {}
+    for member_id, email, filename in (
+        (member_m, "m@example.com", "mine.txt"),
+        (member_n, "n@example.com", "theirs.txt"),
+    ):
+        conversation_id, turn_id = await _seed_web_turn(
+            workspace_id, agent_id, member_id, email, TerminalFrame(status="done", text="ok")
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject="the file",
+                    media_type="text/plain",
+                    size_bytes=3,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        names[filename] = f"{conversation_id.hex[:8]}-{filename.replace('.', '-')}"
+    shared_conversation, shared_turn = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=shared_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="slack",
+                queue_key=f"{agent_id}/C1/{uuid4().hex}",
+                member_id=None,
+                audience=str(SHARED_AUDIENCE),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=shared_turn,
+                workspace_id=workspace_id,
+                conversation_id=shared_conversation,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="ask",
+                speaker_member_id=member_n,
+                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=shared_turn,
+                blob_key=f"artifacts/{uuid4()}/ours.txt",
+                workspace_id=workspace_id,
+                filename="ours.txt",
+                subject="the shared file",
+                media_type="text/plain",
+                size_bytes=3,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    names["ours.txt"] = f"{shared_conversation.hex[:8]}-ours-txt"
+    index = f"/surface/web/objects/artifact?agent={agent_id}"
+    for token in (token_m, token_admin):
+        cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+        listed = (await client.get(index, headers=cookie)).json()
+        assert {row["filename"] for row in listed["objects"]} == (
+            {"mine.txt", "ours.txt"} if token == token_m else {"ours.txt"}
+        )
+        shared_read = await client.get(
+            f"/surface/web/objects/artifact/{names['ours.txt']}?agent={agent_id}", headers=cookie
+        )
+        assert shared_read.status_code == 200
+        assert shared_read.json()["spec"]["subject"] == "the shared file"
+        hidden = await client.get(
+            f"/surface/web/objects/artifact/{names['theirs.txt']}?agent={agent_id}", headers=cookie
+        )
+        assert hidden.status_code == 404
+        assert "artifact" in hidden.text
+    own = await client.get(
+        f"/surface/web/objects/artifact/{names['mine.txt']}?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert own.status_code == 200
+    assert own.json()["spec"] == {
+        "filename": "mine.txt",
+        "media_type": "text/plain",
+        "subject": "the file",
+    }
+    assert own.json()["status"]["filename"] == "mine.txt"
+    [link] = own.json()["links"]
+    assert (link["relation"], link["kind"], link["opens"]) == ("created_in", "conversation", True)
 
 
 async def test_object_pages_refuse_an_unregistered_kind_an_unlisted_kind_and_a_walled_agent(

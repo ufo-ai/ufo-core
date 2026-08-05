@@ -264,18 +264,6 @@ class ToolContext:
                 self.speaker_member_id,
             )
 
-    async def agent_name(self) -> str:
-        """This turn's agent's stable name — the `agent` object kind's own object name."""
-        async with workspace_tx() as connection:
-            return (
-                await connection.execute(
-                    sa.select(tables.agent.c.name).where(
-                        tables.agent.c.id == self.turn.agent_id,
-                        tables.agent.c.workspace_id == self.turn.workspace_id,
-                    )
-                )
-            ).scalar_one()
-
     async def agent_is_main(self) -> bool:
         async with workspace_tx() as connection:
             return bool(

@@ -1,11 +1,13 @@
-"""Member-owned connections and their per-agent connector grants as workspace objects."""
+"""Member-owned connections and their per-agent connector grants as workspace objects, read
+through one owner gate in a turn and in the portal."""
 
 from dataclasses import dataclass
 from typing import ClassVar, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from ufo.sdk.context import JsonValue
+from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.grants import (
     account_object_name,
     connection_summaries,
@@ -14,7 +16,7 @@ from ufo.sdk.grants import (
 from ufo.sdk.objects import (
     AGENT_KIND,
     GeneratedObjectOwner,
-    MemberOwnedObjects,
+    MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -57,14 +59,16 @@ def _named[SummaryT: _AccountSummary](rows: tuple[SummaryT, ...]) -> dict[str, S
 
 
 @dataclass(frozen=True)
-class ConnectionObjects(MemberOwnedObjects[ConnectionSpec, GeneratedObjectOwner]):
+class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwner]):
     kind_name: ClassVar[str] = CONNECTION_KIND
     mutate_gate: ClassVar[str] = DISCONNECT_GATE
     delete_gate: ClassVar[str] = DISCONNECT_GATE
     mutate_requires_speaker: ClassVar[bool] = True
     delete_requires_speaker: ClassVar[bool] = True
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=name,
@@ -78,8 +82,13 @@ class ConnectionObjects(MemberOwnedObjects[ConnectionSpec, GeneratedObjectOwner]
             for name, row in _named(await connection_summaries()).items()
         )
 
-    async def _detail(
-        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: GeneratedObjectOwner,
+        *,
+        member_id: UUID | None,
     ) -> ObjectDetail[ConnectionSpec] | None:
         row = next(
             (summary for summary in await connection_summaries() if summary.id == owner.generation),
@@ -132,7 +141,7 @@ class ConnectionObjects(MemberOwnedObjects[ConnectionSpec, GeneratedObjectOwner]
 
 
 @dataclass(frozen=True)
-class ConnectorGrantObjects(MemberOwnedObjects[ConnectorGrantSpec, GeneratedObjectOwner]):
+class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedObjectOwner]):
     kind_name: ClassVar[str] = CONNECTOR_GRANT_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
     delete_gate: ClassVar[str] = REVOKE_GATE
@@ -142,7 +151,9 @@ class ConnectorGrantObjects(MemberOwnedObjects[ConnectorGrantSpec, GeneratedObje
     def _admin_can_apply(self, old: ConnectorGrantSpec, spec: ConnectorGrantSpec) -> bool:
         return old.shared and spec == old.model_copy(update={"shared": False})
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=name,
@@ -159,8 +170,13 @@ class ConnectorGrantObjects(MemberOwnedObjects[ConnectorGrantSpec, GeneratedObje
             for name, row in _named(await grant_summaries()).items()
         )
 
-    async def _detail(
-        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: GeneratedObjectOwner,
+        *,
+        member_id: UUID | None,
     ) -> ObjectDetail[ConnectorGrantSpec] | None:
         row = next(
             (summary for summary in await grant_summaries() if summary.id == owner.generation),

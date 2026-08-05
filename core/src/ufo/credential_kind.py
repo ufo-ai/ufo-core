@@ -7,6 +7,8 @@ injection host), status says filled or empty — no value field, no value digest
 stay `request_credentials` (a secret
 and a private handoff, the speaker gating the act), so create and update refuse naming it;
 delete clears the stored value, admin-gated in the handler, and the slot stays listed as empty.
+A signed-in member reads the same index and declaration in the portal: a declaration carries no
+member scope and no read discloses a value, so the workspace is the whole audience on both paths.
 
 Core-registered: the loader builds the kind from every active manifest's declared slots and binds
 it with no extension context — the handlers read the ambient workspace directly, exactly as
@@ -26,9 +28,10 @@ from ufo.credentials import (
     named_slots,
 )
 from ufo.db import workspace_tx
-from ufo.ext.context import JsonValue
+from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.objects import (
     AdminRequired,
+    MemberObject,
     ObjectDetail,
     ObjectListQuery,
     ObjectPage,
@@ -72,46 +75,39 @@ class CredentialObjects:
     credentials: CredentialStore | None = None
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        named = self._named()
-        filled = await self._filled_slots()
-        rows = [
-            ObjectRow(
-                name=name,
-                summary=(
-                    f"{slot.extension}: {slot.description or slot.name} — "
-                    f"{'filled' if slot.name in filled else 'empty'}"
-                ),
-                fields={"extension": slot.extension, "filled": slot.name in filled},
-            )
-            for name, slot in sorted(named.items())
-        ]
-        return object_page(tuple(rows), query)
+        return object_page(await self._rows(), query)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The slot index a signed-in member reads — every declared slot with its fill state, the
+        rows `list` produces."""
+        return object_page(await self._rows(), query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[CredentialSpec] | None:
-        slot = self._named().get(name)
-        if slot is None:
+        return await self._detail(name)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[CredentialSpec] | None:
+        """One slot as the portal reads it: the row `list` renders beside the declaration `get`
+        reads, on the same workspace-wide read both answer. A slot no manifest declares is absent
+        for every member."""
+        detail = await self._detail(name)
+        if detail is None:
             return None
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.credential.c.created_at, tables.credential.c.updated_at).where(
-                        tables.credential.c.workspace_id == ws_current().workspace_id,
-                        tables.credential.c.slot == slot.name,
-                    )
-                )
-            ).one_or_none()
-        return ObjectDetail(
-            spec=CredentialSpec(
-                slot=slot.name,
-                description=slot.description,
-                extension=slot.extension,
-                host=slot.host if isinstance(slot.host, str) else "",
-                host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
-                host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
-            ),
-            created_at=None if row is None else row.created_at,
-            updated_at=None if row is None else row.updated_at,
-        )
+        row = next(row for row in await self._rows() if row.name == name)
+        return MemberObject(row=row, detail=detail)
 
     async def status(
         self,
@@ -167,6 +163,46 @@ class CredentialObjects:
                     tables.credential.c.slot == slot.name,
                 )
             )
+
+    async def _rows(self) -> tuple[ObjectRow, ...]:
+        filled = await self._filled_slots()
+        return tuple(
+            ObjectRow(
+                name=name,
+                summary=(
+                    f"{slot.extension}: {slot.description or slot.name} — "
+                    f"{'filled' if slot.name in filled else 'empty'}"
+                ),
+                fields={"extension": slot.extension, "filled": slot.name in filled},
+            )
+            for name, slot in sorted(self._named().items())
+        )
+
+    async def _detail(self, name: str) -> ObjectDetail[CredentialSpec] | None:
+        slot = self._named().get(name)
+        if slot is None:
+            return None
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.credential.c.created_at, tables.credential.c.updated_at).where(
+                        tables.credential.c.workspace_id == ws_current().workspace_id,
+                        tables.credential.c.slot == slot.name,
+                    )
+                )
+            ).one_or_none()
+        return ObjectDetail(
+            spec=CredentialSpec(
+                slot=slot.name,
+                description=slot.description,
+                extension=slot.extension,
+                host=slot.host if isinstance(slot.host, str) else "",
+                host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
+                host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
+            ),
+            created_at=None if row is None else row.created_at,
+            updated_at=None if row is None else row.updated_at,
+        )
 
     def _named(self) -> dict[str, DeclaredSlot]:
         return named_slots(self.slots)
