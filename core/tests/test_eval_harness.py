@@ -300,7 +300,11 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "scenario_env",
         "memory_hygiene",
     }
-    assert exclusive == scenario | {"github_connections", "onboarding_help"}
+    assert exclusive == scenario | {
+        "connector_connections",
+        "github_connections",
+        "onboarding_help",
+    }
 
 
 async def test_task_reports_overlaps_tasks_and_isolates_exclusive_ones() -> None:
