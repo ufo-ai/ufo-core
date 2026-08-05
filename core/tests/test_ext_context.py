@@ -246,6 +246,67 @@ async def test_credential_access_reads_declared_and_rejects_undeclared(db: None)
             await access.get("undeclared_slot")
 
 
+@dataclass(frozen=True)
+class MintedCredential:
+    value: str | None
+
+    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        return self.value
+
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        return self.value is not None
+
+
+async def test_credential_access_resolves_manifest_source(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    access = CredentialAccess(
+        declared=frozenset({"sample_api"}),
+        _sources=(("sample_api", MintedCredential("minted")),),
+        _store=store,
+    )
+    with ws(workspace_id):
+        assert await access.resolve("sample_api") == "minted"
+
+
+async def test_credential_access_resolve_falls_back_to_stored_value(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "sample_api", "stored")
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_api"}),
+        _sources=(("sample_api", MintedCredential(None)),),
+        _store=store,
+    )
+    with ws(workspace_id):
+        assert await access.resolve("sample_api") == "stored"
+
+
+async def test_credential_access_resolve_falls_back_to_platform_value(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAMPLE_API", "platform")
+    store = _store()
+    init_workspace_credentials(store)
+    access = CredentialAccess(
+        declared=frozenset({"sample_api"}),
+        _sources=(("sample_api", MintedCredential(None)),),
+        _store=store,
+    )
+    with ws(await _workspace()):
+        assert await access.resolve("sample_api") == "platform"
+
+
+async def test_credential_access_resolve_requires_source_store(db: None) -> None:
+    access = CredentialAccess(
+        declared=frozenset({"sample_api"}),
+        _sources=(("sample_api", MintedCredential("minted")),),
+    )
+    with ws(await _workspace()), pytest.raises(RuntimeError, match="no credential store"):
+        await access.resolve("sample_api")
+
+
 async def test_credential_access_falls_back_to_platform_env(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

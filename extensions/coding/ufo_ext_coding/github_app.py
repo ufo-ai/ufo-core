@@ -37,9 +37,11 @@ from ufo.sdk.credentials import (
 )
 
 GITHUB_API = "https://api.github.com"
+GIT_SLOT = "github_git_token"
 JWT_LIFETIME_SECONDS = 540
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 MINT_TIMEOUT_SECONDS = 10
+INSTALLATION_PERMISSIONS = {"checks": "write", "contents": "write"}
 
 
 def _segment(payload: dict[str, object]) -> bytes:
@@ -132,6 +134,7 @@ class GitHubAppTokens:
                         "Authorization": f"Bearer {self._jwt()}",
                         "Accept": "application/vnd.github+json",
                     },
+                    json={"permissions": INSTALLATION_PERMISSIONS},
                 )
             except httpx.HTTPError as error:
                 raise CredentialMintFailed(

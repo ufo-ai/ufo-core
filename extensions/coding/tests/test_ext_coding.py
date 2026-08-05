@@ -1,8 +1,3 @@
-"""The coding pack's proof: its manifest registers a single `coding` SubagentProfile over the core
-code builtins, and core's shell-wrap renders it with the shared citation discipline and a filled
-skill index. The profile names only tool names, so the pack is self-contained — nothing here
-imports a core internal."""
-
 import json
 
 import pytest
@@ -51,10 +46,19 @@ def test_partial_github_app_registration_fails(
         coding.github_app_id()
 
 
-def test_coding_manifest_registers_a_single_coding_profile() -> None:
+def test_coding_manifest_registers_coding_and_review_profiles() -> None:
     manifest = coding.manifest()
-    assert [tool.name for tool in manifest.tools] == ["connect_github"]
-    (profile,) = manifest.subagents
+    assert [tool.name for tool in manifest.tools] == [
+        "connect_github",
+        "checkout_code_review",
+        "review_read",
+        "review_glob",
+        "review_grep",
+        "configure_review_inbox",
+        "publish_code_review",
+    ]
+    profile = manifest.subagents[0]
+    assert [subagent.name for subagent in manifest.subagents] == ["coding", "code_review"]
     assert profile.name == "coding"
     assert (
         profile.input_model.model_validate(
@@ -63,6 +67,7 @@ def test_coding_manifest_registers_a_single_coding_profile() -> None:
         == "fix it"
     )
     assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
+    assert [hook.event for hook in manifest.hooks] == ["page_change"]
 
 
 def test_coding_result_uses_only_the_shared_register_bound() -> None:
@@ -189,10 +194,7 @@ def test_the_local_checkout_mode_handles_missing_and_dirty_sources() -> None:
     assert "`origin/*` does not exist until GitHub supplies it" in coding.CODING_PROMPT
 
 
-def test_coding_profile_excludes_the_connector_tools_pr_review_uses() -> None:
-    """`code-review` reaches GitHub through the connector trio (`call_external_tool` +
-    `describe_external_tools`); by design the main agent runs that skill directly, never the coding
-    subagent — whose profile therefore names none of them, so it cannot review a PR itself."""
+def test_coding_profile_excludes_connector_tools() -> None:
     profile = coding.CODING_PROFILE
     assert {"call_external_tool", "describe_external_tools"}.isdisjoint(profile.tool_names)
 
@@ -228,10 +230,11 @@ def test_extended_context_survives_the_spawn_payload_serialization() -> None:
 
 
 def test_coding_skills_parse_and_index() -> None:
-    registry = skill_registry((coding.manifest(),))
+    manifest = coding.manifest()
+    registry = skill_registry((manifest,))
     index = dict(registry.index())
-    for name in ("coding", "code-review"):
-        assert name in index
+    assert tuple(skill.path.name for skill in manifest.skills) == ("coding",)
+    assert "coding" in index
     instructions = registry.named("coding").instructions
     assert "only a workspace admin can do it" in instructions
     assert "only the owner" not in instructions
@@ -281,7 +284,7 @@ def test_the_connect_tool_and_its_return_leg_ship_together() -> None:
     """The member acts between them: a tool that mints an install link with no route to return to
     would strand every connection, and a route with no tool could never be reached with a seal."""
     manifest = coding.manifest()
-    assert [tool.name for tool in manifest.tools] == ["connect_github"]
+    assert "connect_github" in {tool.name for tool in manifest.tools}
     (route,) = manifest.routes
     assert (route.method, route.path) == ("GET", connect.ROUTE_PATH)
     assert route.identify is connect.install_workspace

@@ -485,7 +485,8 @@ class SubagentProfile:
     parent's; a spawn resolves and bills the child under whichever model answers it.
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
     parties): every path that returns it to a parent — spawn_subagent, wait_for_subagents — walls
-    it as data, exactly as an untrusted tool's own result is walled."""
+    it as data, exactly as an untrusted tool's own result is walled. `isolated_tools` makes
+    `tool_names` exact by excluding cross-extension grants and subagent defaults."""
 
     name: str
     prompt: str
@@ -495,6 +496,7 @@ class SubagentProfile:
     max_rounds: int = SUBAGENT_ROUND_LIMIT
     model: str | None = None
     untrusted_output: bool = False
+    isolated_tools: bool = False
 
 
 @dataclass(frozen=True)

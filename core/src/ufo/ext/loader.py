@@ -435,6 +435,10 @@ def turn_tools(
             index,
             embed,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            credential_sources=tuple(
+                (slot.name, slot.source) for slot in manifest.credentials if slot.source is not None
+            ),
+            credential_store=credential_store,
             audience=audience,
         )
         for tool in declared_tools:

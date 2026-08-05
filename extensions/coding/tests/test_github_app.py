@@ -4,7 +4,7 @@ what comes back, never on the fake."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from json import dumps
+from json import dumps, loads
 from uuid import UUID, uuid4
 
 import httpx
@@ -160,6 +160,7 @@ async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expir
     assert len(calls) == 1
     (call,) = calls
     assert call.url.path == f"/app/installations/{INSTALLATION}/access_tokens"
+    assert loads(call.content)["permissions"] == {"checks": "write", "contents": "write"}
     scheme, _, jwt = call.headers["authorization"].partition(" ")
     assert scheme == "Bearer"
     assert len(jwt.split(".")) == 3

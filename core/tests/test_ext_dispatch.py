@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -62,6 +62,15 @@ class StubMemory:
 
 class NoteInput(BaseModel):
     note: str
+
+
+@dataclass(frozen=True)
+class SourceCredential:
+    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        return "minted"
+
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        return True
 
 
 async def _record_note(ctx: ToolContext, args: NoteInput) -> ToolResult:
@@ -330,14 +339,18 @@ async def test_read_tool_receives_no_idempotency_key(db: None, tmp_path: Path) -
     assert tool_result[0].content == "key=None"
 
 
-def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_unmapped() -> None:
+async def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_unmapped() -> (
+    None
+):
     workspace_id = uuid4()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     manifest = Manifest(
         name=EXTENSION,
         version="0.1.0",
         tools=(NOTE_TOOL,),
-        credentials=(CredentialSlot(name="sample_api", description="key"),),
+        credentials=(
+            CredentialSlot(name="sample_api", description="key", source=SourceCredential()),
+        ),
         surfaces=(SurfaceSpec(name="slack", routes=(), identify=_identify_workspace),),
     )
     tools, ext_by_tool = turn_tools((manifest,), store, audience=conversation_audience(None))
@@ -349,6 +362,7 @@ def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_builtins_u
     assert context.store.extension == EXTENSION
     with ws(workspace_id):
         assert context.store.workspace_id == workspace_id
+        assert await context.credentials.resolve("sample_api") == "minted"
     assert context.credentials.declared == frozenset({"sample_api"})
     assert context.installations.declared == frozenset({"slack"})
     assert not any(builtin.name in ext_by_tool for builtin in BUILTIN_TOOLS)

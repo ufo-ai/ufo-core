@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -14,7 +14,7 @@ from ufo.db import workspace_tx
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
-from ufo.loop.queue import _load_turn
+from ufo.loop.queue import _load_turn, _subagent_tools
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
@@ -113,6 +113,25 @@ def test_a_deep_profile_lifts_its_round_budget_above_the_subagent_default() -> N
         max_rounds=200,
     )
     assert deep.max_rounds == 200 > SUBAGENT_ROUND_LIMIT
+
+
+def test_isolated_profile_excludes_grants_and_defaults() -> None:
+    by_name = {tool.name: tool for tool in BUILTIN_TOOLS}
+    profile = replace(
+        _profile("review"),
+        tool_names=("read",),
+        isolated_tools=True,
+    )
+    selected = _subagent_tools(
+        (
+            by_name["read"],
+            by_name["bash"],
+            replace(by_name["edit"], subagent_default=True),
+        ),
+        profile,
+        frozenset({"bash"}),
+    )
+    assert [tool.name for tool in selected] == ["read"]
 
 
 def test_general_purpose_tool_subset_excludes_the_tools_a_subagent_must_not_hold() -> None:

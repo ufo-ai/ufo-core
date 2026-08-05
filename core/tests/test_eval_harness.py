@@ -2604,7 +2604,7 @@ async def test_github_connection_graders_require_the_parent_to_load_coding_first
 def test_github_connection_grading_statements_pin_inputs_order_and_restraint() -> None:
     statements = tuple(grading_statement(case.grader) for case in github_connections.CASES)
 
-    skill = "the first load_skill loads 'coding' (not the distractor 'code-review') and succeeds; "
+    skill = "the first load_skill loads 'coding' (not the distractor 'create-skill') and succeeds; "
     assert statements == (
         skill
         + "attempts connect_github matching {}, connect_account matching {'provider': 'github'}; "

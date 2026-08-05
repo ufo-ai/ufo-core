@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from cryptography.fernet import InvalidToken
 from ufo_ext_coding.connect import GIT_INSTALLATION_SLOT
-from ufo_ext_coding.manifest import GIT_SLOT
+from ufo_ext_coding.github_app import GIT_SLOT
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import CapabilityCase, CapabilitySeed
@@ -145,7 +145,7 @@ CASES = (
         "I haven't connected GitHub to this workspace yet. Set it up so you can work on issues "
         "and send pull requests for our private repositories.",
         combine(
-            skill_scorer("coding", "code-review"),
+            skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (
                     ("connect_github", {}),
@@ -163,7 +163,7 @@ CASES = (
         "Our GitHub issues already work here, but private clone and push do not. Connect what's "
         "missing so pull request work can proceed.",
         combine(
-            skill_scorer("coding", "code-review"),
+            skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (("connect_github", {}),),
                 ("connect_account", "spawn_subagent"),
@@ -178,7 +178,7 @@ CASES = (
         "Private clone and push already work here, but the agent can't read or update our GitHub "
         "issues. Connect what's missing.",
         combine(
-            skill_scorer("coding", "code-review"),
+            skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (("connect_account", {"provider": "github"}),),
                 ("connect_github", "spawn_subagent"),

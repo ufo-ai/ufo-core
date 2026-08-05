@@ -954,6 +954,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
             "bind_installation",
             "get",
+            "resolve",
             "rotate",
             "workspace_id",
             "declared",

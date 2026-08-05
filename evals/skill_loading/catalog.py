@@ -68,29 +68,6 @@ CONTRACT_EDITS = _file(
     4. Add a data-processing addendum reference in section 7.
     """,
 )
-REVIEW_DIFF = _file(
-    "review/feature.diff",
-    """
-    diff --git a/billing/retry.py b/billing/retry.py
-    index 3f1c2aa..9d04b71 100644
-    --- a/billing/retry.py
-    +++ b/billing/retry.py
-    @@ -12,10 +12,14 @@ def charge_with_retry(client, invoice):
-    -    response = client.charge(invoice.id, invoice.amount)
-    -    if response.ok:
-    -        return response
-    -    raise BillingError(invoice.id)
-    +    for attempt in range(5):
-    +        response = client.charge(invoice.id, invoice.amount)
-    +        if response.ok:
-    +            return response
-    +        time.sleep(2 ** attempt)
-    +    return response
-    @@ -30,6 +34,8 @@ def record_payment(db, invoice, response):
-    +    db.execute("UPDATE invoices SET status='paid' WHERE id=%s" % invoice.id)
-    +    db.commit()
-    """,
-)
 REPO_WEBHOOK = _file(
     "repo/webhook.py",
     """
@@ -519,33 +496,7 @@ REPORT_PART1_PDF = WorkspaceFile("pdfs/report-part1.pdf", PDF_STUB)
 REPORT_PART2_PDF = WorkspaceFile("pdfs/report-part2.pdf", PDF_STUB)
 SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
-PR_DIFF = WorkspaceFile("review/pr-418.diff", REVIEW_DIFF.content)
-
-
 CASES: tuple[SkillLoadCase, ...] = (
-    SkillLoadCase(
-        "review-feature-diff",
-        "Review the changes in review/feature.diff for correctness, security issues, and "
-        "maintainability problems.",
-        expected="code-review",
-        forbidden=("coding",),
-        workspace_files=(REVIEW_DIFF,),
-    ),
-    SkillLoadCase(
-        "review-pr-418",
-        "Audit the pull request diff staged at review/pr-418.diff and call out any bugs, unsafe "
-        "behavior, or missing tests before we merge it.",
-        expected="code-review",
-        forbidden=("coding",),
-        workspace_files=(PR_DIFF,),
-    ),
-    SkillLoadCase(
-        "review-rank-severity",
-        "Do a quality review of review/feature.diff and rank the findings by severity.",
-        expected="code-review",
-        forbidden=("coding",),
-        workspace_files=(REVIEW_DIFF,),
-    ),
     SkillLoadCase(
         "coding-trace-webhook",
         "Trace how an incoming webhook event reaches the dispatcher in the code under repo/ and "
@@ -576,15 +527,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "coding-github-connected-for-clone",
         "Is GitHub hooked up well enough for you to check out our private repo and push a branch?",
         expected="coding",
-        forbidden=("code-review",),
-    ),
-    SkillLoadCase(
-        "review-github-pr-not-coding",
-        "Confirm GitHub is reachable, then review the pull request diff staged at "
-        "review/pr-418.diff for bugs before we merge it.",
-        expected="code-review",
-        forbidden=("coding",),
-        workspace_files=(PR_DIFF,),
+        forbidden=("create-skill",),
     ),
     SkillLoadCase(
         "createskill-capture-workflow",

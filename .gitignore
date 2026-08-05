@@ -24,12 +24,6 @@ ufo.db-*
 .claude/*
 !.claude/skills/
 .claude/skills/*
-!.claude/skills/review-pull-request/
-.claude/skills/review-pull-request/*
-!.claude/skills/review-pull-request/SKILL.md
-!.claude/skills/babysit-prs/
-.claude/skills/babysit-prs/*
-!.claude/skills/babysit-prs/SKILL.md
 .worktrees/
 .superpowers/
 docs/superpowers/

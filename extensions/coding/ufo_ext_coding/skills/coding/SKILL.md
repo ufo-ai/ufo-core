@@ -57,10 +57,6 @@ For GitHub-backed tasks, identify the repository URL and put it in the objective
 1. **Check memory** — `memory_search` for the repo name, project name, or related keywords.
 2. **Ask the user** — if memory doesn't have it, just ask.
 
-## Reviewing a PR
-
-Do not spawn a coding subagent to review a PR. Reviewing a PR reaches GitHub through the connector (`call_external_tool` against the `GITHUB_*` actions), which the coding subagent's sandbox tools do not include. Load the `code-review` skill and follow it directly: it fetches the diff through the connector, reviews change-by-change, and reports findings.
-
 ## Mixed Tasks
 
 When a task involves both discovery and coding (e.g., "find tickets and implement them"), split it:
@@ -85,12 +81,6 @@ PR additionally needs the GitHub connector.
 - "Implement this Linear/Jira ticket"
 - "Find the bug causing timeouts and fix it"
   → Find the repo URL and gather requirements yourself, then delegate with `spawn_subagent(profile="coding", ...)` and the repo URL in the objective. Include ticket details and any relevant context.
-
-**Code review:**
-
-- "Review this PR: github.com/acme/cobbledb/pull/42"
-- "Code review PR #123 in acme/cobbledb"
-  → Load the `code-review` skill and review the PR directly (through the GitHub connector) — do not spawn a coding subagent for review.
 
 **Example spawn_subagent call (coding):**
 

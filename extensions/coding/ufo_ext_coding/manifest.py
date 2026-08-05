@@ -1,5 +1,5 @@
 """The coding subagent pack: a software-engineering child turn over the core code builtins, plus the
-`coding` and `code-review` skills the agent loads on demand.
+`coding` skill the agent loads on demand.
 
 `spawn_subagent("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a result. The profile names only tool names — bash/read/write/
@@ -8,12 +8,13 @@ code — so the pack is self-contained and carries no cross-extension import. No
 a file to the member: the child leaves work in the workspace it shares with the parent, and the
 parent decides what reaches the member. Core wraps the prompt with the shared citation/formatting
 discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
-to that child; `code-review` teaches reviewing a PR through the GitHub connector and reporting
-findings.
+to that child.
 
 The pack also declares the git credential slot, because a checkout is the work it routes: a
 workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
-with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox."""
+with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox.
+Its configured review inbox turns changed pull-request source pages into exact-checkout reviewer
+children and publishes their typed result as an advisory GitHub Check."""
 
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import (
     CredentialSlot,
+    HookSpec,
     InjectionTarget,
     Manifest,
     RouteSpec,
@@ -37,13 +39,20 @@ from ufo_ext_coding.connect import (
     github_installed,
     install_workspace,
 )
-from ufo_ext_coding.github_app import app_tokens
+from ufo_ext_coding.github_app import GIT_SLOT, app_tokens
+from ufo_ext_coding.review_checkout import CODE_REVIEW_PROFILE, CODE_REVIEW_TOOLS
+from ufo_ext_coding.review_publish import PublishCodeReviewInput, publish_code_review
+from ufo_ext_coding.review_routing import (
+    ConfigureReviewInboxInput,
+    configure_review_inbox,
+    route_review_pages,
+)
 
 NAME = "coding"
 VERSION = "0.1.0"
 CODING_PROFILE_NAME = "coding"
 SKILLS_ROOT = Path(__file__).parent / "skills"
-SKILL_NAMES = ("code-review", "coding")
+SKILL_NAMES = ("coding",)
 CODING_TOOL_NAMES = (
     "bash",
     "read",
@@ -81,7 +90,6 @@ GIT_APP_ID_ENV = "GITHUB_APP_ID"
 GIT_APP_CLIENT_ID_ENV = "GITHUB_APP_CLIENT_ID"
 GIT_APP_SECRET_ENV = "GITHUB_APP_CLIENT_SECRET"
 GIT_APP_KEY_ENV = "GITHUB_APP_PRIVATE_KEY"
-GIT_SLOT = "github_git_token"
 GIT_HOST = "github.com"
 GIT_SENTINEL = "UFO_SENTINEL_GIT_GITHUB"
 GIT_BASIC_USER = "x-access-token"
@@ -112,10 +120,10 @@ def github_app_id() -> str | None:
 
 GIT_CREDENTIAL = CredentialSlot(
     name=GIT_SLOT,
-    description="A GitHub token with repository contents read and write — a fine-grained personal "
-    "access token scoped to the repositories the agent works in. Only needed for a repository "
-    "outside an organization that installed the ufo GitHub App; where the App is installed, its "
-    "own token is minted per turn instead.",
+    description="A GitHub token with repository contents read and write and Checks write — a "
+    "fine-grained personal access token scoped to the repositories the agent works in. Only "
+    "needed for a repository outside an organization that installed the ufo GitHub App; where "
+    "the App is installed, its own token is minted per turn instead.",
     source=None if github_app_id() is None else app_tokens(GIT_INSTALLATION_SLOT),
     injection=InjectionTarget(
         host=GIT_HOST,
@@ -140,7 +148,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        subagents=(CODING_PROFILE,),
+        subagents=(CODING_PROFILE, CODE_REVIEW_PROFILE),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL),
         tools=(
@@ -152,7 +160,25 @@ def manifest() -> Manifest:
                 input_model=ConnectGitHubInput,
                 handler=connect_github,
             ),
+            *CODE_REVIEW_TOOLS,
+            ToolDef(
+                name="configure_review_inbox",
+                description="Make this conversation the automatic review inbox for one shared "
+                "GitHub pull-request source. Existing pages become the baseline. Admin-only.",
+                input_model=ConfigureReviewInboxInput,
+                handler=configure_review_inbox,
+                side_effecting=True,
+            ),
+            ToolDef(
+                name="publish_code_review",
+                description="Publish a completed typed review as an advisory ufo review Check on "
+                "the exact stored head for this conversation's review run.",
+                input_model=PublishCodeReviewInput,
+                handler=publish_code_review,
+                side_effecting=True,
+            ),
         ),
+        hooks=(HookSpec(event="page_change", handler=route_review_pages),),
         routes=(
             RouteSpec(
                 method="GET",

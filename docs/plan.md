@@ -132,8 +132,8 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## Post-U10 backlog (extensions, in likely order)
 
-e2b carrier · redis hub · turbopuffer index · openrouter · GH code review (webhook → review →
-merge) · self-improvement (port the main-merged offline-replay loop 8e20fa70 onto
+e2b carrier · redis hub · turbopuffer index · openrouter · self-improvement (port the
+main-merged offline-replay loop 8e20fa70 onto
 `trajectories_read`/`propose_change`/jobs — corpus is transcripts, promotion is governed) ·
 security review pack · websites extension (serve tool + routes) · startup + support-bot packs ·
 eval harness port · enterprise k8s layer (apiserver rewriter module, multi-workspace hosting).

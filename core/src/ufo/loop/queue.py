@@ -30,7 +30,7 @@ from ufo.ext.loader import (
     turn_runtime_skills,
     turn_tools,
 )
-from ufo.ext.manifest import CredentialSlot, Manifest
+from ufo.ext.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
@@ -70,7 +70,7 @@ from ufo.schema.records import (
 from ufo.search import SearchProvider
 from ufo.skills.runtime import LoadedSkill, SkillRegistry, mount_skill
 from ufo.tools.context import Spawn
-from ufo.tools.registry import ToolRegistry
+from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.workspace import ws
 
 GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
@@ -78,6 +78,22 @@ CONVERSATION_ID_ENV = "UFO_CONVERSATION_ID"
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
+
+
+def _subagent_tools(
+    all_tools: tuple[ToolDef, ...], profile: SubagentProfile, grants: frozenset[str]
+) -> tuple[ToolDef, ...]:
+    allowed = set(profile.tool_names)
+    if not profile.isolated_tools:
+        allowed.update(grants)
+    selected = tuple(
+        tool
+        for tool in all_tools
+        if tool.name in allowed or (tool.subagent_default and not profile.isolated_tools)
+    )
+    return selected
+
+
 TURN_QUEUE = Queue(
     TURN_QUEUE_NAME,
     concurrency=1,
@@ -281,11 +297,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 model=runtime.registry.resolve(profile.model or agent.model),
                 reasoning=agent.reasoning,
             )
-            allowed = set(profile.tool_names) | runtime.subagent_grants.get(
-                profile.name, frozenset()
-            )
             tools = ToolRegistry(
-                tuple(tool for tool in all_tools if tool.name in allowed or tool.subagent_default)
+                _subagent_tools(
+                    all_tools,
+                    profile,
+                    runtime.subagent_grants.get(profile.name, frozenset()),
+                )
             )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
