@@ -17,6 +17,7 @@ CHECKS_TIMEOUT_SECONDS = 30
 CHECKS_PAGE_SIZE = 100
 CHECKS_PAGE_LIMIT = 10
 CHECK_SUMMARY_MAX_CHARS = 60_000
+CheckConclusion = Literal["success", "action_required"]
 
 
 class PublishCodeReviewInput(BaseModel):
@@ -36,7 +37,7 @@ class CreateCheckRun(BaseModel):
     name: str
     head_sha: str
     status: Literal["completed"]
-    conclusion: Literal["neutral"]
+    conclusion: CheckConclusion
     external_id: str
     output: CheckOutput
 
@@ -44,7 +45,7 @@ class CreateCheckRun(BaseModel):
 class UpdateCheckRun(BaseModel):
     name: str
     status: Literal["completed"]
-    conclusion: Literal["neutral"]
+    conclusion: CheckConclusion
     external_id: str
     output: CheckOutput
 
@@ -84,6 +85,7 @@ class GitHubCheckPublisher:
     async def publish(self, run: StoredReviewRun, review: CodeReviewOutput) -> int:
         external_id = str(run.run_id)
         output = CheckOutput(title=CHECK_TITLE, summary=render_check_summary(review))
+        conclusion: CheckConclusion = "action_required" if review.findings else "success"
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self.token}",
@@ -104,7 +106,7 @@ class GitHubCheckPublisher:
                     UpdateCheckRun(
                         name=CHECK_NAME,
                         status="completed",
-                        conclusion="neutral",
+                        conclusion=conclusion,
                         external_id=external_id,
                         output=output,
                     ),
@@ -118,7 +120,7 @@ class GitHubCheckPublisher:
                     name=CHECK_NAME,
                     head_sha=run.head_sha,
                     status="completed",
-                    conclusion="neutral",
+                    conclusion=conclusion,
                     external_id=external_id,
                     output=output,
                 ),

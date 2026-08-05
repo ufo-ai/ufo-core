@@ -24,7 +24,7 @@ def _run() -> StoredReviewRun:
     )
 
 
-async def test_publisher_creates_neutral_exact_head_check() -> None:
+async def test_publisher_creates_action_required_exact_head_check_for_critical_defect() -> None:
     requests: list[httpx.Request] = []
 
     def github(request: httpx.Request) -> httpx.Response:
@@ -59,7 +59,7 @@ async def test_publisher_creates_neutral_exact_head_check() -> None:
     assert body["name"] == CHECK_NAME
     assert body["head_sha"] == run.head_sha
     assert body["status"] == "completed"
-    assert body["conclusion"] == "neutral"
+    assert body["conclusion"] == "action_required"
     assert body["external_id"] == str(run.run_id)
     assert "`core/review.py:17` Wrong comparison" in body["output"]["summary"]
     assert "Trigger: Publish after the pull request head changes." in body["output"]["summary"]
@@ -91,7 +91,7 @@ async def test_publisher_reconciles_existing_run_by_external_id() -> None:
     assert [request.method for request in requests] == ["GET", "PATCH"]
     assert requests[1].url.path.endswith("/check-runs/42")
     body = json.loads(requests[1].content)
-    assert body["conclusion"] == "neutral"
+    assert body["conclusion"] == "success"
     assert body["external_id"] == str(run.run_id)
     assert body["output"]["summary"] == "No critical defect found."
     assert "head_sha" not in body
