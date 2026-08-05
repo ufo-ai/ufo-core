@@ -6293,7 +6293,9 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     """A spawn copies the spawning conversation's audience onto the child, so a profile's page
     lists the children of this member's own requests and of the workspace-shared ones, never
     another member's — and an admin lists every one. Another profile's children never appear on
-    this page, and the transcript read fails closed on the same answer the listing shows."""
+    this page, and the transcript read fails closed on the same answer the listing shows. That read
+    carries the run itself, identical to the listing row, so a permalink opened cold titles its
+    page without the listing in hand."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
@@ -6364,6 +6366,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     readable = await client.get(f"{path}/{mine}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert readable.status_code == 200
     assert [turn["inbound"] for turn in readable.json()["turns"]] == ["find it", "and again"]
+    assert readable.json()["run"] == rows[0]
 
     for blocked in (theirs, other_profile):
         refused = await client.get(

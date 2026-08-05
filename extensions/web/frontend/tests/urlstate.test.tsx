@@ -3,7 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { changesHash, parseHash, workspaceHash } from "@/lib/route";
+import {
+  changesHash,
+  parseHash,
+  subagentConversationHash,
+  subagentHash,
+  workspaceHash,
+} from "@/lib/route";
 
 import { AGENT, CONVO_ID, MEMBER, json, useStreamFake } from "./harness";
 
@@ -101,6 +107,20 @@ test("the changes hash names its conversation", () => {
     agentId: AGENT.id,
     conversationId: CONVO_ID,
     rootConversationId: root,
+  });
+});
+
+test("the subagent conversation hash names its run and lands on the conversations tab", () => {
+  expect(parseHash(subagentConversationHash("deep_research", CONVO_ID))).toEqual({
+    kind: "subagent",
+    name: "deep_research",
+    tab: "conversations",
+    conversationId: CONVO_ID,
+  });
+  expect(parseHash(subagentHash("deep_research", "conversations"))).toEqual({
+    kind: "subagent",
+    name: "deep_research",
+    tab: "conversations",
   });
 });
 

@@ -69,10 +69,22 @@ test("a subagent inheriting its parent's model says so rather than naming one", 
   expect(panel.getByText(/reaches a parent as trusted/)).toBeTruthy();
 });
 
+const RUN_DETAIL = {
+  run: {
+    id: RUN_ID,
+    agent_name: "assistant",
+    member_email: "member@example.com",
+    turn_count: 1,
+    last_turn_at: "2026-08-02T09:05:00Z",
+    readable: true,
+  },
+};
+
 test("the conversations tab lists this subagent's runs and opens one as a turn tree", async () => {
   wire({
     ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
       json({
+        ...RUN_DETAIL,
         turns: [
           {
             id: "77777777-7777-4777-8777-777777777777",
@@ -124,12 +136,62 @@ test("the conversations tab lists this subagent's runs and opens one as a turn t
     ["ops", "Channel or room · 88888888", "3", "2026-08-01 09:30", "not shared with you"],
   ]);
 
-  await userEvent.click(panel.getByRole("button", { name: "Open" }));
+  await userEvent.click(panel.getByRole("link", { name: "Open" }));
+  expect(location.hash).toBe("#/subagents/deep_research/conversations/" + RUN_ID);
   expect(await screen.findByText("Find the filing deadline")).toBeTruthy();
   expect(screen.getByText("March 31")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Changes" }).getAttribute("href")).toBe(
     "#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/changes",
   );
+});
+
+test("a run permalink opened cold titles the page and returns to the listing", async () => {
+  wire({
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
+      json({
+        ...RUN_DETAIL,
+        turns: [
+          {
+            id: "77777777-7777-4777-8777-777777777777",
+            agent_id: AGENT.id,
+            conversation_id: RUN_ID,
+            seq: 2,
+            status: "done",
+            created_at: "2026-08-02T09:00:00Z",
+            inbound: "Find the filing deadline",
+            outcome: "March 31",
+            error_class: null,
+            subagent_profile: "deep_research",
+            parent_turn_id: null,
+          },
+        ],
+        subagent_turns: [],
+      }),
+    "/subagents/deep_research/overview": () => json(OVERVIEW),
+  });
+  location.hash = "#/subagents/deep_research/conversations/" + RUN_ID;
+  portal({});
+
+  expect(await screen.findByText("assistant · member@example.com")).toBeTruthy();
+  expect(screen.getByText("Find the filing deadline")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+  expect(screen.getByRole("link", { name: "All conversations" }).getAttribute("href")).toBe(
+    "#/subagents/deep_research/conversations",
+  );
+});
+
+test("a run the viewer may not read refuses the permalink instead of titling a page", async () => {
+  wire({
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
+      new Response("no such conversation", { status: 404 }),
+    "/subagents/deep_research/overview": () => json(OVERVIEW),
+  });
+  location.hash = "#/subagents/deep_research/conversations/" + RUN_ID;
+  portal({});
+
+  expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
 });
 
 test("a subagent holding no load_skill says it loads none instead of listing skills", async () => {

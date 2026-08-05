@@ -45,7 +45,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab }
-  | { kind: "subagent"; name: string; tab: SubagentTab }
+  | { kind: "subagent"; name: string; tab: SubagentTab; conversationId?: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "admin" };
 
@@ -55,6 +55,7 @@ const CHANGES_HASH =
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
+const SUBAGENT_CONVERSATION_HASH = /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 
 const PLACE_KEYS = ["kind", "after", "q", "chip", "open"] as const;
@@ -115,6 +116,10 @@ export function parseHash(hash: string): Route {
   if (agent) {
     return { kind: "agent", agentId: agent[1], tab: isAgentTab(agent[2]) ? agent[2] : "overview" };
   }
+  const run = hash.match(SUBAGENT_CONVERSATION_HASH);
+  if (run) {
+    return { kind: "subagent", name: run[1], tab: "conversations", conversationId: run[2] };
+  }
   const subagent = hash.match(SUBAGENT_HASH);
   if (subagent) {
     return {
@@ -149,6 +154,10 @@ export function agentHash(agentId: string, tab: AgentTab): string {
 
 export function subagentHash(name: string, tab: SubagentTab): string {
   return "#/subagents/" + name + (tab === "overview" ? "" : "/" + tab);
+}
+
+export function subagentConversationHash(name: string, conversationId: string): string {
+  return "#/subagents/" + name + "/conversations/" + conversationId;
 }
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {

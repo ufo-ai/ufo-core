@@ -302,6 +302,7 @@ function Pane({
         tab={route.tab}
         tabs={SUBAGENT_TABS}
         onTab={(tab) => onOpenSubagent(subagent.name, tab)}
+        conversationId={route.conversationId}
       />
     );
   }

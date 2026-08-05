@@ -2060,41 +2060,56 @@ class SurfaceContext:
 
     async def readable_subagent_conversation(
         self, conversation_id: UUID, profile: str, member_id: UUID, agent_ids: frozenset[UUID]
-    ) -> UUID | None:
-        """The agent a readable subagent conversation of this profile ran under, or None — the gate
-        a per-profile transcript read answers on, and the agent id the turn reads then scope to. It
-        must be this profile's own child work, under an agent the caller's audience reaches, and
-        readable by the same gate every other content route fails closed on — so a row the listing
-        shows unreadable is a row this refuses. That gate is asked with `admin=False`: this route
-        never honours a disclosure, because the listing beside it reports audience alone and the
-        two must answer together. An admin reads a child by opening the parent it was spawned
-        from, which nests these turns."""
-        async with workspace_tx() as connection:
-            found = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.agent_id)
-                    .select_from(
-                        tables.conversation.join(
-                            tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
-                        )
-                    )
-                    .where(
-                        tables.conversation.c.workspace_id == self.workspace_id,
-                        tables.conversation.c.id == conversation_id,
-                        tables.conversation.c.surface == SUBAGENT_SURFACE,
-                        tables.conversation.c.agent_id.in_(agent_ids),
-                        tables.turn.c.subagent_profile == profile,
-                    )
-                    .limit(1)
+    ) -> SubagentRun | None:
+        """The readable subagent conversation of this profile as its own page names it, or None —
+        the gate a per-profile transcript read answers on, returning the row that titles the page a
+        permalink lands on cold, where the listing beside it is not in hand. It must be this
+        profile's own child work, under an agent the caller's audience reaches, and readable by the
+        same gate every other content route fails closed on — so a row the listing shows unreadable
+        is a row this refuses. That gate is asked with `admin=False`: this route never honours a
+        disclosure, because the listing beside it reports audience alone and the two must answer
+        together. An admin reads a child by opening the parent it was spawned from, which nests
+        these turns."""
+        query = (
+            sa.select(
+                tables.conversation.c.agent_id,
+                tables.agent.c.name.label("agent_name"),
+                tables.member.c.email,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .select_from(
+                tables.conversation.join(
+                    tables.turn, tables.turn.c.conversation_id == tables.conversation.c.id
                 )
-            ).one_or_none()
+                .join(tables.agent, tables.agent.c.id == tables.conversation.c.agent_id)
+                .outerjoin(tables.member, tables.member.c.id == tables.conversation.c.member_id)
+            )
+            .where(
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.surface == SUBAGENT_SURFACE,
+                tables.conversation.c.agent_id.in_(agent_ids),
+                tables.turn.c.subagent_profile == profile,
+            )
+            .group_by(tables.conversation.c.agent_id, tables.agent.c.name, tables.member.c.email)
+        )
+        async with workspace_tx() as connection:
+            found = (await connection.execute(query)).one_or_none()
         if found is None:
             return None
         if not await self.readable_conversation(
             conversation_id, found.agent_id, member_id, admin=False
         ):
             return None
-        return found.agent_id
+        return SubagentRun(
+            id=conversation_id,
+            agent_name=found.agent_name,
+            member_email=found.email,
+            turn_count=found.turn_count,
+            last_turn_at=found.last_turn_at,
+            readable=True,
+        )
 
     async def conversation_subagent_turns(
         self, conversation_id: UUID, limit: int = LIST_TURNS_LIMIT

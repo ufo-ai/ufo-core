@@ -68,6 +68,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestInvalid,
     PortalKind,
     SubagentDetail,
+    SubagentRun,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -1295,27 +1296,26 @@ async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Respo
         admin=audience.admin,
         limit=CONVERSATION_LIST_LIMIT,
     )
-    return JSONResponse(
-        {
-            "conversations": [
-                {
-                    "id": str(run.id),
-                    "agent_name": run.agent_name,
-                    "member_email": run.member_email,
-                    "turn_count": run.turn_count,
-                    "last_turn_at": _iso(run.last_turn_at),
-                    "readable": run.readable,
-                }
-                for run in listed
-            ]
-        }
-    )
+    return JSONResponse({"conversations": [_subagent_run_row(run) for run in listed]})
+
+
+def _subagent_run_row(run: SubagentRun) -> dict[str, object]:
+    """One subagent run as both its listing row and the header its own page titles with."""
+    return {
+        "id": str(run.id),
+        "agent_name": run.agent_name,
+        "member_email": run.member_email,
+        "turn_count": run.turn_count,
+        "last_turn_at": _iso(run.last_turn_at),
+        "readable": run.readable,
+    }
 
 
 async def subagent_conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
     """One subagent conversation's turns, and beneath them the turns it spawned in turn — the same
     transcript the spawning conversation nests, read here scoped to the profile that ran it and to
-    the agents this viewer's audience reaches. A row the listing shows unreadable refuses here."""
+    the agents this viewer's audience reaches. A row the listing shows unreadable refuses here. The
+    run itself rides the response, so a permalink opened cold titles its page from this one read."""
     gated = await _subagent_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -1324,15 +1324,16 @@ async def subagent_conversation_turns(ctx: SurfaceContext, request: Request) -> 
         conversation_id = UUID(request.path_params["conversation_id"])
     except ValueError:
         return Response("no such conversation", status_code=404)
-    agent_id = await ctx.readable_subagent_conversation(
+    run = await ctx.readable_subagent_conversation(
         conversation_id, profile.name, member_id, _reachable_agents(audience)
     )
-    if agent_id is None:
+    if run is None:
         return Response("no such conversation", status_code=404)
     turns = await ctx.list_turns(conversation_id)
     spawned = await ctx.conversation_subagent_turns(conversation_id)
     return JSONResponse(
         {
+            "run": _subagent_run_row(run),
             "turns": [_turn_row(turn) for turn in turns],
             "subagent_turns": [_turn_row(turn) for turn in spawned],
         }

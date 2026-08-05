@@ -1,6 +1,3 @@
-import { useState } from "react";
-
-import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Panel, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
@@ -8,7 +5,7 @@ import { TurnLine, turnTree, who, type Turn } from "@/views/Conversations";
 import { day } from "@/lib/moments";
 import { Heading } from "@/views/Usage";
 import { cn } from "@/lib/cn";
-import type { SubagentTab } from "@/lib/route";
+import { subagentConversationHash, subagentHash, type SubagentTab } from "@/lib/route";
 import type { Subagent } from "@/lib/types";
 
 const TAB_LABELS: Record<SubagentTab, string> = {
@@ -40,9 +37,10 @@ export type SubagentPaneProps = {
   tab: SubagentTab;
   tabs: readonly SubagentTab[];
   onTab: (tab: SubagentTab) => void;
+  conversationId?: string;
 };
 
-export function SubagentPane({ subagent, tab, tabs, onTab }: SubagentPaneProps) {
+export function SubagentPane({ subagent, tab, tabs, onTab, conversationId }: SubagentPaneProps) {
   const base = "/subagents/" + subagent.name;
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
@@ -70,7 +68,13 @@ export function SubagentPane({ subagent, tab, tabs, onTab }: SubagentPaneProps) 
       </div>
       <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
         {tab === "overview" ? <SubagentOverview base={base} /> : null}
-        {tab === "conversations" ? <SubagentConversations base={base} /> : null}
+        {tab === "conversations" ? (
+          <SubagentConversations
+            base={base}
+            name={subagent.name}
+            conversationId={conversationId}
+          />
+        ) : null}
         {tab === "skills" ? <SubagentSkills base={base} /> : null}
       </div>
     </main>
@@ -149,12 +153,19 @@ function SubagentSkills({ base }: { base: string }) {
   );
 }
 
-function SubagentConversations({ base }: { base: string }) {
-  const [opened, setOpened] = useState<Run | null>(null);
+function SubagentConversations({
+  base,
+  name,
+  conversationId,
+}: {
+  base: string;
+  name: string;
+  conversationId?: string;
+}) {
   const state = usePanelRead<{ conversations: Run[] }>(base + "/conversations");
 
-  if (opened) {
-    return <RunDetail base={base} run={opened} onBack={() => setOpened(null)} />;
+  if (conversationId) {
+    return <RunDetail base={base} name={name} conversationId={conversationId} />;
   }
   return (
     <Panel
@@ -179,9 +190,7 @@ function SubagentConversations({ base }: { base: string }) {
                 <Td>{day(run.last_turn_at)}</Td>
                 <Td>
                   {run.readable ? (
-                    <Button variant="row" onClick={() => setOpened(run)}>
-                      Open
-                    </Button>
+                    <a href={subagentConversationHash(name, run.id)}>Open</a>
                   ) : (
                     <span className="font-mono text-mono">not shared with you</span>
                   )}
@@ -195,18 +204,21 @@ function SubagentConversations({ base }: { base: string }) {
   );
 }
 
-function RunDetail({ base, run, onBack }: { base: string; run: Run; onBack: () => void }) {
-  const state = usePanelRead<{ turns: Turn[]; subagent_turns: Turn[] }>(
-    base + "/conversations/" + run.id,
+function RunDetail({
+  base,
+  name,
+  conversationId,
+}: {
+  base: string;
+  name: string;
+  conversationId: string;
+}) {
+  const state = usePanelRead<{ run: Run; turns: Turn[]; subagent_turns: Turn[] }>(
+    base + "/conversations/" + conversationId,
   );
   return (
     <>
-      <Button variant="row" onClick={onBack}>
-        All conversations
-      </Button>
-      <Heading>
-        {run.agent_name} · {who(run)}
-      </Heading>
+      <a href={subagentHash(name, "conversations")}>All conversations</a>
       <Panel
         state={state}
         failed={(message) => (
@@ -219,17 +231,24 @@ function RunDetail({ base, run, onBack }: { base: string; run: Run; onBack: () =
         }
       >
         {(payload) => (
-          <div className="my-lg flex flex-col gap-lg">
-            {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-              <TurnLine
-                key={entry.turn.id}
-                turn={entry.turn}
-                depth={entry.depth}
-                showChanges={entry.first}
-                rootConversationId={entry.turn.conversation_id === run.id ? undefined : run.id}
-              />
-            ))}
-          </div>
+          <>
+            <Heading>
+              {payload.run.agent_name} · {who(payload.run)}
+            </Heading>
+            <div className="my-lg flex flex-col gap-lg">
+              {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
+                <TurnLine
+                  key={entry.turn.id}
+                  turn={entry.turn}
+                  depth={entry.depth}
+                  showChanges={entry.first}
+                  rootConversationId={
+                    entry.turn.conversation_id === conversationId ? undefined : conversationId
+                  }
+                />
+              ))}
+            </div>
+          </>
         )}
       </Panel>
     </>
