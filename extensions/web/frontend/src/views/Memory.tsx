@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Pager, type Placement } from "@/kernel/pager";
-import { day } from "@/views/Tasks";
+import { day } from "@/lib/moments";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
 import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, usePanelRead } from "@/kernel/panel";

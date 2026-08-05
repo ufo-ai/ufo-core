@@ -4,7 +4,18 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { refusedNotice, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import {
+  refusedNotice,
+  AGENT,
+  MEMBER,
+  StreamFake,
+  TASK_KIND,
+  TURN_ID,
+  json,
+  objectIndex,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -247,28 +258,17 @@ test("the tasks, overview, and skills refusals tone their notices", async () => 
     deploy: { sandbox_internet: true },
     audience: [],
   };
-  const TASKS = {
-    tasks: [
-      {
-        name: "digest",
-        schedule: "0 9 * * *",
-        prompt: "summarize",
-        description: null,
-        created_by: "member@example.com",
-        paused: false,
-        next_run_at: null,
-        last_run_at: null,
-        expires_at: null,
-      },
-    ],
-    spec_schema: { properties: { schedule: { type: "string" } } },
-  };
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
   location.hash = "#/agents/" + AGENT.id + "/tasks";
-  wire({ "/tasks": () => json(TASKS), "/transcript": () => json({ messages: [] }), "/intents": refuse });
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": refuse,
+  });
   const first = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+  await userEvent.type(await screen.findByPlaceholderText("object-name"), "digest");
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
   await refusedNotice("The workspace refuses it.");
   first.unmount();
 

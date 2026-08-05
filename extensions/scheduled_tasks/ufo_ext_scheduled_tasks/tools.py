@@ -12,14 +12,16 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
     AdminRequired,
     GeneratedObjectOwner,
-    MemberOwnedObjects,
+    MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -103,18 +105,22 @@ class PauseAndWaitInput(BaseModel):
     )
 
 
-def _require_scheduler(ctx: ToolContext) -> ScheduleStore:
-    if ctx.ext is None or ctx.ext.scheduler is None:
+def _require_scheduler(ext: ExtensionContext | None) -> ScheduleStore:
+    if ext is None or ext.scheduler is None:
         raise RuntimeError("scheduled tasks require the scheduled-tasks ExtensionContext and store")
-    return ctx.ext.scheduler
+    return ext.scheduler
 
 
 def _summary(task: ScheduledTask) -> str:
     return f"{task.schedule} — {task.description or task.prompt}"[:SUMMARY_MAX]
 
 
+def _content_visible(task: ScheduledTask, member_id: UUID | None) -> bool:
+    return task.created_by_member_id is None or task.created_by_member_id == member_id
+
+
 @dataclass(frozen=True)
-class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
+class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
     """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
     only that member or a workspace admin sees and deletes it — the per-member visibility and
     admin gate is the base's. This kind supplies the task rows, their specs and status, and the
@@ -135,13 +141,15 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
         creator's."""
         return not {"prompt", "description"}.intersection(spec.model_fields_set)
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=task.name,
                 summary=(
                     _summary(task)
-                    if self._content_visible(ctx, task)
+                    if _content_visible(task, member_id)
                     else f"{task.schedule} — private member task"
                 ),
                 owner=GeneratedObjectOwner(
@@ -154,13 +162,18 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                     "paused": task.paused,
                 },
             )
-            for task in await _require_scheduler(ctx).list()
+            for task in await _require_scheduler(ext).list()
         )
 
-    async def _detail(
-        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: GeneratedObjectOwner,
+        *,
+        member_id: UUID | None,
     ) -> ObjectDetail[ScheduledTaskSpec] | None:
-        task = await self._find(ctx, name)
+        task = await self._find(ext, name)
         if task is None or task.id != owner.generation:
             return None
         return ObjectDetail(
@@ -179,16 +192,16 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                     target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
                 ),
             ),
-            spec_visible=self._content_visible(ctx, task),
+            spec_visible=_content_visible(task, member_id),
         )
 
     async def _status(
         self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
     ) -> dict[str, JsonValue] | None:
-        task = await self._find(ctx, name)
+        task = await self._find(ctx.ext, name)
         if task is None or task.id != owner.generation:
             return None
-        inspection = await _require_scheduler(ctx).inspect(task)
+        inspection = await _require_scheduler(ctx.ext).inspect(task)
         if inspection is None:
             return None
         last_run: dict[str, JsonValue] | None = None
@@ -197,7 +210,7 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if self._content_visible(ctx, task):
+            if _content_visible(task, ctx.acting_member_id):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -227,8 +240,8 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
         acting_member = ctx.acting_member_id
         if acting_member is None:
             raise AdminRequired(SCHEDULE_REQUESTER_GATE)
-        existing = await self._find(ctx, name)
-        scheduler = _require_scheduler(ctx)
+        existing = await self._find(ctx.ext, name)
+        scheduler = _require_scheduler(ctx.ext)
         if owner is None:
             if existing is not None:
                 raise ValueError(f"scheduled task {name!r} changed while editing")
@@ -269,19 +282,14 @@ class ScheduledTaskObjects(MemberOwnedObjects[ScheduledTaskSpec, GeneratedObject
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
-        task = await self._find(ctx, name)
+        task = await self._find(ctx.ext, name)
         if task is None or task.id != owner.generation:
             raise ValueError(f"scheduled task {name!r} changed while cancelling")
-        await _require_scheduler(ctx).cancel(task)
+        await _require_scheduler(ctx.ext).cancel(task)
 
-    async def _find(self, ctx: ToolContext, name: str) -> ScheduledTask | None:
+    async def _find(self, ext: ExtensionContext | None, name: str) -> ScheduledTask | None:
         return next(
-            (task for task in await _require_scheduler(ctx).list() if task.name == name), None
-        )
-
-    def _content_visible(self, ctx: ToolContext, task: ScheduledTask) -> bool:
-        return (
-            task.created_by_member_id is None or task.created_by_member_id == ctx.acting_member_id
+            (task for task in await _require_scheduler(ext).list() if task.name == name), None
         )
 
 
@@ -323,7 +331,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
 
 
 async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult:
-    scheduler = _require_scheduler(ctx)
+    scheduler = _require_scheduler(ctx.ext)
     resume_at = datetime.now(UTC) + timedelta(minutes=args.wait_minutes)
     wakeup = {
         "resuming": "timer",

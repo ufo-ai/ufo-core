@@ -32,6 +32,9 @@ from ufo.objects import (
     MemberOwnedObjects as MemberOwnedObjects,
 )
 from ufo.objects import (
+    MemberReadableObjects as MemberReadableObjects,
+)
+from ufo.objects import (
     ObjectDetail as ObjectDetail,
 )
 from ufo.objects import (

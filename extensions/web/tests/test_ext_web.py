@@ -21,6 +21,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
+from ufo_ext_sites.objects import site_object_name
 from ufo_ext_sites.store import HostedSites
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
@@ -78,6 +79,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.registry import ModelRegistry
+from ufo.objects import OBJECT_LIST_PAGE
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
@@ -600,7 +602,9 @@ async def web(
             StubEmbed(),
         ),
         subagents=PORTAL_SUBAGENTS,
-        objects=member_object_registry((web_manifest(), SLOTTED, sites_manifest())),
+        objects=member_object_registry(
+            (web_manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED, sites_manifest())
+        ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
@@ -1488,12 +1492,13 @@ async def test_artifacts_listing_caps_at_the_real_limit_with_more_behind_it(
     assert page["newer"] is None
 
 
-async def test_sites_view_answers_through_the_kinds_own_gate(
+async def test_site_index_answers_through_the_kinds_own_gate(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The workspace sites view lists through the site kind's visibility gate: a shared site
-    answers every member, a private one only its creator and an admin — the same rows chat's
-    `object_list` answers, never a second ACL."""
+    """The generic index lists through the site kind's visibility gate: a shared site answers
+    every member, a private one only its creator and an admin — the same rows chat's `object_list`
+    answers, never a second ACL. Each row carries the kind's declared fields, and the page names
+    the vocabulary it filters and orders on."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -1521,25 +1526,290 @@ async def test_sites_view_answers_through_the_kinds_own_gate(
             conversation_audience(member_m),
             True,
         )
-    path = "/surface/web/workspace/sites"
+    path = f"/surface/web/objects/site?agent={agent_id}"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
-    assert m_view["available"] is True
-    assert sorted(site["name"].split("-")[0] for site in m_view["sites"]) == ["draft", "landing"]
+    assert sorted(row["name"].split("-")[0] for row in m_view["objects"]) == ["draft", "landing"]
+    assert m_view["fields"] == ["conversation", "created_at", "visibility"]
+    assert "guidance" not in m_view and "description" not in m_view
+    assert m_view["applies"] is False
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
-    assert [site["name"].split("-")[0] for site in n_view["sites"]] == ["landing"]
+    assert [row["name"].split("-")[0] for row in n_view["objects"]] == ["landing"]
     admin_view = (
         await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
-    assert sorted(site["name"].split("-")[0] for site in admin_view["sites"]) == [
+    assert sorted(row["name"].split("-")[0] for row in admin_view["objects"]) == [
         "draft",
         "landing",
     ]
-    by_name = {site["name"].split("-")[0]: site for site in m_view["sites"]}
+    by_name = {row["name"].split("-")[0]: row for row in m_view["objects"]}
     assert by_name["landing"]["visibility"] == "workspace"
     assert by_name["draft"]["visibility"] == "private"
-    for site in m_view["sites"]:
-        assert site["conversation"] == str(conversation_id)
-        assert site["created_at"]
+    for row in m_view["objects"]:
+        assert row["conversation"] == str(conversation_id)
+        assert row["created_at"]
+
+
+async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A kind with more rows than one page hands back a continuation token, the next read resumes
+    exactly after the last row it served, and a token carried into a different order is refused
+    rather than silently restarting the walk."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    conversation_id, _turn = await _seed_web_turn(
+        workspace_id, agent_id, member_m, "m@example.com", TerminalFrame(status="done", text="ok")
+    )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        for index in range(OBJECT_LIST_PAGE + 1):
+            await sites.register(
+                conversation_id,
+                f"page-{index:03d}",
+                3000 + index,
+                member_m,
+                "workspace",
+                conversation_audience(member_m),
+                True,
+            )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
+    base = f"/surface/web/objects/site?agent={agent_id}"
+    first = (await client.get(base, headers=cookie)).json()
+    assert len(first["objects"]) == OBJECT_LIST_PAGE
+    assert first["next_cursor"]
+    second = (await client.get(base + f"&cursor={first['next_cursor']}", headers=cookie)).json()
+    assert len(second["objects"]) == 1
+    assert second["next_cursor"] is None
+    walked = [row["name"] for row in first["objects"]] + [row["name"] for row in second["objects"]]
+    assert walked == sorted(walked)
+    assert len(set(walked)) == OBJECT_LIST_PAGE + 1
+    reordered = await client.get(
+        base + f"&cursor={first['next_cursor']}&order=desc", headers=cookie
+    )
+    assert reordered.status_code == 400
+    assert "cursor" in reordered.text
+
+
+async def test_a_site_detail_carries_its_conversation_link_and_refuses_a_hidden_row(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The detail projection is the same gate one row at a time: the creator reads their private
+    site with its `created_in` link, and another member gets a 404 naming the kind — a hidden row
+    is indistinguishable from an absent one."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    conversation_id, _turn = await _seed_web_turn(
+        workspace_id, agent_id, member_m, "m@example.com", TerminalFrame(status="done", text="ok")
+    )
+    with ws(workspace_id):
+        await HostedSites(workspace_id, workspace_tx).register(
+            conversation_id,
+            "draft",
+            3001,
+            member_m,
+            "private",
+            conversation_audience(member_m),
+            True,
+        )
+    name = site_object_name(conversation_id, "draft")
+    path = f"/surface/web/objects/site/{name}?agent={agent_id}"
+    read = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert read.status_code == 200
+    detail = read.json()
+    assert detail["spec"] == {"visibility": "private"}
+    assert detail["status"]["visibility"] == "private"
+    assert detail["links"] == [
+        {
+            "relation": "created_in",
+            "kind": "conversation",
+            "name": str(conversation_id),
+            "opens": True,
+        }
+    ]
+    assert detail["created_at"] is not None
+    hidden = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+    assert hidden.status_code == 404
+    assert "site" in hidden.text
+
+
+async def test_a_link_opens_only_where_its_own_row_answers_this_member(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A link is offered on the row it names, not on its kind: a workspace site every member reads
+    was created in one member's own conversation, so its `created_in` opens for that member and is
+    stated for everyone else — and the payload promises exactly what following it returns."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    conversation_id, _turn = await _seed_web_turn(
+        workspace_id, agent_id, member_m, "m@example.com", TerminalFrame(status="done", text="ok")
+    )
+    with ws(workspace_id):
+        await HostedSites(workspace_id, workspace_tx).register(
+            conversation_id,
+            "landing",
+            3002,
+            member_m,
+            "workspace",
+            conversation_audience(member_m),
+            True,
+        )
+    path = (
+        f"/surface/web/objects/site/{site_object_name(conversation_id, 'landing')}?agent={agent_id}"
+    )
+    conversation = f"/surface/web/objects/conversation/{conversation_id}?agent={agent_id}"
+    for token, opens in ((token_m, True), (token_n, False)):
+        cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+        [link] = (await client.get(path, headers=cookie)).json()["links"]
+        assert link["opens"] is opens
+        followed = await client.get(conversation, headers=cookie)
+        assert (followed.status_code == 200) is opens
+
+
+async def test_task_index_filters_and_orders_on_the_kinds_declared_fields(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The index applies the kind's own search, filter, and order vocabulary — `q` narrows to what
+    it matches, `paused` narrows, and an order field reorders the page rather than leaving it in
+    name order: the paused task is the one that sorts first by name, so ordering on `paused` puts
+    it last, and ordering on `next_run_at` follows the moments the rows carry, desc being asc
+    reversed. A field the kind never declared is refused, not silently ignored."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "creator@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    for name, schedule in (("alpha", "0 6 * * *"), ("zulu", "0 22 * * *")):
+        created = await client.post(
+            f"/surface/web/agents/{agent_id}/intents",
+            json={
+                "verb": "apply",
+                "kind": "scheduled_task",
+                "name": name,
+                "spec": {"schedule": schedule, "prompt": f"run {name}"},
+            },
+            headers=cookie,
+        )
+        assert created.json()["applied"] is True
+    paused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "apply", "kind": "scheduled_task", "name": "alpha", "spec": {"paused": True}},
+        headers=cookie,
+    )
+    assert paused.json()["applied"] is True
+
+    base = f"/surface/web/objects/scheduled_task?agent={agent_id}"
+    listed = (await client.get(base, headers=cookie)).json()
+    assert [row["name"] for row in listed["objects"]] == ["alpha", "zulu"]
+    assert listed["applies"] is True
+    assert listed["spec_schema"]["properties"]["schedule"]
+    assert {row["name"]: row["paused"] for row in listed["objects"]} == {
+        "alpha": True,
+        "zulu": False,
+    }
+    searched = (await client.get(base + "&q=alpha", headers=cookie)).json()
+    assert [row["name"] for row in searched["objects"]] == ["alpha"]
+    stopped = (await client.get(base + "&paused=true", headers=cookie)).json()
+    assert [row["name"] for row in stopped["objects"]] == ["alpha"]
+    by_state = (await client.get(base + "&order_by=paused", headers=cookie)).json()
+    assert [row["name"] for row in by_state["objects"]] == ["zulu", "alpha"]
+    by_state_desc = (await client.get(base + "&order_by=paused&order=desc", headers=cookie)).json()
+    assert [row["name"] for row in by_state_desc["objects"]] == ["alpha", "zulu"]
+    ascending = (await client.get(base + "&order_by=next_run_at", headers=cookie)).json()
+    fires = [row["next_run_at"] for row in ascending["objects"]]
+    assert len(set(fires)) == 2 and fires == sorted(fires)
+    descending = (
+        await client.get(base + "&order_by=next_run_at&order=desc", headers=cookie)
+    ).json()
+    assert [row["name"] for row in descending["objects"]] == [
+        row["name"] for row in reversed(ascending["objects"])
+    ]
+    refused = await client.get(base + "&nonesuch=1", headers=cookie)
+    assert refused.status_code == 400
+    assert "nonesuch" in refused.text
+
+
+async def test_a_task_detail_links_to_the_conversation_it_reports_into(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The navigation the object pages exist for: a task's detail carries its `reports_to` link,
+    and that link's kind and name address the conversation's own detail, which answers with the
+    conversation's spec. Another member reaches neither."""
+    client, workspace_id, agent_id = web
+    _creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    creator_cookie = {"cookie": f"{SESSION_COOKIE}={creator_token}"}
+    created = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "daily-brief",
+            "spec": {"schedule": "0 9 * * *", "prompt": "write the daily brief"},
+        },
+        headers=creator_cookie,
+    )
+    assert created.json()["applied"] is True
+
+    task = (
+        await client.get(
+            f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_id}",
+            headers=creator_cookie,
+        )
+    ).json()
+    assert task["spec"]["prompt"] == "write the daily brief"
+    assert task["status"]["paused"] is False
+    [link] = task["links"]
+    assert link["relation"] == "reports_to"
+    assert link["kind"] == "conversation"
+
+    assert link["opens"] is True
+
+    followed = await client.get(
+        f"/surface/web/objects/{link['kind']}/{link['name']}?agent={agent_id}",
+        headers=creator_cookie,
+    )
+    assert followed.status_code == 200
+    [scoped] = followed.json()["links"]
+    assert (scoped["relation"], scoped["kind"], scoped["opens"]) == ("scoped_to", "agent", False)
+    walled = await client.get(
+        f"/surface/web/objects/agent/{scoped['name']}?agent={agent_id}", headers=creator_cookie
+    )
+    assert walled.status_code == 404
+    assert followed.json()["spec"]["surface"] == "web"
+    assert followed.json()["name"] == link["name"]
+    assert followed.json()["applies"] is False
+
+    unseen = await client.get(
+        f"/surface/web/objects/conversation/{link['name']}?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+    assert unseen.status_code == 404
+    assert "conversation" in unseen.text
+
+
+async def test_object_pages_refuse_an_unregistered_kind_an_unlisted_kind_and_a_walled_agent(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Every kind the portal cannot serve refuses by name: an unregistered kind, a kind that reads
+    one row but does not list, and an agent outside the viewer's web audience."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    unknown = await client.get(f"/surface/web/objects/widget?agent={agent_id}", headers=cookie)
+    assert unknown.status_code == 404
+    assert "widget" in unknown.text
+    unlisted = await client.get(
+        f"/surface/web/objects/conversation?agent={agent_id}", headers=cookie
+    )
+    assert unlisted.status_code == 404
+    assert "conversation does not list in the portal" in unlisted.text
+    walled = await client.get(f"/surface/web/objects/site?agent={uuid4()}", headers=cookie)
+    assert walled.status_code == 404
+    assert walled.text == "no such agent"
+    signed_out = await client.get(f"/surface/web/objects/site?agent={agent_id}")
+    assert signed_out.status_code == 401
 
 
 async def test_revoking_web_access_ends_streaming_too(

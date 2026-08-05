@@ -5,7 +5,24 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, MEMBER, PlacedWorkspace, SECOND, StreamFake, TURN_ID, json, refusedNotice, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  AGENT_ID,
+  CONVO_ID,
+  MEMBER,
+  PlacedWorkspace,
+  SECOND,
+  NO_SITES,
+  SITE_KIND,
+  StreamFake,
+  TASK_KIND,
+  TURN_ID,
+  json,
+  objectIndex,
+  refusedNotice,
+  useStreamFake,
+  wire,
+} from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
@@ -73,26 +90,29 @@ test("an overview that fails to read states the error and offers no form", async
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("tasks list their state and pause through the intent lane", async () => {
+test("the task index lists declared fields and its detail pauses through the intent lane", async () => {
   const posted: unknown[] = [];
-  const tasks = {
-    tasks: [
-      {
-        name: "digest",
-        schedule: "0 9 * * *",
-        prompt: "summarize",
-        description: null,
-        created_by: "member@example.com",
-        paused: false,
-        next_run_at: "2026-08-01T09:00:00",
-        last_run_at: null,
-        expires_at: null,
-      },
-    ],
-    spec_schema: { properties: { schedule: { type: "string" }, prompt: { type: "string" } } },
-  };
   wire({
-    "/tasks": () => json(tasks),
+    "/objects/scheduled_task/digest": () =>
+      json({
+        ...TASK_KIND,
+        name: "digest",
+        summary: "0 9 * * * — summarize",
+        spec: { schedule: "0 9 * * *", prompt: "summarize", paused: false },
+        status: { next_run_at: "2026-08-01T09:00:00Z", paused: false },
+        links: [],
+        created_at: "2026-07-01T09:00:00Z",
+        updated_at: "2026-07-01T09:00:00Z",
+      }),
+    "/objects/scheduled_task": () =>
+      objectIndex(TASK_KIND, [
+        {
+          name: "digest",
+          summary: "0 9 * * * — summarize",
+          next_run_at: "2026-08-01T09:00:00Z",
+          paused: false,
+        },
+      ]),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Paused digest." });
@@ -101,10 +121,17 @@ test("tasks list their state and pause through the intent lane", async () => {
   });
   location.hash = "#/agents/" + AGENT_ID + "/tasks";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  expect(await screen.findByText("scheduled")).toBeTruthy();
-  expect(screen.getByText("2026-08-01 09:00")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+  const listed = (await screen.findByRole("button", { name: "digest" })).closest("li");
+  const meta = listed?.querySelector('[data-part="meta"]')?.textContent ?? "";
+  expect(meta).toContain("0 9 * * * — summarize");
+  expect(meta).toContain("next_run_at ");
+  expect(meta).not.toContain("paused");
+
+  await userEvent.click(screen.getByRole("button", { name: "digest" }));
+  await userEvent.click(await screen.findByLabelText("paused"));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({
     verb: "apply",
@@ -114,41 +141,41 @@ test("tasks list their state and pause through the intent lane", async () => {
   });
 });
 
-test("a task with a hidden prompt offers only its cadence fields", async () => {
+test("a detail whose kind the lane refuses offers no control and no prose about it", async () => {
   wire({
-    "/tasks": () =>
+    "/objects/site/docs-abc": () =>
       json({
-        tasks: [
-          {
-            name: "private",
-            schedule: "0 9 * * *",
-            prompt: null,
-            description: null,
-            created_by: "other@example.com",
-            paused: false,
-            next_run_at: null,
-            last_run_at: null,
-            expires_at: null,
-          },
-        ],
-        spec_schema: {
-          properties: {
-            schedule: { type: "string" },
-            prompt: { type: "string" },
-            expires_at: { type: "string" },
-          },
-        },
+        ...SITE_KIND,
+        name: "docs-abc",
+        summary: "docs · workspace · sandbox port 3000",
+        spec: { visibility: "workspace" },
+        status: { conversation: CONVO_ID, created_at: "2026-07-01T09:00:00Z", visibility: "workspace" },
+        links: [],
+        created_at: "2026-07-01T09:00:00Z",
+        updated_at: null,
       }),
+    "/objects/site": () =>
+      objectIndex(SITE_KIND, [
+        {
+          name: "docs-abc",
+          summary: "docs · workspace · sandbox port 3000",
+          conversation: CONVO_ID,
+          created_at: "2026-07-01T09:00:00Z",
+          visibility: "workspace",
+        },
+      ]),
+    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/tasks";
+  location.hash = "#/workspace/sites";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  expect(await screen.findByText("private member task")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Edit" }));
 
-  expect(screen.getByLabelText("schedule")).toBeTruthy();
-  expect(screen.getByLabelText("expires_at")).toBeTruthy();
-  expect(screen.queryByLabelText("prompt")).toBeNull();
+  await userEvent.click(await screen.findByRole("button", { name: "docs-abc" }));
+
+  expect(await screen.findByRole("heading", { name: "docs-abc" })).toBeTruthy();
+  expect(document.querySelector('[data-part="refusal"]')).toBeNull();
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
 test("skills separate member-authored from deploy, and save posts one skill file", async () => {
@@ -442,7 +469,7 @@ test("the sidebar routes agents and the workspace by hash and marks the section 
     "/transcript": () => json({ messages: [] }),
     "/overview": () => json(OVERVIEW),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
-    "/workspace/sites": () => json({ available: false, sites: [] }),
+    "/objects/site": () => objectIndex(SITE_KIND, []),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
@@ -458,7 +485,7 @@ test("the sidebar routes agents and the workspace by hash and marks the section 
   expect(location.hash).toBe("#/workspace/team");
   await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
   expect(location.hash).toBe("#/workspace/sites");
-  expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
+  expect(await screen.findByText(NO_SITES)).toBeTruthy();
 });
 
 test("the agents view lists the deploy's subagents below the agents, opening nothing", async () => {

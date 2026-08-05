@@ -2,11 +2,13 @@
 member's agents — the page and the one POST that opens its session, per-agent chat with
 cookie-authenticated turn admission (each member holds any number of conversations per agent,
 opened by the first message and listed for the rail) and an SSE tail of each turn's live frames,
-read projections (the agent index, conversation transcripts, overviews, scheduled tasks, skills,
-per-agent usage, and connections) beside the workspace-level views every member holds — sources,
-credential slots, memory (latest first, searched across every reachable agent), shared artifacts,
-hosted sites, and usage (their own window, plus the workspace rollup for an admin) — plus the
-administration view for a workspace admin, and prepared intents, the panels' one mutation path.
+read projections (the agent index, conversation transcripts, overviews, skills, per-agent usage,
+and connections) beside the workspace-level views every member holds — sources, credential slots,
+memory (latest first, searched across every reachable agent), shared artifacts, and usage (their
+own window, plus the workspace rollup for an admin) — the two generic object reads every kind's
+index and detail page is built on (`objects/{kind}` and `objects/{kind}/{name}`, each answering
+through the kind's own gate in the named agent's namespace), the administration view for a
+workspace admin, and prepared intents, the panels' one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -26,9 +28,10 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -57,11 +60,13 @@ from ufo.sdk.hub import (
 from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.objects import ObjectListQuery
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
+    PortalKind,
     SubagentDetail,
     SurfaceAuth,
     SurfaceContext,
@@ -72,7 +77,7 @@ from ufo.sdk.surfaces import (
 )
 from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
-from ufo_ext_web.panels import agent_overview, reasoning_levels, submit_intent
+from ufo_ext_web.panels import ApplyIntent, agent_overview, reasoning_levels, submit_intent
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -97,7 +102,6 @@ CONVERSATION_LIST_LIMIT = 100
 CHAT_STORE_PREFIX = "chat/"
 NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
-SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
@@ -835,37 +839,6 @@ def _window_param(request: Request) -> int | Response:
     return window
 
 
-async def tasks(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's recurring tasks, shaped for the viewer in the core read: creators see
-    their tasks whole, an admin sees every task's management metadata with private content elided,
-    anyone else sees none of it. `spec_schema` is the scheduled_task kind's own spec schema — the
-    panel's create and edit forms render their fields from it, never a parallel description."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, _email, audience, agent_id = gated
-    listed = await ctx.list_agent_tasks(agent_id, member_id, audience.admin)
-    return JSONResponse(
-        {
-            "tasks": [
-                {
-                    "name": task.name,
-                    "schedule": task.schedule,
-                    "prompt": task.prompt,
-                    "description": task.description,
-                    "created_by": task.created_by_email,
-                    "paused": task.paused,
-                    "next_run_at": _iso(task.next_run_at),
-                    "last_run_at": _iso(task.last_run_at),
-                    "expires_at": _iso(task.expires_at),
-                }
-                for task in listed
-            ],
-            "spec_schema": ctx.object_spec_schema("scheduled_task"),
-        }
-    )
-
-
 async def skills(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's loadable skills: its own member-authored ones and the deploy's shared
     set."""
@@ -1401,28 +1374,6 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload)
 
 
-async def workspace_sites(ctx: SurfaceContext, request: Request) -> Response:
-    """The hosted sites this member may see, answered through the site kind's own visibility gate
-    — shared sites plus their own private ones, every site for an admin — or `available: false`
-    when the deploy installs no sites extension. Each row carries the kind's declared list fields
-    beside its name and summary."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    page = await ctx.list_member_objects(SITE_KIND, member_id, admin=audience.admin)
-    if page is None:
-        return JSONResponse({"available": False, "sites": []})
-    return JSONResponse(
-        {
-            "available": True,
-            "sites": [
-                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
-            ],
-        }
-    )
-
-
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
     """Tail one turn's live frames. Gated like every portal route: the turn must belong to the
     member AND its agent must still be in their web audience, so a revocation ends streaming
@@ -1594,6 +1545,143 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+async def _object_gate(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, bool, UUID, PortalKind] | Response:
+    """The shared entry of both object pages: the session's member and admin standing, the agent
+    namespace the read runs in — named by `agent` and gated by the viewer's web audience like every
+    per-agent panel — and the kind's declared fields and spec schema. A kind this deploy does not
+    register is not-found by name, never a 500 from inside it."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    try:
+        agent_id = UUID(request.query_params.get("agent", ""))
+    except ValueError:
+        return Response("no such agent", status_code=404)
+    if not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    kind = request.path_params["kind"]
+    described = ctx.object_kind(kind)
+    if described is None:
+        return Response(f"no object kind named {kind!r}", status_code=404)
+    return member_id, audience.admin, agent_id, described
+
+
+def _kind_payload(kind: PortalKind) -> dict[str, object]:
+    return {
+        "kind": kind.kind,
+        "fields": list(kind.list_fields),
+        "spec_schema": kind.spec_schema,
+        "applies": kind.kind in ApplyIntent.kinds(),
+    }
+
+
+def _filter_value(raw: str) -> JsonValue:
+    """One query-string filter value as the kind's rows carry it. A declared field holds whatever
+    scalar its kind produces — `paused=true` is a boolean, `port=3000` a number — so each value is
+    read as JSON and falls back to the string it already is."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+async def object_index(ctx: SurfaceContext, request: Request) -> Response:
+    """One object kind's rows for the signed-in member — the portal's index projection, answering
+    through the kind's own visibility gate and searched, filtered, and ordered on the fields the
+    kind declared. `q` searches, `order_by`/`order` sort, `cursor` continues the walk, and every
+    remaining query parameter is an exact filter; a field the kind never declared is the kind's
+    own refusal, so the page offers only what the kind admits."""
+    gated = await _object_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, admin, agent_id, kind = gated
+    reserved = {"agent", "q", "order_by", "order", "cursor"}
+    order: Literal["asc", "desc"] = "asc"
+    match request.query_params.get("order", "asc"):
+        case "asc":
+            order = "asc"
+        case "desc":
+            order = "desc"
+        case _:
+            return Response("order must be asc or desc", status_code=400)
+    query = ObjectListQuery(
+        query=request.query_params.get("q", ""),
+        filters={
+            name: _filter_value(value)
+            for name, value in request.query_params.items()
+            if name not in reserved
+        },
+        order_by=request.query_params.get("order_by", "name"),
+        order=order,
+        cursor=request.query_params.get("cursor", ""),
+    )
+    try:
+        page = await ctx.list_member_objects(
+            kind.kind, agent_id, member_id, admin=admin, query=query
+        )
+    except ValueError as error:
+        return Response(str(error), status_code=400)
+    if page is None:
+        return Response(f"{kind.kind} does not list in the portal", status_code=404)
+    return JSONResponse(
+        {
+            **_kind_payload(kind),
+            "objects": [
+                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
+            ],
+            "next_cursor": page.next_cursor,
+        }
+    )
+
+
+async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
+    """One object as the signed-in member reads it: the spec its kind applied, the declared fields
+    that are its live state, its typed outgoing links — each naming an object and saying whether
+    this member's read of that row answers, since a kind reading for members is not that row
+    reading for this one — and the row's timestamps. `spec` is null where the kind elides content
+    the member may not read. A row the member may not see is not-found, exactly as an absent
+    one is."""
+    gated = await _object_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, admin, agent_id, kind = gated
+    name = request.path_params["name"]
+    found = await ctx.member_object(kind.kind, name, agent_id, member_id, admin=admin)
+    if found is None:
+        return Response(f"no {kind.kind} named {name!r}", status_code=404)
+    detail = found.detail
+    opened = [
+        await ctx.member_object(
+            link.target.kind, link.target.name, agent_id, member_id, admin=admin
+        )
+        is not None
+        for link in detail.links
+    ]
+    return JSONResponse(
+        {
+            **_kind_payload(kind),
+            "name": found.row.name,
+            "summary": found.row.summary,
+            "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
+            "status": dict(found.row.fields),
+            "links": [
+                {
+                    "relation": link.relation,
+                    "kind": link.target.kind,
+                    "name": link.target.name,
+                    "opens": opens,
+                }
+                for link, opens in zip(detail.links, opened, strict=True)
+            ],
+            "created_at": _iso(detail.created_at),
+            "updated_at": _iso(detail.updated_at),
+        }
+    )
+
+
 def _sse(cursor: str, frame: LiveFrame) -> bytes:
     """One SSE event. A non-empty cursor is emitted as the event `id:`, which the browser echoes as
     `Last-Event-ID` on reconnect, so a dropped stream resumes from the last frame it rendered."""
@@ -1644,7 +1732,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="agents/{agent_id}/overview", handler=overview),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/tasks", handler=tasks),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
@@ -1679,7 +1766,8 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
-    SurfaceRoute(method="GET", path="workspace/sites", handler=workspace_sites),
+    SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
+    SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),

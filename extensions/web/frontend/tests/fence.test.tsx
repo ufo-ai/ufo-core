@@ -5,7 +5,17 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { PlacedWorkspace, AGENT, MEMBER, SECOND, json, useStreamFake } from "./harness";
+import {
+  PlacedWorkspace,
+  AGENT,
+  MEMBER,
+  SECOND,
+  NO_TASKS,
+  TASK_KIND,
+  json,
+  objectIndex,
+  useStreamFake,
+} from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -21,7 +31,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
           releaseSkills = resolve;
         });
       }
-      if (url.includes("/tasks")) return json({ tasks: [], spec_schema: null });
+      if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });
     }),
@@ -33,13 +43,13 @@ test("switching tabs discards the read left behind rather than painting it", asy
   await waitFor(() => expect(releaseSkills).not.toBeNull());
 
   await userEvent.click(screen.getByRole("tab", { name: "Tasks" }));
-  expect(await screen.findByText("No scheduled tasks for this agent.")).toBeTruthy();
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
 
   releaseSkills!(json({ skills: [{ name: "stale", description: "stale skill", origin: "member" }] }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("stale skill")).toBeNull();
-  expect(screen.getByText("No scheduled tasks for this agent.")).toBeTruthy();
+  expect(screen.getByText(NO_TASKS)).toBeTruthy();
 });
 
 test("switching agents discards the read left behind rather than painting it", async () => {

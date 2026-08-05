@@ -13,7 +13,7 @@ like every other portal read."""
 import asyncio
 import json
 import re
-from typing import Literal
+from typing import Literal, get_args
 from uuid import UUID
 
 import yaml
@@ -55,6 +55,13 @@ class ApplyIntent(BaseModel):
     ]
     name: str
     spec: dict[str, JsonValue] | None = None
+
+    @classmethod
+    def kinds(cls) -> frozenset[str]:
+        """The kinds a panel may submit a mutation for, read off the closed Literal that admits
+        them — so an object page offers a control exactly where the lane accepts one, and states
+        the kind's own description in place of a dead control everywhere else."""
+        return frozenset(get_args(cls.model_fields["kind"].annotation))
 
     @model_validator(mode="after")
     def _verb_pairs_with_its_kind(self) -> "ApplyIntent":

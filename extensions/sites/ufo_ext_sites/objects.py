@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
-    MemberOwnedObjects,
+    MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -63,15 +63,15 @@ def _named(sites: Iterable[HostedSite]) -> dict[str, HostedSite]:
     return {site_object_name(site.conversation_id, site.name): site for site in sites}
 
 
-def _workspace(ctx: ToolContext) -> ExtensionContext:
-    if ctx.ext is None:
-        raise RuntimeError("the site kind dispatched without its ExtensionContext")
-    return ctx.ext
+def _workspace(ext: ExtensionContext | None) -> ExtensionContext:
+    if ext is None:
+        raise RuntimeError("the site kind reads through its ExtensionContext")
+    return ext
 
 
-def _sites(ctx: ToolContext) -> HostedSites:
-    ext = _workspace(ctx)
-    return HostedSites(ext.store.workspace_id, ext.transaction)
+def _sites(ext: ExtensionContext | None) -> HostedSites:
+    scoped = _workspace(ext)
+    return HostedSites(scoped.store.workspace_id, scoped.transaction)
 
 
 def _summary(site: HostedSite) -> str:
@@ -79,7 +79,7 @@ def _summary(site: HostedSite) -> str:
 
 
 @dataclass(frozen=True)
-class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
+class SiteObjects(MemberReadableObjects[SiteSpec, ObjectOwner]):
     """Read, re-gate, and unhost handlers over the workspace's registered sites. Ownership is the
     site's creator and disclosure is its own `visibility` column — the gate the frame enforces per
     visit, read here through the one registry both surfaces write."""
@@ -93,13 +93,9 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
     def _admin_can_apply(self, old: SiteSpec, spec: SiteSpec) -> bool:
         return old.visibility != "private" and spec.visibility == "private"
 
-    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
-        return await self._member_rows(_workspace(ctx))
-
-    async def _member_rows(self, ext: ExtensionContext | None) -> tuple[OwnedRow[ObjectOwner], ...]:
-        if ext is None:
-            raise RuntimeError("the site kind reads through its ExtensionContext")
-        sites = HostedSites(ext.store.workspace_id, ext.transaction)
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[ObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=name,
@@ -113,13 +109,18 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
                     "visibility": site.visibility,
                 },
             )
-            for name, site in _named(await sites.all()).items()
+            for name, site in _named(await _sites(ext).all()).items()
         )
 
-    async def _detail(
-        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: ObjectOwner,
+        *,
+        member_id: UUID | None,
     ) -> ObjectDetail[SiteSpec] | None:
-        site = await self._find(ctx, name)
+        site = await self._find(ext, name)
         if site is None:
             return None
         return ObjectDetail(
@@ -137,7 +138,7 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
     async def _status(
         self, ctx: ToolContext, name: str, owner: ObjectOwner
     ) -> dict[str, JsonValue] | None:
-        site = await self._find(ctx, name)
+        site = await self._find(ctx.ext, name)
         if site is None:
             return None
         return {
@@ -146,7 +147,7 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
             "creator_member_id": str(site.creator_member_id),
             "site_url": site_url(
                 ctx.public_base_url,
-                _workspace(ctx).store.workspace_id,
+                _workspace(ctx.ext).store.workspace_id,
                 site.conversation_id,
                 site.name,
             ),
@@ -162,21 +163,21 @@ class SiteObjects(MemberOwnedObjects[SiteSpec, ObjectOwner]):
     ) -> None:
         if old is None or owner is None:
             raise VerbNotSupported(SITES_ARE_DEPLOYED)
-        site = await self._find(ctx, name)
+        site = await self._find(ctx.ext, name)
         if site is None:
             raise ValueError(f"site {name!r} was unhosted while its visibility was changing")
         if spec.visibility == site.visibility:
             return
-        await _sites(ctx).set_visibility(site.conversation_id, site.name, spec.visibility)
+        await _sites(ctx.ext).set_visibility(site.conversation_id, site.name, spec.visibility)
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
-        site = await self._find(ctx, name)
+        site = await self._find(ctx.ext, name)
         if site is None:
             raise ValueError(f"site {name!r} was unhosted while it was being unhosted")
-        await _sites(ctx).unregister(site.conversation_id, site.name)
+        await _sites(ctx.ext).unregister(site.conversation_id, site.name)
 
-    async def _find(self, ctx: ToolContext, name: str) -> HostedSite | None:
-        return _named(await _sites(ctx).all()).get(name)
+    async def _find(self, ext: ExtensionContext | None, name: str) -> HostedSite | None:
+        return _named(await _sites(ext).all()).get(name)
 
 
 SITE_OBJECT = ObjectKind(

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Heading } from "@/views/Usage";
-import { day } from "@/views/Tasks";
+import { day } from "@/lib/moments";
 import { formatSize } from "@/views/Chat";
 import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";

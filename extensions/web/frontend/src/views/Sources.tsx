@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { ListingSpec } from "@/kernel/listing";
-import { day } from "@/views/Tasks";
+import { day } from "@/lib/moments";
 
 type Source = {
   name: string | null;

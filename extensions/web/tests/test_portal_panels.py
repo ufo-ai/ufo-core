@@ -36,7 +36,12 @@ from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
-from ufo.ext.loader import memory_search, skill_registry, turn_runtime_skills
+from ufo.ext.loader import (
+    member_object_registry,
+    memory_search,
+    skill_registry,
+    turn_runtime_skills,
+)
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT, render_skill_index
@@ -61,23 +66,7 @@ ADMIN_EMAIL = "admin@example.com"
 CREATOR_EMAIL = "creator@example.com"
 OTHER_EMAIL = "other@example.com"
 NEXT_RUN = datetime(2027, 1, 1, tzinfo=UTC)
-LAST_RUN = datetime(2026, 12, 25, 9, 0, tzinfo=UTC)
 EXPIRES = datetime(2027, 6, 1, tzinfo=UTC)
-
-
-async def _stamp_last_run(workspace_id: UUID, name: str, moment: datetime) -> None:
-    """Stamp a fire's timing mark straight onto the row — the projection's read half is what the
-    test pins; the write half (`ScheduleStore.reschedule`) needs a claimed task and has its own
-    proofs in the scheduler's suite."""
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.scheduled_task)
-            .values(last_run_at=moment)
-            .where(
-                tables.scheduled_task.c.workspace_id == workspace_id,
-                tables.scheduled_task.c.name == name,
-            )
-        )
 
 
 class StubDbos:
@@ -231,6 +220,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         skills=DEPLOY_SKILLS,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         subagents=PORTAL_SUBAGENTS,
+        objects=member_object_registry(manifests),
         memory=memory_search(manifests, None, index, embed) if with_memory else None,
     )
     return app
@@ -245,7 +235,11 @@ async def portal(db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         yield client, workspace_id, agent_a, agent_b
 
 
-async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
+async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
+    """The task index and detail carry exactly what the scheduled_task kind discloses: its creator
+    reads the whole spec, an admin reads the management row with its content elided (`spec` null,
+    the summary saying so), everyone else sees no row at all, and each read is walled by the agent
+    named on it."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -271,8 +265,8 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
                 "queue sweep",
                 NEXT_RUN,
             )
-        await _stamp_last_run(workspace_id, "daily-brief", LAST_RUN)
-    creator_view = await client.get(f"/surface/web/agents/{agent_a}/tasks", headers=creator_headers)
+    index = f"/surface/web/objects/scheduled_task?agent={agent_a}"
+    creator_view = await client.get(index, headers=creator_headers)
     assert set(creator_view.json()["spec_schema"]["properties"]) == {
         "schedule",
         "prompt",
@@ -280,31 +274,51 @@ async def test_tasks_shape_by_viewer_and_wall_by_agent(portal) -> None:
         "expires_at",
         "paused",
     }
-    (task,) = creator_view.json()["tasks"]
-    assert task["name"] == "daily-brief"
-    assert task["paused"] is False
-    assert task["prompt"] == "write the daily brief"
-    assert task["created_by"] == CREATOR_EMAIL
-    assert task["next_run_at"] == NEXT_RUN.isoformat()
-    assert task["last_run_at"] == LAST_RUN.isoformat()
-    assert task["expires_at"] == EXPIRES.isoformat()
-    admin_view = await client.get(f"/surface/web/agents/{agent_a}/tasks", headers=admin_headers)
-    by_name = {row["name"]: row for row in admin_view.json()["tasks"]}
-    management = by_name["daily-brief"]
-    assert management["prompt"] is None
-    assert management["description"] is None
-    assert management["schedule"] == "0 9 * * *"
-    assert management["created_by"] == CREATOR_EMAIL
-    creatorless = by_name["creatorless-sweep"]
-    assert creatorless["prompt"] == "sweep the queue"
-    assert creatorless["created_by"] is None
-    other_view = await client.get(f"/surface/web/agents/{agent_a}/tasks", headers=other_headers)
-    assert other_view.json()["tasks"] == []
-    crossed = await client.get(f"/surface/web/agents/{agent_b}/tasks", headers=creator_headers)
+    (row,) = creator_view.json()["objects"]
+    assert row["name"] == "daily-brief"
+    assert row["paused"] is False
+    assert row["next_run_at"] == NEXT_RUN.isoformat()
+    assert row["summary"] == "0 9 * * * — daily brief"
+    mine = await client.get(
+        f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=creator_headers
+    )
+    assert mine.json()["spec"]["prompt"] == "write the daily brief"
+    assert mine.json()["spec"]["expires_at"].startswith("2027-06-01T00:00:00")
+
+    admin_view = await client.get(index, headers=admin_headers)
+    by_name = {row["name"]: row for row in admin_view.json()["objects"]}
+    assert by_name["daily-brief"]["summary"] == "0 9 * * * — private member task"
+    assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — queue sweep"
+    management = await client.get(
+        f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=admin_headers
+    )
+    assert management.json()["spec"] is None
+    assert management.json()["status"]["next_run_at"] == NEXT_RUN.isoformat()
+    creatorless = await client.get(
+        f"/surface/web/objects/scheduled_task/creatorless-sweep?agent={agent_a}",
+        headers=admin_headers,
+    )
+    assert creatorless.json()["spec"]["prompt"] == "sweep the queue"
+
+    other_view = await client.get(index, headers=other_headers)
+    assert other_view.json()["objects"] == []
+    assert (
+        await client.get(
+            f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}",
+            headers=other_headers,
+        )
+    ).status_code == 404
+    crossed = await client.get(
+        f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=creator_headers
+    )
     assert crossed.status_code == 404
-    assert (await client.get(f"/surface/web/agents/{agent_b}/tasks")).status_code == 401
-    empty_wall = await client.get(f"/surface/web/agents/{agent_b}/tasks", headers=admin_headers)
-    assert empty_wall.json()["tasks"] == []
+    assert (
+        await client.get(f"/surface/web/objects/scheduled_task?agent={agent_b}")
+    ).status_code == 401
+    empty_wall = await client.get(
+        f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=admin_headers
+    )
+    assert empty_wall.json()["objects"] == []
 
 
 async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:

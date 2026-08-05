@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 
 export type PanelState<T> =
   | { phase: "loading" }
-  | { phase: "failed"; message: string }
+  | { phase: "failed"; message: string; status: number }
   | { phase: "ready"; payload: T };
 
 export function usePanelRead<T>(path: string | null, reloads: number = 0): PanelState<T> {
@@ -20,7 +20,7 @@ export function usePanelRead<T>(path: string | null, reloads: number = 0): Panel
       setState(
         result.ok
           ? { phase: "ready", payload: result.payload }
-          : { phase: "failed", message: result.message },
+          : { phase: "failed", message: result.message, status: result.status },
       );
     });
     return () => {
@@ -40,14 +40,14 @@ export function Panel<T>({
 }: {
   state: PanelState<T>;
   loading?: () => ReactNode;
-  failed?: (message: string) => ReactNode;
+  failed?: (message: string, status: number) => ReactNode;
   empty?: (payload: T) => ReactNode;
   children: (payload: T) => ReactNode;
 }) {
   if (state.phase === "loading")
     return loading ? loading() : <PanelEmpty>Loading…</PanelEmpty>;
   if (state.phase === "failed")
-    return failed ? failed(state.message) : <PanelEmpty>{state.message}</PanelEmpty>;
+    return failed ? failed(state.message, state.status) : <PanelEmpty>{state.message}</PanelEmpty>;
   const nothing = empty?.(state.payload);
   if (nothing) return <PanelEmpty>{nothing}</PanelEmpty>;
   return children(state.payload);

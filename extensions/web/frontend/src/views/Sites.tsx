@@ -1,14 +1,17 @@
-import type { ListingSpec } from "@/kernel/listing";
+import { ObjectPane } from "@/kernel/objects";
+import { PanelEmpty } from "@/kernel/panel";
+import { useMainAgent } from "@/lib/mainAgent";
 
-type Site = { name: string; summary: string };
+const SITE_KIND = "site";
 
-type SitesPayload = { available: boolean; sites: Site[] };
-
-export const SITES: ListingSpec<SitesPayload, Site> = {
-  read: "/workspace/sites",
-  rows: (payload) => payload.sites,
-  rowKey: (site) => site.name,
-  list: { primary: { field: "name" }, meta: [{ field: "summary" }] },
-  empty: "No sites are hosted.",
-  unavailable: (payload) => (payload.available ? null : "No sites extension is installed."),
-};
+export function Sites() {
+  const mainAgent = useMainAgent();
+  if (!mainAgent) return <PanelEmpty>No agent answers this workspace.</PanelEmpty>;
+  return (
+    <ObjectPane
+      agentId={mainAgent.id}
+      kind={SITE_KIND}
+      absent="No sites extension is installed."
+    />
+  );
+}

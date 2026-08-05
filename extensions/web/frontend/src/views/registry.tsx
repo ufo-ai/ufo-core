@@ -5,7 +5,7 @@ import type { Placement } from "@/kernel/pager";
 import type { WorkspaceTab } from "@/lib/route";
 import { ARTIFACTS } from "@/views/Artifacts";
 import { Memory } from "@/views/Memory";
-import { SITES } from "@/views/Sites";
+import { Sites } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { WorkspaceCredentials } from "@/views/WorkspaceCredentials";
@@ -47,6 +47,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, WorkspaceView> = {
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
   artifacts: declared("Artifacts", ARTIFACTS),
-  sites: declared("Sites", SITES),
+  sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
   usage: { label: "Usage", remountOnPlace: false, render: () => <WorkspaceUsage /> },
 };

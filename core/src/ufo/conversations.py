@@ -2,8 +2,10 @@
 
 Artifacts and scheduled tasks link to the conversation they came from or report into; this kind is
 what those links resolve to — the surface, the origin label that surface wrote, audience, row
-timestamps, and, through status, the text exchange written into the turn's workspace. Surfaces
-create conversations, so every mutation is refused."""
+timestamps, and, through status, the text exchange written into the turn's workspace. The portal
+resolves the same links against the same row: `member_detail` answers a signed-in member outside a
+turn, on the subjects their own conversation carries. Surfaces create conversations, so every
+mutation is refused."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -12,13 +14,15 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.agents import AGENT_KIND
+from ufo.audience import audience_subjects, conversation_audience
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
-from ufo.ext.context import JsonValue
+from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.models.interface import TextBlock
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
+    MemberObject,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
@@ -57,49 +61,34 @@ class ConversationSpec(BaseModel):
 
 @dataclass(frozen=True)
 class ConversationObjects:
-    """Read-only handlers over the selected agent's conversations visible to the caller. Status
-    materializes a visible transcript. Resolves artifact and scheduled-task links; every mutation
-    refuses."""
+    """Read-only handlers over the selected agent's conversations visible to the caller, in a turn
+    and — through `member_detail` — for a signed-in member outside one. Status materializes a
+    visible transcript. Resolves artifact and scheduled-task links; every mutation refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = []
-        for row in await self._visible_rows(ctx):
-            origin = (
-                f"{row.surface} conversation"
-                if row.surface_label is None
-                else f"{row.surface_label} on {row.surface}"
-            )
-            fields: dict[str, JsonValue] = {"surface": row.surface}
-            if row.surface_label is not None:
-                fields["surface_label"] = row.surface_label
-            rows.append(
-                ObjectRow(
-                    name=str(row.id),
-                    summary=f"{origin}, created {row.created_at.date().isoformat()}",
-                    fields=fields,
-                )
-            )
-        return object_page(tuple(rows), query)
+        rows = tuple(_row(row) for row in await self._rows(ctx.read_subjects, conversation_id=None))
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None:
-        row = await self._find(ctx, name)
-        if row is None:
-            return None
-        return ObjectDetail(
-            spec=ConversationSpec(
-                surface=row.surface,
-                surface_label=row.surface_label,
-                audience=row.audience,
-            ),
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-            links=(
-                ObjectLink(
-                    relation="scoped_to",
-                    target=ObjectRef(kind=AGENT_KIND, name=row.agent_name),
-                ),
-            ),
-        )
+        row = await self._find(ctx.read_subjects, name)
+        return None if row is None else _detail(row)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[ConversationSpec] | None:
+        """One conversation as the portal reads it outside a turn — the row `list` renders beside
+        the detail `get` reads, gated on the subjects a member's own conversation carries: their
+        own and the workspace-shared. A room's conversation and another member's private one are
+        absent here for everyone, an admin included; the recorded acknowledgement opens transcript
+        content, never this row. The agent is the caller's ambient one, the same wall `list`
+        answers behind."""
+        row = await self._find(audience_subjects(conversation_audience(member_id)), name)
+        return None if row is None else MemberObject(row=_row(row), detail=_detail(row))
 
     async def status(
         self,
@@ -108,11 +97,11 @@ class ConversationObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        row = await self._find(ctx, name)
+        row = await self._find(ctx.read_subjects, name)
         if row is None:
             return None
         exchange = await self._exchange(ctx, row.id)
-        if not await self._unchanged_visible(ctx, row):
+        if not await self._unchanged_visible(ctx.read_subjects, row):
             raise UnknownObject(f"no conversation object named {name!r}")
         body = "\n".join(exchange).encode()
         path: str | None = None
@@ -163,13 +152,13 @@ class ConversationObjects:
                 lines.append(f"{message.role}: {text}")
         return tuple(lines)
 
-    async def _unchanged_visible(self, ctx: ToolContext, row: sa.Row) -> bool:
+    async def _unchanged_visible(self, subjects: frozenset[str], row: sa.Row) -> bool:
         async with workspace_tx() as connection:
             return (
                 await connection.execute(
                     sa.select(
                         sa.exists(
-                            self._visible(ctx).where(
+                            _visible(subjects).where(
                                 tables.conversation.c.id == row.id,
                                 tables.conversation.c.audience == row.audience,
                             )
@@ -178,45 +167,77 @@ class ConversationObjects:
                 )
             ).scalar_one()
 
-    async def _find(self, ctx: ToolContext, name: str) -> sa.Row | None:
+    async def _find(self, subjects: frozenset[str], name: str) -> sa.Row | None:
         try:
             conversation_id = UUID(name)
         except ValueError:
             return None
-        async with workspace_tx() as connection:
-            return (
-                await connection.execute(
-                    self._visible(ctx).where(tables.conversation.c.id == conversation_id)
-                )
-            ).one_or_none()
+        rows = await self._rows(subjects, conversation_id=conversation_id)
+        return rows[0] if rows else None
 
-    async def _visible_rows(self, ctx: ToolContext) -> tuple[sa.Row, ...]:
+    async def _rows(
+        self, subjects: frozenset[str], *, conversation_id: UUID | None
+    ) -> tuple[sa.Row, ...]:
+        query = _visible(subjects)
+        if conversation_id is not None:
+            query = query.where(tables.conversation.c.id == conversation_id)
         async with workspace_tx() as connection:
-            rows = (await connection.execute(self._visible(ctx))).all()
-        return tuple(rows)
+            return tuple((await connection.execute(query)).all())
 
-    def _visible(self, ctx: ToolContext) -> sa.Select:
-        return (
-            sa.select(
-                tables.conversation.c.id,
-                tables.conversation.c.surface,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.audience,
-                tables.conversation.c.created_at,
-                tables.conversation.c.updated_at,
-                tables.agent.c.name.label("agent_name"),
-            )
-            .select_from(
-                tables.conversation.join(
-                    tables.agent, tables.conversation.c.agent_id == tables.agent.c.id
-                )
-            )
-            .where(
-                tables.conversation.c.workspace_id == ws_current().workspace_id,
-                tables.conversation.c.agent_id == object_agent_id(),
-                tables.conversation.c.audience.in_(ctx.read_subjects),
+
+def _visible(subjects: frozenset[str]) -> sa.Select:
+    return (
+        sa.select(
+            tables.conversation.c.id,
+            tables.conversation.c.surface,
+            tables.conversation.c.surface_label,
+            tables.conversation.c.audience,
+            tables.conversation.c.created_at,
+            tables.conversation.c.updated_at,
+            tables.agent.c.name.label("agent_name"),
+        )
+        .select_from(
+            tables.conversation.join(
+                tables.agent, tables.conversation.c.agent_id == tables.agent.c.id
             )
         )
+        .where(
+            tables.conversation.c.workspace_id == ws_current().workspace_id,
+            tables.conversation.c.agent_id == object_agent_id(),
+            tables.conversation.c.audience.in_(subjects),
+        )
+    )
+
+
+def _row(row: sa.Row) -> ObjectRow:
+    origin = (
+        f"{row.surface} conversation"
+        if row.surface_label is None
+        else f"{row.surface_label} on {row.surface}"
+    )
+    fields: dict[str, JsonValue] = {"surface": row.surface}
+    if row.surface_label is not None:
+        fields["surface_label"] = row.surface_label
+    return ObjectRow(
+        name=str(row.id),
+        summary=f"{origin}, created {row.created_at.date().isoformat()}",
+        fields=fields,
+    )
+
+
+def _detail(row: sa.Row) -> ObjectDetail[ConversationSpec]:
+    return ObjectDetail(
+        spec=ConversationSpec(
+            surface=row.surface, surface_label=row.surface_label, audience=row.audience
+        ),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        links=(
+            ObjectLink(
+                relation="scoped_to", target=ObjectRef(kind=AGENT_KIND, name=row.agent_name)
+            ),
+        ),
+    )
 
 
 CONVERSATION_OBJECT = ObjectKind(

@@ -5,7 +5,7 @@ import { Hint } from "@/components/ui/field";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Panel, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { TurnLine, turnTree, who, type Turn } from "@/views/Conversations";
-import { day } from "@/views/Tasks";
+import { day } from "@/lib/moments";
 import { Heading } from "@/views/Usage";
 import { cn } from "@/lib/cn";
 import type { SubagentTab } from "@/lib/route";

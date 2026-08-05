@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { ListingSpec } from "@/kernel/listing";
-import { day } from "@/views/Tasks";
+import { day } from "@/lib/moments";
 import { formatSize } from "@/views/Chat";
 import { Sheet } from "@/components/ui/sheet";
 

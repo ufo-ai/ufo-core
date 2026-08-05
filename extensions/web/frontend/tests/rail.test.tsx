@@ -14,7 +14,9 @@ import {
   SECOND,
   SECOND_ID,
   TURN_ID,
+  SITE_KIND,
   json,
+  objectIndex,
   useStreamFake,
   wire,
 } from "./harness";
@@ -339,7 +341,7 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
 test("the sidebar marks the section the member is in and leaves the others off", async () => {
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
-    "/workspace/sites": () => json({ available: false, sites: [] }),
+    "/objects/site": () => objectIndex(SITE_KIND, []),
     "/overview": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);

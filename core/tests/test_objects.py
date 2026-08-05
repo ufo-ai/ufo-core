@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
+from ufo_ext_sites.objects import SITE_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
 import ufo.artifacts as artifacts
@@ -42,7 +43,7 @@ from ufo.audience import (
     room_audience,
 )
 from ufo.blob import FilesystemBlobStore
-from ufo.conversations import CONVERSATION_KIND
+from ufo.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue, context_for
@@ -63,7 +64,9 @@ from ufo.objects import (
     BoundKind,
     GeneratedObjectOwner,
     InvalidManifest,
+    MemberListable,
     MemberOwnedObjects,
+    MemberReadable,
     ObjectDetail,
     ObjectKind,
     ObjectListQuery,
@@ -552,6 +555,21 @@ def test_member_owned_kinds_gate_through_the_shared_base() -> None:
     assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SOURCE_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
+
+
+def test_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> None:
+    """The portal's two projections are implemented, not declared: a kind answering a signed-in
+    member outside a turn is `MemberReadable`, one answering a whole page is `MemberListable`, and
+    a kind that does neither — every member-owned kind that has not opted in, and the read-only
+    conversation kind for listing — is absent from both, so the portal's routes refuse it by name
+    instead of raising from inside it."""
+    assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberListable)
+    assert isinstance(SITE_OBJECT.store, MemberListable)
+    assert isinstance(CONVERSATION_OBJECT.store, MemberReadable)
+    assert not isinstance(CONVERSATION_OBJECT.store, MemberListable)
+    for unlisted in (CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT, SOURCE_OBJECT):
+        assert not isinstance(unlisted.store, MemberReadable)
+        assert not isinstance(unlisted.store, MemberListable)
 
 
 def test_boot_fails_on_a_colliding_kind() -> None:

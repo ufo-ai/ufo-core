@@ -4,7 +4,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, useStreamFake } from "./harness";
+import {
+  AGENT,
+  MEMBER,
+  NO_SITES,
+  SITE_KIND,
+  json,
+  objectIndex,
+  useStreamFake,
+} from "./harness";
 
 const ARTIFACT = {
   id: "a1",
@@ -26,7 +34,7 @@ function serve() {
     "fetch",
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [ARTIFACT] });
-      if (url.includes("/workspace/sites")) return json({ available: false, sites: [] });
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/team")) return json({ members: [], can_add: false, domain: null });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
@@ -48,7 +56,7 @@ test("the artifact viewer is torn down when the member navigates to another view
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-  expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
+  expect(await screen.findByText(NO_SITES)).toBeTruthy();
 });
 
 test("the artifact viewer is torn down when the member returns to a conversation", async () => {

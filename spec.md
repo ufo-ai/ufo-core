@@ -371,8 +371,9 @@ linking a `surface_identity` on first contact — `join_member` also creates the
 channel-verified email matches the workspace's own domain, the first member's vetted email domain,
 so only that initial member onboards through provisioning — and `adopt_identity` to span a member across
 surfaces), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
-`spend_rollup`, and the per-agent projections — `list_agent_tasks`, `agent_skills`,
-`agent_spend`, and `memory_available`/`search_memory`. An extension registers a
+`spend_rollup`, and the per-agent projections — `object_kind` with
+`list_member_objects`/`member_object`, `agent_skills`, `agent_spend`, and
+`memory_available`/`search_memory`. An extension registers a
 `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
@@ -438,8 +439,7 @@ surface claiming `SurfaceSpec.home`, or the portal path itself — is sent to `/
 the shell is served to a stranger. The plan,
 invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
 yet, so the billing view is a read. Beside chat, each selected agent
-carries read projections shaped by the same contracts chat enforces: its scheduled tasks
-(creator sees content, an admin management metadata, others nothing), its loadable skills (the
+carries read projections shaped by the same contracts chat enforces: its loadable skills (the
 composition a turn loads), its connector accounts, its conversations, its configuration overview
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
@@ -503,8 +503,28 @@ signed TTL link a delivery would and paging by the same shared cursor, `shared_a
 breaking a tie two files one turn shared in one instant would otherwise leave unbroken; opening
 one pins a viewer over the listing that renders what the page honestly can — an image inline,
 text up to a bounded read, and a plain refusal to preview anything else — leaving the download an
-explicit act rather than the click's default. Sites list through the `site` kind's own visibility
-gate, so the portal and chat's `object_list` cannot disagree. A shared connection or source names
+explicit act rather than the click's default.
+
+Every object kind reaches the portal through two generic reads rather than a page of its own:
+`objects/{kind}` is one kind's rows and `objects/{kind}/{name}` is one row whole, each answering
+through the kind's own gate (`member_page` / `member_detail`) in the agent namespace the request
+names and the viewer's audience allows. Implementing those handlers is the opt-in: a kind that
+cannot answer a member outside a turn is refused by name, never a fault from inside it. The index
+searches, filters, and orders on exactly the kind's declared `list_fields` — the portal stamps that
+vocabulary onto the query, so a page can offer only what the kind admits — and an index with no
+rows states that the kind has none, or that none match what it was narrowed to; a view whose
+extension a deploy need not install states that absence in its own words instead. A kind's own
+description and guidance are the agent's tool prose and never reach a member. The detail reads in
+the order `ObjectDetail` carries: the spec that was applied (null where the kind elides content
+this member may not read, the row's own summary standing in its place), the declared fields that
+are its live state, its typed links — each a kind and a name, opened by this same page where that
+row answers this member, so a scheduled task's `reports_to` lands on its conversation, and stated
+as plain text where it does not, since a link's kind reading for members is not that row reading
+for this one — and the row's timestamps. Where the prepared-intent lane does not accept the kind,
+the page offers no control at all; where the kind elided the spec, it offers no form to edit what
+this member cannot read. Scheduled tasks and hosted sites are the kinds that list this way today,
+so the portal and chat's `object_list` cannot disagree; conversations read one row at a time, as
+the target of the links that reach them. A shared connection or source names
 its owner only to an admin or the owner: the roster tells every member who their colleagues are,
 but which colleague registered a given binding is the owner's to disclose, and chat names it to
 nobody else either, so neither does a panel. A panel mutation

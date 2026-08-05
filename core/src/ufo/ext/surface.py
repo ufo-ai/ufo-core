@@ -32,7 +32,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from secrets import token_hex
 from types import MappingProxyType
@@ -100,7 +100,6 @@ from ufo.sandbox.ingress_token import (
     IngressClaims,
     mint_ingress_token,
 )
-from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import (
     SUBAGENT_SURFACE,
@@ -135,7 +134,7 @@ if TYPE_CHECKING:
     from ufo.ext.context import SourceReader
     from ufo.listings import ListingCursor, ListingPage
     from ufo.memory import MemoryMatch, MemorySearch
-    from ufo.objects import BoundKind, ObjectPage
+    from ufo.objects import BoundKind, MemberObject, ObjectListQuery, ObjectPage
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
@@ -335,20 +334,15 @@ class AgentDetail(BaseModel):
 
 
 @dataclass(frozen=True)
-class PortalTask:
-    """One recurring task as the portal lists it, already shaped for its viewer: `prompt` and
-    `description` are None when the viewer may not read the task's content. A value object — the
-    web surface renders it and nothing persists it."""
+class PortalKind:
+    """One object kind as the portal's index and detail pages read it around its rows: the fields
+    it declared for filtering and ordering, and its spec schema (None for a kind this deploy
+    registers without one). A value object — the web surface renders it and nothing persists
+    it."""
 
-    name: str
-    schedule: str
-    prompt: str | None
-    description: str | None
-    created_by_email: str | None
-    paused: bool
-    next_run_at: datetime
-    last_run_at: datetime | None
-    expires_at: datetime | None
+    kind: str
+    list_fields: tuple[str, ...]
+    spec_schema: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -718,7 +712,8 @@ class SurfaceContext:
     core's CLI is the built-in twin) delivers by `tail`-ing the turn's frames off the hub in its
     own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace spend view
     and `member_spend` for the reader's own, and the per-agent projections a portal renders —
-    `list_agent_tasks`, `agent_skills`, `agent_spend`, and `memory_available`/`search_memory` —
+    `list_member_objects`/`member_object`/`object_kind`, `agent_skills`, `agent_spend`, and
+    `memory_available`/`search_memory` —
     and either mode renders a turn's
     shared files, the poller handing them to `attach` while a live surface reads
     `shared_artifacts` and links each through `artifact_link`. Each calls only what it needs.
@@ -1390,68 +1385,19 @@ class SurfaceContext:
             updated_at=row.updated_at,
         )
 
-    async def list_agent_tasks(
-        self, agent_id: UUID, viewer_member_id: UUID, viewer_is_admin: bool
-    ) -> tuple[PortalTask, ...]:
-        """The selected agent's recurring tasks, shaped for the viewer by the same contract the
-        scheduled_task object kind enforces in chat (`MemberOwnedObjects._visible` +
-        `_content_visible`): a task is visible to its creator or a workspace admin — a creatorless
-        task only to an admin — and its content, prompt and description, only to its creator, or
-        to an admin when it has no creator. Everyone else sees nothing."""
-        with bind_agent(agent_id):
-            tasks = await ScheduleStore().list()
-        visible = tuple(
-            task
-            for task in tasks
-            if viewer_is_admin
-            or (
-                task.created_by_member_id is not None
-                and task.created_by_member_id == viewer_member_id
-            )
+    def object_kind(self, kind: str) -> "PortalKind | None":
+        """What the portal's object pages render around one kind's rows, or None when this deploy
+        registers no such kind: its declared filter and order vocabulary, and the spec schema a
+        form renders its fields from, the same schema `object_explain` reports. The kind's own
+        description and guidance are the agent's tool prose and stay out of the portal."""
+        bound = self._objects.get(kind)
+        if bound is None:
+            return None
+        return PortalKind(
+            kind=kind,
+            list_fields=tuple(sorted(bound.kind.list_fields)),
+            spec_schema=self._object_schemas.get(kind),
         )
-        creators = {task.created_by_member_id for task in visible} - {None}
-        emails: dict[UUID, str] = {}
-        if creators:
-            async with workspace_tx() as connection:
-                emails = {
-                    row.id: row.email
-                    for row in await connection.execute(
-                        sa.select(tables.member.c.id, tables.member.c.email).where(
-                            tables.member.c.workspace_id == self.workspace_id,
-                            tables.member.c.id.in_(creators),
-                        )
-                    )
-                }
-
-        shaped: list[PortalTask] = []
-        for task in visible:
-            content = (
-                task.created_by_member_id is None or task.created_by_member_id == viewer_member_id
-            )
-            shaped.append(
-                PortalTask(
-                    name=task.name,
-                    schedule=task.schedule,
-                    prompt=task.prompt if content else None,
-                    description=task.description if content else None,
-                    created_by_email=(
-                        None
-                        if task.created_by_member_id is None
-                        else emails.get(task.created_by_member_id)
-                    ),
-                    paused=task.paused,
-                    next_run_at=task.next_run_at,
-                    last_run_at=task.last_run_at,
-                    expires_at=task.expires_at,
-                )
-            )
-        return tuple(shaped)
-
-    def object_spec_schema(self, kind: str) -> dict[str, Any] | None:
-        """The named object kind's spec schema, or None when this deploy registers no such kind —
-        a portal form renders its fields from the same schema `object_explain` reports, never a
-        parallel description."""
-        return self._object_schemas.get(kind)
 
     async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
         """The selected agent's loadable skills — exactly the composition a turn loads (the deploy
@@ -1651,26 +1597,49 @@ class SurfaceContext:
         )
 
     async def list_member_objects(
-        self, kind: str, member_id: UUID | None, *, admin: bool
+        self,
+        kind: str,
+        agent_id: UUID,
+        member_id: UUID,
+        *,
+        admin: bool,
+        query: "ObjectListQuery",
     ) -> "ObjectPage | None":
-        """One object kind's listing for a signed-in member — the portal's projection over the
-        deploy's registry, answering through the kind's own visibility gate (`member_page`), or
-        None when the deploy installs no such kind. Only a member-owned kind lists here; asking
-        for any other kind is a programming error, not an empty page."""
-        from ufo.objects import MemberOwnedObjects, ObjectListQuery
+        """One object kind's page for a signed-in member — the portal's index projection over the
+        deploy's registry, answering through the kind's own visibility gate (`member_page`) and
+        its own declared filter and order vocabulary, which this stamps onto the query so a
+        caller cannot widen it. None when this deploy registers no such kind, or the kind reads
+        for a member but does not list. The agent is bound here, so an agent-scoped kind reads
+        behind the same wall every portal route answers on."""
+        from ufo.objects import MemberListable
 
         bound = self._objects.get(kind)
-        if bound is None:
+        if bound is None or not isinstance(bound.kind.store, MemberListable):
             return None
-        store = bound.kind.store
-        if not isinstance(store, MemberOwnedObjects):
-            raise RuntimeError(f"object kind {kind!r} does not list for a member")
-        return await store.member_page(
-            bound.context,
-            member_id=member_id,
-            admin=admin,
-            query=ObjectListQuery(supported_fields=bound.kind.list_fields),
-        )
+        with bind_agent(agent_id):
+            return await bound.kind.store.member_page(
+                bound.context,
+                member_id=member_id,
+                admin=admin,
+                query=replace(query, supported_fields=bound.kind.list_fields),
+            )
+
+    async def member_object(
+        self, kind: str, name: str, agent_id: UUID, member_id: UUID, *, admin: bool
+    ) -> "MemberObject | None":
+        """One object as a signed-in member reads it — the portal's detail projection, answering
+        through the kind's own visibility gate (`member_detail`). None when this deploy registers
+        no such kind, the kind does not read for a member, or the member may not see that row: a
+        detail page cannot tell a hidden row from an absent one, and neither may its caller."""
+        from ufo.objects import MemberReadable
+
+        bound = self._objects.get(kind)
+        if bound is None or not isinstance(bound.kind.store, MemberReadable):
+            return None
+        with bind_agent(agent_id):
+            return await bound.kind.store.member_detail(
+                bound.context, name, member_id=member_id, admin=admin
+            )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:
         """The member-fillable declared slots with their fill state — never a value. The

@@ -243,6 +243,7 @@ test("a read whose body fails mid-stream reports the failure instead of rejectin
   await expect(getJson("/whatever")).resolves.toEqual({
     ok: false,
     message: "Network error — try again.",
+    status: 0,
   });
 });
 

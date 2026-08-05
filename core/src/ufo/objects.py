@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
-from typing import ClassVar, Literal, Protocol, get_args
+from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -416,28 +416,6 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         )
         return object_page(rows, query)
 
-    async def member_page(
-        self,
-        ext: "ExtensionContext | None",
-        *,
-        member_id: UUID | None,
-        admin: bool,
-        query: ObjectListQuery,
-    ) -> ObjectPage:
-        """The kind's listing for one signed-in member outside a turn — the portal's read
-        projection. The visibility gate is `list`'s, applied to the same rows; a kind opts in by
-        producing its rows from its extension context alone (`_member_rows`), which is also where
-        `_owned_rows` delegates so the two listings can never diverge."""
-        rows = tuple(
-            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
-            for row in await self._member_rows(ext)
-            if self._visible(row.owner, member_id, admin)
-        )
-        return object_page(rows, query)
-
-    async def _member_rows(self, ext: "ExtensionContext | None") -> tuple[OwnedRow[OwnerT], ...]:
-        raise NotImplementedError(f"{self.kind_name} rows are readable only inside a turn")
-
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(
@@ -579,6 +557,119 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         raise NotImplementedError
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: OwnerT) -> None:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class MemberObject[SpecT: BaseModel]:
+    """One object as a signed-in member reads it outside a turn: the listing row its kind's own
+    index carries — name, summary, and the scalars the kind declared in `list_fields`, which are
+    the live state a detail page renders beside the spec — and the detail its store reads."""
+
+    row: ObjectRow
+    detail: ObjectDetail[SpecT]
+
+
+@runtime_checkable
+class MemberReadable(Protocol):
+    """A kind one signed-in member reads outside a turn, through the kind's own visibility gate —
+    the portal's detail projection. Implementing this IS the opt-in: a kind that cannot answer a
+    member without a turn is simply absent from the portal's object routes, which refuse by name
+    rather than raising inside the kind. The caller binds the workspace and the agent namespace
+    before calling, so an agent-scoped kind reads behind the same wall every portal route
+    answers on."""
+
+    async def member_detail(
+        self,
+        ext: "ExtensionContext | None",
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject | None: ...
+
+
+@runtime_checkable
+class MemberListable(MemberReadable, Protocol):
+    """A member-readable kind that also answers a whole page — the portal's index projection,
+    searched, filtered, and ordered on the kind's own `list_fields`."""
+
+    async def member_page(
+        self,
+        ext: "ExtensionContext | None",
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage: ...
+
+
+@dataclass(frozen=True)
+class MemberReadableObjects[SpecT: BaseModel, OwnerT: ObjectOwner](
+    MemberOwnedObjects[SpecT, OwnerT]
+):
+    """A member-owned kind the portal reads and lists. The visibility gate is `list`'s and `get`'s,
+    applied to rows the kind produces from its extension context and the acting member alone
+    (`_member_rows`, `_member_object`) — which is where the turn-side `_owned_rows` and `_detail`
+    delegate, so the two paths cannot diverge and a kind eliding private content elides it on
+    both."""
+
+    async def member_page(
+        self,
+        ext: "ExtensionContext | None",
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        rows = tuple(
+            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
+            for row in await self._member_rows(ext, member_id=member_id)
+            if self._visible(row.owner, member_id, admin)
+        )
+        return object_page(rows, query)
+
+    async def member_detail(
+        self,
+        ext: "ExtensionContext | None",
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[SpecT] | None:
+        rows = await self._member_rows(ext, member_id=member_id)
+        found = next((row for row in rows if row.name == name), None)
+        if found is None or not self._visible(found.owner, member_id, admin):
+            return None
+        detail = await self._member_object(ext, name, found.owner, member_id=member_id)
+        if detail is None:
+            return None
+        return MemberObject(
+            row=ObjectRow(name=found.name, summary=found.summary, fields=found.fields),
+            detail=detail,
+        )
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[OwnerT], ...]:
+        return await self._member_rows(ctx.ext, member_id=ctx.acting_member_id)
+
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: OwnerT
+    ) -> ObjectDetail[SpecT] | None:
+        return await self._member_object(ctx.ext, name, owner, member_id=ctx.acting_member_id)
+
+    async def _member_rows(
+        self, ext: "ExtensionContext | None", *, member_id: UUID | None
+    ) -> tuple[OwnedRow[OwnerT], ...]:
+        raise NotImplementedError
+
+    async def _member_object(
+        self,
+        ext: "ExtensionContext | None",
+        name: str,
+        owner: OwnerT,
+        *,
+        member_id: UUID | None,
+    ) -> ObjectDetail[SpecT] | None:
         raise NotImplementedError
 
 

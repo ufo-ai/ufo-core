@@ -1,13 +1,15 @@
 import { Button } from "@/components/ui/button";
+import { ObjectPane } from "@/kernel/objects";
 import { Connections } from "@/views/Connections";
 import { Conversations } from "@/views/Conversations";
 import { Overview } from "@/views/Overview";
 import { Skills } from "@/views/Skills";
-import { Tasks } from "@/views/Tasks";
 import { AgentUsage } from "@/views/Usage";
 import { cn } from "@/lib/cn";
 import type { AgentTab } from "@/lib/route";
 import type { Agent } from "@/lib/types";
+
+const SCHEDULED_TASK_KIND = "scheduled_task";
 
 const TAB_LABELS: Record<AgentTab, string> = {
   overview: "Overview",
@@ -56,7 +58,9 @@ export function AgentPane({ agent, tab, tabs, onTab, onNewChat }: AgentPaneProps
       </div>
       <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
         {tab === "overview" ? <Overview agent={agent} /> : null}
-        {tab === "tasks" ? <Tasks agent={agent} /> : null}
+        {tab === "tasks" ? (
+          <ObjectPane key={agent.id} agentId={agent.id} kind={SCHEDULED_TASK_KIND} />
+        ) : null}
         {tab === "conversations" ? <Conversations agent={agent} /> : null}
         {tab === "connections" ? <Connections agent={agent} /> : null}
         {tab === "skills" ? <Skills agent={agent} /> : null}

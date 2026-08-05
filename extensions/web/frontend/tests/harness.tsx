@@ -127,6 +127,35 @@ export const CHAT_ROW = {
 
 export const json = (payload: unknown) => Response.json(payload);
 
+export const NO_TASKS = "No scheduled_task objects.";
+export const NO_SITES = "No site objects.";
+
+export const TASK_KIND = {
+  kind: "scheduled_task",
+  fields: ["next_run_at", "paused"],
+  spec_schema: {
+    properties: {
+      schedule: { type: "string" },
+      prompt: { type: "string" },
+      paused: { type: "boolean" },
+    },
+  },
+  applies: true,
+};
+
+export const SITE_KIND = {
+  kind: "site",
+  fields: ["conversation", "created_at", "visibility"],
+  spec_schema: {
+    properties: { visibility: { type: "string", enum: ["private", "workspace", "public"] } },
+  },
+  applies: false,
+};
+
+export function objectIndex(kind: unknown, objects: unknown[], next: string | null = null) {
+  return json({ ...(kind as object), objects, next_cursor: next });
+}
+
 export async function refusedNotice(text: string): Promise<void> {
   const notice = await screen.findByText(text);
   expect(notice.className).toContain("bg-attention");

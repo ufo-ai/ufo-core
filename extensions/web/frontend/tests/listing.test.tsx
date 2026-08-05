@@ -7,7 +7,6 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { ARTIFACTS } from "@/views/Artifacts";
-import { SITES } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
 import { App } from "@/App";
 
@@ -77,7 +76,6 @@ function cellsOf(name: string): string[] {
 }
 
 test("the declaration alone proves nothing — it is the renderer that must be pinned", () => {
-  expect(SITES.list?.primary.field).toBe("name");
   expect(SOURCES.columns?.map((column) => column.label)).toEqual([
     "source",
     "streams",
@@ -290,25 +288,6 @@ test("a row opens its detail through the context and closes back to the listing"
   expect(screen.getByText("detail of beta")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByText("detail of beta")).toBeNull();
-});
-
-test("the sites declaration binds to the payload the workspace route answers", async () => {
-  wire({
-    "/workspace/sites": () =>
-      json({ available: true, sites: [{ name: "docs", summary: "one page" }] }),
-  });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sites" />
-    </MainAgentProvider>,
-  );
-
-  const item = (await screen.findAllByRole("listitem")).find((entry) =>
-    entry.textContent?.includes("docs"),
-  );
-  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("docs");
-  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("one page");
-  expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
 test("the sources declaration projects a binding and a bare stream into one uniform table", async () => {
@@ -656,7 +635,6 @@ test("every declaration keys its rows on fields its own payload carries", () => 
     url: null,
   };
   expect(ARTIFACTS.rowKey(artifact)).toBe("2026-08-01T06:00:00|report.txt");
-  expect(SITES.rowKey({ name: "docs", summary: "one page" })).toBe("docs");
   expect(
     SOURCES.rows({
       sources: [

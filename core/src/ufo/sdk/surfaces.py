@@ -55,10 +55,10 @@ from ufo.ext.surface import (
     ListedConversation as ListedConversation,
 )
 from ufo.ext.surface import (
-    PortalSkill as PortalSkill,
+    PortalKind as PortalKind,
 )
 from ufo.ext.surface import (
-    PortalTask as PortalTask,
+    PortalSkill as PortalSkill,
 )
 from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
