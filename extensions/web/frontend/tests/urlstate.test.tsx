@@ -3,9 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { parseHash, workspaceHash } from "@/lib/route";
+import { changesHash, parseHash, workspaceHash } from "@/lib/route";
 
-import { AGENT, MEMBER, json, useStreamFake } from "./harness";
+import { AGENT, CONVO_ID, MEMBER, json, useStreamFake } from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -86,6 +86,14 @@ test("the workspace hash carries its place and parses back to it", () => {
     kind: "workspace",
     view: "artifacts",
     place: {},
+  });
+});
+
+test("the changes hash names its conversation", () => {
+  expect(parseHash(changesHash(AGENT.id, CONVO_ID))).toEqual({
+    kind: "changes",
+    agentId: AGENT.id,
+    conversationId: CONVO_ID,
   });
 });
 

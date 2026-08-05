@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -75,7 +75,7 @@ from ufo.sdk.surfaces import (
     TurnContext,
     member_message_text,
 )
-from ufo.sdk.tools import REQUESTED_BY
+from ufo.sdk.tools import FILE_CHANGE_PATH_MAX_CHARS, FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import ApplyIntent, agent_overview, reasoning_levels, submit_intent
 
@@ -99,6 +99,9 @@ MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
 CONVERSATION_LIST_LIMIT = 100
+CONVERSATION_CHANGE_LIMIT = 100
+CONVERSATION_CHANGE_PATCH_MAX_CHARS = 25_000
+CONVERSATION_CHANGES_RESPONSE_MAX_BYTES = 256_000
 CHAT_STORE_PREFIX = "chat/"
 NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
@@ -1026,7 +1029,7 @@ async def _readable_conversation(
     """The agent and conversation a content read is authorized for, or the 404 every unreadable
     case answers: an agent outside the audience, a malformed id, another agent's conversation, a
     room's, and another member's private one until an admin records a disclosure against it. One
-    gate, so the turn, subagent, and file reads below cannot disagree."""
+    gate, so content reads cannot disagree."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -1096,6 +1099,93 @@ async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
             ]
         }
     )
+
+
+class ConversationChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
+    patch: str = Field(max_length=CONVERSATION_CHANGE_PATCH_MAX_CHARS)
+    truncated: bool
+
+
+def _conversation_changes_payload(
+    changes: tuple[ConversationChange, ...], truncated: bool
+) -> dict[str, object]:
+    return {
+        "changes": [change.model_dump(mode="json") for change in changes],
+        "truncated": truncated,
+    }
+
+
+def _conversation_changes(
+    messages: tuple[Message, ...],
+) -> tuple[tuple[ConversationChange, ...], bool]:
+    changes: list[ConversationChange] = []
+    total = 0
+    accepting = True
+    encoded_bytes = len(
+        json.dumps(
+            _conversation_changes_payload((), False),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+    for message in messages:
+        if isinstance(message.content, str):
+            continue
+        for result in message.content:
+            if not isinstance(result, ToolResultBlock) or result.is_error:
+                continue
+            if not isinstance(result.content, str):
+                continue
+            try:
+                payload = json.loads(result.content)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(payload, dict) or payload.get("type") != FILE_CHANGE_RESULT_TYPE:
+                continue
+            total += 1
+            try:
+                detail = payload.get("change")
+                path = payload.get("path")
+                if not isinstance(detail, dict) or not isinstance(path, str):
+                    raise ValueError("change envelope is malformed")
+                change = ConversationChange.model_validate({**detail, "path": path})
+            except (ValidationError, ValueError):
+                continue
+            if not accepting:
+                continue
+            if len(changes) == CONVERSATION_CHANGE_LIMIT:
+                accepting = False
+                continue
+            encoded_change = json.dumps(
+                change.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+            separator_bytes = int(bool(changes))
+            if (
+                encoded_bytes + separator_bytes + len(encoded_change)
+                > CONVERSATION_CHANGES_RESPONSE_MAX_BYTES
+            ):
+                accepting = False
+                continue
+            changes.append(change)
+            encoded_bytes += separator_bytes + len(encoded_change)
+    return tuple(changes), total > len(changes)
+
+
+async def conversation_changes(ctx: SurfaceContext, request: Request) -> Response:
+    """Successful file changes in the conversation's durable execution."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    _agent_id, conversation_id = authorized
+    recorded = await ctx.read_transcript(conversation_id)
+    changes, truncated = _conversation_changes(() if recorded is None else recorded.messages)
+    compacted = bool(await ctx.list_compactions(conversation_id))
+    return JSONResponse(_conversation_changes_payload(changes, truncated or compacted))
 
 
 async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
@@ -1755,6 +1845,11 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/files",
         handler=conversation_files,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/changes",
+        handler=conversation_changes,
     ),
     SurfaceRoute(
         method="GET",

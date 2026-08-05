@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -94,6 +94,100 @@ test("a reloaded conversation keeps the activity that produced its reply", async
   await userEvent.click(summary);
   expect(screen.getByText("Running the focused tests")).toBeTruthy();
   expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+});
+
+test("a conversation opens its file changes and returns to chat", async () => {
+  wire({
+    ...transcript(),
+    ["/conversations/" + CONVO_ID + "/changes"]: () =>
+      json({
+        changes: [
+          {
+            path: "/workspace/demo.py",
+            patch: "--- before\n+++ after\n@@ -1 +1 @@\n-old demo\n+new demo",
+            truncated: false,
+          },
+          {
+            path: "/workspace/ufo/src/answer.ts",
+            patch: "--- before\n+++ after\n@@ -1 +1 @@\n-old\n+new",
+            truncated: true,
+          },
+        ],
+        truncated: true,
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
+  expect(location.hash).toBe(
+    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes",
+  );
+  expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
+  expect(screen.getByText("-old").className).toContain("bg-attention/25");
+  expect(screen.getByText("+new").className).toContain("bg-link/10");
+  expect(
+    screen.getAllByText("--- before").every((line) => !line.className.includes("bg-attention/25")),
+  ).toBe(true);
+  expect(screen.getByText("This diff is truncated.")).toBeTruthy();
+  expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
+
+  await userEvent.click(within(screen.getByRole("main")).getByRole("button", { name: AGENT.name }));
+  expect(location.hash).toBe("#/agents/" + AGENT.id);
+});
+
+test.each([
+  [200, { changes: [], truncated: false }, "No changes."],
+  [200, { changes: [], truncated: true }, "Some changes may not be shown."],
+  [404, null, "This conversation is not shared with you."],
+])("changes renders status %s", async (status, payload, message) => {
+  location.hash = "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes";
+  wire({
+    ...transcript(),
+    ["/conversations/" + CONVO_ID + "/changes"]: () =>
+      payload === null ? new Response("no", { status }) : json(payload),
+  });
+  open();
+
+  expect(await screen.findByText(message)).toBeTruthy();
+});
+
+test("changes refresh after another file result lands", async () => {
+  location.hash = "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes";
+  let loads = 0;
+  wire({
+    ...transcript(),
+    ["/conversations/" + CONVO_ID + "/changes"]: () => {
+      loads += 1;
+      return json({
+        changes:
+          loads === 1
+            ? []
+            : [{ path: "src/late.ts", patch: "+export const ready = true;", truncated: false }],
+        truncated: false,
+      });
+    },
+  });
+  open();
+
+  expect(await screen.findByText("No changes.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(await screen.findByText("src/late.ts")).toBeTruthy();
+  expect(loads).toBe(2);
+});
+
+test("a changes URL opens a conversation absent from the chat rail", async () => {
+  const child = "66666666-6666-4666-8666-666666666666";
+  location.hash = "#/agents/" + AGENT.id + "/conversations/" + child + "/changes";
+  wire({
+    ["/conversations/" + child + "/changes"]: () =>
+      json({
+        changes: [{ path: "/workspace/repo/child.py", patch: "+child\n", truncated: false }],
+        truncated: false,
+      }),
+  });
+  open();
+
+  expect(await screen.findByText("/workspace/repo/child.py")).toBeTruthy();
 });
 
 test("the composer is disabled while a turn streams and re-enabled when it lands", async () => {

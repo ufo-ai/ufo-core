@@ -571,7 +571,8 @@ an upload. The portal renders agent replies as markdown through one sanitizing c
 HTML in a reply renders as visible text, never as elements; links open in a new tab carrying
 `noopener noreferrer`; and an image renders only from the portal's own origin, so a reply can
 never direct the member's browser to fetch an attacker-chosen host. A reply the parser cannot
-handle renders as its raw text rather than failing the page. `surface_identity` and `conversation.surface`
+handle renders as its raw text rather than failing the page. A conversation's Changes view renders
+bounded file deltas from its durable tool results. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 Slack renders terminal accounting and model metadata as the reply's final context block only in
 the operator's own workspace — the one whose first member's email domain is `OPERATOR_EMAIL_DOMAIN`, the

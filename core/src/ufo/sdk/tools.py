@@ -18,6 +18,12 @@ from ufo.tools.context import (
 from ufo.tools.context import (
     ToolResult as ToolResult,
 )
+from ufo.tools.file_changes import (
+    FILE_CHANGE_PATH_MAX_CHARS as FILE_CHANGE_PATH_MAX_CHARS,
+)
+from ufo.tools.file_changes import (
+    FILE_CHANGE_RESULT_TYPE as FILE_CHANGE_RESULT_TYPE,
+)
 from ufo.tools.registry import (
     REQUESTED_BY as REQUESTED_BY,
 )

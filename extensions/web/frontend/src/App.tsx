@@ -5,6 +5,7 @@ import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
 import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
+import { ChangesPane } from "@/views/ChangesPane";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -23,6 +24,7 @@ import {
   SUBAGENT_TABS,
   agentHash,
   chatHash,
+  changesHash,
   newChatHash,
   parseHash,
   subagentHash,
@@ -91,6 +93,12 @@ export function App({ agents, subagents, member }: AppProps) {
   const openAgent = useCallback(
     (agentId: string, tab: AgentTab = "overview") =>
       go(agentHash(agentId, tab), { kind: "agent", agentId, tab }),
+    [go],
+  );
+
+  const openChanges = useCallback(
+    (agentId: string, conversationId: string) =>
+      go(changesHash(agentId, conversationId), { kind: "changes", agentId, conversationId }),
     [go],
   );
 
@@ -228,6 +236,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onCreated={created}
           onActivity={activity}
           onOpenAgent={openAgent}
+          onOpenChanges={openChanges}
           onOpenSubagent={openSubagent}
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
@@ -248,6 +257,7 @@ function Pane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onOpenChanges,
   onOpenSubagent,
   onNewChat,
   onPlaceWorkspace,
@@ -262,6 +272,7 @@ function Pane({
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+  onOpenChanges: (agentId: string, conversationId: string) => void;
   onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
@@ -307,6 +318,17 @@ function Pane({
       />
     );
   }
+  if (route.kind === "changes") {
+    const agent = agents.find((entry) => entry.id === route.agentId);
+    if (!agent) return <PaneNote>No such agent.</PaneNote>;
+    return (
+      <ChangesPane
+        agent={agent}
+        conversationId={route.conversationId}
+        onOpenAgent={onOpenAgent}
+      />
+    );
+  }
   if (route.kind === "chat") {
     const row = rail.rows.find((entry) => entry.conversation_id === route.conversationId);
     const agent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
@@ -324,6 +346,7 @@ function Pane({
         conversationId={row.conversation_id}
         onActivity={onActivity}
         onOpenAgent={onOpenAgent}
+        onOpenChanges={onOpenChanges}
       />
     );
   }
@@ -447,7 +470,10 @@ function RailList({
             {group.rows.map((row) => (
               <li key={row.conversation_id}>
                 <SidebarButton
-                  current={route.kind === "chat" && route.conversationId === row.conversation_id}
+                  current={
+                    (route.kind === "chat" || route.kind === "changes") &&
+                    route.conversationId === row.conversation_id
+                  }
                   onClick={() => onOpen(row.conversation_id)}
                 >
                   <span className="block overflow-hidden text-ellipsis whitespace-nowrap">

@@ -36,6 +36,7 @@ export type WorkspacePlace = {
 export type Route =
   | { kind: "home" }
   | { kind: "chat"; conversationId: string }
+  | { kind: "changes"; agentId: string; conversationId: string }
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab }
@@ -44,6 +45,8 @@ export type Route =
   | { kind: "admin" };
 
 const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})$/;
+const CHANGES_HASH =
+  /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/changes$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
@@ -89,6 +92,8 @@ export function parseHash(hash: string): Route {
   if (hash === "#/agents") return { kind: "agents" };
   const chat = hash.match(CHAT_HASH);
   if (chat) return { kind: "chat", conversationId: chat[1] };
+  const changes = hash.match(CHANGES_HASH);
+  if (changes) return { kind: "changes", agentId: changes[1], conversationId: changes[2] };
   const fresh = hash.match(NEW_CHAT_HASH);
   if (fresh) return { kind: "new-chat", agentId: fresh[1] };
   const workspace = hash.match(WORKSPACE_HASH);
@@ -112,6 +117,10 @@ export function parseHash(hash: string): Route {
 
 export function chatHash(conversationId: string): string {
   return "#/c/" + conversationId;
+}
+
+export function changesHash(agentId: string, conversationId: string): string {
+  return "#/agents/" + agentId + "/conversations/" + conversationId + "/changes";
 }
 
 export function newChatHash(agentId: string): string {

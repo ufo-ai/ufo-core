@@ -62,13 +62,12 @@ from ufo.tools.context import (
     ToolResult,
     UnknownSubagentProfile,
 )
+from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS, FILE_CHANGE_RESULT_TYPE
 from ufo.tools.registry import ToolDef
 
 GREP_HEAD_LIMIT = 100
-FILE_PATH_MAX_CHARS = 4_096
 FILE_PATH_JSON_MAX_CHARS = 10_000
 FILE_TOOL_RESULT_MAX_CHARS = 20_000
-FILE_CHANGE_RESULT_TYPE = "ufo.file_change"
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
 SHA256_DIGEST_PREFIX = "sha256:"
@@ -137,7 +136,7 @@ def _bounded_file_path(path: str) -> str:
 
 _FilePath = Annotated[
     str,
-    Field(max_length=FILE_PATH_MAX_CHARS),
+    Field(max_length=FILE_CHANGE_PATH_MAX_CHARS),
     AfterValidator(_bounded_file_path),
 ]
 

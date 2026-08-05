@@ -2,13 +2,14 @@ import asyncio
 import json
 import re
 import secrets
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
+import lz4.frame
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -16,6 +17,7 @@ from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from pydantic import BaseModel, ValidationError
+from starlette.responses import JSONResponse
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
@@ -102,7 +104,7 @@ from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
-from ufo.transcript import Conversation
+from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
@@ -5418,17 +5420,311 @@ async def test_the_conversations_route_serializes_who_may_be_disclosed(
     assert rows[str(own)]["disclosable"] is False
 
 
-async def test_conversation_files_ride_the_same_gate(
-    web: tuple[AsyncClient, UUID, UUID],
+def _change_result(
+    path: str,
+    patch: str,
+    *,
+    truncated: bool = False,
+) -> str:
+    return json.dumps(
+        {
+            "type": "ufo.file_change",
+            "path": f"/workspace/{path}",
+            "change": {
+                "patch": patch,
+                "truncated": truncated,
+            },
+        }
+    )
+
+
+MAX_CHANGE_PATCH_BYTES = 25_000
+
+
+def _max_change_patch(index: int) -> str:
+    prefix = str(index)
+    return prefix + "é" * ((MAX_CHANGE_PATCH_BYTES - len(prefix)) // 2)
+
+
+def _change_messages(count: int, patch: Callable[[int], str]) -> tuple[Message, ...]:
+    return (
+        Message(
+            role="user",
+            content=tuple(
+                ToolResultBlock(
+                    tool_use_id=f"write-{index}",
+                    content=_change_result(f"repo/file-{index}.py", patch(index)),
+                )
+                for index in range(count)
+            ),
+        ),
+    )
+
+
+def test_conversation_changes_reads_change_results_in_order() -> None:
+    write_change = _change_result("repo/new.py", "+print('new')\n")
+    edit_change = _change_result("repo/app.py", "-old\n+new\n", truncated=True)
+    changes, truncated = web_surface._conversation_changes(
+        (
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="reused", content=write_change),
+                    ToolResultBlock(tool_use_id="reused", content=edit_change),
+                    ToolResultBlock(tool_use_id="failed", content="not json", is_error=True),
+                ),
+            ),
+        )
+    )
+
+    write_payload = json.loads(write_change)
+    edit_payload = json.loads(edit_change)
+    assert [change.model_dump(mode="json") for change in changes] == [
+        {**write_payload["change"], "path": write_payload["path"]},
+        {**edit_payload["change"], "path": edit_payload["path"]},
+    ]
+    assert truncated is False
+
+
+def test_conversation_changes_skips_unprojectable_results() -> None:
+    current = _change_result("notes.txt", "+new\n")
+    changes, truncated = web_surface._conversation_changes(
+        (
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="plain",
+                        content=json.dumps({"path": "plain.txt", "created": True}),
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="unrelated-change",
+                        content=json.dumps({"change": 4.2}),
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="coincidental-change",
+                        content=json.dumps(
+                            {
+                                "path": "repo/fake.py",
+                                "change": {"patch": "+fake\n", "truncated": False},
+                            }
+                        ),
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="other-type",
+                        content=json.dumps(
+                            {
+                                "type": "market.quote",
+                                "path": "ABC",
+                                "change": {"patch": "+fake\n", "truncated": False},
+                            }
+                        ),
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="offloaded",
+                        content=(
+                            '{"path":"old.txt","message":"old'
+                            + "x" * 6_144
+                            + "\n…[preview only — the full 25790 chars are at "
+                            "/workspace/.tool-output/edit.txt]"
+                        ),
+                    ),
+                    ToolResultBlock(tool_use_id="current", content=current),
+                ),
+            ),
+        )
+    )
+
+    assert [change.model_dump(mode="json") for change in changes] == [
+        {
+            "path": "/workspace/notes.txt",
+            "patch": "+new\n",
+            "truncated": False,
+        }
+    ]
+    assert truncated is False
+
+
+def test_conversation_changes_bounds_the_encoded_response() -> None:
+    changes, truncated = web_surface._conversation_changes(_change_messages(20, _max_change_patch))
+    encoded = json.dumps(
+        web_surface._conversation_changes_payload(changes, truncated),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    response = JSONResponse(web_surface._conversation_changes_payload(changes, truncated))
+
+    assert response.body == encoded
+    assert len(encoded) <= web_surface.CONVERSATION_CHANGES_RESPONSE_MAX_BYTES
+    assert len(changes) == 10
+    assert [change.path for change in changes] == [
+        f"/workspace/repo/file-{index}.py" for index in range(len(changes))
+    ]
+    assert truncated is True
+
+    small_count = web_surface.CONVERSATION_CHANGE_LIMIT + 1
+    small, count_truncated = web_surface._conversation_changes(
+        _change_messages(small_count, lambda _index: "patch")
+    )
+    assert len(small) == web_surface.CONVERSATION_CHANGE_LIMIT
+    assert count_truncated is True
+
+
+def test_conversation_changes_accounts_for_exact_encoded_bytes(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The file list and one file's bytes answer only where the turns do: a member's own
-    conversation lists (empty without a live sandbox), a path escaping the workspace subtree is
-    not-found rather than read, and another member's private conversation is not-found on both
-    routes for an admin who has recorded no disclosure against it. The agent is the wall here
-    too — `_owned_conversation` scopes the
-    sandbox read to the workspace only, so a shared conversation of another agent is not-found
-    solely because this gate holds it."""
+    messages = _change_messages(2, lambda index: "é" * (index + 1))
+    expected, _truncated = web_surface._conversation_changes(messages)
+    exact = len(
+        json.dumps(
+            web_surface._conversation_changes_payload(expected, False),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+    monkeypatch.setattr(web_surface, "CONVERSATION_CHANGES_RESPONSE_MAX_BYTES", exact)
+
+    changes, truncated = web_surface._conversation_changes(messages)
+    assert changes == expected
+    assert truncated is False
+
+    monkeypatch.setattr(web_surface, "CONVERSATION_CHANGES_RESPONSE_MAX_BYTES", exact - 1)
+    bounded, bounded_truncated = web_surface._conversation_changes(messages)
+    assert bounded == expected[:1]
+    assert bounded_truncated is True
+
+
+def test_conversation_changes_marks_an_invalid_successful_change_omitted() -> None:
+    changes, truncated = web_surface._conversation_changes(
+        (
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="invalid",
+                        content=json.dumps(
+                            {
+                                "type": "ufo.file_change",
+                                "path": "repo/app.py",
+                                "change": {
+                                    "patch": "é"
+                                    * (web_surface.CONVERSATION_CHANGE_PATCH_MAX_CHARS + 1),
+                                    "truncated": False,
+                                },
+                            }
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert changes == ()
+    assert truncated is True
+
+
+def test_conversation_changes_skips_unparseable_json() -> None:
+    changes, truncated = web_surface._conversation_changes(
+        (
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="nested", content="[" * 20_000),
+                    ToolResultBlock(tool_use_id="integer", content="9" * 20_000),
+                ),
+            ),
+        )
+    )
+
+    assert changes == ()
+    assert truncated is False
+
+
+async def test_conversation_changes_stay_with_their_execution_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "member@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="coding-request",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    parent_turn_id = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound="update the application",
+    )
+    worker_conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=str(parent_turn_id),
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        worker_conversation_id,
+        agent_id,
+        seq=1,
+        inbound="edit the files",
+        parent_turn_id=parent_turn_id,
+        subagent_profile="coding",
+    )
+    await Transcript(blob=blob, conversation_id=worker_conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(
+                            tool_use_id="write-app",
+                            content=_change_result("repo/app.py", "-old\n+new\n"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    parent_response = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    worker_response = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{worker_conversation_id}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert parent_response.status_code == 200
+    assert parent_response.json() == {"changes": [], "truncated": False}
+    assert worker_response.status_code == 200
+    assert worker_response.json() == {
+        "changes": [
+            {
+                "path": "/workspace/repo/app.py",
+                "patch": "-old\n+new\n",
+                "truncated": False,
+            }
+        ],
+        "truncated": False,
+    }
+
+
+async def test_conversation_reads_ride_the_same_gate(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -5446,6 +5742,27 @@ async def test_conversation_files_ride_the_same_gate(
         audience=str(conversation_audience(member_n)),
         member_id=member_n,
     )
+    empty = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="empty",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    result = _change_result("repo/file-0.py", "-old\n+new\n")
+    await Transcript(blob=blob, conversation_id=mine).write(
+        Conversation(
+            seq=1,
+            messages=_change_messages(1, lambda _index: "-old\n+new\n"),
+        )
+    )
+    window = CompactionWindow(messages=(Message(role="user", content="before compaction"),))
+    summary = CompactionSummary(intent="edit", current_work="writing", next_step="continue")
+    for half, payload in (("before", window), ("after", window), ("summary", summary)):
+        await blob.put(
+            compaction_key(mine, 1, half),
+            lz4.frame.compress(payload.model_dump_json().encode()),
+        )
 
     listed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files",
@@ -5453,6 +5770,87 @@ async def test_conversation_files_ride_the_same_gate(
     )
     assert listed.status_code == 200
     assert listed.json() == {"files": []}
+    changes = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert changes.status_code == 200
+    change_payload = json.loads(result)
+    assert changes.json() == {
+        "changes": [{**change_payload["change"], "path": change_payload["path"]}],
+        "truncated": True,
+    }
+    no_transcript = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert no_transcript.status_code == 200
+    assert no_transcript.json() == {"changes": [], "truncated": False}
+    await Transcript(blob=blob, conversation_id=mine).write(
+        Conversation(seq=2, messages=(Message(role="user", content="continued"),))
+    )
+    compacted_without_changes = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert compacted_without_changes.status_code == 200
+    assert compacted_without_changes.json() == {"changes": [], "truncated": True}
+    for half, payload in (("before", window), ("after", window), ("summary", summary)):
+        await blob.put(
+            compaction_key(empty, 1, half),
+            lz4.frame.compress(payload.model_dump_json().encode()),
+        )
+    compacting = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert compacting.status_code == 200
+    assert compacting.json() == {"changes": [], "truncated": True}
+    await Transcript(blob=blob, conversation_id=mine).write(
+        Conversation(
+            seq=3,
+            messages=_change_messages(
+                1,
+                lambda _index: "é" * (web_surface.CONVERSATION_CHANGE_PATCH_MAX_CHARS + 1),
+            ),
+        )
+    )
+    invalid = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert invalid.status_code == 200
+    assert invalid.json() == {"changes": [], "truncated": True}
+    invalid_envelopes = (
+        json.dumps({"type": "ufo.file_change", "path": "repo/app.py"}),
+        json.dumps({"type": "ufo.file_change", "path": "repo/app.py", "change": "oops"}),
+        json.dumps(
+            {
+                "type": "ufo.file_change",
+                "path": 1,
+                "change": {"patch": "+new\n", "truncated": False},
+            }
+        ),
+    )
+    for seq, content in enumerate(invalid_envelopes, start=4):
+        call_id = f"invalid-{seq}"
+        await Transcript(blob=blob, conversation_id=mine).write(
+            Conversation(
+                seq=seq,
+                messages=(
+                    Message(
+                        role="user",
+                        content=(ToolResultBlock(tool_use_id=call_id, content=content),),
+                    ),
+                ),
+            )
+        )
+        malformed = await client.get(
+            f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+            headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+        )
+        assert malformed.status_code == 200
+        assert malformed.json() == {"changes": [], "truncated": True}
     absent = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files/brief.md",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
@@ -5465,16 +5863,12 @@ async def test_conversation_files_ride_the_same_gate(
     assert escaping.status_code == 404
 
     for token in (token_m, token_admin):
-        denied_list = await client.get(
-            f"/surface/web/agents/{agent_id}/conversations/{theirs}/files",
-            headers={"cookie": f"{SESSION_COOKIE}={token}"},
-        )
-        assert denied_list.status_code == 404
-        denied_read = await client.get(
-            f"/surface/web/agents/{agent_id}/conversations/{theirs}/files/brief.md",
-            headers={"cookie": f"{SESSION_COOKIE}={token}"},
-        )
-        assert denied_read.status_code == 404
+        for route in ("files", "changes", "files/brief.md"):
+            denied = await client.get(
+                f"/surface/web/agents/{agent_id}/conversations/{theirs}/{route}",
+                headers={"cookie": f"{SESSION_COOKIE}={token}"},
+            )
+            assert denied.status_code == 404
 
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -5492,7 +5886,7 @@ async def test_conversation_files_ride_the_same_gate(
     elsewhere = await _seed_agent_conversation(
         workspace_id, second_agent, queue_key="elsewhere", audience="shared", member_id=None
     )
-    for route in ("files", "files/brief.md"):
+    for route in ("files", "changes", "files/brief.md"):
         crossed = await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/{route}",
             headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},

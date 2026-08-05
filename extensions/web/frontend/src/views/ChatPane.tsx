@@ -1,6 +1,9 @@
 import { Chat, type ChatProps } from "@/views/Chat";
 
-export type ChatPaneProps = ChatProps & { onOpenAgent: (agentId: string) => void };
+export type ChatPaneProps = ChatProps & {
+  onOpenAgent: (agentId: string) => void;
+  onOpenChanges?: (agentId: string, conversationId: string) => void;
+};
 
 export function ChatPane({
   agent,
@@ -9,6 +12,7 @@ export function ChatPane({
   onCreated,
   onActivity,
   onOpenAgent,
+  onOpenChanges,
 }: ChatPaneProps) {
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
@@ -21,6 +25,15 @@ export function ChatPane({
           {agent.name}
         </button>
         <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
+        {conversationId && onOpenChanges ? (
+          <button
+            type="button"
+            className="ml-auto"
+            onClick={() => onOpenChanges(agent.id, conversationId)}
+          >
+            Changes
+          </button>
+        ) : null}
       </div>
       <Chat
         agent={agent}
