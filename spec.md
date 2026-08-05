@@ -591,11 +591,12 @@ who never resolved to a member, per-round park on revocation, the last seated ad
 seat), and a billing extension's tools drive grants and ask an admin to approve overage seats. The
 core-registered `workspace` kind is the shape itself as one read-only object — one instance per
 workspace, named by its id, listing both bounds beside the member and seated counts and reporting
-those with `billed_overage_seats` and a `roster` naming who holds a seat, readable by any member
-and withheld from an externally shared channel exactly as the `member` roster is. Its spec carries no
-field, because nothing it reports is authored: both bounds are the plan's, the counts are derived,
-and seating one member is the `member` kind's admin-gated apply, so create, update, and delete all
-refuse.
+those with `billed_overage_seats` and a `roster` naming who holds a seat, which follows the roster
+rule above — whole to a member asking the main agent, the speaker's own row alone to a child
+agent, and nothing at all to an externally shared channel, which reads none of this kind. Its
+spec carries no field, because nothing it reports is authored: both bounds are the plan's, the
+counts are derived, and seating one member is the `member` kind's admin-gated apply, so create,
+update, and delete all refuse.
 
 An external billing vendor is an extension draining the usage-export seam
 (`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta

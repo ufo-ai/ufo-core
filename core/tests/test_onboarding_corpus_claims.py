@@ -207,7 +207,7 @@ CLAIMS = (
             r"async def status\(\n"
             r"(?:.*\n)*?"
             r'\s+"roster": \[\n'
-            r'\s+\{"email": holder\.email, "seated": holder\.seated, "admin": holder\.admin\}'
+            r'\s+\{"email": entry\.email, "seated": entry\.seated, "admin": entry\.admin\}'
         ),
     ),
     Claim(

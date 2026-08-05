@@ -8,9 +8,9 @@ from the member rows. So the spec carries no field at all — the schema `object
 the form a caller may fill, and here there is nothing to fill — and the whole shape is status.
 Seating one member is the `member` kind's admin-gated apply; the bounds move with the plan.
 
-Status names who holds a seat, so any member reads the roster the way they always have. Reads
-answer an internal conversation only: an externally shared channel never hears the seat shape,
-exactly as the `member` kind's roster does not travel there.
+Status names who holds a seat, under the roster's own rule: a member asking the main agent in an
+internal conversation reads every colleague, and a child agent answers the speaker's own row
+alone, exactly as the `member` kind does.
 
 The loader binds it with no extension context, so the handlers read the ambient workspace
 directly."""
@@ -35,6 +35,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
+from ufo.seats import SeatEntry, Seats
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
@@ -54,16 +55,6 @@ class WorkspaceSpec(BaseModel):
 
 
 @dataclass(frozen=True)
-class SeatHolder:
-    """One member as the seat roster names them: who they are, whether the agent answers them, and
-    whether they administer the workspace."""
-
-    email: str
-    seated: bool
-    admin: bool
-
-
-@dataclass(frozen=True)
 class WorkspaceShape:
     """The one read every verb of this kind answers from: the two plan-established bounds, the
     member counts they gate, the seats billed beyond the included allowance, the roster naming who
@@ -74,7 +65,7 @@ class WorkspaceShape:
     members: int
     seated: int
     billed_overage_seats: int
-    roster: tuple[SeatHolder, ...]
+    roster: tuple[SeatEntry, ...]
     created_at: datetime
     updated_at: datetime
 
@@ -129,6 +120,7 @@ class WorkspaceObjects:
         if name != str(ws_current().workspace_id):
             return None
         shape = await self._shape()
+        whole = ctx.speaker_member_id is not None and await ctx.agent_is_main()
         return {
             "seat_limit": shape.seat_limit,
             "included_seats": shape.included_seats,
@@ -136,8 +128,9 @@ class WorkspaceObjects:
             "seated": shape.seated,
             "billed_overage_seats": shape.billed_overage_seats,
             "roster": [
-                {"email": holder.email, "seated": holder.seated, "admin": holder.admin}
-                for holder in shape.roster
+                {"email": entry.email, "seated": entry.seated, "admin": entry.admin}
+                for entry in shape.roster
+                if whole or entry.id == ctx.speaker_member_id
             ],
         }
 
@@ -167,41 +160,21 @@ class WorkspaceObjects:
             row = (
                 await connection.execute(
                     sa.select(
-                        tables.workspace.c.seat_limit,
-                        tables.workspace.c.included_seats,
                         tables.workspace.c.created_at,
                         tables.workspace.c.updated_at,
                     ).where(tables.workspace.c.id == workspace_id)
                 )
             ).one()
-            members = (
-                await connection.execute(
-                    sa.select(
-                        tables.member.c.email,
-                        tables.member.c.seated_at,
-                        tables.member.c.is_admin,
-                    )
-                    .where(tables.member.c.workspace_id == workspace_id)
-                    .order_by(tables.member.c.email)
-                )
-            ).all()
-        seated = sum(1 for member in members if member.seated_at is not None)
+            snapshot = await Seats(workspace_id).snapshot(connection)
         return WorkspaceShape(
-            seat_limit=row.seat_limit,
-            included_seats=row.included_seats,
-            members=len(members),
-            seated=seated,
+            seat_limit=snapshot.limit,
+            included_seats=snapshot.included,
+            members=len(snapshot.members),
+            seated=snapshot.seated,
             billed_overage_seats=(
-                0 if row.included_seats is None else max(0, seated - row.included_seats)
+                0 if snapshot.included is None else max(0, snapshot.seated - snapshot.included)
             ),
-            roster=tuple(
-                SeatHolder(
-                    email=member.email,
-                    seated=member.seated_at is not None,
-                    admin=member.is_admin,
-                )
-                for member in members
-            ),
+            roster=snapshot.members,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -219,7 +192,9 @@ WORKSPACE_OBJECT = ObjectKind(
         "row. Listings filter and order on `seat_limit`, `included_seats`, `members`, and "
         "`seated`; status carries those four plus `billed_overage_seats` and `roster`, which "
         "names every member with whether they hold a seat and whether they administer the "
-        "workspace. Any member may read it. A null `seat_limit` and a null `included_seats` mean "
+        "workspace. A member asking the main agent in an internal conversation reads the whole "
+        "roster; a child agent answers the speaker's own row alone. A "
+        "null `seat_limit` and a null `included_seats` mean "
         "the workspace is ungated: every member is answered and no seat is counted. "
         "`included_seats` bounds the seats handed out silently at member creation; `seat_limit` "
         "is the ceiling an admin may grant up to, and every seat past the included allowance "

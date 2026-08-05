@@ -206,7 +206,7 @@ async def _acked() -> set[tuple[UUID, int]]:
         return {(row.ledger_id, row.from_amount) for row in result.all()}
 
 
-def test_manifest_declares_four_cron_jobs_four_tools_two_sections() -> None:
+def test_manifest_declares_four_cron_jobs_three_tools_two_sections() -> None:
     declared = metronome.manifest()
     assert declared.name == "metronome"
     usage, seats, approvals, billing = declared.jobs
