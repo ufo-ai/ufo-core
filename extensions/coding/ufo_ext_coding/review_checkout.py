@@ -89,17 +89,27 @@ class ReviewGrepInput(BaseModel):
 class CodeReviewFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    path: str
+    path: str = Field(min_length=1, description="Affected repository-relative path.")
     line: int = Field(gt=0)
-    severity: Literal["P0", "P1", "P2", "P3"]
-    title: str
-    body: str
+    title: str = Field(min_length=1, description="Concise defect title.")
+    trigger: str = Field(
+        min_length=1,
+        description="Specific supported input or execution path that reaches the defect.",
+    )
+    failure: str = Field(min_length=1, description="What fails when the trigger is exercised.")
+    impact: Literal[
+        "security or workspace-boundary breach",
+        "data loss, corruption, or wrong-target mutation",
+        "production outage, deadlock, or permanently unfinished work",
+        "a required workflow cannot complete for valid input",
+        "the feature cannot function in its supported production configuration",
+        "the code fails to build or breaks required CI",
+    ]
 
 
 class CodeReviewOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    summary: str
     findings: tuple[CodeReviewFinding, ...] = ()
 
 

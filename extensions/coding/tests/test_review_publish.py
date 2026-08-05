@@ -37,14 +37,14 @@ async def test_publisher_creates_neutral_exact_head_check() -> None:
     check_id = await GitHubCheckPublisher("secret", transport=httpx.MockTransport(github)).publish(
         run,
         CodeReviewOutput(
-            summary="One defect.",
             findings=(
                 CodeReviewFinding(
                     path="core/review.py",
                     line=17,
-                    severity="P1",
                     title="Wrong comparison",
-                    body="The published SHA differs from the reviewed SHA.",
+                    trigger="Publish after the pull request head changes.",
+                    failure="The published SHA differs from the reviewed SHA.",
+                    impact="a required workflow cannot complete for valid input",
                 ),
             ),
         ),
@@ -61,7 +61,12 @@ async def test_publisher_creates_neutral_exact_head_check() -> None:
     assert body["status"] == "completed"
     assert body["conclusion"] == "neutral"
     assert body["external_id"] == str(run.run_id)
-    assert "P1 `core/review.py:17` Wrong comparison" in body["output"]["summary"]
+    assert "`core/review.py:17` Wrong comparison" in body["output"]["summary"]
+    assert "Trigger: Publish after the pull request head changes." in body["output"]["summary"]
+    assert "Failure: The published SHA differs from the reviewed SHA." in body["output"]["summary"]
+    assert (
+        "Impact: A required workflow cannot complete for valid input." in body["output"]["summary"]
+    )
     assert requests[1].headers["Authorization"] == "Bearer secret"
 
 
@@ -79,7 +84,7 @@ async def test_publisher_reconciles_existing_run_by_external_id() -> None:
         return httpx.Response(200, json={"id": 42})
 
     check_id = await GitHubCheckPublisher("secret", transport=httpx.MockTransport(github)).publish(
-        run, CodeReviewOutput(summary="Clear.")
+        run, CodeReviewOutput()
     )
 
     assert check_id == 42
@@ -88,9 +93,23 @@ async def test_publisher_reconciles_existing_run_by_external_id() -> None:
     body = json.loads(requests[1].content)
     assert body["conclusion"] == "neutral"
     assert body["external_id"] == str(run.run_id)
+    assert body["output"]["summary"] == "No critical defect found."
     assert "head_sha" not in body
 
 
 def test_check_summary_is_bounded_next_to_publication() -> None:
-    summary = render_check_summary(CodeReviewOutput(summary="x" * (CHECK_SUMMARY_MAX_CHARS + 10)))
+    summary = render_check_summary(
+        CodeReviewOutput(
+            findings=(
+                CodeReviewFinding(
+                    path="core/review.py",
+                    line=17,
+                    title="x" * (CHECK_SUMMARY_MAX_CHARS + 10),
+                    trigger="trigger",
+                    failure="failure",
+                    impact="the code fails to build or breaks required CI",
+                ),
+            )
+        )
+    )
     assert len(summary) == CHECK_SUMMARY_MAX_CHARS

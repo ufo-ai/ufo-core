@@ -59,19 +59,20 @@ class CheckRunList(BaseModel):
 
 
 def render_check_summary(review: CodeReviewOutput) -> str:
-    parts = [review.summary.strip()]
     if review.findings:
-        parts.extend(("", "Findings"))
+        parts = ["Critical defects"]
         for finding in review.findings:
             parts.extend(
                 (
                     "",
-                    f"- {finding.severity} `{finding.path}:{finding.line}` {finding.title}",
-                    f"  {finding.body}",
+                    f"- `{finding.path}:{finding.line}` {finding.title}",
+                    f"  Trigger: {finding.trigger}",
+                    f"  Failure: {finding.failure}",
+                    f"  Impact: {finding.impact[0].upper()}{finding.impact[1:]}.",
                 )
             )
     else:
-        parts.extend(("", "No findings."))
+        parts = ["No critical defect found."]
     return "\n".join(parts)[:CHECK_SUMMARY_MAX_CHARS]
 
 

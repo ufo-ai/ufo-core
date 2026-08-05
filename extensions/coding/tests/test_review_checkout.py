@@ -251,21 +251,53 @@ def test_review_candidate_has_only_checkout_and_read_tools() -> None:
     assert CODE_REVIEW_TOOL.profile_only is True
     assert CODE_REVIEW_TOOL.untrusted is True
     assert CODE_REVIEW_TOOL.side_effecting is True
+    assert CODE_REVIEW_PROFILE.output_model.model_validate(
+        {
+            "findings": [
+                {
+                    "path": "core/review.py",
+                    "line": 17,
+                    "title": "Publishes the wrong commit",
+                    "trigger": "Publish a completed review after the pull request head changes.",
+                    "failure": "The check is attached to a commit the reviewer did not inspect.",
+                    "impact": "a required workflow cannot complete for valid input",
+                }
+            ]
+        }
+    )
     with pytest.raises(ValueError):
         CODE_REVIEW_PROFILE.output_model.model_validate(
             {
-                "summary": "bad severity",
                 "findings": [
                     {
                         "path": "file.py",
                         "line": 1,
-                        "severity": "P4",
-                        "title": "invalid",
-                        "body": "invalid",
+                        "severity": "P1",
+                        "title": "Add a docstring",
+                        "body": "This public method has no docstring.",
                     }
                 ],
             }
         )
+
+
+def test_review_prompt_admits_only_merge_blocking_defects() -> None:
+    prompt = CODE_REVIEW_PROFILE.prompt
+
+    assert "concrete, reachable defects introduced by the pull request" in prompt
+    assert "Would we refuse to merge this even if fixing it were inconvenient?" in prompt
+    assert "`security or workspace-boundary breach`" in prompt
+    assert "`data loss, corruption, or wrong-target mutation`" in prompt
+    assert "`production outage, deadlock, or permanently unfinished work`" in prompt
+    assert "`a required workflow cannot complete for valid input`" in prompt
+    assert "`the feature cannot function in its supported production configuration`" in prompt
+    assert "`the code fails to build or breaks required CI`" in prompt
+    assert "Style, naming, readability, and documentation nits." in prompt
+    assert "Missing tests when no actual defect is demonstrated." in prompt
+    assert "P0" not in prompt
+    assert "P1" not in prompt
+    assert "P2" not in prompt
+    assert "P3" not in prompt
 
 
 async def test_review_file_tools_are_text_only_and_bound_to_this_turn(
