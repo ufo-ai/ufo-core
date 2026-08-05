@@ -4,13 +4,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo import accounting
 from ufo.accounting import (
     MEMBER_SCOPE,
+    TOKENS_DIMENSION,
     SpendRollup,
+    TurnCost,
     read_turn_cost,
     record_egress_request,
     record_sandbox_tokens,
@@ -30,7 +33,7 @@ from ufo.models.pricing import (
 )
 from ufo.models.registry import model_registry
 from ufo.schema import tables
-from ufo.schema.records import Usage
+from ufo.schema.records import Usage, ledger_id_for
 
 FULL_USAGE = Usage(
     input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
@@ -113,7 +116,7 @@ async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "gpt-4o", FULL_USAGE)
     async with workspace_tx() as connection:
-        cost = await read_turn_cost(connection, turn_id)
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
         stamped = (
             await connection.execute(
                 sa.select(tables.ledger.c.price_digest).where(
@@ -122,7 +125,7 @@ async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
                 )
             )
         ).scalar_one()
-    assert cost == (10_000, 0, "gpt-4o")
+    assert cost == TurnCost(tokens=10_000, micro_usd=0, model="gpt-4o", cache_percent=38)
     assert stamped == PRICE_DIGEST
 
 
@@ -199,8 +202,60 @@ async def test_record_then_read_back(db: None) -> None:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
     async with workspace_tx() as connection:
-        cost = await read_turn_cost(connection, turn_id)
-    assert cost == (10_000, 96_500, "claude-opus-4-8")
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+    assert cost == TurnCost(
+        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+    )
+
+
+async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> None:
+    """A turn parked mid-run and resumed bills each partial burn under its own attempt, so the read
+    totals every field across those rows: tokens, cost and both halves of the prompt split sum, and
+    the cache share is the cached part of the whole prompt rather than of whichever attempt ran
+    last."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        for attempt, usage in (
+            (
+                "parked-run",
+                Usage(
+                    input_tokens=300,
+                    output_tokens=100,
+                    cache_read_tokens=600,
+                    cache_write_tokens=100,
+                ),
+            ),
+            ("resumed-run", Usage(input_tokens=200, output_tokens=100, cache_read_tokens=800)),
+        ):
+            await record_turn_usage(
+                connection, workspace_id, turn_id, "claude-opus-4-8", usage, attempt
+            )
+    async with workspace_tx() as connection:
+        billed = sa.select(
+            sa.func.sum(tables.ledger.c.amount),
+            sa.func.sum(tables.ledger.c.priced_micro_usd),
+            sa.func.sum(tables.ledger.c.prompt_tokens),
+            sa.func.sum(tables.ledger.c.cache_read_tokens),
+        ).where(
+            (tables.ledger.c.turn_id == turn_id) & (tables.ledger.c.dimension == TOKENS_DIMENSION)
+        )
+        totals = (await connection.execute(billed)).one()
+        ids = set(
+            (
+                await connection.execute(
+                    sa.select(tables.ledger.c.id).where(tables.ledger.c.turn_id == turn_id)
+                )
+            ).scalars()
+        )
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+    assert ids == {
+        ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
+        for attempt in ("parked-run", "resumed-run")
+    }
+    assert tuple(int(total) for total in totals) == (2_200, 9_200, 2_000, 1_400)
+    assert cost == TurnCost(
+        tokens=2_200, micro_usd=9_200, model="claude-opus-4-8", cache_percent=70
+    )
 
 
 async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
@@ -249,7 +304,7 @@ async def test_zero_usage_writes_nothing(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", Usage())
-        assert await read_turn_cost(connection, turn_id) is None
+        assert await read_turn_cost(connection, turn_id, TOKENS_DIMENSION) is None
 
 
 async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
@@ -278,14 +333,16 @@ async def test_egress_never_double_counts_the_token_cost(db: None) -> None:
         await record_egress_request(connection, workspace_id, turn_id)
         await record_egress_request(connection, workspace_id, turn_id)
     async with workspace_tx() as connection:
-        cost = await read_turn_cost(connection, turn_id)
-    assert cost == (10_000, 96_500, "claude-opus-4-8")
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+    assert cost == TurnCost(
+        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+    )
 
 
 async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) -> None:
     """An in-sandbox model call metered under `sandbox_tokens` and the host loop's terminal `tokens`
-    bill for one turn are two rows with distinct ids; read_turn_cost bills only `tokens`, so the
-    sandbox meter is additive, never a double-count of the host burn."""
+    bill for one turn are two rows with distinct ids, and a read that names `tokens` sees only the
+    host row, so the sandbox meter is additive, never a double-count of the host burn."""
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
@@ -306,7 +363,7 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
                 .order_by(tables.ledger.c.dimension)
             )
         ).all()
-        cost = await read_turn_cost(connection, turn_id)
+        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
     assert {
         row.dimension: (int(row.amount), int(row.priced_micro_usd), row.price_digest)
         for row in rows
@@ -315,7 +372,19 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
         "tokens": (10_000, 96_500, PRICE_DIGEST),
     }
     assert len({row.id for row in rows}) == 2
-    assert cost == (10_000, 96_500, "claude-opus-4-8")
+    assert cost == TurnCost(
+        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+    )
+
+
+async def test_a_turn_cost_read_has_to_name_the_spend_it_reads(db: None) -> None:
+    """One turn can carry spend under more than one dimension, so no default is right for every
+    reader: a caller that names none is refused at the call site rather than reading whichever one
+    the signature happened to prefer."""
+    async with workspace_tx() as connection:
+        _workspace_id, turn_id = await _seed_turn(connection)
+        with pytest.raises(TypeError, match="dimension"):
+            await read_turn_cost(connection, turn_id)  # type: ignore[call-arg]
 
 
 async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:

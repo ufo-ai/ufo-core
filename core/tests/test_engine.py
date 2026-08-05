@@ -272,6 +272,16 @@ class CachedModel:
 
 
 @dataclass(frozen=True)
+class UnbilledModel:
+    """Stands in for a round whose reported usage is all zeros, so it writes no ledger row and the
+    terminal has only whatever the ledger already holds to read."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="answer")
+        yield Usage()
+
+
+@dataclass(frozen=True)
 class CancelRacingModel:
     """Stands in for the model while the cancel endpoint wins the race mid-round."""
 
@@ -2536,6 +2546,47 @@ async def test_terminal_records_cached_share_of_prompt_tokens(db: None, tmp_path
             )
         ).scalar_one()
     assert TerminalFrame.model_validate(stored).cache_percent == 57
+
+
+async def test_terminal_reports_a_zero_cache_share_when_a_row_accounts_no_prompt(
+    db: None, tmp_path: Path
+) -> None:
+    """The terminal reads all four spend fields off the turn's ledger rows, and a `tokens` row that
+    accounts no prompt yields a zero cache share: tokens, cost and model still describe the burn,
+    and the cache share reports nothing cached rather than dividing by a prompt no row accounts
+    for."""
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                turn_id=turn.id,
+                dimension="tokens",
+                amount=1_200,
+                priced_micro_usd=9_500,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    frame = await _engine(turn, UnbilledModel(), tmp_path).run()
+    assert frame is not None
+    assert (frame.tokens, frame.cost_micro_usd, frame.model) == (1_200, 9_500, "claude-opus-4-8")
+    assert frame.cache_percent == 0
+
+
+async def test_terminal_reports_no_spend_when_the_turn_billed_nothing(
+    db: None, tmp_path: Path
+) -> None:
+    """A turn whose rounds burned nothing writes no ledger row, so the read finds no spend and the
+    frame says so: no tokens, no cost, no cache share, and neither a model nor a reasoning effort to
+    attribute a burn the ledger has no account of."""
+    turn = await _seed_turn("queued", None)
+    frame = await _engine(turn, UnbilledModel(), tmp_path).run()
+    assert frame is not None
+    assert (frame.tokens, frame.cost_micro_usd, frame.cache_percent) == (0, 0, 0)
+    assert (frame.model, frame.reasoning) == ("", None)
 
 
 async def test_already_terminal_turn_republishes_without_clobbering_transcript(

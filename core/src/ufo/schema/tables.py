@@ -242,6 +242,8 @@ ledger = sa.Table(
     sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id"), nullable=True),
     sa.Column("dimension", sa.Text, nullable=False),
     sa.Column("amount", sa.BigInteger, nullable=False),
+    sa.Column("prompt_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("cache_read_tokens", sa.BigInteger, nullable=False, server_default=sa.text("0")),
     sa.Column("priced_micro_usd", sa.BigInteger, nullable=False),
     sa.Column("model", sa.Text, nullable=False),
     sa.Column("price_digest", sa.Text, nullable=True),

@@ -62,6 +62,21 @@ def _note_absent_caps(key: tuple[UUID, UUID | None, UUID]) -> None:
     _no_applicable_caps[key] = now + CAP_PRESENCE_TTL_SECONDS
 
 
+def _total_tokens(usage: Usage) -> int:
+    return (
+        usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_tokens
+    )
+
+
+def _prompt_tokens(usage: Usage) -> int:
+    """The tokens the provider read to answer, cached or not — the denominator of the cache share a
+    terminal frame renders."""
+    return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+
+
 async def record_turn_usage(
     connection: AsyncConnection,
     workspace_id: UUID,
@@ -74,13 +89,12 @@ async def record_turn_usage(
     """One billing write per turn per run attempt; select-then-insert is replay-safe because DBOS
     re-executes a given attempt sequentially, never concurrently with itself. A turn parked mid-run
     and resumed spends under a fresh attempt (workflow id), so each partial burn is billed once and
-    the ledger reflects the true total the provider charged — never a lost burn, never a double."""
-    total = (
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-    )
+    the ledger reflects the true total the provider charged — never a lost burn, never a double.
+
+    The row carries the burn's prompt split beside its total, so a terminal frame's cache share is a
+    read of the same row the tokens, cost and model come off rather than a second account of the
+    same spend."""
+    total = _total_tokens(usage)
     if total == 0:
         return
     ledger_id = ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
@@ -96,6 +110,8 @@ async def record_turn_usage(
             turn_id=turn_id,
             dimension=TOKENS_DIMENSION,
             amount=total,
+            prompt_tokens=_prompt_tokens(usage),
+            cache_read_tokens=usage.cache_read_tokens,
             priced_micro_usd=pricing.micro_usd(model, usage),
             model=model,
             price_digest=pricing.digest,
@@ -105,25 +121,48 @@ async def record_turn_usage(
     )
 
 
-async def read_turn_cost(connection: AsyncConnection, turn_id: UUID) -> tuple[int, int, str] | None:
-    """The billed tokens, micro-USD, and model for a turn, summed across its run attempts; None when
-    nothing was billed. A parked-then-resumed turn has one ledger row per attempt, so the terminal
-    cost is their total — the true provider charge."""
+@dataclass(frozen=True, slots=True)
+class TurnCost:
+    """What a turn spent under one ledger dimension: the billed tokens, their micro-USD, the model
+    that burned them, and the share of the prompt that was served from cache."""
+
+    tokens: int
+    micro_usd: int
+    model: str
+    cache_percent: int
+
+
+async def read_turn_cost(
+    connection: AsyncConnection, turn_id: UUID, dimension: str
+) -> TurnCost | None:
+    """What a turn spent, summed across its run attempts; None when nothing was billed. A
+    parked-then-resumed turn has one ledger row per attempt, so the terminal cost is their total —
+    the true provider charge — and the cache share is the cached part of the whole prompt, computed
+    from the split those same rows carry rather than from any in-memory account of the burn.
+
+    `dimension` names which of the turn's spends that is: ufo's own rounds bill `tokens` host-side,
+    while a loop that makes its model calls from inside the sandbox has them metered onto the same
+    turn by the egress proxy under `sandbox_tokens`."""
     row = (
         await connection.execute(
             sa.select(
                 sa.func.sum(tables.ledger.c.amount),
                 sa.func.sum(tables.ledger.c.priced_micro_usd),
                 sa.func.max(tables.ledger.c.model),
-            ).where(
-                (tables.ledger.c.turn_id == turn_id)
-                & (tables.ledger.c.dimension == TOKENS_DIMENSION)
-            )
+                sa.func.sum(tables.ledger.c.prompt_tokens),
+                sa.func.sum(tables.ledger.c.cache_read_tokens),
+            ).where((tables.ledger.c.turn_id == turn_id) & (tables.ledger.c.dimension == dimension))
         )
     ).one()
     if row[0] is None:
         return None
-    return int(row[0]), int(row[1]), row[2]
+    prompt_tokens, cache_read_tokens = int(row[3]), int(row[4])
+    return TurnCost(
+        tokens=int(row[0]),
+        micro_usd=int(row[1]),
+        model=row[2],
+        cache_percent=round(100 * cache_read_tokens / prompt_tokens) if prompt_tokens else 0,
+    )
 
 
 async def record_workspace_usage(
@@ -141,12 +180,7 @@ async def record_workspace_usage(
     workspace spend total and every workspace-scoped cap window (which sum by `workspace_id`), and
     is excluded from per-member and per-agent attribution (which join through `turn` — a NULL FK
     drops out), because a job's spend belongs to no member or agent."""
-    total = (
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-    )
+    total = _total_tokens(usage)
     if total == 0:
         return
     await connection.execute(
@@ -156,6 +190,8 @@ async def record_workspace_usage(
             turn_id=None,
             dimension=TOKENS_DIMENSION,
             amount=total,
+            prompt_tokens=_prompt_tokens(usage),
+            cache_read_tokens=usage.cache_read_tokens,
             priced_micro_usd=pricing.micro_usd(model, usage),
             model=model,
             price_digest=pricing.digest,
@@ -215,12 +251,7 @@ async def record_sandbox_tokens(
     rate and sandbox rows reconcile with turn rows by digest. Keyed with an empty attempt under a
     dimension distinct from `tokens`, so its id can never collide with the host row
     `record_turn_usage` writes for the same turn."""
-    total = (
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-    )
+    total = _total_tokens(usage)
     if total == 0:
         return
     priced = pricing.micro_usd(model, usage)

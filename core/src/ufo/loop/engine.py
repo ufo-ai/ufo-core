@@ -30,7 +30,9 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.accounting import (
     ALLOW,
+    TOKENS_DIMENSION,
     SpendEvaluator,
+    TurnCost,
     applicable_caps_absent,
     read_turn_cost,
     record_turn_usage,
@@ -169,6 +171,7 @@ SandboxFor = Callable[[UUID | None], Awaitable[SandboxSession]]
 SubagentsFor = Callable[[UUID | None], tuple[Spawn, SubagentControl | None]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
+_NOTHING_SPENT = TurnCost(tokens=0, micro_usd=0, model="", cache_percent=0)
 
 
 async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
@@ -2256,9 +2259,8 @@ class TurnEngine:
                 self.attempt,
                 pricing=self.pricing,
             )
-            cost = await read_turn_cost(connection, self.turn.id)
-            tokens, micro_usd, model = cost if cost is not None else (0, 0, "")
-            prompt_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+            cost = await read_turn_cost(connection, self.turn.id, TOKENS_DIMENSION)
+            spend = cost if cost is not None else _NOTHING_SPENT
             match error:
                 case None:
                     error_class = error_message = None
@@ -2277,13 +2279,11 @@ class TurnEngine:
                     if error_message is not None
                     else None
                 ),
-                tokens=tokens,
-                cost_micro_usd=micro_usd,
-                cache_percent=(
-                    round(100 * usage.cache_read_tokens / prompt_tokens) if prompt_tokens else 0
-                ),
-                model=model,
-                reasoning=self.agent.reasoning if model else None,
+                tokens=spend.tokens,
+                cost_micro_usd=spend.micro_usd,
+                cache_percent=spend.cache_percent,
+                model=spend.model,
+                reasoning=self.agent.reasoning if spend.model else None,
                 question=question,
                 credential_request=credential_request,
                 connect_request=connect_request,
