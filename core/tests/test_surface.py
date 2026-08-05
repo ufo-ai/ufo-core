@@ -1137,7 +1137,7 @@ def test_ingress_url_addresses_the_site_the_ingress_resolves(
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
     workspace_id, conversation_id = uuid4(), uuid4()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    url = context.ingress_url(conversation_id, 8000)
+    url = context.ingress_url(conversation_id, 8000, "/")
     assert url is not None
     base = urlsplit(url)
     label, _, host = base.netloc.partition(".")
@@ -1170,7 +1170,7 @@ def test_ingress_url_mints_the_configured_ttl_and_keeps_the_bases_port(
         _ingress_public_url="https://sites.example.test:8443",
     )
     before = int(datetime.now(UTC).timestamp())
-    url = context.ingress_url(conversation_id, 8000)
+    url = context.ingress_url(conversation_id, 8000, "/")
     assert url is not None
     base = urlsplit(url)
     assert base.netloc.endswith(".sites.example.test:8443")
@@ -1181,11 +1181,31 @@ def test_ingress_url_mints_the_configured_ttl_and_keeps_the_bases_port(
     assert claims.expires_at - before == pytest.approx(INGRESS_VIEW_TTL_SECONDS, abs=2)
 
 
+def test_ingress_url_carries_the_entry_path_the_frame_asked_for(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry path rides after the token, where the ingress reads it as where to land the session
+    it binds — the site's own paths are reachable no other way from outside. The root appends
+    nothing, so the common link keeps the shape it always had, and a path is quoted rather than
+    trusted, so a space cannot split the URL. The token stays parseable either way: `sign_token`
+    emits `base64url.base64url`, so the first `/` after it is always the boundary."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
+    workspace_id, conversation_id = uuid4(), uuid4()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    rooted = urlsplit(context.ingress_url(conversation_id, 8000, "/") or "").path
+    assert not rooted.endswith("/")
+    deep = urlsplit(context.ingress_url(conversation_id, 8000, "/send/a b") or "").path
+    assert deep.endswith("/send/a%20b")
+    token, _, entry = deep.removeprefix(f"{INGRESS_VIEW_PATH}/").partition("/")
+    assert entry == "send/a%20b"
+    assert verify_ingress_token(token, datetime.now(UTC), INGRESS_VIEW_KIND).port == 8000
+
+
 def test_ingress_url_is_none_without_a_configured_base(tmp_path) -> None:
     """A deploy that serves no sandbox port has no address to mint against, so the surface names no
     site rather than inventing a hostname."""
     context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert replace(context, _ingress_public_url=None).ingress_url(uuid4(), 8000) is None
+    assert replace(context, _ingress_public_url=None).ingress_url(uuid4(), 8000, "/") is None
 
 
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:

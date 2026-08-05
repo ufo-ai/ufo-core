@@ -68,7 +68,7 @@ async def _must_not_run(_ctx: SurfaceContext, _request: Request) -> Response:
 
 
 async def _mint_site_link(ctx: SurfaceContext, request: Request) -> Response:
-    return Response(ctx.ingress_url(SITE_CONVERSATION, SITE_PORT) or "")
+    return Response(ctx.ingress_url(SITE_CONVERSATION, SITE_PORT, "/") or "")
 
 
 def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:

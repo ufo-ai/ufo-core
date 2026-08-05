@@ -50,6 +50,7 @@ CONVERSATION_CLAIM = "conversation"
 NAME_CLAIM = "name"
 CSRF_CLAIM = "csrf"
 TOKEN_PARAM = "site_token"
+PATH_PARAM = "site_path"
 VISIBILITY_FIELD = "visibility"
 CSRF_FIELD = "csrf"
 HOSTING_UNCONFIGURED = (
@@ -140,7 +141,12 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
 
 
 async def frame(ctx: SurfaceContext, request: Request) -> Response:
-    """Render one site: verify, resolve, authenticate, gate, embed."""
+    """Render one site: verify, resolve, authenticate, gate, embed.
+
+    Whatever trails the token is the site path to open at, so a member can be handed a link to one
+    page of a site rather than only its front door — the site's own paths live at the embedded
+    origin and are reachable from outside no other way. The gate is the site's either way: a deep
+    link proves no more than the bare one, and both pass through the same visibility check."""
     site = await _resolve(ctx, request)
     if site is None:
         return _not_found()
@@ -149,13 +155,16 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
         return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE))
     if site.visibility == "private" and viewer != site.creator_member_id:
         return _not_found()
-    embedded = ctx.ingress_url(site.conversation_id, site.port)
+    embedded = ctx.ingress_url(
+        site.conversation_id, site.port, f"/{request.path_params.get(PATH_PARAM, '')}"
+    )
     csrf = (
         mint_surface_token(SURFACE_SITES, {CSRF_CLAIM: _session_digest(request)})
         if viewer is not None and viewer == site.creator_member_id
         else ""
     )
-    return HTMLResponse(_frame_page(site, embedded, request.url.path, csrf))
+    frame_path = f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}"
+    return HTMLResponse(_frame_page(site, embedded, frame_path, csrf))
 
 
 async def set_visibility(ctx: SurfaceContext, request: Request) -> Response:
@@ -236,7 +245,11 @@ def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: s
     origin onto something wearing its face. The flags kept are the ones the site is promised —
     scripts, its own origin's storage, forms, popups, modals, downloads, pointer lock — with
     fullscreen granted through `allow`. A deploy with no ingress configured has no origin to embed,
-    so the frame says that instead of framing nothing."""
+    so the frame says that instead of framing nothing.
+
+    `frame_path` is the token's own address rather than the address this request arrived at: the
+    selector posts to `<frame_path>/visibility`, and a deep link's path would otherwise trail into
+    that action and name a route no method serves."""
     control = (
         _selector(site.visibility, frame_path, csrf)
         if csrf
@@ -292,6 +305,7 @@ SITES_SURFACE = SurfaceSpec(
     routes=(
         SurfaceRoute(method="GET", path=f"{{{TOKEN_PARAM}}}", handler=frame),
         SurfaceRoute(method="POST", path=f"{{{TOKEN_PARAM}}}/visibility", handler=set_visibility),
+        SurfaceRoute(method="GET", path=f"{{{TOKEN_PARAM}}}/{{{PATH_PARAM}:path}}", handler=frame),
     ),
     identify=resolve_workspace,
 )

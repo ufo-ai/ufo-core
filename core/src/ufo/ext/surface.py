@@ -37,7 +37,7 @@ from datetime import UTC, datetime, timedelta
 from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -903,14 +903,21 @@ class SurfaceContext:
         )
         return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
 
-    def ingress_url(self, conversation_id: UUID, port: int) -> str | None:
-        """The URL that opens one conversation's sandbox port in a browser, or None when the ingress
-        is unconfigured (no `[sandbox] ingress_public_url`) — the surface then serves no site. The
-        port gets its own signed origin, and the view token the ingress trades for that origin's
-        session cookie. The origin is stable per `(conversation, port)`, so a bookmark and the
-        site's stored state survive a redeploy, while the token expires, so a leaked URL stops
-        opening new sessions. Mints the view token the ingress verifies — never a session token,
-        the other kind — so no surface holds the deploy secret or a credential a site accepts."""
+    def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None:
+        """The URL that opens one conversation's sandbox port in a browser at `entry_path`, or None
+        when the ingress is unconfigured (no `[sandbox] ingress_public_url`) — the surface then
+        serves no site. The port gets its own signed origin, and the view token the ingress trades
+        for that origin's session cookie. The origin is stable per `(conversation, port)`, so a
+        bookmark and the site's stored state survive a redeploy, while the token expires, so a
+        leaked URL stops opening new sessions. Mints the view token the ingress verifies — never a
+        session token, the other kind — so no surface holds the deploy secret or a credential a site
+        accepts.
+
+        `entry_path` is site-rooted and rides after the token, which the ingress can still read off
+        because `sign_token` emits `base64url.base64url` and neither half holds a `/`. The root
+        appends nothing, so the link a site is ordinarily handed out as keeps its shape. It is
+        quoted rather than trusted: this caller decodes it out of its own URL, so re-encoding is
+        what round-trips a space or a literal `?` in a filename instead of splitting the URL."""
         if not self._ingress_public_url:
             return None
         base = urlsplit(self._ingress_public_url)
@@ -924,7 +931,8 @@ class SurfaceContext:
             INGRESS_VIEW_KIND,
         )
         label = site_label(conversation_id, port)
-        return f"{base.scheme}://{label}.{base.netloc}{INGRESS_VIEW_PATH}/{token}"
+        entry = "" if entry_path == "/" else quote(entry_path, safe="/")
+        return f"{base.scheme}://{label}.{base.netloc}{INGRESS_VIEW_PATH}/{token}{entry}"
 
     async def _identity_member(self, surface: str, external_id: str) -> UUID | None:
         """The member a surface's external id is linked to, or None. `linked_member` reads this

@@ -799,6 +799,41 @@ async def test_flipping_to_workspace_opens_the_frame_for_another_member(
     assert "<select name=visibility>" not in shared.text
 
 
+async def test_a_deep_link_frames_the_site_at_that_path(deployment: Deployment) -> None:
+    """A site's own paths live at the embedded origin, behind a view token minted per render, so a
+    path appended to the frame link was the one spelling that could not work — it named a route the
+    surface does not serve and answered 404 while the page sat there reachable. It now opens the
+    site where it points: the path rides after the view token, and the ingress lands the session it
+    binds there instead of at `/`.
+
+    The selector goes on posting to the token's own address. Built from the request path it would
+    trail the deep path into the action and post to a route no method serves, so a creator opening
+    their own site one page in would lose the control the bare link gives them."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
+
+    deep = await client.get(f"{link}/send", headers=_cookie(creator_token))
+    assert deep.status_code == 200
+    embedded = _embedded(deep.text)
+    assert embedded.endswith("/send")
+    view = verify_ingress_token(
+        embedded.rpartition(f"{INGRESS_VIEW_PATH}/")[2].partition("/")[0],
+        datetime.now(UTC),
+        INGRESS_VIEW_KIND,
+    )
+    assert (view.conversation_id, view.port) == (conversation_id, APP_SERVE_PORT)
+
+    flipped = await client.post(
+        f"{link}/visibility",
+        data={"visibility": "public", "csrf": _csrf(deep.text)},
+        headers=_cookie(creator_token),
+    )
+    assert flipped.status_code == 303
+
+
 async def test_the_visibility_post_refuses_a_non_creator_and_a_missing_csrf(
     deployment: Deployment,
 ) -> None:

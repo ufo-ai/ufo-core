@@ -258,10 +258,17 @@ class IngressServe:
         `lax` because arrival is a navigation in from the app host — a different origin, but one
         registrable domain, so the cookie counts as same-site and is sent both on the way in and on
         every request the embedded site makes afterwards. `none` is what a frame across two
-        registrable domains would need, and is not what this is."""
+        registrable domains would need, and is not what this is.
+
+        Whatever follows the token is where the bound session lands, so a frame can open a site at
+        one of its own paths rather than only at its root — the site's paths are reachable no other
+        way from outside. The boundary is the first `/` after the token, which is unambiguous
+        because `sign_token` emits `base64url.base64url` and neither half can hold one. The entry
+        path is not signed: it grants nothing the session does not, since the catch-all proxies
+        every path once the cookie is bound."""
         if request.method not in VIEW_METHODS:
             return Response(status_code=405, headers={"allow": ", ".join(VIEW_METHODS)})
-        view_token = view_path
+        view_token, _, entry_path = view_path.partition("/")
         site = self._site(request)
         if site is None:
             return Response(NO_SITE_HERE, status_code=404, media_type="text/plain")
@@ -272,11 +279,15 @@ class IngressServe:
             return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
         if (claims.conversation_id, claims.port) != site:
             return Response(WRONG_SITE, status_code=403, media_type="text/plain")
+        if entry_path.startswith("/"):
+            return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
         session = mint_ingress_token(
             replace(claims, expires_at=int(now.timestamp()) + INGRESS_SESSION_TTL_SECONDS),
             INGRESS_SESSION_KIND,
         )
-        response = RedirectResponse("/", status_code=303)
+        response = RedirectResponse(
+            f"/{quote(entry_path, safe=PATH_SAFE_CHARACTERS)}", status_code=303
+        )
         set_session_cookie(response, INGRESS_SESSION_COOKIE, session, samesite="lax")
         return response
 

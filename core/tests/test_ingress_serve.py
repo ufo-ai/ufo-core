@@ -369,6 +369,44 @@ async def test_the_view_token_binds_a_session_and_redirects_to_the_site_root(db,
     assert "samesite=lax" in cookie.lower()
 
 
+async def test_the_view_token_lands_the_viewer_on_the_path_the_frame_named(db, ingress) -> None:
+    """A site's own paths are reachable only through the frame, so entering one is the frame's to
+    ask for: whatever follows the token is where the bound session lands. The token cannot swallow
+    it — `sign_token` emits `base64url.base64url`, so the first `/` after the token is always the
+    boundary. Nothing here is signed beyond the token itself, because the entry path grants nothing
+    the session does not: once the cookie is bound the catch-all proxies every path anyway."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    token = _token(workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}{INGRESS_VIEW_PATH}/{token}/send")
+    assert got.status_code == 303
+    assert got.headers["location"] == "/send"
+    assert got.headers["set-cookie"].startswith(f"{INGRESS_SESSION_COOKIE}=")
+
+
+async def test_an_entry_path_cannot_send_the_viewer_off_this_origin(db, ingress) -> None:
+    """`//evil.test` in a `Location` is a protocol-relative URL, not a path — the one entry the
+    quoting cannot neutralise, since `/` has to stay a path separator. A second leading slash is
+    refused outright rather than folded to one: this redirect exists to enter a site, and a link
+    naming somewhere else is not a link into a site.
+
+    The rest is encoded rather than trusted. A `?` is quoted, so a deep link names a file called
+    `a?b` instead of splitting into a query the site never sees. A CRLF never arrives at all: the
+    route's `:path` converter is `.*`, which does not span a newline, so the request matches neither
+    this route nor the catch-all and is refused before any handler runs."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    token = _token(workspace_id, conversation_id)
+    origin = _origin(conversation_id)
+    escaped = await ingress.get(f"{origin}{INGRESS_VIEW_PATH}/{token}//evil.test")
+    assert escaped.status_code == 403
+    assert escaped.text == LINK_NOT_VALID
+    quoted = await ingress.get(f"{origin}{INGRESS_VIEW_PATH}/{token}/a%3Fb")
+    assert quoted.status_code == 303
+    assert quoted.headers["location"] == "/a%3Fb"
+    injected = await ingress.get(f"{origin}{INGRESS_VIEW_PATH}/{token}/a%0d%0aX-Evil:%20yes")
+    assert injected.status_code == 404
+    assert "x-evil" not in injected.headers
+
+
 async def test_a_request_without_a_session_is_403_and_says_how_to_get_back_in(db, ingress) -> None:
     """The label is an address, not an authorization: knowing a site's origin gets a viewer nothing
     until the frame has traded a view token for that origin's session. A bookmark opened after the
@@ -745,15 +783,21 @@ async def test_no_path_under_the_view_prefix_reaches_the_sandbox(db, ingress) ->
     """The view path claims everything under itself, not one segment of it. A single-segment capture
     left every deeper path to the catch-all, which forwards its path to the origin — so
     `GET /~t/{token}/anything` handed agent-authored code a token good for fresh sessions until it
-    expires. A deeper path is no longer proxied and is not a valid view link either, so it stops at
-    the ingress; the bare view path, which carries no token, stops there too. What it does not claim
-    is a *name* that merely starts the same way — see
+    expires. Everything under the prefix is still the ingress's own: a deeper path is read as the
+    entry path the frame named and answered with a redirect, and the request the origin then serves
+    carries the path alone. The bare view path, which names no token, stops here too. What the
+    prefix does not claim is a *name* that merely starts the same way — see
     `test_a_site_path_merely_starting_with_the_view_prefix_is_served`."""
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
-    await _open(ingress, workspace_id, conversation_id)
     token = _token(workspace_id, conversation_id)
     origin = _origin(conversation_id)
-    for suffix in (f"/{token}/extra", f"/{token}/a/b", f"/{token}/../assets/app.js", "/", ""):
+    entered = await ingress.get(f"{origin}{INGRESS_VIEW_PATH}/{token}/a/b")
+    assert entered.status_code == 303
+    assert entered.headers["location"] == "/a/b"
+    served = await ingress.get(f"{origin}/a/b")
+    assert served.json()["path"] == "/a/b"
+    assert token not in served.json()["path"]
+    for suffix in ("/", ""):
         got = await ingress.get(f"{origin}{INGRESS_VIEW_PATH}{suffix}", follow_redirects=False)
         assert got.status_code == 403, suffix
         assert got.text == LINK_NOT_VALID
