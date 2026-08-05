@@ -1,10 +1,19 @@
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
-from ufo.hub import SUBSCRIBER_QUEUE_FRAMES, InProcessHub, LiveFrame, Terminal
-from ufo.models.interface import TextDelta
+from ufo.activity import tool_activity
+from ufo.hub import (
+    SUBSCRIBER_QUEUE_FRAMES,
+    InProcessHub,
+    LiveFrame,
+    SkillLoad,
+    Terminal,
+    ToolCall,
+)
+from ufo.models.interface import TextDelta, ToolUseBlock
 from ufo.schema.records import TerminalFrame
 
 
@@ -14,6 +23,22 @@ async def _pending_first(
     pending = asyncio.ensure_future(anext(stream))
     await asyncio.sleep(0)
     return pending
+
+
+def test_tool_activity_uses_one_bounded_frame_shape():
+    assert tool_activity(ToolUseBlock(id="s", name="load_skill", input={"name": 7})) == SkillLoad(
+        skill=""
+    )
+    command = "é" * 100
+    frame = tool_activity(
+        ToolUseBlock(id="t", name="bash", input={"command": command, "user_description": 7})
+    )
+    assert frame == ToolCall(
+        tool="bash",
+        preview=json.dumps({"command": command, "user_description": 7}, separators=(",", ":"))[:200]
+        + "…",
+        description="",
+    )
 
 
 async def test_round_trip_delivers_text_and_terminal():

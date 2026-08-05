@@ -19,5 +19,8 @@ from ufo.tools.context import (
     ToolResult as ToolResult,
 )
 from ufo.tools.registry import (
+    REQUESTED_BY as REQUESTED_BY,
+)
+from ufo.tools.registry import (
     ToolDef as ToolDef,
 )

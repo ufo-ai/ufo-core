@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
+from ufo.activity import SKILL_LOAD_TOOL
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.config import (
@@ -53,7 +54,6 @@ from ufo.ext.loader import (
 from ufo.ext.manifest import Manifest
 from ufo.hub import InProcessHub
 from ufo.jobs import bindings_from
-from ufo.loop.engine import SKILL_LOAD_TOOL
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.registry import model_registry

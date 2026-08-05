@@ -80,12 +80,14 @@ class ToolResultBlock(BaseModel):
     """A tool's result for the model. `content` is plain text for the common case; a tool that
     returns visual output (a read of an image or PDF, a browser screenshot) carries a tuple of
     text and image blocks — the shape Anthropic's `tool_result.content` accepts natively and the
-    OpenAI client lifts into a trailing user image message."""
+    OpenAI client lifts into a trailing user image message. `activity` records that the call passed
+    requester binding and entered dispatch, which is when its member-facing activity frame fires."""
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
     content: str | tuple[ToolResultContent, ...]
     is_error: bool = False
+    activity: bool = False
 
 
 ContentBlock = Annotated[

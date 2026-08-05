@@ -45,10 +45,18 @@ from ufo.sdk.http import (
     UploadFile,
     set_session_cookie,
 )
-from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.sdk.hub import (
+    CostTick,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    Terminal,
+    ToolCall,
+    tool_activity,
+)
 from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.memory import MemoryMatch
-from ufo.sdk.models import Message, TextBlock
+from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
@@ -62,6 +70,7 @@ from ufo.sdk.surfaces import (
     TurnContext,
     member_message_text,
 )
+from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import agent_overview, reasoning_levels, submit_intent
 
@@ -598,11 +607,69 @@ def _rendered_text(message: Message) -> str:
     return rendered.strip()
 
 
+def _tool_event(block: ToolUseBlock) -> dict[str, str]:
+    visible = block.model_copy(
+        update={"input": {key: value for key, value in block.input.items() if key != REQUESTED_BY}}
+    )
+    match tool_activity(visible):
+        case SkillLoad(skill=skill):
+            return {"kind": "skill", "name": skill, "preview": "", "description": ""}
+        case ToolCall(tool=name, preview=preview, description=description):
+            return {
+                "kind": "tool",
+                "name": name,
+                "preview": preview,
+                "description": description,
+            }
+
+
+def _rendered_messages(messages: tuple[Message, ...]) -> list[dict[str, object]]:
+    rendered: list[dict[str, object]] = []
+    pending: list[dict[str, str]] = []
+    answer = ""
+    active = {
+        block.tool_use_id
+        for message in messages
+        if not isinstance(message.content, str)
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.activity
+    }
+    for message in messages:
+        if message.role == "assistant" and not isinstance(message.content, str):
+            pending.extend(
+                _tool_event(block)
+                for block in message.content
+                if isinstance(block, ToolUseBlock) and block.id in active
+            )
+        text = _rendered_text(message)
+        if not text:
+            continue
+        if message.role == "assistant":
+            answer = text
+            continue
+        if not isinstance(message.content, str) or CONTEXT_TAG.match(message.content) is None:
+            continue
+        if answer or pending:
+            reply: dict[str, object] = {"role": "assistant", "text": answer}
+            if pending:
+                reply["events"] = pending
+            rendered.append(reply)
+            pending = []
+            answer = ""
+        rendered.append({"role": "user", "text": text})
+    if answer or pending:
+        reply = {"role": "assistant", "text": answer}
+        if pending:
+            reply["events"] = pending
+        rendered.append(reply)
+    return rendered
+
+
 async def transcript(ctx: SurfaceContext, request: Request) -> Response:
-    """One conversation of the member's with this agent, as the portal renders it on load: text
-    only, the engine's `<context>` framing stripped, tool traffic elided — a projection of the
-    durable transcript, never a second store. The `conversation` parameter names which one, gated
-    to the member's own like the chat POST that writes it."""
+    """One conversation of the member's with this agent, as the portal renders it on load: the
+    engine's `<context>` framing stripped and tool results elided — a projection of the durable
+    transcript, never a second store. The `conversation` parameter names which one, gated to the
+    member's own like the chat POST that writes it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -620,15 +687,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
         return Response("no such conversation", status_code=404)
     recorded = await ctx.read_transcript(conversation_id)
-    rendered = (
-        []
-        if recorded is None
-        else [
-            {"role": message.role, "text": text}
-            for message in recorded.messages
-            if (text := _rendered_text(message))
-        ]
-    )
+    rendered = [] if recorded is None else _rendered_messages(recorded.messages)
     payload: dict[str, object] = {"messages": rendered}
     latest = await ctx.latest_turn(conversation_id)
     if latest is not None:

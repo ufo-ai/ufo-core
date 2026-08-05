@@ -1099,6 +1099,7 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     )
 
     assert not bound.is_error and not common.is_error and not founding.is_error
+    assert bound.activity and common.activity and founding.activity
     assert seen == [
         (
             requesters[arrival].member_id,
@@ -1804,6 +1805,7 @@ async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
             {},
         )
     assert result.is_error
+    assert not result.activity
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
     ] == [

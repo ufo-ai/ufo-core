@@ -29,7 +29,14 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
-from ufo_ext_web.surface import PORTAL_FILE, PORTAL_HTML, SESSION_COOKIE, _sse, load_assets
+from ufo_ext_web.surface import (
+    PORTAL_FILE,
+    PORTAL_HTML,
+    SESSION_COOKIE,
+    _rendered_messages,
+    _sse,
+    load_assets,
+)
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
@@ -61,7 +68,15 @@ from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_syste
 from ufo.loop.transcript import Transcript
 from ufo.members import ADD_MEMBER_GATE
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
@@ -85,6 +100,7 @@ from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
+from ufo.transcript import Conversation
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
@@ -147,6 +163,218 @@ def test_sse_tags_tool_and_skill_activity_frames() -> None:
     skill = _sse("", SkillLoad(skill="demo"))
     assert skill.startswith(b"event: skill\ndata: ")
     assert json.loads(skill.split(b"data: ", 1)[1]) == {"skill": "demo"}
+
+
+def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nInspect it."),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="Let me check."),
+                    ToolUseBlock(
+                        id="call-1",
+                        name="bash",
+                        input={
+                            "command": "uv run pytest",
+                            "user_description": "Running the focused tests",
+                            "requested_by": "internal-message-ref",
+                        },
+                    ),
+                    ToolUseBlock(id="call-2", name="load_skill", input={"name": "coding"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="call-1", content="1 passed", activity=True),
+                    ToolResultBlock(tool_use_id="call-2", content="mounted", activity=True),
+                ),
+            ),
+            Message(role="user", content="End the turn now."),
+            Message(role="assistant", content=(TextBlock(text="The tests pass."),)),
+        )
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "Inspect it."},
+        {
+            "role": "assistant",
+            "text": "The tests pass.",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": (
+                        '{"command":"uv run pytest","user_description":"Running the focused tests"}'
+                    ),
+                    "description": "Running the focused tests",
+                },
+                {
+                    "kind": "skill",
+                    "name": "coding",
+                    "preview": "",
+                    "description": "",
+                },
+            ],
+        },
+    ]
+
+
+def test_transcript_projection_does_not_move_activity_between_turns() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nRun it."),
+            Message(
+                role="assistant",
+                content=(ToolUseBlock(id="call-1", name="bash", input={"command": "false"}),),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1", content="exit 1", is_error=True, activity=True
+                    ),
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="It failed."),)),
+            Message(role="user", content="<context>source: web</context>\nTry something else."),
+            Message(role="assistant", content=(TextBlock(text="Done."),)),
+        )
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "Run it."},
+        {
+            "role": "assistant",
+            "text": "It failed.",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": '{"command":"false"}',
+                    "description": "",
+                }
+            ],
+        },
+        {"role": "user", "text": "Try something else."},
+        {"role": "assistant", "text": "Done."},
+    ]
+
+
+def test_transcript_projection_flushes_activity_for_an_empty_answer() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nRun it."),
+            Message(
+                role="assistant",
+                content=(ToolUseBlock(id="call-1", name="bash", input={"command": "true"}),),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="", activity=True),),
+            ),
+            Message(role="assistant", content=""),
+            Message(role="user", content="<context>source: web</context>\nContinue."),
+            Message(role="assistant", content="Done."),
+        )
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "Run it."},
+        {
+            "role": "assistant",
+            "text": "",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": '{"command":"true"}',
+                    "description": "",
+                }
+            ],
+        },
+        {"role": "user", "text": "Continue."},
+        {"role": "assistant", "text": "Done."},
+    ]
+
+
+def test_transcript_projection_bounds_trailing_activity_and_skips_rejected_calls() -> None:
+    command = "é" * 100
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nRun it."),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(id="accepted", name="bash", input={"command": command}),
+                    ToolUseBlock(id="rejected", name="bash", input={"command": "hidden"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="accepted", content="done", activity=True),
+                    ToolResultBlock(tool_use_id="rejected", content="ValueError", is_error=True),
+                ),
+            ),
+        )
+    )
+
+    expected = json.dumps({"command": command}, separators=(",", ":"))
+    assert rendered == [
+        {"role": "user", "text": "Run it."},
+        {
+            "role": "assistant",
+            "text": "",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": expected[:200] + "…",
+                    "description": "",
+                }
+            ],
+        },
+    ]
+
+
+def test_transcript_projection_guards_activity_labels() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nRun it."),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(id="skill", name="load_skill", input={"name": 7}),
+                    ToolUseBlock(id="tool", name="bash", input={"user_description": 7}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="skill", content="done", activity=True),
+                    ToolResultBlock(tool_use_id="tool", content="done", activity=True),
+                ),
+            ),
+            Message(role="assistant", content="Done."),
+        )
+    )
+
+    assert rendered[-1] == {
+        "role": "assistant",
+        "text": "Done.",
+        "events": [
+            {"kind": "skill", "name": "", "preview": "", "description": ""},
+            {
+                "kind": "tool",
+                "name": "bash",
+                "preview": '{"user_description":7}',
+                "description": "",
+            },
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -475,6 +703,63 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     assert transcript.json()["messages"] == [
         {"role": "user", "text": "hello"},
         {"role": "assistant", "text": "echo:1"},
+    ]
+
+
+async def test_transcript_route_returns_durable_tool_activity(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Done."),
+    )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="<context>source: web</context>\nRun it."),
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),),
+                ),
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(tool_use_id="call-1", content="/workspace", activity=True),
+                    ),
+                ),
+                Message(role="assistant", content="Done."),
+            ),
+        )
+    )
+
+    response = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"] == [
+        {"role": "user", "text": "Run it."},
+        {
+            "role": "assistant",
+            "text": "Done.",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": '{"command":"pwd"}',
+                    "description": "",
+                }
+            ],
+        },
     ]
 
 

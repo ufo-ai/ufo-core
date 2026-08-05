@@ -64,7 +64,14 @@ export type CredentialRequest = {
   prompts: CredentialPrompt[];
 };
 
-export type Message = { role: string; text: string };
+export type ToolEvent = {
+  kind: "tool" | "skill";
+  name: string;
+  preview: string;
+  description: string;
+};
+
+export type Message = { role: string; text: string; events?: ToolEvent[] };
 
 export type Transcript = {
   messages: Message[];

@@ -46,11 +46,12 @@ from evals.onboarding_help import (
     slack_rotated_secret_scorer,
     slack_setup_scorer,
 )
+from ufo.activity import SKILL_LOAD_TOOL
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, skill_registry
-from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL, SKILL_LOAD_TOOL
+from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
 from ufo.sdk.context import (
     CredentialAccess,

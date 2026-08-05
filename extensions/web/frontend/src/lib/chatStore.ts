@@ -1,19 +1,13 @@
 import { useSyncExternalStore } from "react";
 
-import type { ChatFile, ChatQuestion, CredentialRequest, Message } from "@/lib/types";
+import type { ChatFile, ChatQuestion, CredentialRequest, Message, ToolEvent } from "@/lib/types";
 
-export type ToolEvent = {
-  kind: "tool" | "skill";
-  name: string;
-  preview: string;
-  description: string;
-};
+export type { ToolEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
   files?: ChatFile[];
   connectUrl?: string;
-  events?: ToolEvent[];
 };
 
 export type LiveTurn = {

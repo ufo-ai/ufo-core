@@ -62,6 +62,40 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
+test("a reloaded conversation keeps the activity that produced its reply", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "inspect it" },
+        {
+          role: "assistant",
+          text: "The tests pass.",
+          events: [
+            {
+              kind: "tool",
+              name: "bash",
+              preview: '{"command":"uv run pytest"}',
+              description: "Running the focused tests",
+            },
+            {
+              kind: "skill",
+              name: "coding",
+              preview: "",
+              description: "",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  const summary = await screen.findByText("2 tool calls");
+  await userEvent.click(summary);
+  expect(screen.getByText("Running the focused tests")).toBeTruthy();
+  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+});
+
 test("the composer is disabled while a turn streams and re-enabled when it lands", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();

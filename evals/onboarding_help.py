@@ -96,9 +96,10 @@ from evals.harness.capability import (
     ToolInvocation,
 )
 from evals.harness.scorers import combine
+from ufo.activity import SKILL_LOAD_TOOL
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL, SKILL_LOAD_TOOL
+from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
 from ufo.skills.runtime import SKILLS_MOUNT_DIR
 from ufo.workspace import ws_current

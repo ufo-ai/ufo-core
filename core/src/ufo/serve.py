@@ -19,6 +19,7 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ufo.activity import SKILL_LOAD_TOOL
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import CdpProvider
 from ufo.config import (
@@ -86,7 +87,6 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.loop.engine import SKILL_LOAD_TOOL
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt

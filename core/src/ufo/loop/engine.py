@@ -37,6 +37,7 @@ from ufo.accounting import (
     read_turn_cost,
     record_turn_usage,
 )
+from ufo.activity import SKILL_LOAD_TOOL, tool_activity
 from ufo.audience import Audience, audience_member, audience_subjects
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
@@ -53,7 +54,7 @@ from ufo.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.grants import GrantStore
-from ufo.hub import CostTick, Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import CostTick, Hub, LiveFrame, Parked, Terminal
 from ufo.loop.compaction import (
     Compaction,
     is_context_overflow,
@@ -144,7 +145,6 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
-SKILL_LOAD_TOOL = "load_skill"
 ASK_USER_TOOL = "ask_user"
 REQUEST_CREDENTIALS_TOOL = "request_credentials"
 CONNECT_ACCOUNT_TOOL = "connect_account"
@@ -287,7 +287,6 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
     )
 
 
-TOOL_CALL_PREVIEW_CHARS = 200
 MAX_TOOL_RESULT_CHARS = 25_600
 TOOL_RESULT_PREVIEW_CHARS = 6_144
 TOOL_IMAGE_BLOB_DIR = "tool-images"
@@ -393,6 +392,7 @@ class DispatchResult(BaseModel):
     tool_use_id: str
     text: str
     is_error: bool
+    activity: bool = False
     image_refs: tuple[ImageRef, ...] = ()
 
 
@@ -1838,7 +1838,10 @@ class TurnEngine:
         result = await step
         if not result.image_refs:
             return ToolResultBlock(
-                tool_use_id=result.tool_use_id, content=result.text, is_error=result.is_error
+                tool_use_id=result.tool_use_id,
+                content=result.text,
+                is_error=result.is_error,
+                activity=result.activity,
             )
         images = [
             ImageBlock(
@@ -1853,7 +1856,10 @@ class TurnEngine:
             *images,
         )
         return ToolResultBlock(
-            tool_use_id=result.tool_use_id, content=blocks, is_error=result.is_error
+            tool_use_id=result.tool_use_id,
+            content=blocks,
+            is_error=result.is_error,
+            activity=result.activity,
         )
 
     async def _bind_requester(
@@ -1982,14 +1988,17 @@ class TurnEngine:
                     is_error=True,
                 )
             context = bound.context
-            await self._publish_activity(call)
+            await self._publish(tool_activity(call))
             try:
                 tool = self.tools.get(call.name)
                 args = tool.input_model.model_validate(call.input)
             except Exception as error:
                 outcome, error_class = "invalid_call", type(error).__name__
                 return DispatchResult(
-                    tool_use_id=call.id, text=f"{type(error).__name__}: {error}", is_error=True
+                    tool_use_id=call.id,
+                    text=f"{type(error).__name__}: {error}",
+                    is_error=True,
+                    activity=True,
                 )
             pre = await self.hooks.fire(
                 "pre_tool_use",
@@ -2004,7 +2013,9 @@ class TurnEngine:
                     if pre.failed_closed is None
                     else ("hook_failed", pre.failed_closed)
                 )
-                return DispatchResult(tool_use_id=call.id, text=pre.denied, is_error=True)
+                return DispatchResult(
+                    tool_use_id=call.id, text=pre.denied, is_error=True, activity=True
+                )
             args = pre.tool_input if pre.tool_input is not None else args
             images: list[ImageBlock] = []
             key = f"{self.turn.id}/{call.name}/{call.id}" if tool.side_effecting else None
@@ -2081,6 +2092,7 @@ class TurnEngine:
                 tool_use_id=call.id,
                 text=content,
                 is_error=is_error,
+                activity=True,
                 image_refs=tuple(image_refs),
             )
         except (Exception, asyncio.CancelledError) as error:
@@ -2117,27 +2129,6 @@ class TurnEngine:
         )
         return ImageBlock(
             source=ImageSource(media_type=media_type, data=b64encode(buffer.getvalue()).decode())
-        )
-
-    async def _publish_activity(self, call: ToolUseBlock) -> None:
-        """Announce a tool call as it enters dispatch so a surface shows live activity on a long
-        multi-tool turn: load_skill as the skill it mounts, every other tool as its name plus the
-        model's plain-language `user_description` when it gave one, else a bounded args preview.
-        Rides the live leg, so a publish failure never fails the turn."""
-        if call.name == SKILL_LOAD_TOOL:
-            name = call.input.get("name")
-            await self._publish(SkillLoad(skill=name if isinstance(name, str) else ""))
-            return
-        description = call.input.get("user_description")
-        preview = json.dumps(call.input, separators=(",", ":"))
-        if len(preview) > TOOL_CALL_PREVIEW_CHARS:
-            preview = preview[:TOOL_CALL_PREVIEW_CHARS] + "…"
-        await self._publish(
-            ToolCall(
-                tool=call.name,
-                preview=preview,
-                description=description if isinstance(description, str) else "",
-            )
         )
 
     async def _commit(
