@@ -372,7 +372,14 @@ async def test_write_creates_and_reports_size_and_lines(
     ctx, workspace = file_ctx
     result = await _run("write", ctx, file_path="new.txt", content="hello\nworld\n")
     payload = json.loads(result.content[0].text)
-    assert payload == {"path": "new.txt", "created": True, "size_bytes": 12, "lines": 2}
+    payload.pop("change")
+    assert payload == {
+        "type": "ufo.file_change",
+        "path": "new.txt",
+        "created": True,
+        "size_bytes": 12,
+        "lines": 2,
+    }
     assert (workspace / "new.txt").read_text() == "hello\nworld\n"
 
 

@@ -34,11 +34,11 @@ import shlex
 from base64 import b64encode
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from ufo.artifact_token import (
     ARTIFACT_DOWNLOAD_PATH,
@@ -51,7 +51,7 @@ from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
 from ufo.members import ADD_MEMBER_TOOL_DEF
-from ufo.sandbox.session import WORKSPACE_DIR, workspace_path
+from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import loaded_context, mount_skill
@@ -65,6 +65,10 @@ from ufo.tools.context import (
 from ufo.tools.registry import ToolDef
 
 GREP_HEAD_LIMIT = 100
+FILE_PATH_MAX_CHARS = 4_096
+FILE_PATH_JSON_MAX_CHARS = 10_000
+FILE_TOOL_RESULT_MAX_CHARS = 20_000
+FILE_CHANGE_RESULT_TYPE = "ufo.file_change"
 ARTIFACT_FALLBACK_NAME = "download"
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
 SHA256_DIGEST_PREFIX = "sha256:"
@@ -125,9 +129,22 @@ class ReadInput(BaseModel):
     )
 
 
+def _bounded_file_path(path: str) -> str:
+    if len(json.dumps(path, ensure_ascii=False)) > FILE_PATH_JSON_MAX_CHARS:
+        raise ValueError("file path expands beyond its result envelope")
+    return path
+
+
+_FilePath = Annotated[
+    str,
+    Field(max_length=FILE_PATH_MAX_CHARS),
+    AfterValidator(_bounded_file_path),
+]
+
+
 class WriteInput(BaseModel):
-    file_path: str = Field(
-        description="Absolute path to the file to write, e.g. /workspace/output.json."
+    file_path: _FilePath = Field(
+        description="Absolute path to the file to write, e.g. /workspace/output.json.",
     )
     content: str = Field(description="The text content to write to the file.")
     user_description: str = Field(
@@ -146,7 +163,7 @@ class FileEdit(BaseModel):
 
 
 class EditInput(BaseModel):
-    file_path: str = Field(description="Absolute path to the file to modify.")
+    file_path: _FilePath = Field(description="Absolute path to the file to modify.")
     edits: tuple[FileEdit, ...] = Field(
         min_length=1,
         description="List of edits to apply sequentially. Each edit is an object with old_string, "
@@ -413,38 +430,74 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
 
 
 async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
-    existed = await ctx.sandbox.file_exists(args.file_path)
-    if existed and args.file_path not in ctx.read_paths:
-        raise ValueError(f"file {args.file_path} must be read before it is written")
     data = args.content.encode()
-    await ctx.sandbox.write_file(args.file_path, data)
-    ctx.read_paths.add(args.file_path)
-    trailing = 1 if data and not data.endswith(b"\n") else 0
-    return ToolResult(
-        content=(
-            TextContent(
-                text=json.dumps(
-                    {
-                        "path": args.file_path,
-                        "created": not existed,
-                        "size_bytes": len(data),
-                        "lines": args.content.count("\n") + trailing,
-                    }
-                )
-            ),
-        )
+    await ctx.sandbox.ensure_tool_output_dir()
+    staged = f"{TOOL_OUTPUT_DIR}/{uuid4().hex}.stage"
+    await ctx.sandbox.write_file(staged, data)
+    result = await ctx.sandbox.run_sbxfs(
+        "write",
+        {
+            "path": args.file_path,
+            "workspace": WORKSPACE_DIR,
+            "staged_path": staged,
+            "allow_existing": args.file_path in ctx.read_paths,
+        },
     )
+    trailing = 1 if data and not data.endswith(b"\n") else 0
+    result.update(
+        {
+            "path": args.file_path,
+            "size_bytes": len(data),
+            "lines": args.content.count("\n") + trailing,
+        }
+    )
+    tool_result = _file_tool_result(result)
+    ctx.read_paths.add(args.file_path)
+    return tool_result
 
 
 async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
     if args.file_path not in ctx.read_paths:
         raise ValueError(f"file {args.file_path} must be read before it is edited")
     edits = [
-        {"old_string": e.old_string, "new_string": e.new_string, "replace_all": e.replace_all}
+        {
+            "old_string_b64": b64encode(e.old_string.encode(), altchars=b"-_").decode(),
+            "new_string_b64": b64encode(e.new_string.encode(), altchars=b"-_").decode(),
+            "replace_all": e.replace_all,
+        }
         for e in args.edits
     ]
-    result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
-    return ToolResult(content=(TextContent(text=json.dumps(result)),))
+    result = await ctx.sandbox.run_sbxfs(
+        "edit", {"path": args.file_path, "workspace": WORKSPACE_DIR, "edits": edits}
+    )
+    result["path"] = args.file_path
+    if not isinstance(result.get("change"), dict):
+        raise RuntimeError("sbxfs edit returned no file change")
+    return _file_tool_result(result)
+
+
+def _file_tool_result(result: dict[str, object]) -> ToolResult:
+    result["type"] = FILE_CHANGE_RESULT_TYPE
+    change = result.get("change")
+    if not isinstance(change, dict):
+        raise RuntimeError("file tool returned no change")
+    content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(content) <= FILE_TOOL_RESULT_MAX_CHARS:
+        return ToolResult(content=(TextContent(text=content),))
+    result.pop("snippet", None)
+    if "message" in result:
+        result["message"] = f"{result.get('replacements', 0)} replacements"
+    content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(content) > FILE_TOOL_RESULT_MAX_CHARS:
+        change["truncated"] = True
+        patch = change.get("patch")
+        excess = len(content) - FILE_TOOL_RESULT_MAX_CHARS
+        if excess > 0 and isinstance(patch, str):
+            change["patch"] = patch[: max(0, len(patch) - excess)]
+            content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(content) > FILE_TOOL_RESULT_MAX_CHARS:
+        raise RuntimeError("file tool result exceeds its limit")
+    return ToolResult(content=(TextContent(text=content),))
 
 
 async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult:

@@ -1,4 +1,8 @@
+import asyncio
+import fcntl
+import hashlib
 import json
+import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,11 +21,17 @@ from ufo.audience import (
 from ufo.blob import FilesystemBlobStore
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
 from ufo.subjects import member_subject
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.tools.builtins import BUILTIN_TOOLS, FILE_TOOL_RESULT_MAX_CHARS, _file_tool_result
 from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
 from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
 
@@ -31,12 +41,6 @@ ARTIFACT_SECRET = "tools-test-secret"
 
 @dataclass
 class FakeSandbox:
-    """A stand-in for the carrier-backed session for the handler logic that never reaches the
-    sandbox: `bash` output is scripted, and `run_sbxfs` raises so a guard test proves the read
-    guard short-circuits before any file op runs. The sbxfs-backed behavior (windowing, edits,
-    streamed share) is proven against a real container in test_file_tools, never against this
-    stand-in."""
-
     bash_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
@@ -91,7 +95,7 @@ class StubSubagentControl:
 
 
 def make_context(
-    sandbox: FakeSandbox,
+    sandbox: FakeSandbox | SandboxSession,
     tmp_path: Path,
     artifact_secret: str = ARTIFACT_SECRET,
     subagents: StubSubagentControl | None = None,
@@ -229,6 +233,188 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
             file_path="code.py",
             edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
             user_description="tweaking the script",
+        )
+
+
+async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(workspace),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token",
+        )
+    )
+    ctx = make_context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    written = await run(
+        "write",
+        ctx,
+        file_path="notes.txt",
+        content="old /workspace path\n",
+        user_description="writing notes",
+    )
+    written_payload = json.loads(written.content[0].text)
+    assert written_payload["type"] == "ufo.file_change"
+    assert written_payload["change"] == {
+        "patch": "--- /dev/null\n+++ after\n@@ -0,0 +1 @@\n+old /workspace path\n",
+        "truncated": False,
+    }
+    assert (workspace / "notes.txt").read_text() == "old /workspace path\n"
+
+    edited = await run(
+        "edit",
+        ctx,
+        file_path="notes.txt",
+        edits=[{"old_string": "/workspace", "new_string": "/workspace/final"}],
+        user_description="editing notes",
+    )
+    edited_payload = json.loads(edited.content[0].text)
+    assert edited_payload["type"] == "ufo.file_change"
+    assert "-old /workspace path\n+old /workspace/final path\n" in edited_payload["change"]["patch"]
+    assert (workspace / "notes.txt").read_text() == "old /workspace/final path\n"
+
+    await ctx.sandbox.write_file("large.txt", b"old\n" * 10_000)
+    ctx.read_paths.add("large.txt")
+    large = await run(
+        "write",
+        ctx,
+        file_path="large.txt",
+        content="new\n" * 10_000,
+        user_description="writing a large file",
+    )
+    large_payload = json.loads(large.content[0].text)
+    assert large_payload["change"]["truncated"] is True
+    assert len(large.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
+    assert (workspace / "large.txt").read_text() == "new\n" * 10_000
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="escapes"):
+        await run(
+            "write",
+            ctx,
+            file_path="escape/file.txt",
+            content="outside\n",
+            user_description="writing outside",
+        )
+    assert not (outside / "file.txt").exists()
+
+    outside_file = outside / "target.txt"
+    outside_file.write_text("outside\n")
+    (workspace / "link.txt").symlink_to(outside_file)
+    ctx.read_paths.add("link.txt")
+    with pytest.raises(ValueError, match="not a regular file"):
+        await run(
+            "write",
+            ctx,
+            file_path="link.txt",
+            content="inside\n",
+            user_description="writing a linked file",
+        )
+    assert outside_file.read_text() == "outside\n"
+
+    injected = await run(
+        "write",
+        ctx,
+        file_path="name\n+++ injected",
+        content="safe\n",
+        user_description="writing a file",
+    )
+    injected_patch = json.loads(injected.content[0].text)["change"]["patch"]
+    assert injected_patch == "--- /dev/null\n+++ after\n@@ -0,0 +1 @@\n+safe\n"
+
+
+async def test_sbxfs_write_waits_for_the_shared_filesystem_lock(tmp_path: Path) -> None:
+    workspace = tmp_path / "shared"
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        workspace_host_path=str(workspace),
+        proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+        run_token="run-token",
+    )
+    first_carrier = LocalCarrier()
+    second_carrier = LocalCarrier()
+    first = make_context(
+        SandboxSession(carrier=first_carrier, handle=await first_carrier.create(spec)), tmp_path
+    )
+    second = make_context(
+        SandboxSession(carrier=second_carrier, handle=await second_carrier.create(spec)), tmp_path
+    )
+    await run(
+        "write",
+        first,
+        file_path="shared.txt",
+        content="old\n",
+        user_description="writing shared content",
+    )
+    second.read_paths.add("shared.txt")
+    lock_root = Path(tempfile.gettempdir()) / "ufo-sbxfs-locks"
+    lock_root.mkdir(mode=0o700, exist_ok=True)
+    lock_path = lock_root / hashlib.sha256(str(workspace / "shared.txt").encode()).hexdigest()
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pending = asyncio.create_task(
+            run(
+                "write",
+                second,
+                file_path="shared.txt",
+                content="new\n",
+                user_description="writing shared content",
+            )
+        )
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(pending), 0.1)
+        assert (workspace / "shared.txt").read_text() == "old\n"
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    payload = json.loads((await pending).content[0].text)
+    assert "-old\n+new\n" in payload["change"]["patch"]
+    assert (workspace / "shared.txt").read_text() == "new\n"
+
+
+def test_file_tool_result_bounds_escaped_paths() -> None:
+    path = "/".join(["\\" * 200] * 20 + ["\\" * 73])
+    result = _file_tool_result(
+        {
+            "type": "ufo.file_change",
+            "path": path,
+            "message": f"{path}: 1 replacements",
+            "replacements": 1,
+            "snippet": "\\" * 2_000,
+            "change": {"patch": "+" + "z" * 10_000, "truncated": False},
+        }
+    )
+    payload = json.loads(result.content[0].text)
+    assert payload["type"] == "ufo.file_change"
+    assert len(result.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
+    assert len(payload["change"]["patch"]) == 10_001
+    assert "snippet" not in payload
+
+
+def test_file_tool_result_assigns_the_public_result_type() -> None:
+    result = _file_tool_result(
+        {
+            "path": "notes.txt",
+            "change": {"patch": "+new\n", "truncated": False},
+        }
+    )
+
+    assert json.loads(result.content[0].text)["type"] == "ufo.file_change"
+
+
+def test_file_tool_paths_bound_the_serialized_envelope() -> None:
+    path = "/".join("\u0001" * 120 for _ in range(30))
+    with pytest.raises(ValidationError, match="expands beyond its result envelope"):
+        REGISTRY.get("write").input_model.model_validate(
+            {
+                "file_path": path,
+                "content": "x",
+                "user_description": "writing a file",
+            }
         )
 
 

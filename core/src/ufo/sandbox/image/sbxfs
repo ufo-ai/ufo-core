@@ -18,15 +18,22 @@ back as images; everything else is pure stdlib.
 from __future__ import annotations
 
 import base64
+import binascii
+import difflib
+import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 READ_DEFAULT_LIMIT = 2000
 LINE_CHAR_CAP = 2000
@@ -227,6 +234,10 @@ SKIP_DIRS = frozenset(
 )
 
 EDIT_SNIPPET_CONTEXT = 4
+EDIT_SNIPPET_MAX_CHARS = 2_000
+FILE_CHANGE_INPUT_MAX_CHARS = 20_000
+FILE_CHANGE_INPUT_MAX_LINES = 2_000
+FILE_CHANGE_PATCH_MAX_CHARS = 10_000
 
 
 class FsError(RuntimeError):
@@ -483,39 +494,221 @@ def op_read(params: dict) -> dict:
     }
 
 
-def op_write(params: dict) -> dict:
+def _inside(path: Path, workspace: Path) -> bool:
+    return path == workspace or workspace in path.parents
+
+
+@contextmanager
+def _file_target(params: dict, create_parent: bool = False):
+    workspace = Path(params["workspace"]).resolve()
     path = Path(params["path"])
-    content = params["content"]
-    if not isinstance(content, str):
-        raise FsError("content must be a string")
-    if path.is_dir():
-        raise FsError(f"{path} is a directory")
-    created = not path.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = content.encode("utf-8")
-    path.write_bytes(data)
-    trailing = 0 if content == "" or content.endswith("\n") else 1
+    if path.name in {"", ".", ".."}:
+        raise FsError(f"{path} is not a file path")
+    parent = path.parent.resolve()
+    if not _inside(parent, workspace):
+        raise FsError(f"{path} escapes {workspace}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(workspace, flags)
+    except OSError as error:
+        raise FsError(str(error)) from error
+    try:
+        for part in parent.relative_to(workspace).parts:
+            if create_parent:
+                try:
+                    os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError as error:
+                raise FsError(f"{path} not found") from error
+            except OSError as error:
+                raise FsError(str(error)) from error
+            os.close(descriptor)
+            descriptor = child
+        yield parent / path.name, workspace, descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _regular_text(parent: int, path: Path, limit: int) -> str:
+    descriptor = os.open(
+        path.name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=parent,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
+            descriptor = -1
+            return handle.read(limit)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextmanager
+def _file_lock(path: Path):
+    root = Path(tempfile.gettempdir()) / "ufo-sbxfs-locks"
+    root.mkdir(mode=0o700, exist_ok=True)
+    lock = root / hashlib.sha256(str(path).encode()).hexdigest()
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _existing_regular(parent: int, path: Path) -> os.stat_result | None:
+    try:
+        existing = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(existing.st_mode):
+        raise FsError(f"{path} is not a regular file")
+    return existing
+
+
+def _replace_text(parent: int, path: Path, text: str, mode: int) -> None:
+    staged = f".ufo-edit-{uuid4().hex}"
+    descriptor = os.open(
+        staged,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=parent,
+    )
+    try:
+        os.fchmod(descriptor, mode & 0o777)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(text)
+        os.replace(staged, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(staged, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+
+
+def _diff_lines(text: str | None) -> tuple[list[str], bool]:
+    if text is None:
+        return [], False
+    bounded = text[:FILE_CHANGE_INPUT_MAX_CHARS]
+    lines = bounded.splitlines(keepends=True)
+    truncated = len(text) > FILE_CHANGE_INPUT_MAX_CHARS
+    if len(lines) > FILE_CHANGE_INPUT_MAX_LINES:
+        lines = lines[:FILE_CHANGE_INPUT_MAX_LINES]
+        truncated = True
+    return lines, truncated
+
+
+def _file_change(
+    before: str | None,
+    after: str,
+    truncated: bool = False,
+) -> dict:
+    before_lines, before_truncated = _diff_lines(before)
+    after_lines, after_truncated = _diff_lines(after)
+    patch_parts = []
+    for line in difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile="/dev/null" if before is None else "before",
+        tofile="after",
+        n=3,
+        lineterm="\n",
+    ):
+        patch_parts.append(line)
+        if line.startswith(("+", "-", " ")) and not line.endswith("\n"):
+            patch_parts.append("\n\\ No newline at end of file\n")
+    patch = "".join(patch_parts)
     return {
-        "path": str(path),
-        "size_bytes": len(data),
-        "lines": content.count("\n") + trailing,
-        "created": created,
+        "patch": patch[:FILE_CHANGE_PATCH_MAX_CHARS],
+        "truncated": (
+            truncated
+            or before_truncated
+            or after_truncated
+            or len(patch) > FILE_CHANGE_PATCH_MAX_CHARS
+        ),
     }
+
+
+def _decode_text(encoded: object) -> str:
+    if not isinstance(encoded, str):
+        raise FsError("text must be base64 encoded")
+    try:
+        return base64.b64decode(encoded, altchars=b"-_", validate=True).decode(errors="replace")
+    except (ValueError, binascii.Error) as error:
+        raise FsError("text must be base64 encoded") from error
+
+
+def op_write(params: dict) -> dict:
+    with _file_target(params, create_parent=True) as (path, workspace, parent):
+        with _file_target({"path": params["staged_path"], "workspace": params["workspace"]}) as (
+            staged,
+            staged_workspace,
+            staged_parent,
+        ):
+            if staged_workspace != workspace:
+                raise FsError("staged file is outside the workspace")
+            if staged == path:
+                raise FsError("staged file must differ from its target")
+            try:
+                with _file_lock(path):
+                    existing = _existing_regular(parent, path)
+                    if existing is not None and params.get("allow_existing") is not True:
+                        raise FsError(f"file {path} must be read before it is written")
+                    if _existing_regular(staged_parent, staged) is None:
+                        raise FsError(f"{staged} not found")
+                    before = (
+                        None
+                        if existing is None
+                        else _regular_text(parent, path, FILE_CHANGE_INPUT_MAX_CHARS + 1)
+                    )
+                    after = _regular_text(staged_parent, staged, FILE_CHANGE_INPUT_MAX_CHARS + 1)
+                    change = _file_change(before, after)
+                    if existing is not None:
+                        os.chmod(
+                            staged.name,
+                            existing.st_mode & 0o777,
+                            dir_fd=staged_parent,
+                            follow_symlinks=False,
+                        )
+                    os.replace(
+                        staged.name,
+                        path.name,
+                        src_dir_fd=staged_parent,
+                        dst_dir_fd=parent,
+                    )
+                    return {
+                        "created": existing is None,
+                        "change": change,
+                    }
+            finally:
+                try:
+                    os.unlink(staged.name, dir_fd=staged_parent)
+                except FileNotFoundError:
+                    pass
 
 
 def _edit_list(params: dict) -> list[dict]:
     edits = params.get("edits")
-    if edits is None:
-        return [
-            {
-                "old_string": params["old_string"],
-                "new_string": params["new_string"],
-                "replace_all": bool(params.get("replace_all")),
-            }
-        ]
     if not isinstance(edits, list) or not edits:
         raise FsError("edits must be a non-empty list")
-    return edits
+    return [
+        {
+            "old_string": _decode_text(edit["old_string_b64"]),
+            "new_string": _decode_text(edit["new_string_b64"]),
+            "replace_all": bool(edit.get("replace_all")),
+        }
+        for edit in edits
+    ]
 
 
 def _apply_edit(text: str, edit: dict) -> tuple[str, int]:
@@ -549,24 +742,27 @@ def _edit_snippet(text: str, marker: str) -> str:
 
 
 def op_edit(params: dict) -> dict:
-    path = Path(params["path"])
-    if not path.exists():
-        raise FsError(f"{path} not found")
-    if path.is_dir():
-        raise FsError(f"{path} is a directory")
-    edits = _edit_list(params)
-    text = _read_text(path)
-    total = 0
-    for edit in edits:
-        text, count = _apply_edit(text, edit)
-        total += count
-    path.write_text(text, "utf-8")
-    return {
-        "path": str(path),
-        "message": f"{path}: {total} replacements",
-        "replacements": total,
-        "snippet": _edit_snippet(text, edits[0]["new_string"]),
-    }
+    with _file_target(params) as (path, _workspace, parent):
+        with _file_lock(path):
+            existing = _existing_regular(parent, path)
+            if existing is None:
+                raise FsError(f"{path} not found")
+            edits = _edit_list(params)
+            before = _regular_text(parent, path, existing.st_size + 1)
+            text = before
+            total = 0
+            for edit in edits:
+                text, count = _apply_edit(text, edit)
+                total += count
+            result = {
+                "path": str(path),
+                "message": f"{path}: {total} replacements",
+                "replacements": total,
+                "snippet": _edit_snippet(text, edits[0]["new_string"])[:EDIT_SNIPPET_MAX_CHARS],
+                "change": _file_change(before, text),
+            }
+            _replace_text(parent, path, text, existing.st_mode)
+            return result
 
 
 def _walk(root: Path):
