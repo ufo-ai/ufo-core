@@ -47,19 +47,17 @@ test("the built bundle mounts into the served page and asks for the session's ag
 
   new Function(bundle())();
   await waitFor(() => expect(asked).toContain("/surface/web/api/agents"));
-  await waitFor(() =>
-    expect(document.body.textContent).toContain("Open your workspace"),
-  );
+  await waitFor(() => expect(document.body.textContent).toContain("Session ended"));
 });
 
-test("an unauthenticated read shows the token card, which posts the token to this surface", async () => {
+test("a session that ends under the open page offers the one sign-in page", async () => {
   wire({ "/api/agents": () => new Response("unauthorized", { status: 401 }) });
   render(<Portal />);
 
-  expect(await screen.findByText("Open your workspace")).toBeTruthy();
-  const form = screen.getByPlaceholderText("Session token").closest("form")!;
-  expect(form.getAttribute("action")).toBe("/surface/web");
-  expect(form.getAttribute("method")).toBe("post");
+  expect(await screen.findByText("Session ended")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login");
+  expect(screen.getByText("ufoctl portal")).toBeTruthy();
+  expect(screen.queryByRole("textbox")).toBeNull();
 });
 
 test("a boot that fails on the server states the status and renders no shell", async () => {
@@ -70,7 +68,7 @@ test("a boot that fails on the server states the status and renders no shell", a
   expect(screen.queryByRole("tablist")).toBeNull();
 });
 
-test("a boot whose network fails shows the token card rather than an empty page", async () => {
+test("a boot whose network fails says so rather than sending a live session to sign in", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => {
@@ -78,7 +76,7 @@ test("a boot whose network fails shows the token card rather than an empty page"
     }),
   );
   render(<Portal />);
-  expect(await screen.findByText("Open your workspace")).toBeTruthy();
+  expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
 test("an admin is offered administration, which reads the admin projection", async () => {

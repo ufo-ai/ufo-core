@@ -92,6 +92,7 @@ SITE_KIND = "site"
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
+LOGIN_PATH = "/login"
 PORTAL_BUILD = (
     "npm --prefix extensions/web/frontend ci && npm --prefix extensions/web/frontend run build"
 )
@@ -107,10 +108,10 @@ ASSET_MEDIA_TYPES = {
 
 def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]:
     """The built assets this surface serves, by request name. Only a file whose suffix carries a
-    declared media type is served: these answer before authentication, so a build that starts
-    emitting source maps publishes nothing until someone declares them here. Nothing raises —
-    the page names the assets it needs, and the origin gate fails when one of those is unserved,
-    which is the layer that can tell a missing asset from a file the build merely left behind."""
+    declared media type is served, so a build that starts emitting source maps publishes nothing
+    until someone declares them here. Nothing raises — the page names the assets it needs, and the
+    origin gate fails when one of those is unserved, which is the layer that can tell a missing
+    asset from a file the build merely left behind."""
     return {
         f"{directory.name}/{path.name}": (path.read_bytes(), ASSET_MEDIA_TYPES[path.suffix])
         for path in sorted(directory.glob("*"))
@@ -134,10 +135,11 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     logs, and browser history. Each fallback keys on the previous credential failing to RESOLVE,
     not merely being absent, so a member whose cookie outlived its bearer's expiry recovers by
     posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of
-    the portal page serves the same static shell, showing its token form because `api/agents`
-    answers 401. Only a urlencoded body is read for the token — the type every token form posts —
-    so an unauthenticated multipart request is rejected without its parse ever running. The
-    handler re-verifies the same bearer for the member email — workspace here, identity there."""
+    the portal page redirects to the deploy's one sign-in page, so the portal offers no second way
+    in and nothing of the shell is served to a stranger. Only a urlencoded body is read for the
+    token — the type the signed-in card posts — so an unauthenticated multipart request is
+    rejected without its parse ever running. The handler re-verifies the same bearer for the
+    member email — workspace here, identity there."""
     cookie = request.cookies.get(SESSION_COOKIE, "")
     workspace = workspace_claim(cookie) if cookie else None
     if (
@@ -154,22 +156,13 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
         posted = form.get(TOKEN_FIELD, "")
         if isinstance(posted, str) and posted.strip():
             workspace = workspace_claim(posted.strip())
-    if workspace is None and request.method == "GET":
-        if request.url.path.rstrip("/") == PORTAL_PATH:
-            return _portal_response()
-        asset = _static_response(request)
-        if asset is not None:
-            return asset
+    if (
+        workspace is None
+        and request.method == "GET"
+        and request.url.path.rstrip("/") == PORTAL_PATH
+    ):
+        return RedirectResponse(LOGIN_PATH, status_code=303)
     return workspace
-
-
-def _portal_response() -> Response:
-    """The built page. A deploy that skipped the frontend build fails here, naming the command,
-    rather than at import — an unbuilt tree still loads the extension, so every route that holds
-    no built asset keeps working and the fault reads as what it is."""
-    if PORTAL_HTML is None:
-        raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
-    return HTMLResponse(PORTAL_HTML)
 
 
 def _static_response(request: Request) -> Response | None:
@@ -190,9 +183,15 @@ def _static_response(request: Request) -> Response | None:
 
 
 async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
-    """Serve the portal shell. The page itself decides between its token form (no session yet) and
-    the signed-in shell by asking `api/agents` — the server serves one page either way."""
-    return _portal_response()
+    """Serve the portal shell to a request whose session resolved. A session that expires while the
+    page is open leaves the shell asking `api/agents`, which answers 401; the page sends the member
+    to the same sign-in page an unresolved arrival is redirected to. A deploy that skipped the
+    frontend build fails here, naming the command, rather than at import — an unbuilt tree still
+    loads the extension, so every route that holds no built asset keeps working and the fault reads
+    as what it is."""
+    if PORTAL_HTML is None:
+        raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
+    return HTMLResponse(PORTAL_HTML)
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None:
@@ -210,9 +209,9 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
 
 
 async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
-    """Serve a portal stylesheet or module to a request whose session resolved. An unresolved
-    request never reaches here — `resolve_workspace` answers it with the same bytes, because the
-    token card styles itself before any session exists. The assets carry no workspace data."""
+    """Serve a portal stylesheet or module to a request whose session resolved. Only the shell
+    names these, and the shell serves to a session, so an unresolved request is a 401 rather than
+    a transfer. The assets carry no workspace data."""
     return _static_response(request) or Response("no such asset", status_code=404)
 
 

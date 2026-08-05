@@ -21,7 +21,12 @@ npm --prefix extensions/web/frontend ci     # only if you want the web portal; c
 npm --prefix extensions/web/frontend run build
 uv run ufoctl serve                         # one process: surfaces + workers
 uv run ufoctl chat                          # second terminal; sessions persist across runs
+uv run ufoctl portal                        # third: opens the portal in your browser, signed in
 ```
+
+A node with no sign-in page in front of it has one browser door: `ufoctl portal` hands this
+machine's CLI token to a local one-shot page, which posts it to the portal exactly as the hosted
+sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 
 **Full hosted stack** — the whole hosted topology in one command: Postgres, the onboarding
 **gateway** (`/login`), and the **serve** fleet (surfaces + DBOS workers + embedded egress proxy):
@@ -40,8 +45,10 @@ One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`de
 — read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
 carrier). Sign in at `http://localhost:8080/login` with a work email and the code from the gateway
-log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`), which opens the portal at
-`http://localhost:8710/surface/web`. The portal is built by npm, not tracked in git, so the
+log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`), then open your workspace from the
+signed-in card, which posts the bearer to `http://localhost:8710/surface/web` and lands the session
+cookie; `http://localhost:8710/` redirects there too, and back to the sign-in page without a
+session. The portal is built by npm, not tracked in git, so the
 build above runs before the stack; skip it and the portal route fails with the command in the
 serve log. Host ports override via
 `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /

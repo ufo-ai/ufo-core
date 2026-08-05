@@ -109,7 +109,6 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         "<title>ufo</title>",
         "<header>ufo</header>",
         "<h1>Sign in</h1>",
-        "Use your work email.",
         ">Continue</button>",
         "<h1>Signed in</h1>",
         ">Open your workspace</button>",
@@ -120,6 +119,12 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         "'Failed — reload to retry.'",
     ):
         assert copy in LOGIN_PAGE, copy
+
+
+def test_login_page_asks_for_the_email_once() -> None:
+    """The ask is the machine's own directive, rendered as the prompt label. The page words it no
+    second time, so a member reads one instruction and answers one field."""
+    assert "work email" not in LOGIN_PAGE
 
 
 def test_login_page_hands_the_token_off_by_post_after_the_whole_batch() -> None:

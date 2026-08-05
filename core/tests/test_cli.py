@@ -3,6 +3,9 @@
 
 import io
 import os
+import threading
+import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -10,8 +13,21 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from ufo.cli import _ChatStream, _load_dotenv, _run_turn, _TurnDisplay, _unescape, init
+from ufo.cli import (
+    BrowserHandoff,
+    _ChatStream,
+    _load_dotenv,
+    _run_turn,
+    _TurnDisplay,
+    _unescape,
+    init,
+    portal,
+)
 from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.ext.manifest import Manifest
+from ufo.ext.surface import SurfaceSpec
+
+BROWSER_JOIN_SECONDS = 5.0
 
 
 def tty_display(buffer: io.StringIO) -> _TurnDisplay:
@@ -271,3 +287,89 @@ def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain(address: 
     result = CliRunner().invoke(init, ["--email", address])
     assert result.exit_code == 2
     assert f"{address!r} is not one local@domain address." in result.output
+
+
+def _handoff_page(fetch: Callable[[str], None], monkeypatch: pytest.MonkeyPatch) -> str:
+    """Drive one handoff: the browser stand-in runs on its own thread, because the page is served
+    by the loop `open()` is sitting in."""
+    handoff = BrowserHandoff(portal_url="http://127.0.0.1:8710/surface/web", token="bearer.value")
+    opened: list[str] = []
+    browser = threading.Thread(target=lambda: fetch(opened[0]))
+
+    def browse(url: str) -> bool:
+        opened.append(url)
+        browser.start()
+        return True
+
+    monkeypatch.setattr(webbrowser, "open", browse)
+    handoff.open()
+    browser.join(BROWSER_JOIN_SECONDS)
+    return opened[0]
+
+
+def test_the_browser_handoff_posts_the_bearer_and_keeps_it_out_of_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-hosted node's door: the browser is sent to a local page whose form posts the bearer
+    to the portal — the same POST the hosted sign-in card makes. The bearer is in the body, and
+    the URL the browser was handed carries nothing but the one-shot path."""
+    served: list[httpx.Response] = []
+    missed: list[httpx.Response] = []
+
+    def visit(url: str) -> None:
+        missed.append(httpx.get(f"{url}-guessed"))
+        served.append(httpx.get(url))
+
+    url = _handoff_page(visit, monkeypatch)
+
+    assert "bearer.value" not in url
+    assert missed[0].status_code == 404
+    page = served[0].text
+    assert '<form id="open" method="post" action="http://127.0.0.1:8710/surface/web">' in page
+    assert '<input type="hidden" name="token" value="bearer.value">' in page
+    assert ">Open your workspace</button>" in page
+
+
+def test_the_browser_handoff_closes_the_listener_behind_the_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bearer is readable by anything that can reach the port, so the port outlives exactly one
+    delivery — the page cannot be fetched a second time."""
+    url = _handoff_page(lambda visited: httpx.get(visited), monkeypatch)
+
+    with pytest.raises(httpx.ConnectError):
+        httpx.get(url)
+
+
+def test_portal_refuses_before_init_has_minted_a_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verb spends the bearer `init` wrote; without one there is nothing to hand a browser, and
+    the fix is the same line `chat` gives."""
+
+    async def identify(_request: object, _auth: object) -> None:
+        return None
+
+    monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / "empty"))
+    monkeypatch.setattr(
+        "ufo.cli.load_config",
+        lambda: Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///unused.db"),
+            blob=BlobConfig(backend="filesystem", root=Path("/tmp/unused")),
+        ),
+    )
+    monkeypatch.setattr(
+        "ufo.cli.load_manifests",
+        lambda _pack: (
+            Manifest(
+                name="web",
+                version="0.1.0",
+                surfaces=(SurfaceSpec(name="web", routes=(), identify=identify, home=True),),
+            ),
+        ),
+    )
+
+    result = CliRunner().invoke(portal)
+
+    assert result.exit_code == 1
+    assert "no CLI token — run `ufoctl init` first" in result.output

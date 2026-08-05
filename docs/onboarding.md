@@ -190,6 +190,20 @@ session cookie is set through `ufo.sdk.http.set_session_cookie`, which takes no 
 cookie is always host-only and a session can never cross a subdomain, environment, or preview host
 (a repo gate forbids raw `set_cookie` elsewhere).
 
+`/login` is the deploy's one sign-in, and every other browser door leads to it. `GET /` on the app
+host redirects to the surface claiming `SurfaceSpec.home` — the portal (`/surface/web`) — which
+serves its shell only to a resolved session and redirects an arrival without one to `/login`; a
+session that expires under an open page leaves the shell offering the same link. The portal takes
+no bearer from a member: the bearer enters through the one POST the signed-in card makes, so there
+is exactly one place a member types their email.
+
+A self-hosted node runs no gateway, so it has no sign-in page and no email machine — the member at
+the terminal is the owner `ufoctl init` seated, and their CLI token is the proof. `ufoctl portal`
+spends it: a loopback listener serves one page at an unguessable path, the browser posts the bearer
+from that page's form to `/surface/web`, and the listener closes behind the request that took it.
+Same route, same act, same cookie as the hosted card — the deploy differs, the door does not.
+`ufoctl serve` names the portal and that verb at startup.
+
 `GET /login` serves a self-contained sign-in page — a second renderer of the identical
 `Onboarding` machine, never a second machine. The page generates a session UUID, sends each answer
 to the same-origin `POST /v1/onboard/web` (header `x-ufo-session`, channel `web` — the claim index

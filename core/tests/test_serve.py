@@ -10,6 +10,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
 
 import ufo.db
@@ -20,6 +21,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.credentials import CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.ext.surface import SurfaceSpec
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.sandbox.proxy.rules import ScopeRule
@@ -458,6 +460,43 @@ def test_the_local_proxy_base_admits_the_s3_artifact_store_host(
     serve._proxy_endpoint(_local_config(), (), None, CORE_PRICING, RUN_TOKENS, store)
 
     assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in captured["base"]
+
+
+def _home_manifest(name: str, home: bool) -> Manifest:
+    async def identify(_request: object, _auth: object) -> None:
+        return None
+
+    return Manifest(
+        name=name,
+        version="0.1.0",
+        surfaces=(SurfaceSpec(name=name, routes=(), identify=identify, home=home),),
+    )
+
+
+def test_the_bare_host_opens_the_surface_that_claims_the_browser_home() -> None:
+    """A browser typing the deploy's host lands on a door, not a 404: `/` redirects to the home
+    surface, which decides between its own page and the sign-in page from the request's session."""
+    app = FastAPI()
+    serve._mount_home(app, (_home_manifest("slack", False), _home_manifest("web", True)))
+
+    landed = TestClient(app).get("/", follow_redirects=False)
+
+    assert landed.status_code == 303
+    assert landed.headers["location"] == "/surface/web"
+
+
+def test_a_deploy_with_no_home_surface_mounts_no_root_route() -> None:
+    app = FastAPI()
+    serve._mount_home(app, (_home_manifest("slack", False),))
+
+    assert TestClient(app).get("/").status_code == 404
+
+
+def test_two_home_surfaces_fail_the_boot() -> None:
+    """Two claims name no single door, so the pack is refused where every other surface conflict
+    is — at boot, rather than by whichever manifest loaded last."""
+    with pytest.raises(RuntimeError, match="browser home"):
+        serve._mount_home(FastAPI(), (_home_manifest("web", True), _home_manifest("debug", True)))
 
 
 def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:

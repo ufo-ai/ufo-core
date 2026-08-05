@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { App } from "@/App";
-import { TokenCard } from "@/views/TokenCard";
+import { SignIn } from "@/views/SignIn";
 import { BASE } from "@/lib/api";
 import type { AgentsPayload } from "@/lib/types";
 
@@ -24,7 +24,11 @@ export function Portal() {
         res = null;
       }
       if (!live) return;
-      if (!res || res.status === 401) {
+      if (!res) {
+        setBoot({ phase: "failed", message: "Network error — try again." });
+        return;
+      }
+      if (res.status === 401) {
         setBoot({ phase: "signed-out" });
         return;
       }
@@ -49,7 +53,7 @@ export function Portal() {
 
   if (boot.phase === "loading")
     return <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">Loading…</div>;
-  if (boot.phase === "signed-out") return <TokenCard />;
+  if (boot.phase === "signed-out") return <SignIn />;
   if (boot.phase === "failed") {
     return (
       <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">

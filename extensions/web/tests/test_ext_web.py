@@ -1322,15 +1322,14 @@ async def test_a_stale_cookie_does_not_block_a_fresh_token_post(
 ) -> None:
     """The fallback chain keys on the cookie failing to resolve, not being absent: a member whose
     cookie outlived its bearer recovers by posting a fresh token — the session reopens instead of
-    401ing behind the stale cookie, and a GET behind that stale cookie serves the portal page
-    rather than a bare rejection. What that page then shows is the bundle's business, proven where
-    it runs (`tests/boot.test.tsx`)."""
+    401ing behind the stale cookie, and a GET behind that stale cookie sends them to the sign-in
+    page rather than a bare rejection."""
     client, workspace_id, _agent_id = web
     stale = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=-1))
     fresh = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     page = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={stale}"})
-    assert page.status_code == 200
-    assert page.text == PORTAL_FILE.read_text()
+    assert page.status_code == 303
+    assert page.headers["location"] == "/login"
     opened = await client.post(
         "/surface/web",
         data={"token": fresh},
@@ -2124,8 +2123,8 @@ async def test_a_non_admin_is_not_found_on_the_admin_view(
 def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
     """This read runs on every boot, so nothing the build directory happens to hold may wedge it:
     a directory named for a declared suffix is the entry that reaches `read_bytes` when only the
-    suffix is checked. Suffixes answer the other half — assets serve before authentication, so
-    turning on `build.sourcemap` publishes nothing until someone declares `.map` here."""
+    suffix is checked. Suffixes answer the other half — turning on `build.sourcemap` publishes
+    nothing until someone declares `.map` here."""
     assets = tmp_path / "assets"
     (assets / "nested").mkdir(parents=True)
     (assets / "chunks.js").mkdir()
@@ -2147,10 +2146,11 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     the absence of an external URL insufficient on its own — a page referencing a file nobody
     serves carries no external origin either — so every `src` and `href` it names must resolve
     under the surface's own static path and answer with the media type its element expects.
-    The token card styles itself before any session exists, so each asset serves unauthenticated
-    too, and each revalidates by etag rather than transferring on every load."""
+    Only the shell names these and the shell serves to a session, so an asset read carrying none is
+    401; each revalidates by etag rather than transferring on every load."""
     client, workspace_id, _agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     assert PORTAL_HTML is not None
     assert "<!doctype html>" in PORTAL_HTML
     for scheme in ("http://", "https://", "//cdn"):
@@ -2164,41 +2164,36 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
         assert ref.startswith("/surface/web"), ref
 
     for ref in sorted(assets):
-        signed_out = await client.get(ref)
-        assert signed_out.status_code == 200, ref
-        expected = "text/javascript" if ref.endswith(".js") else "text/css"
-        assert signed_out.headers["content-type"].startswith(expected)
-        assert signed_out.text.strip()
+        assert (await client.get(ref)).status_code == 401, ref
 
-        signed_in = await client.get(ref, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+        signed_in = await client.get(ref, headers=cookie)
         assert signed_in.status_code == 200
-        assert signed_in.text == signed_out.text
+        expected = "text/javascript" if ref.endswith(".js") else "text/css"
+        assert signed_in.headers["content-type"].startswith(expected)
+        assert signed_in.text.strip()
 
-        etag = signed_out.headers["etag"]
-        unchanged = await client.get(ref, headers={"if-none-match": etag})
+        etag = signed_in.headers["etag"]
+        unchanged = await client.get(ref, headers={**cookie, "if-none-match": etag})
         assert unchanged.status_code == 304
 
-    missing = await client.get("/surface/web/static/assets/nothing.css")
-    assert missing.status_code == 401
-    traversal = await client.get(
-        "/surface/web/static/assets/..%2F..%2Fsurface.py",
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
+    missing = await client.get("/surface/web/static/assets/nothing.css", headers=cookie)
+    assert missing.status_code == 404
+    traversal = await client.get("/surface/web/static/assets/..%2F..%2Fsurface.py", headers=cookie)
     assert traversal.status_code == 404
 
 
-async def test_portal_serves_without_a_session_and_posted_token_opens_one(
+async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_opens_one(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The bearer never rides a URL: the page serves unauthenticated — the bundle it loads posts
-    the token back here, and that the unauthenticated read renders that form is proven in
-    `tests/boot.test.tsx` — and the one POST that opens a session lands the form token as the
-    host-only session cookie — HttpOnly, Secure, and `lax`, because arrival is a cross-site
-    navigation from the gateway's signed-in card — then redirects into the portal."""
+    """The portal offers no second way in: a GET with no session redirects to the deploy's one
+    sign-in page, serving nothing of the shell. The bearer never rides a URL — the one POST that
+    opens a session lands the form token as the host-only session cookie — HttpOnly, Secure, and
+    `lax`, because arrival is a cross-site navigation from the gateway's signed-in card — then
+    redirects into the portal."""
     client, workspace_id, _agent_id = web
     page = await client.get("/surface/web")
-    assert page.status_code == 200
-    assert page.text == PORTAL_FILE.read_text()
+    assert page.status_code == 303
+    assert page.headers["location"] == "/login"
     token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     opened = await client.post("/surface/web", data={"token": token})
     assert opened.status_code == 303
@@ -2207,6 +2202,9 @@ async def test_portal_serves_without_a_session_and_posted_token_opens_one(
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
+    shell = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    assert shell.status_code == 200
+    assert shell.text == PORTAL_FILE.read_text()
     client.cookies.clear()
     tokenless = await client.post("/surface/web", data={})
     assert tokenless.status_code == 401

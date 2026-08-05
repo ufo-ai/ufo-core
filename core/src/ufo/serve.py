@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -879,6 +879,7 @@ def _mount_shared_surfaces(
                     methods=[route.method],
                 )
             log("serve.shared_surface.mounted", surface=spec.name)
+    _mount_home(app, manifests)
     if registered:
         app.state.writeback_poller = WritebackPoller(
             worker_id=uuid4().hex,
@@ -886,6 +887,31 @@ def _mount_shared_surfaces(
             context_for=context_for,
             candidates=writeback_workspaces(),
         )
+
+
+def home_surface(manifests: tuple[Manifest, ...]) -> str | None:
+    """The name of the surface a browser belongs on, or None when the deploy installs no browser
+    surface at all. A pack claiming two homes names no single door, so it is refused here — at
+    boot, and equally in the CLI verb that opens the same path."""
+    homes = sorted(spec.name for manifest in manifests for spec in manifest.surfaces if spec.home)
+    if len(homes) > 1:
+        raise RuntimeError(f"more than one surface claims the browser home: {homes}")
+    return homes[0] if homes else None
+
+
+def _mount_home(app: FastAPI, manifests: tuple[Manifest, ...]) -> None:
+    """Answer `GET /` with a redirect to the home surface, so the bare host is a door instead of a
+    404. The redirected surface decides what an arriving browser sees — its own page for a resolved
+    session, the sign-in page for none — which keeps one sign-in for the whole deploy."""
+    surface = home_surface(manifests)
+    if surface is None:
+        return
+    path = f"/surface/{surface}"
+
+    async def home(_request: Request) -> Response:
+        return RedirectResponse(path, status_code=303)
+
+    app.add_route("/", home, methods=["GET"])
 
 
 @asynccontextmanager

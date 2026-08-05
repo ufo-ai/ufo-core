@@ -87,7 +87,6 @@ LOGIN_PAGE = r"""<!doctype html>
 <main>
   <section class="card" id="board">
     <h1>Sign in</h1>
-    <div class="hint">Use your work email.</div>
     <div id="log"></div>
     <form id="prompt-row">
       <label id="prompt-label" for="answer"></label>

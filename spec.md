@@ -425,7 +425,10 @@ the administration view (agents with their policy,
 installations, and web-audience grants; members and seats; spend caps with their subjects named;
 the deploy's installed extensions and public-internet ceiling) answers a workspace admin only,
 and the signed bearer enters as a session cookie through one POST (the gateway's signed-in
-card), never a URL. The plan,
+card), never a URL. That card is the deploy's one sign-in: the portal takes no bearer from a
+member, so a request reaching it without a session — the bare host `/`, which redirects to the
+surface claiming `SurfaceSpec.home`, or the portal path itself — is sent to `/login` and nothing of
+the shell is served to a stranger. The plan,
 invoices, and payment methods stay chat acts (`manage_billing`), and caps have no object kind
 yet, so the billing view is a read. Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its scheduled tasks

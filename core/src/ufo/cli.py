@@ -1,13 +1,17 @@
-"""The ufoctl CLI: init, serve, chat, ext, bundle."""
+"""The ufoctl CLI: init, serve, portal, chat, ext, bundle."""
 
 import asyncio
 import os
 import secrets
 import subprocess
 import sys
+import threading
 import tomllib
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from html import escape
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import TextIO
 from uuid import UUID, uuid4
@@ -34,10 +38,14 @@ from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
+from ufo.serve import home_surface
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
+PORTAL_REACH_TIMEOUT_SECONDS = 5.0
+HANDOFF_PATH_BYTES = 24
+LOOPBACK = "127.0.0.1"
 ERASE_LINE = "\r\x1b[K"
 MICRO_USD_PER_USD = 1_000_000
 CLI_TOKEN_TTL = timedelta(days=3650)
@@ -235,7 +243,91 @@ def migrate() -> None:
 @main.command()
 def serve() -> None:
     """Run surfaces, workers, and jobs; embed the egress proxy for single-node config."""
+    config = load_config()
+    surface = home_surface(load_manifests(config.pack.name))
+    if surface is not None:
+        click.echo(
+            f"portal {_serve_base(config)}/surface/{surface} — "
+            "run `ufoctl portal` to open a session in your browser"
+        )
     serve_run()
+
+
+@main.command()
+def portal() -> None:
+    """Open the portal in a browser, signed in with this machine's CLI token."""
+    config = load_config()
+    surface = home_surface(load_manifests(config.pack.name))
+    if surface is None:
+        raise click.ClickException(f"pack {config.pack.name!r} installs no browser portal")
+    token_path = _ufoctl_dir() / "token"
+    if not token_path.exists():
+        raise click.ClickException("no CLI token — run `ufoctl init` first")
+    base = _serve_base(config)
+    portal_url = f"{base}/surface/{surface}"
+    try:
+        httpx.get(portal_url, follow_redirects=False, timeout=PORTAL_REACH_TIMEOUT_SECONDS)
+    except httpx.HTTPError as error:
+        raise click.ClickException(
+            f"serve is not answering at {base} ({error}) — run `ufoctl serve` first"
+        ) from error
+    BrowserHandoff(portal_url=portal_url, token=token_path.read_text().strip()).open()
+    click.echo(f"opened {portal_url}")
+
+
+def _serve_base(config: Config) -> str:
+    return f"http://{config.serve.host}:{config.serve.port}"
+
+
+@dataclass(frozen=True)
+class BrowserHandoff:
+    """Hand this machine's bearer to a browser as a portal session. The browser opens a page this
+    process serves and that page posts the bearer to the portal — the same POST the hosted sign-in
+    card makes, so a node with no sign-in page reaches the portal through the one door every deploy
+    uses, with nothing for anyone to type or paste. The bearer rides the form body, never a URL.
+    The page answers at an unguessable path and the listener closes behind the one request that
+    took it, so another account on the host cannot read the bearer off the port."""
+
+    portal_url: str
+    token: str
+
+    def open(self) -> None:
+        path = f"/{secrets.token_urlsafe(HANDOFF_PATH_BYTES)}"
+        delivered = threading.Event()
+        with HTTPServer((LOOPBACK, 0), self._responder(path, delivered)) as listener:
+            url = f"http://{LOOPBACK}:{listener.server_port}{path}"
+            if not webbrowser.open(url):
+                click.echo(f"open {url} to finish signing in")
+            while not delivered.is_set():
+                listener.handle_request()
+
+    def _responder(self, path: str, delivered: threading.Event) -> type[BaseHTTPRequestHandler]:
+        page = self._page().encode()
+
+        class Responder(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path != path:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                delivered.set()
+
+            def log_message(self, *args: object) -> None: ...
+
+        return Responder
+
+    def _page(self) -> str:
+        return (
+            '<!doctype html>\n<meta charset="utf-8">\n<title>ufo</title>\n'
+            f'<form id="open" method="post" action="{escape(self.portal_url, quote=True)}">\n'
+            f'<input type="hidden" name="token" value="{escape(self.token, quote=True)}">\n'
+            '<button type="submit">Open your workspace</button>\n</form>\n'
+            "<script>document.getElementById('open').submit()</script>\n"
+        )
 
 
 @main.command()

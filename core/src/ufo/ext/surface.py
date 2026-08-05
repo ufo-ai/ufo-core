@@ -2492,6 +2492,10 @@ class SurfaceSpec:
     post: PostHandler | None = None
     attach: AttachHandler | None = None
     self_user_id: SurfaceIdentityResolver | None = None
+    home: bool = False
+    """Whether a browser arriving at the deploy's root belongs on this surface. Core answers `GET /`
+    with a redirect to `/surface/<name>`, so the bare host is a door rather than a 404. At most one
+    installed surface may claim it — two homes is a pack error, refused at boot."""
 
 
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]:
