@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ufo.sdk.manifest import SubagentProfile
 from ufo.sdk.sandbox import WORKSPACE_DIR, ExecResult, SandboxSession, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_coding.review_routing import ReviewTarget, record_review_conversation
 
 REVIEW_CHECKOUT_TIMEOUT_SECONDS = 300
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -222,6 +223,8 @@ async def checkout_code_review(ctx: ToolContext, args: CheckoutCodeReviewInput) 
     comparison = ExactComparison.model_validate(args.model_dump(exclude={"user_description"}))
     if comparison != expected:
         raise ValueError("review checkout input does not match the admitted comparison")
+    if ctx.ext is None:
+        raise RuntimeError("review checkout requires the coding extension context")
     review_checkout = ExactComparisonCheckout(
         ctx.sandbox,
         f"https://github.com/{comparison.repository}.git",
@@ -229,6 +232,16 @@ async def checkout_code_review(ctx: ToolContext, args: CheckoutCodeReviewInput) 
     )
     checkout = await review_checkout.run(comparison)
     ctx.cleanup.register(review_checkout.remove)
+    await record_review_conversation(
+        ctx.ext,
+        ReviewTarget(
+            repository=comparison.repository,
+            pull_request_number=comparison.pull_number,
+            base_sha=comparison.base_sha,
+            head_sha=comparison.head_sha,
+        ),
+        ctx.turn.conversation_id,
+    )
     return ToolResult(
         content=(
             TextContent(

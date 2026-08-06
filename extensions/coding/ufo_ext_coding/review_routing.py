@@ -44,6 +44,7 @@ review_run = sa.Table(
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("turn_id", sa.Uuid, nullable=True),
+    sa.Column("review_conversation_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -132,6 +133,7 @@ class StoredReviewRun:
     base_sha: str
     head_sha: str
     conversation_id: UUID
+    review_conversation_id: UUID | None
 
 
 async def review_run_for(
@@ -160,7 +162,24 @@ async def review_run_for(
         base_sha=row["base_sha"],
         head_sha=row["head_sha"],
         conversation_id=row["conversation_id"],
+        review_conversation_id=row["review_conversation_id"],
     )
+
+
+async def record_review_conversation(
+    ext: ExtensionContext, target: ReviewTarget, conversation_id: UUID
+) -> None:
+    """Which conversation actually ran the review, written by the reviewer child itself: the run row
+    names the inbox conversation that ordered the review, while the reviewer's own transcript lives
+    in the fresh conversation its turn runs in. The child writes its own turn's id, so publication
+    links a conversation the host resolved rather than one a review claimed. A comparison with no
+    stored run — a reviewer spawned by hand — matches no row and records nothing."""
+    async with ext.transaction() as connection:
+        await connection.execute(
+            sa.update(review_run)
+            .values(review_conversation_id=conversation_id, updated_at=sa.func.now())
+            .where(_run_match(ext.store.workspace_id, target))
+        )
 
 
 @dataclass(frozen=True)
@@ -295,6 +314,7 @@ class ReviewRouting:
                     conversation_id=inbox.conversation_id,
                     agent_id=inbox.agent_id,
                     turn_id=None,
+                    review_conversation_id=None,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

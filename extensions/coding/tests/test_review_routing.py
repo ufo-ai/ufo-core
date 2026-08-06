@@ -10,7 +10,9 @@ from ufo_ext_coding.review_routing import (
     GITHUB_PROVIDER,
     PULL_REQUEST_STREAM,
     ConfigureReviewInboxInput,
+    ReviewTarget,
     configure_review_inbox,
+    record_review_conversation,
     review_inbox,
     review_run,
     review_run_for,
@@ -21,7 +23,7 @@ from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import SUBAGENT_SURFACE, Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, binding_name
@@ -224,6 +226,24 @@ async def _turns(state: Workspace) -> list[sa.RowMapping]:
         )
 
 
+async def _reviewer_conversation(state: Workspace) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=state.id,
+                agent_id=state.agent_id,
+                surface=SUBAGENT_SURFACE,
+                queue_key=uuid4().hex,
+                member_id=state.owner_id,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+    return conversation_id
+
+
 async def test_activation_baselines_existing_pages_and_wakes_exact_inbox(db: None) -> None:
     state = await _workspace()
     async with workspace_tx() as connection:
@@ -316,6 +336,49 @@ async def test_only_new_open_ready_comparisons_wake_once(db: None) -> None:
         )
     assert [run["head_sha"] for run in runs] == ["a" * 40, "c" * 40]
     assert {run["turn_id"] for run in runs} == {turns[0]["id"]}
+
+
+async def test_the_conversation_that_ran_the_review_is_recorded_on_its_run(db: None) -> None:
+    state = await _workspace()
+    await _activate(state)
+    await _route(state, _hook_context(state), _change(state, revision=1))
+    reviewer = await _reviewer_conversation(state)
+    target = ReviewTarget(
+        repository="metalcraftai/ufo",
+        pull_request_number=1237,
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+    )
+    async with workspace_tx() as connection:
+        run_id = (
+            await connection.execute(
+                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+            )
+        ).scalar_one()
+
+    with ws(state.id):
+        ordered = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+        await record_review_conversation(_hook_context(state), target, reviewer)
+        reviewed = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+        await record_review_conversation(
+            _hook_context(state),
+            ReviewTarget(
+                repository="metalcraftai/ufo",
+                pull_request_number=1237,
+                base_sha="b" * 40,
+                head_sha="c" * 40,
+            ),
+            uuid4(),
+        )
+        unmatched = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+
+    assert ordered is not None
+    assert ordered.conversation_id == state.conversation_id
+    assert ordered.review_conversation_id is None
+    assert reviewed is not None
+    assert reviewed.review_conversation_id == reviewer
+    assert unmatched is not None
+    assert unmatched.review_conversation_id == reviewer
 
 
 async def test_review_run_refuses_another_workspaces_turn(db: None) -> None:

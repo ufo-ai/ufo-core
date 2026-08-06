@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_coding.review_checkout as review_checkout
@@ -20,8 +20,10 @@ from ufo_ext_coding.review_checkout import (
     review_grep,
     review_read,
 )
+from ufo_ext_coding.review_routing import ReviewTarget
 
 from ufo.sandbox.local import LocalCarrier
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.sandbox import ProxyEndpoint, SandboxSession, SandboxSpec
 from ufo.sdk.tools import ToolContext
 
@@ -145,7 +147,15 @@ async def test_exact_comparison_checkout_uses_the_real_remote_and_leaves_no_push
     assert not await asyncio.to_thread(root.exists)
 
 
-async def test_checkout_tool_registers_turn_cleanup(tmp_path: Path) -> None:
+async def test_checkout_tool_records_its_conversation_and_registers_turn_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: list[tuple[object, ReviewTarget, UUID]] = []
+
+    async def record(ext: object, target: ReviewTarget, conversation_id: UUID) -> None:
+        recorded.append((ext, target, conversation_id))
+
+    monkeypatch.setattr(review_checkout, "record_review_conversation", record)
     remote, _, base, head = await _comparison(tmp_path)
     sandbox = await _sandbox(tmp_path)
     rewrite = await sandbox.carrier.exec(
@@ -167,11 +177,14 @@ async def test_checkout_tool_registers_turn_cleanup(tmp_path: Path) -> None:
         head_sha=head,
     )
     turn_id = uuid4()
+    conversation_id = uuid4()
+    ext = SimpleNamespace()
     context = ToolContext(
         sandbox=sandbox,
         blob=None,
         turn=SimpleNamespace(
             id=turn_id,
+            conversation_id=conversation_id,
             subagent_profile="code_review",
             inbound=comparison.model_dump_json(),
         ),
@@ -180,6 +193,7 @@ async def test_checkout_tool_registers_turn_cleanup(tmp_path: Path) -> None:
         speaker_member_id=None,
         audience=None,
         artifact_token_secret="",
+        ext=cast(ExtensionContext, ext),
     )
     await checkout_code_review(
         context,
@@ -187,6 +201,18 @@ async def test_checkout_tool_registers_turn_cleanup(tmp_path: Path) -> None:
             **comparison.model_dump(), user_description="Preparing the review."
         ),
     )
+    assert recorded == [
+        (
+            ext,
+            ReviewTarget(
+                repository="metalcraftai/ufo",
+                pull_request_number=PULL_NUMBER,
+                base_sha=base,
+                head_sha=head,
+            ),
+            conversation_id,
+        )
+    ]
     checkout = tmp_path / "workspace" / ".ufo-review" / turn_id.hex
     assert await asyncio.to_thread(checkout.exists)
     await context.cleanup.drain()

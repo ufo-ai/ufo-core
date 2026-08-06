@@ -199,7 +199,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0012",
         "sample_ext_note_0001",
         "skill_create_0002",
-        "coding_0001",
+        "coding_0002",
         "eval_env_0001",
         "sites_0001",
         "web_0001",

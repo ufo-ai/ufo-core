@@ -7,11 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
 from ufo_ext_coding.github_app import GIT_SLOT, GITHUB_API
-from ufo_ext_coding.review_checkout import CodeReviewOutput
+from ufo_ext_coding.review_checkout import CODE_REVIEW_PROFILE_NAME, CodeReviewOutput
 from ufo_ext_coding.review_routing import StoredReviewRun, review_run_for
 
 CHECK_NAME = "ufo review"
 CHECK_TITLE = "Code review"
+WEB_SURFACE_PATH = "/surface/web"
+REVIEW_CONVERSATION_LABEL = "Review conversation:"
 CHECKS_API_VERSION = "2022-11-28"
 CHECKS_TIMEOUT_SECONDS = 30
 CHECKS_PAGE_SIZE = 100
@@ -40,6 +42,7 @@ class CreateCheckRun(BaseModel):
     conclusion: CheckConclusion
     external_id: str
     output: CheckOutput
+    details_url: str | None = None
 
 
 class UpdateCheckRun(BaseModel):
@@ -48,6 +51,7 @@ class UpdateCheckRun(BaseModel):
     conclusion: CheckConclusion
     external_id: str
     output: CheckOutput
+    details_url: str | None = None
 
 
 class CheckRun(BaseModel):
@@ -59,7 +63,20 @@ class CheckRunList(BaseModel):
     check_runs: tuple[CheckRun, ...]
 
 
-def render_check_summary(review: CodeReviewOutput) -> str:
+def review_conversation_url(public_base_url: str | None, run: StoredReviewRun) -> str | None:
+    """Where the review itself happened, on the web surface: the reviewer child's own run page under
+    its profile, which is the portal route that opens a conversation of the subagent surface — the
+    chat permalink opens a web chat or an agent's listed conversation, and a child's is neither.
+    Absent until that child records it, and on a deploy that publishes no public base URL."""
+    if public_base_url is None or run.review_conversation_id is None:
+        return None
+    return (
+        f"{public_base_url.rstrip('/')}{WEB_SURFACE_PATH}#/subagents/{CODE_REVIEW_PROFILE_NAME}"
+        f"/conversations/{run.review_conversation_id}"
+    )
+
+
+def render_check_summary(review: CodeReviewOutput, conversation_url: str | None = None) -> str:
     if review.findings:
         parts = ["Severe defects"]
         for finding in review.findings:
@@ -74,17 +91,24 @@ def render_check_summary(review: CodeReviewOutput) -> str:
             )
     else:
         parts = ["No severe defect found."]
-    return "\n".join(parts)[:CHECK_SUMMARY_MAX_CHARS]
+    body = "\n".join(parts)
+    if conversation_url is None:
+        return body[:CHECK_SUMMARY_MAX_CHARS]
+    link = f"\n\n{REVIEW_CONVERSATION_LABEL} {conversation_url}"
+    return body[: CHECK_SUMMARY_MAX_CHARS - len(link)] + link
 
 
 @dataclass(frozen=True)
 class GitHubCheckPublisher:
     token: str
+    conversation_url: str | None = None
     transport: httpx.AsyncBaseTransport | None = None
 
     async def publish(self, run: StoredReviewRun, review: CodeReviewOutput) -> int:
         external_id = str(run.run_id)
-        output = CheckOutput(title=CHECK_TITLE, summary=render_check_summary(review))
+        output = CheckOutput(
+            title=CHECK_TITLE, summary=render_check_summary(review, self.conversation_url)
+        )
         conclusion: CheckConclusion = "action_required" if review.findings else "success"
         headers = {
             "Accept": "application/vnd.github+json",
@@ -109,6 +133,7 @@ class GitHubCheckPublisher:
                         conclusion=conclusion,
                         external_id=external_id,
                         output=output,
+                        details_url=self.conversation_url,
                     ),
                 )
                 return existing
@@ -123,6 +148,7 @@ class GitHubCheckPublisher:
                     conclusion=conclusion,
                     external_id=external_id,
                     output=output,
+                    details_url=self.conversation_url,
                 ),
             )
             return CheckRun.model_validate(response.json()).id
@@ -163,7 +189,7 @@ class GitHubCheckPublisher:
             response = await client.request(method, path, params=params)
         else:
             response = await client.request(
-                method, path, params=params, json=body.model_dump(mode="json")
+                method, path, params=params, json=body.model_dump(mode="json", exclude_none=True)
             )
         try:
             response.raise_for_status()
@@ -179,7 +205,9 @@ async def publish_code_review(ctx: ToolContext, args: PublishCodeReviewInput) ->
     if run is None:
         raise ValueError("review run does not belong to this conversation")
     token = await ctx.ext.credentials.resolve(GIT_SLOT)
-    check_id = await GitHubCheckPublisher(token).publish(run, args.review)
+    check_id = await GitHubCheckPublisher(
+        token, review_conversation_url(ctx.public_base_url, run)
+    ).publish(run, args.review)
     return ToolResult(
         content=(
             TextContent(
