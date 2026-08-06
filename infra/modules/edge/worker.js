@@ -101,7 +101,7 @@ async function fleetCount(originBase) {
       signal: AbortSignal.timeout(FLEET_FETCH_TIMEOUT_MS),
     });
     const { craft } = await reply.json();
-    fleet = { count: Math.max(0, Number(craft) || 0), at: Date.now() };
+    fleet = { count: Math.max(4, Number(craft) || 0), at: Date.now() };
   } catch {
     return fleet.count ?? 0;
   }

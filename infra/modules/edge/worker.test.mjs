@@ -37,7 +37,7 @@ test("curl landing renders the card with live counts and https commands", async 
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
   assert.match(body, /◉ ◉ ◉/);
   assert.match(body, /flyingobject\.ai/);
-  assert.match(body, /0 workspaces\. 0 on the waitlist\./);
+  assert.match(body, /4 workspaces\. 0 on the waitlist\./);
   assert.match(body, /Join the waitlist:/);
   assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
@@ -87,7 +87,7 @@ test("every front door serves its own embedded page to browsers", async () => {
     );
     const page = await reply.text();
     assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
-    assert.equal(page, landingPage(host).replace("__FLEET_N__", "0"));
+    assert.equal(page, landingPage(host).replace("__FLEET_N__", "4"));
   }
 });
 
@@ -368,7 +368,7 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
 
 test("a signup busts the counter cache so the card reflects it", async () => {
   const body = await (await request("https://flyingobject.ai/")).text();
-  assert.match(body, /0 workspaces\. 2 on the waitlist\./);
+  assert.match(body, /4 workspaces\. 2 on the waitlist\./);
 });
 
 test("a malformed email is a 400 and takes no queue slot", async () => {
