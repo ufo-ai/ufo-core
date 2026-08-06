@@ -283,11 +283,11 @@ export function TurnLine({
           <a href={changesHash(turn.agent_id, turn.conversation_id, rootConversationId)}>Changes</a>
         ) : null}
       </div>
-      <div className="max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm">
+      <div className="max-w-bubble self-end whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill px-lg py-sm">
         {turn.inbound}
       </div>
       {answer ? (
-        <div className="max-w-bubble self-start whitespace-pre-wrap rounded-bubble bg-fill-subtle px-lg py-sm">
+        <div className="max-w-bubble self-start whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill-subtle px-lg py-sm">
           {answer}
         </div>
       ) : null}
@@ -349,7 +349,7 @@ function ConversationFiles({ base }: { base: string }) {
                 </tbody>
               </Table>
               {preview === null ? null : (
-                <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+                <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
                   {preview}
                 </pre>
               )}

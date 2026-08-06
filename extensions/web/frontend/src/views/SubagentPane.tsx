@@ -102,7 +102,7 @@ function SubagentOverview({ base }: { base: string }) {
           </Section>
 
           <Section title="Prompt">
-            <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+            <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
               {subagent.prompt}
             </pre>
           </Section>

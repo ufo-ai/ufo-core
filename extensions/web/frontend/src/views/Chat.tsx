@@ -202,7 +202,7 @@ function Speech({
   return (
     <div
       className={cn(
-        "break-words [&_a]:text-link",
+        "wrap-anywhere [&_a]:text-link",
         mine
           ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
           : "w-full max-w-bubble self-start text-body leading-reading",

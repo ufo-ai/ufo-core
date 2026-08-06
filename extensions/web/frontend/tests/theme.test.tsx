@@ -8,6 +8,7 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
 import { Notice } from "@/kernel/panel";
+import { TurnLine } from "@/views/Conversations";
 
 import { CHAT_ROW, CONVO_ID, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
@@ -126,6 +127,36 @@ test("a table keeps its height inside a scrolling panel instead of collapsing", 
   expect(builtStyles().replace(/\s+/g, "")).toContain(".shrink-0{flex-shrink:0}");
 });
 
+test("a transcript bubble wraps an unbreakable string instead of widening the pane", () => {
+  const blob = '{"pull_number":1269,"head_sha":"e8beb82515566586de252fdc5a411db2526057e1"}';
+  render(
+    <TurnLine
+      turn={{
+        id: TURN_ID,
+        agent_id: AGENT.id,
+        conversation_id: CONVO_ID,
+        seq: 1,
+        status: "done",
+        created_at: "2026-08-06T09:00:00Z",
+        inbound: blob,
+        outcome: blob,
+        error_class: null,
+        subagent_profile: "code_review",
+        parent_turn_id: null,
+      }}
+      depth={0}
+      showChanges={false}
+    />,
+  );
+
+  for (const bubble of screen.getAllByText(blob)) {
+    expect(bubble.className).toContain("wrap-anywhere");
+  }
+  // `anywhere` rather than `break-word`: only `anywhere` lowers the intrinsic minimum width, so a
+  // shrink-to-fit bubble resolves to the pane instead of to its 70ch maximum and overflowing it.
+  expect(builtStyles().replace(/\s+/g, "")).toContain(".wrap-anywhere{overflow-wrap:anywhere}");
+});
+
 test("the working pulse yields to reduced motion in the built sheet", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
@@ -158,6 +189,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   const mineSide = screen.getByText("mine").closest("[data-role=me]")!;
   expect(mineSide.className).toContain("self-end");
   expect(mineSide.className).toContain("bg-fill");
+  for (const side of [agentSide, mineSide]) expect(side.className).toContain("wrap-anywhere");
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));

@@ -110,7 +110,7 @@ export function Overview({ agent }: { agent: Agent }) {
                 digest {ready.agent.prompt_digest} — prompt changes go through the governed proposal path
                 in chat
               </Hint>
-              <pre className="overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+              <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
                 {ready.agent.prompt}
               </pre>
             </Section>
