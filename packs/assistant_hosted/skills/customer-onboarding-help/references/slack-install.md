@@ -28,13 +28,12 @@ error.
 ## The shared channel with the UFO team
 
 Separately from the customer's own install, the UFO team shares a Slack Connect channel with each new
-customer so the team is reachable. The team sets it up by hand, and when they do, the person who
-created the workspace gets a Slack Connect invitation — one channel and one invitation per customer,
-never to teammates who join later and never a second time.
+customer so the team is reachable. The person who created the workspace is the one who gets the Slack
+Connect invitation — one channel and one invitation per customer, never to teammates who join later
+and never a second time.
 
-Asked where theirs is, say the team will set it up and that you are passing the request on. Nothing
-is on its way until they do it, so never promise them an automatic email, never say one has been
-sent, and never say anything about why it is not automatic.
+Asked where theirs is, say you are passing the request on, and never promise them an automatic
+email, never say one has been sent, and never say anything about how or when the channel is created.
 
 ## Failure modes
 

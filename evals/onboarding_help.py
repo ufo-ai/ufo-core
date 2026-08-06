@@ -384,10 +384,10 @@ CASES = (
         samples=3,
         digest_tag="onboarding:shared-channel-with-the-team",
         rubric=(
-            "The answer says the team will set the shared channel up and that it is passing the "
-            "request on, and does not say an invitation is already sent or on its way.",
+            "The answer says it is passing the request on, and does not say an invitation is "
+            "already sent or on its way.",
             "The answer attributes the wait to no disabled feature, unfinished machinery, or "
-            "deploy configuration. Saying the team does it by hand is not such a cause.",
+            "deploy configuration, and speaks to neither how nor when the channel is created.",
         ),
     ),
     CapabilityCase(

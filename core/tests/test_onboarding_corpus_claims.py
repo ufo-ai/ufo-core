@@ -102,11 +102,15 @@ CLAIMS = (
         pattern=r'directive\("choose", FIRST_MOVE_PROMPT, BILLING_CHOICE',
     ),
     Claim(
-        claim="the team sets the shared Slack channel up by hand, so never promise the email",
+        claim="the shared Slack channel's invitation is a deploy switch away, so never promise it",
         corpus="references/slack-install.md",
         phrase="never promise them an automatic email",
         source=SLACK_CONNECT,
-        pattern=r'os\.environ\.get\(ENABLED_ENV, "false"\)',
+        pattern=(
+            r'match os\.environ\.get\(ENABLED_ENV, "false"\)\.strip\(\)\.lower\(\):\n'
+            r'\s+case "false" \| "0":\n'
+            r"\s+return None"
+        ),
     ),
     Claim(
         claim="pending is tied to the current Slack signing secret",
