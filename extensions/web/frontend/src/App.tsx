@@ -349,11 +349,15 @@ function Pane({
       const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent_id);
       if (!linkedAgent) return <PaneNote>No such agent.</PaneNote>;
       return (
-        <ConversationDetail
-          agent={linkedAgent}
-          conversation={linkedConversation}
-          onBack={() => onOpenAgent(linkedAgent.id, "conversations")}
-        />
+        <main className="flex min-h-0 min-w-0 flex-col">
+          <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
+            <ConversationDetail
+              agent={linkedAgent}
+              conversation={linkedConversation}
+              onBack={() => onOpenAgent(linkedAgent.id, "conversations")}
+            />
+          </div>
+        </main>
       );
     }
     const agent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;

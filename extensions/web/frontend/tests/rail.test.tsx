@@ -277,6 +277,10 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
   expect(screen.queryByLabelText("Message the agent")).toBeNull();
+  expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
+  expect(
+    screen.getByRole("heading", { name: "slack · Shared · " + CONVO_ID.slice(0, 8) }),
+  ).toBeTruthy();
 });
 
 test("the new-conversation control targets the main agent, or picks among several", async () => {
