@@ -38,6 +38,7 @@ def test_documents_skills_parse_and_index() -> None:
         "office-xlsx",
         "pdf",
         "theme-factory",
+        "writing-drafts",
     ):
         assert name in index
 

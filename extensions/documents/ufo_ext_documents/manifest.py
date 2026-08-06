@@ -5,7 +5,8 @@ references — that the loader parses into the loadable-skill registry and mount
 under `.skills/<name>/` when `load_skill` resolves it. `office-docx`, `office-pptx`, `pdf`, and
 `theme-factory` build on `design-foundations`, the shared visual baseline, which each names in its
 `depends` so loading any of them pulls it too. `document-review` reviews any of the office formats,
-loading their skills at runtime to annotate."""
+loading their skills at runtime to annotate. `writing-drafts` covers the prose a document carries
+rather than its format, so it composes with whichever skill owns the artifact."""
 
 from pathlib import Path
 
@@ -22,6 +23,7 @@ SKILL_NAMES = (
     "office-xlsx",
     "pdf",
     "theme-factory",
+    "writing-drafts",
 )
 
 
