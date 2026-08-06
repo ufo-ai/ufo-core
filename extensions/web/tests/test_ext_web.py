@@ -381,6 +381,44 @@ def test_transcript_projection_guards_activity_labels() -> None:
     }
 
 
+def test_transcript_projection_places_child_conversations_on_their_parent_replies() -> None:
+    answered, failed = uuid4(), uuid4()
+    answered_child, failed_child = uuid4(), uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {answered}\n</context>\nFirst.",
+            ),
+            Message(role="assistant", content="Done."),
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {failed}\n</context>\nSecond.",
+            ),
+        ),
+        {
+            str(answered): [{"profile": "general_purpose", "conversation_id": str(answered_child)}],
+            str(failed): [{"profile": "deep_research", "conversation_id": str(failed_child)}],
+        },
+        frozenset((str(answered), str(failed))),
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "First."},
+        {
+            "role": "assistant",
+            "text": "Done.",
+            "subagents": [{"profile": "general_purpose", "conversation_id": str(answered_child)}],
+        },
+        {"role": "user", "text": "Second."},
+        {
+            "role": "assistant",
+            "text": "",
+            "subagents": [{"profile": "deep_research", "conversation_id": str(failed_child)}],
+        },
+    ]
+
+
 @dataclass(frozen=True)
 class StandInModel:
     """Echoes the round count back so a web turn runs the full queue path without a provider."""
@@ -719,7 +757,7 @@ async def test_transcript_route_returns_durable_tool_activity(
     client, workspace_id, agent_id = web
     _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    conversation_id, _turn_id = await _seed_web_turn(
+    conversation_id, turn_id = await _seed_web_turn(
         workspace_id,
         agent_id,
         member_id,
@@ -730,7 +768,10 @@ async def test_transcript_route_returns_durable_tool_activity(
         Conversation(
             seq=1,
             messages=(
-                Message(role="user", content="<context>source: web</context>\nRun it."),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nRun it.",
+                ),
                 Message(
                     role="assistant",
                     content=(ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),),
@@ -744,6 +785,9 @@ async def test_transcript_route_returns_durable_tool_activity(
                 Message(role="assistant", content="Done."),
             ),
         )
+    )
+    child_conversation, _child_turn = await _seed_subagent(
+        workspace_id, agent_id, member_id, turn_id
     )
 
     response = await client.get(
@@ -763,6 +807,12 @@ async def test_transcript_route_returns_durable_tool_activity(
                     "name": "bash",
                     "preview": '{"command":"pwd"}',
                     "description": "",
+                }
+            ],
+            "subagents": [
+                {
+                    "profile": "general_purpose",
+                    "conversation_id": str(child_conversation),
                 }
             ],
         },
@@ -3159,6 +3209,45 @@ async def _seed_web_turn(
     return conversation_id, turn_id
 
 
+async def _seed_subagent(
+    workspace_id: UUID,
+    agent_id: UUID,
+    member_id: UUID,
+    parent_turn_id: UUID,
+) -> tuple[UUID, UUID]:
+    conversation_id, turn_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=SUBAGENT_SURFACE,
+                queue_key=str(turn_id),
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="{}",
+                terminal=TerminalFrame(status="done", text="{}").model_dump(mode="json"),
+                parent_turn_id=parent_turn_id,
+                subagent_profile="general_purpose",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id, turn_id
+
+
 async def _collect_events(
     client: AsyncClient, token: str, turn_id: UUID
 ) -> list[tuple[str, dict[str, object]]]:
@@ -3342,6 +3431,30 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
             )
         ).scalar_one()
     assert turns == 1
+
+
+async def test_terminal_stream_links_the_turns_child_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Done."),
+    )
+    child_conversation, _child_turn = await _seed_subagent(
+        workspace_id, agent_id, member_id, turn_id
+    )
+
+    events = dict(await _collect_events(client, token, turn_id))
+
+    assert events["subagent"] == {
+        "profile": "general_purpose",
+        "conversation_id": str(child_conversation),
+    }
 
 
 async def test_shared_files_stream_and_reload_as_download_links(

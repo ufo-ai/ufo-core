@@ -82,7 +82,14 @@ export type ToolEvent = {
   description: string;
 };
 
-export type Message = { role: string; text: string; events?: ToolEvent[] };
+export type SubagentRun = { profile: string; conversation_id: string };
+
+export type Message = {
+  role: string;
+  text: string;
+  events?: ToolEvent[];
+  subagents?: SubagentRun[];
+};
 
 export type Transcript = {
   messages: Message[];

@@ -143,6 +143,7 @@ STATIC_ETAGS = {
     name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in STATIC_ASSETS.items()
 }
 CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
+MESSAGE_REF = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)", re.S)
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -633,10 +634,53 @@ def _tool_event(block: ToolUseBlock) -> dict[str, str]:
             }
 
 
-def _rendered_messages(messages: tuple[Message, ...]) -> list[dict[str, object]]:
+SubagentRuns = dict[str, list[dict[str, str]]]
+
+
+def _subagent_runs(turns: tuple[Turn, ...]) -> SubagentRuns:
+    runs: SubagentRuns = {}
+    for turn in turns:
+        if turn.parent_turn_id is None or turn.subagent_profile is None:
+            continue
+        run = {
+            "profile": turn.subagent_profile,
+            "conversation_id": str(turn.conversation_id),
+        }
+        parent_runs = runs.setdefault(str(turn.parent_turn_id), [])
+        if run not in parent_runs:
+            parent_runs.append(run)
+    return runs
+
+
+def _rendered_messages(
+    messages: tuple[Message, ...],
+    subagents: SubagentRuns | None = None,
+    turn_ids: frozenset[str] = frozenset(),
+) -> list[dict[str, object]]:
+    subagents = subagents or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
+    current_turn_id: str | None = None
+
+    def flush_reply(include_subagents: bool) -> None:
+        nonlocal answer, pending
+        runs = (
+            subagents.get(current_turn_id, [])
+            if include_subagents and current_turn_id is not None
+            else []
+        )
+        if not answer and not pending and not runs:
+            return
+        reply: dict[str, object] = {"role": "assistant", "text": answer}
+        if pending:
+            reply["events"] = pending
+        if runs:
+            reply["subagents"] = runs
+        rendered.append(reply)
+        pending = []
+        answer = ""
+
     active = {
         block.tool_use_id
         for message in messages
@@ -659,19 +703,15 @@ def _rendered_messages(messages: tuple[Message, ...]) -> list[dict[str, object]]
             continue
         if not isinstance(message.content, str) or CONTEXT_TAG.match(message.content) is None:
             continue
-        if answer or pending:
-            reply: dict[str, object] = {"role": "assistant", "text": answer}
-            if pending:
-                reply["events"] = pending
-            rendered.append(reply)
-            pending = []
-            answer = ""
+        match = MESSAGE_REF.match(message.content)
+        turn_id = None if match is None else match.group("ref").strip()
+        if turn_id in turn_ids and turn_id != current_turn_id:
+            flush_reply(True)
+            current_turn_id = turn_id
+        else:
+            flush_reply(False)
         rendered.append({"role": "user", "text": text})
-    if answer or pending:
-        reply = {"role": "assistant", "text": answer}
-        if pending:
-            reply["events"] = pending
-        rendered.append(reply)
+    flush_reply(True)
     return rendered
 
 
@@ -701,7 +741,18 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
         return Response("no such conversation", status_code=404)
     recorded = await ctx.read_transcript(conversation_id)
-    rendered = [] if recorded is None else _rendered_messages(recorded.messages)
+    if recorded is None:
+        rendered = []
+    else:
+        turns, spawned = await asyncio.gather(
+            ctx.list_turns(conversation_id),
+            ctx.conversation_subagent_turns(conversation_id),
+        )
+        rendered = _rendered_messages(
+            recorded.messages,
+            _subagent_runs(spawned),
+            frozenset(str(turn.id) for turn in turns),
+        )
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
     if detail is None:
@@ -1580,6 +1631,16 @@ async def _events(
 ) -> AsyncIterator[bytes]:
     async for cursor, frame in ctx.tail(turn_id, since):
         if isinstance(frame, Terminal):
+            detail = await ctx.turn_detail(turn_id)
+            if detail is not None:
+                for run in _subagent_runs(detail.children).get(str(turn_id), []):
+                    yield _event(
+                        "subagent",
+                        {
+                            "profile": run["profile"],
+                            "conversation_id": run["conversation_id"],
+                        },
+                    )
             if frame.frame.connect_request is not None:
                 try:
                     url = await ctx.connect_url(turn_id, member_id)

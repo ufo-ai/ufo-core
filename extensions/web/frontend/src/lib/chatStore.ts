@@ -1,6 +1,13 @@
 import { useSyncExternalStore } from "react";
 
-import type { ChatFile, ChatQuestion, CredentialRequest, Message, ToolEvent } from "@/lib/types";
+import type {
+  ChatFile,
+  ChatQuestion,
+  CredentialRequest,
+  Message,
+  SubagentRun,
+  ToolEvent,
+} from "@/lib/types";
 
 export type { ToolEvent } from "@/lib/types";
 
@@ -18,6 +25,7 @@ export type LiveTurn = {
   files: ChatFile[] | null;
   connectUrl: string | null;
   events: ToolEvent[];
+  subagents: SubagentRun[];
   reconnecting: boolean;
 };
 
@@ -60,6 +68,7 @@ export function liveTurn(): LiveTurn {
     files: null,
     connectUrl: null,
     events: [],
+    subagents: [],
     reconnecting: false,
   };
 }

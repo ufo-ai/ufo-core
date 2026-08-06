@@ -6,6 +6,7 @@ import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { chatState, clearChat, updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
+import { subagentConversationHash } from "@/lib/route";
 import {
   answerQuestion,
   eventLabel,
@@ -14,7 +15,14 @@ import {
   sendMessage,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
+import type {
+  Agent,
+  ChatFile,
+  ChatQuestion,
+  Member,
+  QuestionEntry,
+  SubagentRun,
+} from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
 
@@ -109,6 +117,7 @@ export function Chat({ agent, member, conversationId, onCreated, onActivity }: C
           ) : (
             <Speech key={index} mine={message.role === "user"}>
               {message.role === "user" ? message.text : <Markdown text={message.text} />}
+              {message.subagents ? <SubagentCards runs={message.subagents} /> : null}
               {message.events ? <ToolFold events={message.events} /> : null}
               {message.files ? <Files files={message.files} /> : null}
               {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
@@ -119,11 +128,12 @@ export function Chat({ agent, member, conversationId, onCreated, onActivity }: C
         {state.live ? (
           <Speech mine={false} entering>
             <StreamingBody text={state.live.text} />
+            {state.live.subagents.length ? <SubagentCards runs={state.live.subagents} /> : null}
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
             {state.live.reconnecting ? (
               <Working>Reconnecting…</Working>
-            ) : state.live.activity ? (
+            ) : state.live.activity && !state.live.subagents.length ? (
               <Working>{state.live.activity}</Working>
             ) : state.live.text ? null : (
               <Working>Thinking…</Working>
@@ -244,6 +254,24 @@ function ToolFold({ events }: { events: ToolEvent[] }) {
         ))}
       </ul>
     </details>
+  );
+}
+
+function SubagentCards({ runs }: { runs: SubagentRun[] }) {
+  return (
+    <>
+      {runs.map((run) => (
+        <a
+          key={run.conversation_id}
+          href={subagentConversationHash(run.profile, run.conversation_id)}
+          className="mt-sm flex w-full flex-col rounded-control border border-edge-control px-lg py-md no-underline"
+          data-kind="subagent"
+        >
+          <span>Subagent · {run.profile}</span>
+          <span className="mt-2xs text-small opacity-(--muted)">Open conversation</span>
+        </a>
+      ))}
+    </>
   );
 }
 

@@ -462,7 +462,9 @@ explicit grant holds the agent, never the main-agent default alone. Beside the p
 `api/chats` lists the member's own web conversations across their audience agents — the rail's
 projection, each row titled from its first message. A `#/c/<conversation_id>` permalink opens a web
 chat normally and opens another surface's readable conversation in that same conversation view,
-read-only. The conversations view lists the member's own plus the workspace-shared ones and opens
+read-only. A reply links the subagent conversations its turn spawned through the child turns'
+existing parent linkage. The conversations view lists the member's own plus the workspace-shared
+ones and opens
 each as its turns, the turns those spawned nested beneath them (a subagent runs in its own
 conversation carrying the parent's audience, in the spawning turn's sandbox), and the live
 workspace files; an admin lists every conversation of the agent and reads another member's private

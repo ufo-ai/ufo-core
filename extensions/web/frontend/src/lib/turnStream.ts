@@ -8,7 +8,7 @@ import {
   type LiveTurn,
   type ToolEvent,
 } from "@/lib/chatStore";
-import type { ChatFile, ChatQuestion, Transcript } from "@/lib/types";
+import type { ChatFile, ChatQuestion, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
@@ -97,7 +97,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   const record = () =>
     updateChat(chatKey, (state) => {
       const live = state.live;
-      if (!live || !live.text) return state;
+      if (!live || (!live.text && !live.subagents.length)) return state;
       return {
         ...state,
         messages: (state.messages ?? []).concat({
@@ -107,6 +107,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
           ...(live.files ? { files: live.files } : {}),
           ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
           ...(live.events.length ? { events: live.events } : {}),
+          ...(live.subagents.length ? { subagents: live.subagents } : {}),
         }),
       };
     });
@@ -173,6 +174,15 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       events: live.events.concat(entry),
       activity: eventLabel(entry, "active"),
     }));
+  });
+
+  source.addEventListener("subagent", (event) => {
+    const run = JSON.parse((event as MessageEvent).data) as SubagentRun;
+    onLive((live) =>
+      live.subagents.some((entry) => entry.conversation_id === run.conversation_id)
+        ? live
+        : { ...live, subagents: live.subagents.concat(run) },
+    );
   });
 
   source.addEventListener("cost", (event) => {

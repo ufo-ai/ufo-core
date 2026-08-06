@@ -168,6 +168,27 @@ test("a settled conversation tails nothing", async () => {
   expect(screen.queryByText("Thinking…")).toBeNull();
 });
 
+test("a reloaded conversation links its subagent conversation", async () => {
+  const conversationId = "66666666-6666-4666-8666-666666666666";
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Done.",
+          subagents: [{ profile: "general_purpose", conversation_id: conversationId }],
+        },
+      ],
+    }),
+  );
+  open();
+
+  const card = await screen.findByRole("link", { name: /Subagent · general_purpose/ });
+  expect(card.getAttribute("href")).toBe(
+    "#/subagents/general_purpose/conversations/" + conversationId,
+  );
+});
+
 test("a conversation opens its file changes and returns to chat", async () => {
   wire({
     ...transcript(),

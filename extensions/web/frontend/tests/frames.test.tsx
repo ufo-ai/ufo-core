@@ -75,6 +75,27 @@ test("a single tool call folds behind singular copy", async () => {
   expect((await screen.findByText("1 tool call")).tagName).toBe("SUMMARY");
 });
 
+test("a terminal subagent event becomes a conversation card", async () => {
+  const stream = await streaming();
+  const conversationId = "66666666-6666-4666-8666-666666666666";
+  stream.emit("subagent", {
+    profile: "general_purpose",
+    conversation_id: conversationId,
+  });
+  stream.emit("terminal", {
+    status: "done",
+    text: "Done.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1,
+  });
+
+  const card = await screen.findByRole("link", { name: /Subagent · general_purpose/ });
+  expect(card.getAttribute("href")).toBe(
+    "#/subagents/general_purpose/conversations/" + conversationId,
+  );
+});
+
 test("a turn with no tool calls renders no fold", async () => {
   const stream = await streaming();
   stream.emit("terminal", {
