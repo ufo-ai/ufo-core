@@ -40,5 +40,9 @@ record.
 | [0007](archive/0007-github-extension-sources.md) | Install extensions from GitHub URLs (public + private) | proposed |
 | [0013](archive/0013-workspace-resources.md) | Workspace resources — governed CRUD, revisions, settings, pack agents, agent messaging | withdrawn |
 | [0015](archive/0015-extension-host.md) | Extension host — a sandboxed, JS-only channel for third-party extensions | accepted |
+| [0025](archive/0025-deep-work.md) | Deep work — control over what may proceed, and insight into whether it is converging | rejected |
 
 `0002`–`0004` were settled by 0011 (repo topology; the Postgres tier) and never shipped as written.
+`0025` is the one rejected on measurement rather than on argument: both closure forms it proposed that
+an agent performs scored below no discipline at all on HANDBOOK.md, and the record is kept for the
+reason why.
