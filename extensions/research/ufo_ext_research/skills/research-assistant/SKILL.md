@@ -27,7 +27,7 @@ When researching or gathering information:
 - Go deep on each item, don't skim
 - Cross-reference multiple sources when accuracy matters
 - Note gaps and limitations in what you found
-- For any topic with an ongoing timeline, always include a recency-focused query (e.g., "[topic] [current year]") to catch recent developments like settlements, rulings, or closures that would invalidate older sources
+- For any topic with an ongoing timeline, run one query bounded to the recent past with `start_published_date` to catch developments like settlements, rulings, or closures that would invalidate older sources
 
 When researching official rankings, lists, or published data:
 

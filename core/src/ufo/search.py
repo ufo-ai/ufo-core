@@ -12,6 +12,7 @@ on `supports_fetch` before calling `fetch`."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Protocol
 
 
@@ -48,13 +49,15 @@ class FetchedPage:
 
 @dataclass(frozen=True)
 class SearchQuery:
-    """One web search the provider runs: the `query` text, how many results to return, an optional
-    `recency` window keyword (`day`/`week`/`month`), domains to restrict to, and an optional
-    `vertical` (academic, people, image, video, shopping) the backend maps to its own category."""
+    """One web search the provider runs: the `query` text — a natural-language sentence stating the
+    intent, never a keyword string with its constraints baked in — how many results to return, the
+    published-date window to restrict to, domains to restrict to, and an optional `vertical`
+    (academic, people, image, video, shopping) the backend maps to its own category."""
 
     query: str
     num_results: int
-    recency: str | None = None
+    start_published_date: date | None = None
+    end_published_date: date | None = None
     allowed_domains: tuple[str, ...] = ()
     vertical: str | None = None
 

@@ -7,12 +7,14 @@ assert the tools' own marshalling (queries fanned and merged, the vertical folde
 gate, the fail-loud on a missing provider), never the fake. The exa backend keeps its own proof."""
 
 import json
-from datetime import UTC, datetime
+import re
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
 import ufo_ext_research.manifest as research_manifest
 import ufo_ext_research.tools as research_tools
+from pydantic import ValidationError
 from ufo_ext_research.subagent import (
     DEEP_RESEARCH_PROFILE,
     DEEP_RESEARCH_ROUND_LIMIT,
@@ -41,9 +43,13 @@ TOOL_NARRATION = "looking it up"
 
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "
-    "URLs, and content snippets. Best for news, prices, and time-sensitive data. Use "
-    "short, keyword-focused queries — max 3-5 per call. Run parallel queries for "
-    "different topics rather than one combined query."
+    "URLs, and content snippets. Best for news, prices, and time-sensitive data. Write each "
+    "query as a natural-language sentence stating what you want to know, and carry filters in a "
+    "parameter rather than in the query text: when a page was published in "
+    "start_published_date/end_published_date, a site restriction in allowed_domains. The period "
+    "you are asking about stays in the sentence — a page reporting a finished year is published "
+    "after that year ends. One query at a higher num_results beats several rephrasings of it — "
+    "send more than one query only for genuinely different topics."
 )
 FETCH_URL_DESCRIPTION = (
     "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
@@ -52,6 +58,8 @@ FETCH_URL_DESCRIPTION = (
     "crawler whose session is not yours: identity or account context in a response is the "
     "crawler's, so call APIs from bash instead of fetching them."
 )
+PERIOD_STAYS_IN_THE_SENTENCE = re.compile(r"period[^.]*stays in the sentence")
+PUBLICATION_NOT_THE_REPORTED_PERIOD = re.compile(r"published, not on the period it reports")
 
 
 class _FakeSearchProvider:
@@ -86,6 +94,17 @@ class _FakeSearchProvider:
             text="page text",
             summary="the summary" if request.prompt else None,
         )
+
+
+def _search_web_guidance_copies() -> tuple[str, ...]:
+    (section,) = research_manifest.manifest().prompt_sections
+    return (
+        research_tools.SEARCH_WEB_DESCRIPTION,
+        research_tools.SearchWebInput.model_fields["queries"].description or "",
+        section.body,
+        RESEARCH_PROFILE.prompt,
+        DEEP_RESEARCH_PROFILE.prompt,
+    )
 
 
 def _no_spawn(profile: str, payload: dict[str, object], background: bool = False) -> object:
@@ -150,7 +169,9 @@ def test_tool_descriptions_are_the_ported_verbatim_strings_and_untrusted() -> No
     assert all(tool.untrusted for tool in RESEARCH_TOOLS)
     assert set(research_tools.SearchWebInput.model_fields) == {
         "queries",
-        "recency_filter",
+        "num_results",
+        "start_published_date",
+        "end_published_date",
         "allowed_domains",
         "user_description",
     }
@@ -177,14 +198,12 @@ async def test_search_web_runs_one_provider_search_per_query_and_merges() -> Non
         "search_web",
         provider,
         queries=["alpha", "beta"],
-        recency_filter="week",
         allowed_domains=["docs.x.test"],
     )
     assert result.is_error is False
     assert [query.query for query in provider.queries] == ["alpha", "beta"]
     first = provider.queries[0]
     assert first.num_results == research_tools.DEFAULT_SEARCH_RESULTS
-    assert first.recency == "week"
     assert first.allowed_domains == ("docs.x.test",)
     assert first.vertical is None
     payload = json.loads(result.content[0].text)
@@ -197,6 +216,83 @@ async def test_search_web_runs_one_provider_search_per_query_and_merges() -> Non
 async def test_search_web_omits_answer_when_the_provider_gives_none() -> None:
     result = await _run("search_web", _FakeSearchProvider(), queries=["solo"])
     assert "answer" not in json.loads(result.content[0].text)
+
+
+async def test_search_web_carries_the_date_window_and_result_count_as_parameters() -> None:
+    """The constraints the agent used to bake into the query string reach the provider as seam
+    fields: a real date window (not a day/week/month enum, which cannot express one) and the
+    result count that replaces a fan-out of rephrasings."""
+    provider = _FakeSearchProvider()
+    sentence = "What did NanoCo announce about the NanoClaw release?"
+    result = await _run(
+        "search_web",
+        provider,
+        queries=[sentence],
+        num_results=research_tools.MAX_SEARCH_RESULTS,
+        start_published_date="2026-07-01",
+        end_published_date="2026-08-05",
+    )
+    assert result.is_error is False
+    (query,) = provider.queries
+    assert query.query == sentence
+    assert query.num_results == research_tools.MAX_SEARCH_RESULTS
+    assert query.start_published_date == date(2026, 7, 1)
+    assert query.end_published_date == date(2026, 8, 5)
+
+
+async def test_search_web_leaves_the_date_window_unset_when_the_agent_passes_none() -> None:
+    provider = _FakeSearchProvider()
+    await _run("search_web", provider, queries=["How does the seam work?"])
+    (query,) = provider.queries
+    assert query.start_published_date is None
+    assert query.end_published_date is None
+
+
+def test_search_web_bounds_the_result_count_and_rejects_a_malformed_date() -> None:
+    with pytest.raises(ValidationError):
+        research_tools.SearchWebInput.model_validate(
+            {
+                "queries": ["x"],
+                "user_description": TOOL_NARRATION,
+                "num_results": research_tools.MAX_SEARCH_RESULTS + 1,
+            }
+        )
+    with pytest.raises(ValidationError):
+        research_tools.SearchWebInput.model_validate(
+            {
+                "queries": ["x"],
+                "user_description": TOOL_NARRATION,
+                "start_published_date": "last week",
+            }
+        )
+
+
+def test_every_search_guidance_copy_asks_for_sentences_and_parameterised_constraints() -> None:
+    """A tool description, a field description, a prompt section, and two subagent prompts all shape
+    the query the agent writes; one copy left telling it to type keyword strings contradicts the
+    rest."""
+    search_web_copies = _search_web_guidance_copies()
+    for copy in search_web_copies:
+        assert "natural-language" in copy
+        assert "num_results" in copy
+    for copy in (
+        *search_web_copies,
+        research_tools.SearchVerticalInput.model_fields["query"].description or "",
+    ):
+        assert not any(
+            banned in copy for banned in ("keyword-focused", "keyword-based", "Short keyword")
+        )
+
+
+def test_no_search_guidance_copy_sends_the_reported_period_into_the_date_window() -> None:
+    """The window filters on when a page was published, not on the period a page reports, and the
+    source for a finished year is published after that year ends. A copy telling the agent to move
+    every date out of the query text sends the period it asks about into the window, which then
+    filters out the pages reporting that period."""
+    for copy in _search_web_guidance_copies():
+        assert PERIOD_STAYS_IN_THE_SENTENCE.search(copy), copy
+    window = research_tools.SearchWebInput.model_fields["end_published_date"].description or ""
+    assert PUBLICATION_NOT_THE_REPORTED_PERIOD.search(window), window
 
 
 async def test_search_vertical_folds_the_vertical_into_the_query() -> None:

@@ -9,6 +9,7 @@ credential store, so the host-side key read is exercised end to end (the key lan
 wire; the mapping is what the model ultimately sees."""
 
 import json
+from datetime import date
 from uuid import UUID, uuid4
 
 import httpx
@@ -95,18 +96,23 @@ async def test_search_posts_one_exa_search_body_and_maps_the_results(db: None) -
     with ws(workspace_id):
         results = await provider.search(
             SearchQuery(
-                query="alpha", num_results=5, recency="week", allowed_domains=("docs.x.test",)
+                query="What did NanoCo announce about the NanoClaw release?",
+                num_results=25,
+                start_published_date=date(2026, 7, 1),
+                end_published_date=date(2026, 8, 5),
+                allowed_domains=("docs.x.test",),
             )
         )
     request = recorder.requests[-1]
     assert request.url.path == "/search"
     assert request.headers["x-api-key"] == EXA_KEY
     body = _body(recorder)
-    assert body["query"] == "alpha"
-    assert body["numResults"] == 5
+    assert body["query"] == "What did NanoCo announce about the NanoClaw release?"
+    assert body["numResults"] == 25
     assert body["contents"] == {"text": {"maxCharacters": 1000}, "highlights": True}
     assert body["includeDomains"] == ["docs.x.test"]
-    assert "startPublishedDate" in body
+    assert body["startPublishedDate"] == "2026-07-01T00:00:00Z"
+    assert body["endPublishedDate"] == "2026-08-05T23:59:59Z"
 
     hit = results.hits[0]
     assert (hit.url, hit.title, hit.text, hit.published_date) == (
@@ -143,7 +149,23 @@ async def test_search_reads_the_platform_exa_api_key(
     assert recorder.requests[-1].headers["x-api-key"] == EXA_KEY
 
 
-async def test_search_omits_domain_and_recency_filters_when_unset(db: None) -> None:
+async def test_search_sends_one_open_end_of_the_date_window(db: None) -> None:
+    recorder = _Recorder({"results": []})
+    provider, workspace_id = await _keyed_provider(recorder)
+    with ws(workspace_id):
+        await provider.search(
+            SearchQuery(
+                query="What changed in the spec?",
+                num_results=5,
+                start_published_date=date(2026, 8, 5),
+            )
+        )
+    body = _body(recorder)
+    assert body["startPublishedDate"] == "2026-08-05T00:00:00Z"
+    assert "endPublishedDate" not in body
+
+
+async def test_search_omits_domain_and_date_filters_when_unset(db: None) -> None:
     recorder = _Recorder({"results": []})
     provider, workspace_id = await _keyed_provider(recorder)
     with ws(workspace_id):
@@ -151,6 +173,7 @@ async def test_search_omits_domain_and_recency_filters_when_unset(db: None) -> N
     body = _body(recorder)
     assert "includeDomains" not in body
     assert "startPublishedDate" not in body
+    assert "endPublishedDate" not in body
 
 
 async def test_vertical_search_carries_its_category_and_narrower_snippet(db: None) -> None:

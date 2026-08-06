@@ -310,12 +310,12 @@ Use `allowed_domains: ["sec.gov"]` when targeting SEC filings specifically.
 
 ### Query Formulation
 
-- Always include year: "Kimberly-Clark revenue 2023" not just "Kimberly-Clark revenue"
-- Use ticker symbols as alternative queries: "KMB 10-K 2023"
-- For specific metrics, name the filing: "Apple 10-K 2023 segment revenue"
-- For deal data: "{Company} acquisition press release {year}" or "{Company} 8-K {year}"
-- For market data: "{Industry} market size {year} {source}" (e.g., "global SaaS market size 2023 Gartner")
-- For benchmarks: "S&P 500 total return 2023" or "10-year Treasury yield December 2023"
+- Name the period in the sentence: "What was Kimberly-Clark's annual revenue in 2023?" — a published-date window closed at the end of 2023 would drop the 10-K that reports it, filed in Feb 2024
+- Use the ticker as an alternative wording when the company name returns nothing: "KMB 2023 annual report 10-K"
+- For specific metrics, name the filing: "Apple's 2023 10-K segment revenue breakdown"
+- For deal data: "{Company}'s press release announcing its acquisition of {Target} in {year}" or "{Company}'s {year} 8-K on the acquisition"
+- For market data: "{Industry} market size in {year} according to {source}" (e.g., "global SaaS market size in 2023 according to Gartner")
+- For benchmarks: "What was the S&P 500 total return in 2023?" or "the 10-year Treasury yield in December 2023"
 
 ### Company Investor Relations
 

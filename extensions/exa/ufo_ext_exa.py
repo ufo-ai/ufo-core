@@ -9,7 +9,6 @@ research extension's tools call this backend through the turn's `ToolContext`; a
 it with `[research] search_provider = "exa"`."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -31,7 +30,8 @@ CONTENTS_PATH = "/contents"
 SEARCH_TEXT_CHARS = 1000
 VERTICAL_TEXT_CHARS = 500
 MAX_FETCH_CHARS = 20_000
-RECENCY_DAYS = {"day": 1, "week": 7, "month": 30}
+PUBLISHED_DAY_START = "T00:00:00Z"
+PUBLISHED_DAY_END = "T23:59:59Z"
 VERTICAL_CATEGORY = {"academic": "research paper", "people": "linkedin profile"}
 
 
@@ -80,9 +80,12 @@ class ExaSearchProvider:
             body["contents"] = {"text": {"maxCharacters": SEARCH_TEXT_CHARS}, "highlights": True}
             if query.allowed_domains:
                 body["includeDomains"] = list(query.allowed_domains)
-            if query.recency is not None:
-                start = datetime.now(UTC) - timedelta(days=RECENCY_DAYS[query.recency])
-                body["startPublishedDate"] = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if query.start_published_date is not None:
+                start = query.start_published_date.isoformat()
+                body["startPublishedDate"] = f"{start}{PUBLISHED_DAY_START}"
+            if query.end_published_date is not None:
+                end = query.end_published_date.isoformat()
+                body["endPublishedDate"] = f"{end}{PUBLISHED_DAY_END}"
         else:
             body["contents"] = {"text": {"maxCharacters": VERTICAL_TEXT_CHARS}}
             category = VERTICAL_CATEGORY.get(query.vertical)

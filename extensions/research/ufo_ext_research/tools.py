@@ -11,6 +11,7 @@ in a response is the crawler's, never the workspace's, and no URL shape can pred
 responses carry it. A turn with no search backend fails loud."""
 
 import json
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -23,6 +24,7 @@ FETCH_URL_TOOL = "fetch_url"
 SEARCH_VERTICAL_TOOL = "search_vertical"
 MAX_SEARCH_QUERIES = 5
 DEFAULT_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 25
 FETCH_UNSUPPORTED_MESSAGE = (
     "the configured search provider can't fetch a URL — use search_web, the browser tools, "
     "or bash with curl"
@@ -35,9 +37,13 @@ CRAWLER_PROVENANCE = (
 
 SEARCH_WEB_DESCRIPTION = (
     "Searches the web for current and factual information. Returns results with titles, "
-    "URLs, and content snippets. Best for news, prices, and time-sensitive data. Use "
-    "short, keyword-focused queries — max 3-5 per call. Run parallel queries for "
-    "different topics rather than one combined query."
+    "URLs, and content snippets. Best for news, prices, and time-sensitive data. Write each "
+    "query as a natural-language sentence stating what you want to know, and carry filters in a "
+    "parameter rather than in the query text: when a page was published in "
+    "start_published_date/end_published_date, a site restriction in allowed_domains. The period "
+    "you are asking about stays in the sentence — a page reporting a finished year is published "
+    "after that year ends. One query at a higher num_results beats several rephrasings of it — "
+    "send more than one query only for genuinely different topics."
 )
 FETCH_URL_DESCRIPTION = (
     "Fetches content from an HTTP/HTTPS URL. Optionally extracts specific information via LLM "
@@ -55,13 +61,30 @@ SEARCH_VERTICAL_DESCRIPTION = (
 class SearchWebInput(BaseModel):
     queries: tuple[str, ...] = Field(
         max_length=MAX_SEARCH_QUERIES,
-        description="Array of short keyword-based search queries. Max 5. Each query should cover a "
-        "single topic. Do not use quotes — the engine performs fuzzy matching.",
+        description="One natural-language sentence per query, stating the intent — not a keyword "
+        "string. Max 5, and each must be a genuinely different topic: rephrasings of one question "
+        "belong in a single query at a higher num_results. Keep publication filters, site: "
+        "filters, and quotes out of the text — they belong in the parameters below; the period you "
+        "are asking about stays in the sentence.",
     )
-    recency_filter: Literal["day", "week", "month"] | None = Field(
+    num_results: int | None = Field(
         default=None,
-        description="Restrict results by recency. 'day' for breaking news, 'week' for recent "
-        "developments, 'month' for broader context.",
+        ge=1,
+        le=MAX_SEARCH_RESULTS,
+        description=f"How many results each query returns, 1-{MAX_SEARCH_RESULTS}; defaults to "
+        f"{DEFAULT_SEARCH_RESULTS}. Raise it to cover one question broadly instead of firing "
+        "near-duplicate queries.",
+    )
+    start_published_date: date | None = Field(
+        default=None,
+        description="Only return pages published on or after this date (YYYY-MM-DD). Recency "
+        "constraints go here rather than into the query text.",
+    )
+    end_published_date: date | None = Field(
+        default=None,
+        description="Only return pages published on or before this date (YYYY-MM-DD). This filters "
+        "on when a page was published, not on the period it reports: sources for a finished year "
+        "are published after that year ends, so a window closed at the period's end drops them.",
     )
     allowed_domains: tuple[str, ...] | None = Field(
         default=None,
@@ -108,8 +131,9 @@ class SearchVerticalInput(BaseModel):
         "prices."
     )
     query: str = Field(
-        description="Short keyword search, 2-5 words. E.g. 'golden retriever puppy', 'machine "
-        "learning transformer', 'John Smith Acme CTO'."
+        description="A natural-language phrase for what you want, not a keyword list. E.g. "
+        "'photographs of a golden retriever puppy', 'transformer architectures for machine "
+        "translation', 'John Smith, the CTO of Acme'."
     )
     user_description: str = Field(
         description="Brief plain-language description of what you're doing, shown in the activity "
@@ -148,8 +172,9 @@ async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult:
         results = await provider.search(
             SearchQuery(
                 query=query,
-                num_results=DEFAULT_SEARCH_RESULTS,
-                recency=args.recency_filter,
+                num_results=args.num_results or DEFAULT_SEARCH_RESULTS,
+                start_published_date=args.start_published_date,
+                end_published_date=args.end_published_date,
                 allowed_domains=args.allowed_domains or (),
             )
         )

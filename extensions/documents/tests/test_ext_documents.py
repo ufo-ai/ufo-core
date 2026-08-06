@@ -13,6 +13,10 @@ from ufo.skills.runtime import SKILL_MD, mount_skill
 
 DESIGN_FOUNDATIONS_DEPENDENTS = ("office-docx", "office-pptx", "pdf", "theme-factory")
 PHRASE_LENGTHS = (3, 4, 5)
+FINANCE_SPECIALIZATION = "specializations/finance.md"
+QUERY_FORMULATION = re.compile(r"^### Query Formulation$(.*?)^### ", re.M | re.S)
+PERIOD_IN_AN_EXAMPLE = re.compile(r"\b(19|20)\d{2}\b|\{year\}")
+WINDOW_FILTERS_PUBLICATION = re.compile(r"published[^.]*not the period it reports")
 
 
 def _words(text: str) -> str:
@@ -125,6 +129,26 @@ def test_the_references_table_routes_each_topic_to_the_file_that_holds_it() -> N
         assert located, f"the {name} row claims nothing that identifies a reference file"
         misrouted = {p: holder for p, holder in located.items() if holder != name}
         assert not misrouted, f"the {name} row claims text that lives elsewhere: {misrouted}"
+
+
+def test_document_review_puts_the_period_it_checks_in_the_query_text() -> None:
+    """The published-date window filters on when a page was published, so bounding it to the year a
+    figure covers drops the sources that report that year: the FY2023 filing behind this skill's own
+    evidence example is filed in Feb 2024. Phase 3 has to send the period into the query sentence,
+    and say what the window actually filters on, or every dated claim comes back inconclusive."""
+    review = skill_registry((documents.manifest(),)).named("document-review")
+    assert WINDOW_FILTERS_PUBLICATION.search(review.instructions)
+    year_selection = next(
+        line for line in review.instructions.splitlines() if "**Year selection**" in line
+    )
+    assert PERIOD_IN_AN_EXAMPLE.search(year_selection), year_selection
+
+    finance = dict(review.files)[FINANCE_SPECIALIZATION].decode()
+    (formulation,) = QUERY_FORMULATION.findall(finance)
+    bullets = [line for line in formulation.splitlines() if line.startswith("- ")]
+    assert len(bullets) == 6
+    for bullet in bullets:
+        assert PERIOD_IN_AN_EXAMPLE.search(bullet), bullet
 
 
 def test_document_review_bundles_its_annotation_scripts() -> None:
