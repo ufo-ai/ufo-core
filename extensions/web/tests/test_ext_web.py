@@ -769,6 +769,74 @@ async def test_transcript_route_returns_durable_tool_activity(
     ]
 
 
+async def test_transcript_carries_a_running_turns_prompt_and_names_the_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A turn writes the transcript when it ends, so a reload while one runs would otherwise draw
+    a conversation with the member's own message missing. The read carries the running turn's
+    prompt as the message it is and names the turn for the page to tail; a conversation whose
+    newest turn is committed names none, so the page never tails a finished turn."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="<context>source: web</context>\nFirst ask."),
+                Message(role="assistant", content="Looked."),
+            ),
+        )
+    )
+    settled = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    assert settled.status_code == 200
+    history = [
+        {"role": "user", "text": "First ask."},
+        {"role": "assistant", "text": "Looked."},
+    ]
+    assert settled.json() == {"messages": history}
+
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="Review PR 1268.",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    mid = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert mid.status_code == 200
+    assert mid.json() == {
+        "messages": [*history, {"role": "user", "text": "Review PR 1268."}],
+        "turn": str(running),
+    }
+
+
 async def test_unknown_session_token_is_rejected(web: tuple[AsyncClient, UUID, UUID]) -> None:
     client, _workspace_id, agent_id = web
     stranger = secrets.token_hex(16)

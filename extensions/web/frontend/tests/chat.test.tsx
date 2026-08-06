@@ -96,6 +96,78 @@ test("a reloaded conversation keeps the activity that produced its reply", async
   expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
 });
 
+test("a conversation reloaded while its turn runs shows the prompt, says so, and tails the turn", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
+  open();
+
+  expect(await screen.findByText("Review PR 1268.")).toBeTruthy();
+  expect(await screen.findByText("Thinking…")).toBeTruthy();
+  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
+
+  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
+  expect(await screen.findByText("bash gh pr view")).toBeTruthy();
+  expect(screen.queryByText("Thinking…")).toBeNull();
+
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Reviewed it.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  expect(await screen.findByText("Reviewed it.")).toBeTruthy();
+  expect(StreamFake.last().closed).toBe(true);
+});
+
+test("a conversation reloaded mid-turn holds the composer, so the turn is tailed once", async () => {
+  const { calls } = wire({
+    ...transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  const send = screen.getByRole("button", { name: "Send" });
+  expect((send as HTMLButtonElement).disabled).toBe(true);
+
+  // A folded follow-up returns the running turn's own id, so a second attach would leave two
+  // EventSources writing one live turn — every chunk doubled, and the reply recorded twice.
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
+  await userEvent.click(send);
+  expect(calls.filter((url) => url.includes("/chat?conversation=")).length).toBe(0);
+  expect(StreamFake.opened.length).toBe(1);
+
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Reviewed it.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  await screen.findByText("Reviewed it.");
+  await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
+  expect(StreamFake.opened.length).toBe(1);
+});
+
+test("a settled conversation tails nothing", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "inspect it" },
+        { role: "assistant", text: "The tests pass." },
+      ],
+    }),
+  );
+  open();
+
+  expect(await screen.findByText("The tests pass.")).toBeTruthy();
+  expect(StreamFake.opened.length).toBe(0);
+  expect(screen.queryByText("Thinking…")).toBeNull();
+});
+
 test("a conversation opens its file changes and returns to chat", async () => {
   wire({
     ...transcript(),

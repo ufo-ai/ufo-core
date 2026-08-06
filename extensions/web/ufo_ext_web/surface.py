@@ -73,6 +73,7 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
+    TerminalFrame,
     Turn,
     TurnContext,
     member_message_text,
@@ -678,7 +679,11 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     """One conversation of the member's with this agent, as the portal renders it on load: the
     engine's `<context>` framing stripped and tool results elided — a projection of the durable
     transcript, never a second store. The `conversation` parameter names which one, gated to the
-    member's own like the chat POST that writes it."""
+    member's own like the chat POST that writes it.
+
+    A turn writes the transcript when it ends, so a turn still running is absent from it: the read
+    carries that turn's prompt as the message it is and names the turn, and the page attaches to
+    its live frames instead of drawing an empty conversation."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -697,21 +702,28 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         return Response("no such conversation", status_code=404)
     recorded = await ctx.read_transcript(conversation_id)
     rendered = [] if recorded is None else _rendered_messages(recorded.messages)
-    payload: dict[str, object] = {"messages": rendered}
     latest = await ctx.latest_turn(conversation_id)
-    if latest is not None:
-        payload.update(await _open_handoffs(ctx, latest))
-    return JSONResponse(payload)
+    detail = None if latest is None else await ctx.turn_detail(latest)
+    if detail is None:
+        return JSONResponse({"messages": rendered})
+    turn = detail.turn
+    if turn.terminal is None:
+        return JSONResponse(
+            {
+                "messages": [*rendered, {"role": "user", "text": turn.inbound}],
+                "turn": str(turn.id),
+            }
+        )
+    return JSONResponse({"messages": rendered, **await _open_handoffs(ctx, turn.id, turn.terminal)})
 
 
-async def _open_handoffs(ctx: SurfaceContext, turn_id: UUID) -> dict[str, object]:
-    """What the conversation's newest turn still asks of the member, so a reload re-renders the
-    same affordances the live stream drew: an unanswered question (a later turn would have
-    superseded it), credential prompts still awaiting values, and the turn's shared files."""
-    detail = await ctx.turn_detail(turn_id)
-    if detail is None or detail.turn.terminal is None:
-        return {}
-    terminal = detail.turn.terminal
+async def _open_handoffs(
+    ctx: SurfaceContext, turn_id: UUID, terminal: TerminalFrame
+) -> dict[str, object]:
+    """What the conversation's newest committed turn still asks of the member, so a reload
+    re-renders the same affordances the live stream drew: an unanswered question (a later turn
+    would have superseded it), credential prompts still awaiting values, and the turn's shared
+    files."""
     handoffs: dict[str, object] = {}
     if terminal.question is not None:
         handoffs["question"] = {

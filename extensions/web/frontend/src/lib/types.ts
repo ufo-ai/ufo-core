@@ -86,6 +86,7 @@ export type Message = { role: string; text: string; events?: ToolEvent[] };
 
 export type Transcript = {
   messages: Message[];
+  turn?: string;
   question?: ChatQuestion | null;
   credentials?: CredentialRequest | null;
   files?: ChatFile[] | null;

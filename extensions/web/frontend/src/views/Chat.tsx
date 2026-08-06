@@ -125,7 +125,9 @@ export function Chat({ agent, member, conversationId, onCreated, onActivity }: C
               <Working>Reconnecting…</Working>
             ) : state.live.activity ? (
               <Working>{state.live.activity}</Working>
-            ) : null}
+            ) : state.live.text ? null : (
+              <Working>Thinking…</Working>
+            )}
             {state.live.meter ? <Meta>{state.live.meter}</Meta> : null}
             {state.live.meta ? <Meta>{state.live.meta}</Meta> : null}
           </Speech>

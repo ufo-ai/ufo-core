@@ -76,7 +76,11 @@ export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
 
 export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
   REATTACHES.delete(chatKey);
-  updateChat(chatKey, (state) => ({ ...state, turn: { id: turnId, answering } }));
+  updateChat(chatKey, (state) => ({
+    ...state,
+    live: state.live ?? liveTurn(),
+    turn: { id: turnId, answering },
+  }));
   attach(chatKey, turnId, answering, false);
 }
 
@@ -298,9 +302,13 @@ export async function refreshTranscript(
         : held && held.turn_id === incoming.turn_id
           ? { ...incoming, answered: held.answered }
           : incoming;
+    const running = ("turn" in payload && payload.turn) || null;
     return {
       ...current,
       messages: payload.messages,
+      busy: running ? true : current.busy,
+      turn: running ? { id: running, answering: false } : current.turn,
+      live: running ? (current.live ?? liveTurn()) : current.live,
       handoffs: {
         question,
         credentials: ("credentials" in payload && payload.credentials) || null,
@@ -308,6 +316,10 @@ export async function refreshTranscript(
       },
     };
   });
+  const streaming = chatState(chatKey).turn;
+  if (streaming && !SOURCES.has(chatKey) && !TIMERS.has(chatKey)) {
+    streamTurn(chatKey, streaming.id, streaming.answering);
+  }
 }
 
 export async function sendMessage(
