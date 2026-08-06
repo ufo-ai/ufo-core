@@ -24,7 +24,7 @@ def _run() -> StoredReviewRun:
     )
 
 
-async def test_publisher_creates_action_required_exact_head_check_for_critical_defect() -> None:
+async def test_publisher_creates_action_required_exact_head_check_for_severe_defect() -> None:
     requests: list[httpx.Request] = []
 
     def github(request: httpx.Request) -> httpx.Response:
@@ -44,7 +44,7 @@ async def test_publisher_creates_action_required_exact_head_check_for_critical_d
                     title="Wrong comparison",
                     trigger="Publish after the pull request head changes.",
                     failure="The published SHA differs from the reviewed SHA.",
-                    impact="a required workflow cannot complete for valid input",
+                    impact="materially incorrect result or state for a supported workflow",
                 ),
             ),
         ),
@@ -65,7 +65,8 @@ async def test_publisher_creates_action_required_exact_head_check_for_critical_d
     assert "Trigger: Publish after the pull request head changes." in body["output"]["summary"]
     assert "Failure: The published SHA differs from the reviewed SHA." in body["output"]["summary"]
     assert (
-        "Impact: A required workflow cannot complete for valid input." in body["output"]["summary"]
+        "Impact: Materially incorrect result or state for a supported workflow."
+        in body["output"]["summary"]
     )
     assert requests[1].headers["Authorization"] == "Bearer secret"
 
@@ -93,7 +94,7 @@ async def test_publisher_reconciles_existing_run_by_external_id() -> None:
     body = json.loads(requests[1].content)
     assert body["conclusion"] == "success"
     assert body["external_id"] == str(run.run_id)
-    assert body["output"]["summary"] == "No critical defect found."
+    assert body["output"]["summary"] == "No severe defect found."
     assert "head_sha" not in body
 
 

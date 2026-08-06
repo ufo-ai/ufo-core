@@ -101,7 +101,9 @@ class CodeReviewFinding(BaseModel):
         "security or workspace-boundary breach",
         "data loss, corruption, or wrong-target mutation",
         "production outage, deadlock, or permanently unfinished work",
-        "a required workflow cannot complete for valid input",
+        "a supported operation fails or cannot complete for valid input",
+        "materially incorrect result or state for a supported workflow",
+        "substantial availability, reliability, or performance regression",
         "the feature cannot function in its supported production configuration",
         "the code fails to build or breaks required CI",
     ]

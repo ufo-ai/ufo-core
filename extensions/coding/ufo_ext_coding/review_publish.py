@@ -61,7 +61,7 @@ class CheckRunList(BaseModel):
 
 def render_check_summary(review: CodeReviewOutput) -> str:
     if review.findings:
-        parts = ["Critical defects"]
+        parts = ["Severe defects"]
         for finding in review.findings:
             parts.extend(
                 (
@@ -73,7 +73,7 @@ def render_check_summary(review: CodeReviewOutput) -> str:
                 )
             )
     else:
-        parts = ["No critical defect found."]
+        parts = ["No severe defect found."]
     return "\n".join(parts)[:CHECK_SUMMARY_MAX_CHARS]
 
 

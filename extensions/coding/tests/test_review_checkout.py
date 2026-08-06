@@ -260,7 +260,7 @@ def test_review_candidate_has_only_checkout_and_read_tools() -> None:
                     "title": "Publishes the wrong commit",
                     "trigger": "Publish a completed review after the pull request head changes.",
                     "failure": "The check is attached to a commit the reviewer did not inspect.",
-                    "impact": "a required workflow cannot complete for valid input",
+                    "impact": "materially incorrect result or state for a supported workflow",
                 }
             ]
         }
@@ -281,19 +281,25 @@ def test_review_candidate_has_only_checkout_and_read_tools() -> None:
         )
 
 
-def test_review_prompt_admits_only_merge_blocking_defects() -> None:
+def test_review_prompt_admits_only_severe_merge_blocking_defects() -> None:
     prompt = CODE_REVIEW_PROFILE.prompt
 
     assert "concrete, reachable defects introduced by the pull request" in prompt
-    assert "Would we refuse to merge this even if fixing it were inconvenient?" in prompt
+    assert (
+        "materially harms a supported workflow, result, state, security, or availability" in prompt
+    )
     assert "`security or workspace-boundary breach`" in prompt
     assert "`data loss, corruption, or wrong-target mutation`" in prompt
     assert "`production outage, deadlock, or permanently unfinished work`" in prompt
-    assert "`a required workflow cannot complete for valid input`" in prompt
+    assert "`a supported operation fails or cannot complete for valid input`" in prompt
+    assert "`materially incorrect result or state for a supported workflow`" in prompt
+    assert "`substantial availability, reliability, or performance regression`" in prompt
     assert "`the feature cannot function in its supported production configuration`" in prompt
     assert "`the code fails to build or breaks required CI`" in prompt
     assert "Style, naming, readability, and documentation nits." in prompt
     assert "Missing tests when no actual defect is demonstrated." in prompt
+    assert "Return an empty findings list when there is no severe defect." in prompt
+    assert "critical defect" not in prompt
     assert "P0" not in prompt
     assert "P1" not in prompt
     assert "P2" not in prompt
