@@ -145,8 +145,8 @@ test("the conversations tab lists this subagent's runs and opens one as a turn t
   );
 });
 
-test("a run permalink opened cold titles the page and returns to the listing", async () => {
-  wire({
+test("a run permalink opened cold titles the page without reading the listing", async () => {
+  const { calls } = wire({
     ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
       json({
         ...RUN_DETAIL,
@@ -180,6 +180,7 @@ test("a run permalink opened cold titles the page and returns to the listing", a
   expect(screen.getByRole("link", { name: "All conversations" }).getAttribute("href")).toBe(
     "#/subagents/deep_research/conversations",
   );
+  expect(calls.filter((url) => url.endsWith("/conversations"))).toEqual([]);
 });
 
 test("a run the viewer may not read refuses the permalink instead of titling a page", async () => {

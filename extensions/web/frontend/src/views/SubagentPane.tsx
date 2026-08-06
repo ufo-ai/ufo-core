@@ -162,7 +162,9 @@ function SubagentConversations({
   name: string;
   conversationId?: string;
 }) {
-  const state = usePanelRead<{ conversations: Run[] }>(base + "/conversations");
+  const state = usePanelRead<{ conversations: Run[] }>(
+    conversationId ? null : base + "/conversations",
+  );
 
   if (conversationId) {
     return <RunDetail base={base} name={name} conversationId={conversationId} />;
