@@ -27,10 +27,15 @@ import ufo_ext_pipedream.provider as provider
 from cryptography.fernet import Fernet
 from starlette.requests import Request
 from ufo_ext_connectors.tools import (
+    AVAILABLE_TOOLS_FALLBACK_NOTE,
+    AVAILABLE_TOOLS_OMITTED_NOTE,
+    SEARCH_TOOLS_NOTE_KEY,
     CallExternalToolInput,
     DescribeExternalToolsInput,
+    SearchConnectorToolsInput,
     call_external_tool,
     describe_external_tools,
+    search_connector_tools,
 )
 from ufo_ext_pipedream.broker import PipedreamBroker
 
@@ -42,6 +47,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.loader import turn_tools
 from ufo.grants import ConnectHandoff, GrantStore, install_connect_flow
+from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
@@ -62,6 +68,15 @@ PIPEDREAM_ACCOUNT = "apn_test123"
 GMAIL_ACTION = "gmail-send-email"
 UNKNOWN_ACTION = "gmail-definitely-not-an-action"
 ACTION_DESCRIPTION = "Send an email from your Gmail account."
+ACTION_PROPS: list[dict[str, object]] = [
+    {"name": "gmail", "type": "app", "app": "gmail"},
+    {"name": "to", "type": "string", "label": "Recipient"},
+    {"name": "draft", "type": "boolean", "optional": True},
+    {"name": "syncDir", "type": "dir", "optional": True},
+]
+SECOND_PAGE_CURSOR = "cursor_page_two"
+SECOND_PAGE_ACTION = "gmail-find-email"
+DISCOVERY_QUERY = "find an email from a sender"
 OAUTH_APP_ID = "oa_gmail_custom"
 
 
@@ -122,26 +137,9 @@ def _pipedream_handler(
                 },
             )
         if method == "GET" and path.endswith("/actions"):
-            return httpx.Response(
-                200,
-                json={"data": [{"key": GMAIL_ACTION, "description": ACTION_DESCRIPTION}]},
-            )
+            return httpx.Response(200, json={"data": [_action_row(GMAIL_ACTION)]})
         if method == "GET" and path.endswith(f"/components/{GMAIL_ACTION}"):
-            return httpx.Response(
-                200,
-                json={
-                    "data": {
-                        "key": GMAIL_ACTION,
-                        "description": ACTION_DESCRIPTION,
-                        "configurable_props": [
-                            {"name": "gmail", "type": "app", "app": "gmail"},
-                            {"name": "to", "type": "string", "label": "Recipient"},
-                            {"name": "draft", "type": "boolean", "optional": True},
-                            {"name": "syncDir", "type": "dir", "optional": True},
-                        ],
-                    }
-                },
-            )
+            return httpx.Response(200, json={"data": _action_row(GMAIL_ACTION)})
         if method == "GET" and "/components/" in path:
             return httpx.Response(404, json={"error": "unknown component"})
         if method == "POST" and path.endswith("/actions/run"):
@@ -151,6 +149,33 @@ def _pipedream_handler(
                 200, json={"exports": {"$summary": "sent"}, "os": [], "ret": {"id": "msg_1"}}
             )
         return httpx.Response(404, json={})
+
+    return handle
+
+
+def _action_row(key: str) -> dict[str, object]:
+    """One component as Connect carries it in both the listing and the definition — the
+    `configurable_props` the agent-facing schema is derived from included."""
+    return {"key": key, "description": ACTION_DESCRIPTION, "configurable_props": ACTION_PROPS}
+
+
+def _paged_actions_handler(
+    recorded: list[httpx.QueryParams],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A two-page Connect action listing: the first page fills `ACTION_PAGE_LIMIT` with bare keys
+    and carries the cursor of the second, which holds `SECOND_PAGE_ACTION` in full and no cursor.
+    Every listing request's query params land in `recorded`, so the wire is assertable."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
+        recorded.append(request.url.params)
+        if request.url.params.get("after") == SECOND_PAGE_CURSOR:
+            return httpx.Response(200, json={"data": [_action_row(SECOND_PAGE_ACTION)]})
+        head = [{"key": f"gmail-head-{n}"} for n in range(pipedream.ACTION_PAGE_LIMIT)]
+        return httpx.Response(
+            200, json={"data": head, "page_info": {"end_cursor": SECOND_PAGE_CURSOR}}
+        )
 
     return handle
 
@@ -423,6 +448,129 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     payload = json.loads(result.content[0].text)
     assert payload["unresolved"] == [UNKNOWN_ACTION]
     assert [tool["slug"] for tool in payload["availableTools"]] == [GMAIL_ACTION]
+    assert set(payload["availableTools"][0]["input_schema"]["properties"]) == {"to", "draft"}
+
+
+async def test_describe_external_tools_reaches_the_action_listings_second_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An app's actions are paged, so the key the query really wants can sit past the first page:
+    the walk follows `page_info.end_cursor` into it, each request carries a full page size and the
+    caller's `q`, and every row reaches `availableTools` with the schema its props derive."""
+    recorded: list[httpx.QueryParams] = []
+    _install_transport(monkeypatch, _paged_actions_handler(recorded))
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    listed = json.loads(result.content[0].text)["availableTools"]
+    assert len(listed) == pipedream.ACTION_PAGE_LIMIT + 1
+    assert listed[-1]["slug"] == SECOND_PAGE_ACTION
+    assert listed[-1]["input_schema"]["required"] == ["to"]
+    assert [dict(params) for params in recorded] == [
+        {"app": "gmail", "limit": str(pipedream.ACTION_PAGE_LIMIT), "q": DISCOVERY_QUERY},
+        {
+            "app": "gmail",
+            "limit": str(pipedream.ACTION_PAGE_LIMIT),
+            "q": DISCOVERY_QUERY,
+            "after": SECOND_PAGE_CURSOR,
+        },
+    ]
+
+
+async def test_list_actions_stops_at_the_row_cap_while_a_cursor_is_still_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk is bounded whatever Connect says: an app that keeps offering a cursor is read to
+    `MAX_LISTED_ACTIONS` rows and no further, so a runaway catalog cannot drive an unbounded number
+    of requests."""
+    pages: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
+        pages.append(1)
+        data = [{"key": f"gmail-{len(pages)}-{n}"} for n in range(pipedream.ACTION_PAGE_LIMIT)]
+        return httpx.Response(
+            200, json={"data": data, "page_info": {"end_cursor": SECOND_PAGE_CURSOR}}
+        )
+
+    _install_transport(monkeypatch, handle)
+    rows = await pipedream.pipedream_client().list_actions("gmail")
+    assert len(rows) == pipedream.MAX_LISTED_ACTIONS
+    assert len(pages) == pipedream.MAX_LISTED_ACTIONS // pipedream.ACTION_PAGE_LIMIT
+
+
+async def test_search_connector_tools_bounds_the_catalog_it_answers_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipedream has no router, so its search is the same paged catalog listing, every row of which
+    now carries a schema — the answer is bounded to what the model keeps in context and says how
+    many actions were left out, rather than being offloaded to a file."""
+    props = ACTION_PROPS + [
+        {"name": f"field_{n}", "type": "string", "description": "x" * 40} for n in range(20)
+    ]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
+        data = [
+            {
+                "key": f"gmail-action-{n}",
+                "description": ACTION_DESCRIPTION,
+                "configurable_props": props,
+            }
+            for n in range(pipedream.ACTION_PAGE_LIMIT)
+        ]
+        return httpx.Response(200, json={"data": data})
+
+    _install_transport(monkeypatch, handle)
+    result = await search_connector_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        SearchConnectorToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    text = result.content[0].text
+    payload = json.loads(text)
+    assert 0 < len(payload["tools"]) < pipedream.ACTION_PAGE_LIMIT
+    assert len(text) <= MAX_TOOL_RESULT_CHARS, f"{len(text)} chars is past the inline budget"
+    assert payload[SEARCH_TOOLS_NOTE_KEY] == AVAILABLE_TOOLS_OMITTED_NOTE.format(
+        omitted=pipedream.ACTION_PAGE_LIMIT - len(payload["tools"]),
+        total=pipedream.ACTION_PAGE_LIMIT,
+    )
+
+
+async def test_search_connector_tools_falls_back_to_top_actions_and_marks_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connect's `q` is a term match, so the use-case sentence this search is built for routinely
+    answers empty. It must not dead-end there: the answer is the app's unqueried top actions, marked
+    as catalog order — the same rule discovery follows, held at the seam both tools share."""
+    recorded: list[httpx.QueryParams] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
+        recorded.append(request.url.params)
+        if request.url.params.get("q"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(200, json={"data": [_action_row(GMAIL_ACTION)]})
+
+    _install_transport(monkeypatch, handle)
+    result = await search_connector_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        SearchConnectorToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    payload = json.loads(result.content[0].text)
+    assert [tool["slug"] for tool in payload["tools"]] == [GMAIL_ACTION]
+    assert payload["tools"][0]["input_schema"]["required"] == ["to"]
+    assert payload[SEARCH_TOOLS_NOTE_KEY] == AVAILABLE_TOOLS_FALLBACK_NOTE
+    assert [params.get("q") for params in recorded] == [DISCOVERY_QUERY, None]
 
 
 async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedream(

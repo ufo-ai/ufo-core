@@ -31,6 +31,9 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from ufo_ext_composio.broker import ComposioBroker
 from ufo_ext_connectors.tools import (
+    AVAILABLE_TOOLS_FALLBACK_NOTE,
+    AVAILABLE_TOOLS_NOTE_KEY,
+    AVAILABLE_TOOLS_OMITTED_NOTE,
     CallExternalToolInput,
     DescribeExternalToolsInput,
     ListExternalToolsInput,
@@ -55,6 +58,7 @@ from ufo.grants import (
     UnknownProvider,
     install_connect_flow,
 )
+from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.sandbox.proxy.rules import connector_transfer_hosts
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
@@ -78,6 +82,13 @@ COMPOSIO_USER = "ufo_ws"
 GITHUB_SLUG = "GITHUB_LIST_PULL_REQUESTS"
 UNKNOWN_SLUG = "GITHUB_DEFINITELY_NOT_A_TOOL"
 TOOL_DESCRIPTION = "List pull requests on a repository."
+TOOL_INPUT_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {"owner": {"type": "string"}},
+}
+SECOND_PAGE_CURSOR = "cursor_page_two"
+SECOND_PAGE_SLUG = "GITHUB_FIND_ISSUE"
+DISCOVERY_QUERY = "find an issue on a repository"
 BANNED_SLUG = "attio"
 TOOLKIT_CATALOG = {
     "github": ("GitHub", ["OAUTH2"], 871),
@@ -90,6 +101,32 @@ TOOLKIT_CATALOG = {
 of each shape the namespace refuses. `xero` is the real shape of a toolkit Composio brokers but
 holds no managed credentials for — the consent leg has no client to ride. `attio` is the opposite,
 and the reason the ban cannot be derived: fully credentialed, rich in tools, yet on `BANNED`."""
+
+
+def _tool_row(slug: str) -> dict[str, object]:
+    """One row of Composio's tool listing, carrying the `input_parameters` schema every row does."""
+    return {
+        "slug": slug,
+        "description": TOOL_DESCRIPTION,
+        "input_parameters": TOOL_INPUT_PARAMETERS,
+    }
+
+
+def _paged_tools_handler(
+    recorded: list[httpx.QueryParams],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A two-page Composio tool listing: the first page fills `TOOL_PAGE_LIMIT` with bare slugs and
+    carries the cursor of the second, which holds `SECOND_PAGE_SLUG` in full and no cursor. Every
+    request's query params land in `recorded`, so what went on the wire is assertable."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        recorded.append(request.url.params)
+        if request.url.params.get("cursor") == SECOND_PAGE_CURSOR:
+            return httpx.Response(200, json={"items": [_tool_row(SECOND_PAGE_SLUG)]})
+        head = [{"slug": f"GITHUB_HEAD_TOOL_{n}"} for n in range(composio.TOOL_PAGE_LIMIT)]
+        return httpx.Response(200, json={"items": head, "next_cursor": SECOND_PAGE_CURSOR})
+
+    return handle
 
 
 def _toolkit_record(slug: str) -> dict[str, object]:
@@ -139,16 +176,10 @@ def _composio_handler(
                 },
             )
         if method == "GET" and path.endswith("/tools"):
-            return httpx.Response(
-                200, json={"items": [{"slug": tool_slug, "description": TOOL_DESCRIPTION}]}
-            )
+            return httpx.Response(200, json={"items": [_tool_row(tool_slug)]})
         if method == "GET" and path.endswith(f"/tools/{tool_slug}"):
             return httpx.Response(
-                200,
-                json={
-                    "slug": tool_slug,
-                    "input_schema": {"type": "object", "properties": {"owner": {"type": "string"}}},
-                },
+                200, json={"slug": tool_slug, "input_parameters": TOOL_INPUT_PARAMETERS}
             )
         if method == "GET" and "/tools/" in path:
             return httpx.Response(404, json={"error": "unknown tool"})
@@ -553,7 +584,7 @@ async def test_schema_rewrites_file_params_to_the_workspace_vocabulary(
     payload = {
         "slug": GITHUB_SLUG,
         "description": TOOL_DESCRIPTION,
-        "input_schema": {
+        "input_parameters": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
@@ -819,6 +850,151 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     payload = json.loads(result.content[0].text)
     assert payload["unresolved"] == [UNKNOWN_SLUG]
     assert [tool["slug"] for tool in payload["availableTools"]] == [GITHUB_SLUG]
+    assert payload["availableTools"][0]["input_schema"] == TOOL_INPUT_PARAMETERS
+
+
+async def test_describe_external_tools_falls_back_to_top_tools_and_marks_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composio's `query` is a full-text filter over name/slug/description, so a use-case sentence
+    routinely matches nothing. Discovery answers the connector's unqueried top tools rather than an
+    empty list, and marks them as not being query matches so the head is never read as a ranking."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("query"):
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(200, json={"items": [_tool_row(GITHUB_SLUG)]})
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle)),
+    )
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    payload = json.loads(result.content[0].text)
+    assert [tool["slug"] for tool in payload["availableTools"]] == [GITHUB_SLUG]
+    assert payload[AVAILABLE_TOOLS_NOTE_KEY] == AVAILABLE_TOOLS_FALLBACK_NOTE
+
+
+async def test_describe_external_tools_reaches_the_listings_second_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit's listing is paged, so the slug the query really wants can sit past the first
+    page — the walk follows `next_cursor` and every row reaches `availableTools`, schema
+    included."""
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(
+            api_key="test", transport=httpx.MockTransport(_paged_tools_handler([]))
+        ),
+    )
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    payload = json.loads(result.content[0].text)
+    listed = payload["availableTools"]
+    assert len(listed) == composio.TOOL_PAGE_LIMIT + 1
+    assert listed[-1] == {
+        "slug": SECOND_PAGE_SLUG,
+        "description": TOOL_DESCRIPTION,
+        "input_schema": TOOL_INPUT_PARAMETERS,
+    }
+    assert AVAILABLE_TOOLS_NOTE_KEY not in payload
+
+
+async def test_list_tools_stops_at_the_row_cap_while_a_cursor_is_still_offered() -> None:
+    """The walk is bounded whatever the listing says: a toolkit that keeps offering a cursor is read
+    to `MAX_LISTED_TOOLS` rows and no further, so a runaway catalog cannot drive an unbounded number
+    of requests."""
+    pages: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        pages.append(1)
+        items = [{"slug": f"GITHUB_TOOL_{len(pages)}_{n}"} for n in range(composio.TOOL_PAGE_LIMIT)]
+        return httpx.Response(200, json={"items": items, "next_cursor": SECOND_PAGE_CURSOR})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    rows = await client.list_tools(PROVIDER)
+    assert len(rows) == composio.MAX_LISTED_TOOLS
+    assert len(pages) == composio.MAX_LISTED_TOOLS // composio.TOOL_PAGE_LIMIT
+
+
+async def test_describe_external_tools_bounds_the_listing_it_answers_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A big toolkit catalogs hundreds of tools and every listed row carries its input schema, so
+    the answer is bounded to what the model keeps in context — past the budget the rows stop and the
+    note says how many were left out, rather than the whole result being offloaded to a file."""
+    fat_schema = {
+        "type": "object",
+        "properties": {
+            f"field_{n}": {"type": "string", "description": "x" * 40} for n in range(20)
+        },
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        items = [
+            {
+                "slug": f"GITHUB_TOOL_{n}",
+                "description": TOOL_DESCRIPTION,
+                "input_parameters": fat_schema,
+            }
+            for n in range(composio.TOOL_PAGE_LIMIT)
+        ]
+        return httpx.Response(200, json={"items": items})
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle)),
+    )
+    result = await describe_external_tools(
+        _ctx(uuid4(), uuid4(), uuid4(), None),
+        DescribeExternalToolsInput(
+            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
+        ),
+    )
+    text = result.content[0].text
+    payload = json.loads(text)
+    listed = payload["availableTools"]
+    assert 0 < len(listed) < composio.TOOL_PAGE_LIMIT
+    assert len(text) <= MAX_TOOL_RESULT_CHARS, f"{len(text)} chars is past the inline budget"
+    assert payload[AVAILABLE_TOOLS_NOTE_KEY] == AVAILABLE_TOOLS_OMITTED_NOTE.format(
+        omitted=composio.TOOL_PAGE_LIMIT - len(listed), total=composio.TOOL_PAGE_LIMIT
+    )
+
+
+async def test_listing_requests_carry_the_page_size_the_query_and_the_cursor() -> None:
+    """What actually goes on the wire: a full page per request, the caller's query on every request,
+    and the previous page's cursor on the second — the three params the discovery loss hung on."""
+    recorded: list[httpx.QueryParams] = []
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(_paged_tools_handler(recorded))
+    )
+    rows = await client.list_tools(PROVIDER, DISCOVERY_QUERY)
+    assert len(rows) == composio.TOOL_PAGE_LIMIT + 1
+    assert [dict(params) for params in recorded] == [
+        {
+            "toolkit_slug": PROVIDER,
+            "limit": str(composio.TOOL_PAGE_LIMIT),
+            "query": DISCOVERY_QUERY,
+        },
+        {
+            "toolkit_slug": PROVIDER,
+            "limit": str(composio.TOOL_PAGE_LIMIT),
+            "query": DISCOVERY_QUERY,
+            "cursor": SECOND_PAGE_CURSOR,
+        },
+    ]
 
 
 async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composio(

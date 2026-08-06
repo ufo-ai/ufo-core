@@ -46,8 +46,7 @@ class ComposioBroker:
     test's transport override is honoured. See the module docstring for each method's contract."""
 
     async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
-        listed = await composio.composio_client().list_tools(provider, query)
-        return _discovered_tools(listed)
+        return _discovered_tools(await composio.composio_client().list_tools(provider, query))
 
     async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool:
         try:
@@ -57,7 +56,7 @@ class ComposioBroker:
                 raise
             raise UnknownBrokerTool(slug) from error
         description = payload.get("description")
-        input_schema = composio.workspace_file_schema(payload.get("input_schema"))
+        input_schema = composio.workspace_file_schema(payload.get("input_parameters"))
         return BrokerTool(
             slug=slug,
             description=description if isinstance(description, str) else "",
@@ -191,26 +190,24 @@ def _reconnect_error(error: composio.ComposioError, provider: str) -> composio.C
     return composio.ComposioError(error.status, f"{error.body} — {stale_grant_guidance(provider)}")
 
 
-def _discovered_tools(listed: dict[str, object]) -> tuple[BrokerTool, ...]:
-    """Project a Composio `list_tools` response to the connector's real slugs and short
-    descriptions."""
-    items = listed.get("items")
+def _discovered_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]:
+    """Project Composio's listed tools to the connector's real slugs, short descriptions, and the
+    input schemas the listing already carries (`input_parameters`) — so discovery answers with what
+    a call needs, without a second round trip per slug."""
     tools: list[BrokerTool] = []
-    if not isinstance(items, list):
-        return ()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    for item in rows:
         slug = item.get("slug") or item.get("name")
         if not isinstance(slug, str) or not slug:
             continue
         description = item.get("description")
+        input_schema = composio.workspace_file_schema(item.get("input_parameters"))
         tools.append(
             BrokerTool(
                 slug=slug,
                 description=description[:DISCOVERY_DESCRIPTION_CAP]
                 if isinstance(description, str)
                 else "",
+                input_schema=input_schema if isinstance(input_schema, dict) else {},
             )
         )
     return tuple(tools)

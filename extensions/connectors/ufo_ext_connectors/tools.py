@@ -4,7 +4,9 @@ execute one server-side — generic over every installed broker.
 A broker fronts hundreds of services and thousands of tools, so the agent never holds a fixed
 per-provider tool — it searches. Every call reads the turn's `ConnectorRegistry` and dispatches to
 the broker that registered the provider: `list_external_tools` filters the registry locally;
-`describe_external_tools` and `search_connector_tools` read the broker's catalog;
+`describe_external_tools` and `search_connector_tools` read the broker's catalog — a discovery
+listing whose query matched nothing falls back to the connector's unqueried top tools and marks the
+answer, so discovery is never a dead end and a fallback head is never read as a relevance ranking;
 `call_external_tool` executes on the broker's server-side API, authenticated by the turn-agent's
 connected account (bound through `/connect`). The broker holds the account's token and injects it
 itself, so an execute reaches only the broker's own API.
@@ -32,7 +34,7 @@ import string
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
@@ -56,6 +58,17 @@ TRANSFER_MAX_BYTES = 100 * 1024 * 1024
 WORKSPACE_FILES_RESULT_KEY = "workspace_files"
 CATALOG_SEARCH_LIMIT = 10
 MAX_LIST_QUERIES = 8
+AVAILABLE_TOOLS_KEY = "availableTools"
+AVAILABLE_TOOLS_NOTE_KEY = "availableTools_note"
+SEARCH_TOOLS_NOTE_KEY = "tools_note"
+AVAILABLE_TOOLS_BUDGET_CHARS = 20_000
+AVAILABLE_TOOLS_FALLBACK_NOTE = (
+    "No tool matched the query. These are the connector's top tools in its own catalog order, "
+    "not matches ranked by relevance."
+)
+AVAILABLE_TOOLS_OMITTED_NOTE = (
+    "{omitted} of the {total} tools listed are omitted here; narrow the query to reach them."
+)
 
 BASE64_MARKER = "base64"
 INLINED_MARKER = "utf-8"
@@ -184,12 +197,12 @@ async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsI
         schemas[name] = _tool_json(described)
     result: dict[str, object] = {"source_id": args.source_id, "schemas": schemas}
     if args.query or unresolved or not args.tool_names:
-        listed = await entry.broker.tools(
-            workspace_id, entry.provider, _discovery_query(args.query, unresolved)
-        )
-        result["availableTools"] = [
-            {"slug": tool.slug, "description": tool.description} for tool in listed
-        ]
+        query = _discovery_query(args.query, unresolved)
+        listed = await entry.broker.tools(workspace_id, entry.provider, query)
+        rows, note = await _discovered_rows(entry, workspace_id, query, listed)
+        result[AVAILABLE_TOOLS_KEY] = rows
+        if note:
+            result[AVAILABLE_TOOLS_NOTE_KEY] = note
     if unresolved:
         result["unresolved"] = unresolved
     return _json_result(result)
@@ -629,16 +642,19 @@ def _decoded_base64(value: object) -> tuple[bytes, str | None] | None:
 
 async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
-    found = await entry.broker.search(ctx.turn.workspace_id, entry.provider, args.query)
-    return _json_result(
-        {
-            "connector": args.source_id,
-            "tools": [_tool_json(tool) for tool in found.tools],
-            "plan": list(found.plan),
-            "guidance": list(found.guidance),
-            "pitfalls": list(found.pitfalls),
-        }
-    )
+    workspace_id = ctx.turn.workspace_id
+    found = await entry.broker.search(workspace_id, entry.provider, args.query)
+    rows, note = await _discovered_rows(entry, workspace_id, args.query, found.tools)
+    result: dict[str, object] = {
+        "connector": args.source_id,
+        "tools": rows,
+        "plan": list(found.plan),
+        "guidance": list(found.guidance),
+        "pitfalls": list(found.pitfalls),
+    }
+    if note:
+        result[SEARCH_TOOLS_NOTE_KEY] = note
+    return _json_result(result)
 
 
 def _registry(ctx: ToolContext) -> ConnectorRegistry:
@@ -649,6 +665,42 @@ def _registry(ctx: ToolContext) -> ConnectorRegistry:
 
 def _tool_json(tool: BrokerTool) -> dict[str, object]:
     return {"slug": tool.slug, "description": tool.description, "input_schema": tool.input_schema}
+
+
+async def _discovered_rows(
+    entry: ConnectorEntry, workspace_id: UUID, query: str, found: tuple[BrokerTool, ...]
+) -> tuple[list[dict[str, object]], str]:
+    """The tool rows one discovery answer carries and the note describing how they were reached —
+    the seam both discovery tools go through, so the "never a dead end" rule holds however the
+    broker matched. A query that found nothing is answered with the connector's unqueried top tools
+    instead of empty, marked as catalog order rather than relevance so a fallback head is never read
+    as a ranking: a broker whose search is a term match (or a semantic router that recalls nothing)
+    would otherwise tell the model the connector cannot do the thing at all."""
+    degraded = bool(query) and not found
+    listed = await entry.broker.tools(workspace_id, entry.provider, "") if degraded else found
+    rows = _available_tools(listed)
+    notes = [AVAILABLE_TOOLS_FALLBACK_NOTE] if degraded and rows else []
+    if len(rows) < len(listed):
+        notes.append(
+            AVAILABLE_TOOLS_OMITTED_NOTE.format(omitted=len(listed) - len(rows), total=len(listed))
+        )
+    return rows, " ".join(notes)
+
+
+def _available_tools(listed: tuple[BrokerTool, ...]) -> list[dict[str, object]]:
+    """The tool rows that fit the model's inline result budget, for discovery and search alike: a
+    connector can catalog hundreds of tools and every row carries the input schema its listing
+    already held, so the projection stops before the answer grows past what the engine keeps in
+    context rather than being offloaded to a file the model must then filter."""
+    rows: list[dict[str, object]] = []
+    spent = 0
+    for tool in listed:
+        row = _tool_json(tool)
+        spent += len(json.dumps(row))
+        if spent > AVAILABLE_TOOLS_BUDGET_CHARS and rows:
+            break
+        rows.append(row)
+    return rows
 
 
 def _discovery_query(explicit: str, unresolved: list[str]) -> str:

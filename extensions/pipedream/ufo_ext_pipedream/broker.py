@@ -57,14 +57,8 @@ class PipedreamBroker:
     contract."""
 
     async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
-        """Pipedream's `q` is a strict term match — a multi-word query routinely answers empty — so
-        an empty queried answer falls back to the app's unqueried top actions, never a dead end."""
         client = pipedream.pipedream_client()
-        app = _spec(provider).app
-        found = _listed_tools(await client.list_actions(app, query))
-        if not found and query:
-            found = _listed_tools(await client.list_actions(app, ""))
-        return found
+        return _listed_tools(await client.list_actions(_spec(provider).app, query))
 
     async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool:
         definition = await self._definition(slug)
@@ -219,18 +213,22 @@ def _spec(provider: str) -> ConnectorSpec:
     return spec
 
 
-def _listed_tools(listed: dict[str, object]) -> tuple[BrokerTool, ...]:
-    """Project a Pipedream `list_actions` response to the app's real component keys and short
-    descriptions."""
-    items = listed.get("data")
+def _listed_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]:
+    """Project Pipedream's listed actions to the app's real component keys, short descriptions, and
+    the input schemas the listing already carries (`configurable_props`) — so discovery answers with
+    what a call needs, without a second round trip per key."""
     tools: list[BrokerTool] = []
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict):
-            continue
+    for item in rows:
         key = item.get("key")
         if not isinstance(key, str) or not key:
             continue
-        tools.append(BrokerTool(slug=key, description=_str(item.get("description"))))
+        tools.append(
+            BrokerTool(
+                slug=key,
+                description=_str(item.get("description")),
+                input_schema=_input_schema(_props(item)),
+            )
+        )
     return tuple(tools)
 
 

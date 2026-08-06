@@ -5,9 +5,9 @@ registry holding the sample extension's ConnectorProvider (a real installed brok
 execute back as its response) exactly as `serve` threads one onto the turn's ToolContext. What is
 proved here is the orchestration: listing filters the registry, describe folds an unknown slug into
 `unresolved` and backfills discovery from the broker's catalog, search renders the broker's
-`BrokerSearch`, and a call without the registry, or naming a provider no extension registers, fails
-loud. The grant-resolving execute path keeps its end-to-end proof in the composio extension's
-tests."""
+`BrokerSearch` and falls back to the connector's top tools when it recalled nothing, and a call
+without the registry, or naming a provider no extension registers, fails loud. The grant-resolving
+execute path keeps its end-to-end proof in the composio extension's tests."""
 
 import asyncio
 import base64
@@ -15,7 +15,7 @@ import hashlib
 import json
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -36,7 +36,14 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
-from ufo.connectors import BrokerFile, ConnectorEntry, ConnectorRegistry, StagedUpload
+from ufo.connectors import (
+    BrokerFile,
+    BrokerSearch,
+    BrokerTool,
+    ConnectorEntry,
+    ConnectorRegistry,
+    StagedUpload,
+)
 from ufo.ext.loader import turn_tools
 from ufo.grants import Grant, GrantStore
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
@@ -75,6 +82,22 @@ class _Grants(GrantStore):
             )
             for account in self.accounts
         )
+
+
+@dataclass(frozen=True)
+class _UnmatchedSearchBroker(sample._SampleBroker):
+    """A broker whose search recalls nothing for the query it is given — a term matcher fed a
+    use-case sentence, which is what a broker without a semantic router answers. Every listing query
+    it is asked for is recorded."""
+
+    listed: list[str] = field(default_factory=list)
+
+    async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]:
+        self.listed.append(query)
+        return await super().tools(workspace_id, provider, query)
+
+    async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch:
+        return BrokerSearch(tools=())
 
 
 def _registry() -> ConnectorRegistry:
@@ -210,6 +233,34 @@ async def test_search_connector_tools_renders_the_brokers_search() -> None:
     assert [tool["slug"] for tool in payload["tools"]] == [sample.BROKER_TOOL_SLUG]
     assert payload["plan"] == [sample.BROKER_SEARCH_PLAN]
     assert payload["guidance"] == []
+
+
+async def test_search_connector_tools_falls_back_to_top_tools_and_marks_the_answer() -> None:
+    """Search goes through the same seam as describe, so a query the broker matched nothing for is
+    answered with the connector's unqueried top tools rather than empty rows beside an empty plan —
+    and marked as catalog order, so the head is never read as a relevance ranking."""
+    broker = _UnmatchedSearchBroker()
+    registry = ConnectorRegistry(
+        entries={
+            sample.CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=sample.CONNECTOR_PROVIDER, label=sample.CONNECTOR_LABEL, broker=broker
+            )
+        }
+    )
+    result = await search_connector_tools(
+        _ctx(registry),
+        SearchConnectorToolsInput(
+            user_description=TOOL_NARRATION,
+            source_id=sample.CONNECTOR_PROVIDER,
+            query="reserve the widget nobody has named yet",
+        ),
+    )
+    payload = _payload(result)
+    assert [tool["slug"] for tool in payload["tools"]] == [sample.BROKER_TOOL_SLUG]
+    assert payload[connector_tools.SEARCH_TOOLS_NOTE_KEY] == (
+        connector_tools.AVAILABLE_TOOLS_FALLBACK_NOTE
+    )
+    assert broker.listed == [""]
 
 
 async def test_call_external_tool_uses_the_only_connected_account() -> None:

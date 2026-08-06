@@ -42,7 +42,8 @@ CONNECTION_ID_CHARS = 32
 LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
 PIPEDREAM_TIMEOUT_SECONDS = 30.0
 TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
-ACTION_SEARCH_LIMIT = 10
+ACTION_PAGE_LIMIT = 100
+MAX_LISTED_ACTIONS = 500
 MAX_RUN_ARGUMENTS_BYTES = 1024 * 1024
 APP_PROP_TYPE = "app"
 STASH_NEW = "NEW"
@@ -194,13 +195,36 @@ class PipedreamClient:
             raise PipedreamError(502, f"connected account carried no id: {newest!r}")
         return _owned_account(newest, account_id, external_user_id)
 
-    async def list_actions(
-        self, app: str, query: str = "", limit: int = ACTION_SEARCH_LIMIT
-    ) -> dict[str, object]:
-        params = {"app": app, "limit": str(limit)}
-        if query:
-            params["q"] = query
-        return await self._get(f"/connect/{self.project_id}/actions", params=params)
+    async def list_actions(self, app: str, query: str = "") -> tuple[dict[str, object], ...]:
+        """Every action row the app catalogs for `query`, following `page_info.end_cursor` to the
+        end of the listing — an app publishes dozens of actions, so one page is a slice of
+        Pipedream's own order and a real component key on page two would be invisible to discovery.
+        The walk ends on a short page (Connect carries the last item's cursor on every page,
+        including the last) or at `MAX_LISTED_ACTIONS` rows, which stops it even where the listing
+        offers another cursor: past that count no caller renders the rows."""
+        rows: list[dict[str, object]] = []
+        after = ""
+        while True:
+            params = {"app": app, "limit": str(ACTION_PAGE_LIMIT)}
+            if query:
+                params["q"] = query
+            if after:
+                params["after"] = after
+            payload = await self._get(f"/connect/{self.project_id}/actions", params=params)
+            data = payload.get("data")
+            page = (
+                [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+            )
+            rows.extend(page)
+            end_cursor = _dict(payload.get("page_info")).get("end_cursor")
+            if (
+                len(page) < ACTION_PAGE_LIMIT
+                or len(rows) >= MAX_LISTED_ACTIONS
+                or not isinstance(end_cursor, str)
+                or not end_cursor
+            ):
+                return tuple(rows[:MAX_LISTED_ACTIONS])
+            after = end_cursor
 
     async def action_definition(self, key: str) -> dict[str, object]:
         return await self._get(f"/connect/{self.project_id}/components/{key}")

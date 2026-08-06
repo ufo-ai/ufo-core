@@ -28,7 +28,9 @@ COMPOSIO_API_KEY_ENV = "COMPOSIO_API_KEY"
 EXTERNAL_USER_PREFIX = "ufo_"
 COMPOSIO_TIMEOUT_SECONDS = 30.0
 ACTIVE_STATUS = "ACTIVE"
-TOOL_SEARCH_LIMIT = 10
+TOOL_PAGE_LIMIT = 100
+MAX_LISTED_TOOLS = 500
+TOOLKIT_SEARCH_LIMIT = 10
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
 IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
@@ -205,13 +207,37 @@ class ComposioClient:
             )
         return OAuthAccount(account_id=account_id)
 
-    async def list_tools(
-        self, toolkit: str, query: str = "", limit: int = TOOL_SEARCH_LIMIT
-    ) -> dict[str, object]:
-        params = {"toolkit_slug": toolkit, "limit": str(limit)}
-        if query:
-            params["query"] = query
-        return await self._get("/tools", params=params)
+    async def list_tools(self, toolkit: str, query: str = "") -> tuple[dict[str, object], ...]:
+        """Every tool row the toolkit catalogs for `query`, following `next_cursor` to the end of
+        the listing — a toolkit's tools run to the hundreds, so one page is a slice of Composio's
+        own order and a real slug on page two would be invisible to discovery. The walk ends on a
+        short page (the last page carries no cursor) or at `MAX_LISTED_TOOLS` rows, which stops it
+        even where the listing offers another cursor: past that count no caller renders the rows."""
+        rows: list[dict[str, object]] = []
+        cursor = ""
+        while True:
+            params = {"toolkit_slug": toolkit, "limit": str(TOOL_PAGE_LIMIT)}
+            if query:
+                params["query"] = query
+            if cursor:
+                params["cursor"] = cursor
+            payload = await self._get("/tools", params=params)
+            items = payload.get("items")
+            page = (
+                [item for item in items if isinstance(item, dict)]
+                if isinstance(items, list)
+                else []
+            )
+            rows.extend(page)
+            next_cursor = payload.get("next_cursor")
+            if (
+                len(page) < TOOL_PAGE_LIMIT
+                or len(rows) >= MAX_LISTED_TOOLS
+                or not isinstance(next_cursor, str)
+                or not next_cursor
+            ):
+                return tuple(rows[:MAX_LISTED_TOOLS])
+            cursor = next_cursor
 
     async def tool_schema(self, slug: str) -> dict[str, object]:
         return await self._get(f"/tools/{slug}")
