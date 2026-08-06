@@ -7,7 +7,8 @@ token, never correctness — the durable terminal-or-parked state always arrives
 parked turn is non-terminal, so the poll reads the turn's status, not only its terminal frame."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -26,13 +27,18 @@ PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is
 
 async def tail_frames(
     hub: Hub, turn_id: UUID, since: str = ""
-) -> AsyncIterator[tuple[str, LiveFrame]]:
+) -> AsyncGenerator[tuple[str, LiveFrame]]:
     """Yield a turn's live frames, each with its cursor, until it ends — a Terminal, or a Parked
     hold — whether the turn is still running or already committed when the caller attaches. A
     reconnecting caller passes the last cursor it saw as `since`: the hub resumes gaplessly from
     there when it still covers that cursor, else the tail redraws from the start of the retained
     ring. Frames sourced from the durable poll carry no cursor (the stream ends on them). The caller
-    serializes each frame for its own transport."""
+    serializes each frame for its own transport.
+
+    The pump, the poll, and the hub subscription behind them live exactly as long as this generator:
+    closing it runs the `finally` that ends all three. `HubTailer.tail` hands it out inside that
+    scope, so a caller that answers on the first terminal frame — leaving the generator suspended at
+    its yield — releases all three at its own block's exit."""
     frames: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue()
     start = since if since and await hub.covers(turn_id, since) else ""
     pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
@@ -116,5 +122,7 @@ class HubTailer:
 
     hub: Hub
 
-    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
-        return tail_frames(self.hub, turn_id, since)
+    def tail(
+        self, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
+        return aclosing(tail_frames(self.hub, turn_id, since))

@@ -892,8 +892,9 @@ async def _surface_live_stream(ctx: SurfaceContext, request: Request) -> Respons
 
 
 async def _surface_frames(ctx: SurfaceContext, turn_id: UUID) -> AsyncIterator[bytes]:
-    async for _cursor, frame in ctx.tail(turn_id):
-        yield frame.model_dump_json().encode() + b"\n"
+    async with ctx.tail(turn_id) as frames:
+        async for _cursor, frame in frames:
+            yield frame.model_dump_json().encode() + b"\n"
 
 
 @dataclass(frozen=True)

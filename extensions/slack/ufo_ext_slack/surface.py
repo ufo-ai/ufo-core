@@ -1749,46 +1749,46 @@ class ThreadStatus:
 
     async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None:
         sent_at = time.monotonic()
-        frames = aiter(self.ctx.tail(self.turn_id))
-        upcoming = asyncio.ensure_future(anext(frames))
-        try:
-            while True:
-                done, _pending = await asyncio.wait([upcoming], timeout=STATUS_REFRESH_SECONDS)
-                if not done:
-                    if shown:
-                        await self._set(client, bot_token, shown)
-                        sent_at = time.monotonic()
-                    continue
-                try:
-                    _cursor, frame = upcoming.result()
-                except StopAsyncIteration:
-                    return
-                upcoming = asyncio.ensure_future(anext(frames))
-                match frame:
-                    case Terminal() | Parked():
-                        return
-                    case ToolCall(tool=tool, description=description):
-                        stated = description.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
-                        text = (
-                            STATUS_DESCRIBED_TEXT.format(description=stated)
-                            if stated
-                            else STATUS_WORKING_TEXT.format(tool=tool)
-                        )
-                    case SkillLoad(skill=skill):
-                        text = STATUS_SKILL_TEXT.format(skill=skill)
-                    case TextDelta():
-                        text = STATUS_GENERATING_TEXT
-                    case _:
+        async with self.ctx.tail(self.turn_id) as frames:
+            upcoming = asyncio.ensure_future(anext(frames))
+            try:
+                while True:
+                    done, _pending = await asyncio.wait([upcoming], timeout=STATUS_REFRESH_SECONDS)
+                    if not done:
+                        if shown:
+                            await self._set(client, bot_token, shown)
+                            sent_at = time.monotonic()
                         continue
-                text = text[:STATUS_TEXT_LIMIT]
-                if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
-                    continue
-                if await self._set(client, bot_token, text):
-                    shown = text
-                sent_at = time.monotonic()
-        finally:
-            upcoming.cancel()
-            await asyncio.gather(upcoming, return_exceptions=True)
+                    try:
+                        _cursor, frame = upcoming.result()
+                    except StopAsyncIteration:
+                        return
+                    upcoming = asyncio.ensure_future(anext(frames))
+                    match frame:
+                        case Terminal() | Parked():
+                            return
+                        case ToolCall(tool=tool, description=description):
+                            stated = description.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
+                            text = (
+                                STATUS_DESCRIBED_TEXT.format(description=stated)
+                                if stated
+                                else STATUS_WORKING_TEXT.format(tool=tool)
+                            )
+                        case SkillLoad(skill=skill):
+                            text = STATUS_SKILL_TEXT.format(skill=skill)
+                        case TextDelta():
+                            text = STATUS_GENERATING_TEXT
+                        case _:
+                            continue
+                    text = text[:STATUS_TEXT_LIMIT]
+                    if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
+                        continue
+                    if await self._set(client, bot_token, text):
+                        shown = text
+                    sent_at = time.monotonic()
+            finally:
+                upcoming.cancel()
+                await asyncio.gather(upcoming, return_exceptions=True)
 
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
@@ -1981,38 +1981,38 @@ class ThreadProgress:
         intervals = self.cadence.intervals()
         deadline = started + next(intervals)
         activity = TurnActivity()
-        frames = aiter(self.ctx.tail(self.turn_id))
-        upcoming = asyncio.ensure_future(anext(frames))
-        try:
-            while True:
-                waiting = max(deadline - time.monotonic(), 0.0)
-                done, _pending = await asyncio.wait([upcoming], timeout=waiting)
-                if not done:
-                    if await self.ctx.turn_is_terminal(self.turn_id):
-                        return
-                    await self._post(client, bot_token, activity, time.monotonic() - started)
-                    activity.checkpoint()
-                    deadline = time.monotonic() + next(intervals)
-                    continue
-                try:
-                    _cursor, frame = upcoming.result()
-                except StopAsyncIteration:
-                    return
-                upcoming = asyncio.ensure_future(anext(frames))
-                match frame:
-                    case Terminal() | Parked():
-                        return
-                    case ToolCall(tool=tool, description=description):
-                        activity.tool(tool, description)
-                    case SkillLoad(skill=skill):
-                        activity.skill(skill)
-                    case TextDelta(text=text):
-                        activity.stream(text)
-                    case _:
+        async with self.ctx.tail(self.turn_id) as frames:
+            upcoming = asyncio.ensure_future(anext(frames))
+            try:
+                while True:
+                    waiting = max(deadline - time.monotonic(), 0.0)
+                    done, _pending = await asyncio.wait([upcoming], timeout=waiting)
+                    if not done:
+                        if await self.ctx.turn_is_terminal(self.turn_id):
+                            return
+                        await self._post(client, bot_token, activity, time.monotonic() - started)
+                        activity.checkpoint()
+                        deadline = time.monotonic() + next(intervals)
                         continue
-        finally:
-            upcoming.cancel()
-            await asyncio.gather(upcoming, return_exceptions=True)
+                    try:
+                        _cursor, frame = upcoming.result()
+                    except StopAsyncIteration:
+                        return
+                    upcoming = asyncio.ensure_future(anext(frames))
+                    match frame:
+                        case Terminal() | Parked():
+                            return
+                        case ToolCall(tool=tool, description=description):
+                            activity.tool(tool, description)
+                        case SkillLoad(skill=skill):
+                            activity.skill(skill)
+                        case TextDelta(text=text):
+                            activity.stream(text)
+                        case _:
+                            continue
+            finally:
+                upcoming.cancel()
+                await asyncio.gather(upcoming, return_exceptions=True)
 
     async def _post(
         self,

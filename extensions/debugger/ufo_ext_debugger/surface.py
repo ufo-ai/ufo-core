@@ -143,8 +143,9 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def _events(ctx: SurfaceContext, turn_id: UUID, since: str) -> AsyncIterator[bytes]:
-    async for cursor, frame in ctx.tail(turn_id, since):
-        yield _sse(cursor, frame)
+    async with ctx.tail(turn_id, since) as frames:
+        async for cursor, frame in frames:
+            yield _sse(cursor, frame)
 
 
 def _sse(cursor: str, frame: LiveFrame) -> bytes:

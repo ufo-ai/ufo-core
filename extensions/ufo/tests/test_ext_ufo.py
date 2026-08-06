@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -183,9 +184,9 @@ async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
     async def token_only(sealed: str, slot: str) -> bool:
         return slot == "slack_bot_token"
 
-    gated = [line async for line in stream_directives(frames(), 5.0, fulfilled)]
+    gated = [line async for line in stream_directives(aclosing(frames()), 5.0, fulfilled)]
     assert not any(line.startswith(b"secret\t") for line in gated)
-    partial = [line async for line in stream_directives(frames(), 5.0, token_only)]
+    partial = [line async for line in stream_directives(aclosing(frames()), 5.0, token_only)]
     secrets = [line for line in partial if line.startswith(b"secret\t")]
     assert secrets == [b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n"]
 
@@ -206,7 +207,7 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
     async def connect() -> str:
         return "https://oauth.example.test/authorize"
 
-    lines = [line async for line in stream_directives(frames(), 5.0, connect=connect)]
+    lines = [line async for line in stream_directives(aclosing(frames()), 5.0, connect=connect)]
     assert lines == [
         b"say\tUse the connection control.\n",
         b"say\tComplete the connection: https://oauth.example.test/authorize\n",
@@ -307,7 +308,9 @@ async def _feed(frames: list[tuple[str, object]]) -> AsyncIterator[tuple[str, ob
 
 async def test_hold_expires_and_the_stream_ends_with_poll() -> None:
     assert HOLD_SECONDS == 85.0
-    out = b"".join([chunk async for chunk in stream_directives(_Never(), hold_seconds=0.05)])
+    out = b"".join(
+        [chunk async for chunk in stream_directives(aclosing(_Never()), hold_seconds=0.05)]
+    )
     lines = _lines(out)
     assert lines[0] == ["txt", "working"]
     assert lines[-1] == ["poll", "1"]
@@ -317,7 +320,9 @@ async def test_terminal_frame_closes_the_stream_without_polling() -> None:
     frames = _feed(
         [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
     )
-    out = b"".join([chunk async for chunk in stream_directives(frames, hold_seconds=HOLD_SECONDS)])
+    out = b"".join(
+        [chunk async for chunk in stream_directives(aclosing(frames), hold_seconds=HOLD_SECONDS)]
+    )
     lines = _lines(out)
     assert lines == [["txt", "echo:1"], ["ask", ">"]]
 

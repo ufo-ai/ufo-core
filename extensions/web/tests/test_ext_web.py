@@ -2,7 +2,8 @@ import asyncio
 import json
 import re
 import secrets
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ from ufo_ext_sites.store import HostedSites
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
+from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
@@ -65,7 +67,7 @@ from ufo.grants import (
     account_object_name,
     install_connect_flow,
 )
-from ufo.hub import InProcessHub, SkillLoad, ToolCall
+from ufo.hub import InProcessHub, LiveFrame, SkillLoad, Terminal, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
@@ -4304,6 +4306,110 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     assert recorded is not None
     assert len(recorded.messages) == 2
     assert recorded.messages[-1].role == "assistant"
+
+
+def _held_tail(
+    frames: tuple[LiveFrame, ...], teardown_seconds: float
+) -> Callable[..., AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]]:
+    """A tail that yields `frames`, holds, and takes `teardown_seconds` to close — the real tail's
+    two costs (frames that may never arrive, a close that cancels the pump and poll and waits for
+    both) as exact timings, so what the intent deadline covers is decided rather than raced."""
+
+    def tail(
+        self: hub_tail.HubTailer, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
+        async def held() -> AsyncGenerator[tuple[str, LiveFrame]]:
+            try:
+                for cursor, frame in enumerate(frames, start=1):
+                    yield str(cursor), frame
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(teardown_seconds)
+
+        return aclosing(held())
+
+    return tail
+
+
+async def test_an_intent_the_deadline_outruns_answers_that_it_is_still_applying(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline branch: a terminal frame that does not arrive in time answers 504 naming the
+    turn to check back on, because the turn keeps running after the connection is done with it."""
+    client, workspace_id, agent_id = web
+    monkeypatch.setattr(web_panels, "INTENT_RESULT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(hub_tail.HubTailer, "tail", _held_tail((), 0.0))
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.status_code == 504
+    outcome = submitted.json()
+    assert outcome["applied"] is False
+    assert outcome["message"] == "The change is still being applied — check back."
+    assert UUID(outcome["turn_id"])
+
+
+async def test_a_deadline_spanning_the_tails_close_keeps_the_outcome_it_already_read(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing the tail takes time, and the answer is already decided by then: the deadline bounds
+    reading frames, never the close that follows, so a slow close answers with the outcome the
+    terminal frame carried instead of the 504 that means the change had not landed yet."""
+    client, workspace_id, agent_id = web
+    monkeypatch.setattr(web_panels, "INTENT_RESULT_TIMEOUT_SECONDS", 0.05)
+    applied = Terminal(frame=TerminalFrame(status="done", text="applied"))
+    monkeypatch.setattr(hub_tail.HubTailer, "tail", _held_tail((applied,), 0.2))
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.status_code == 200
+    outcome = submitted.json()
+    assert outcome["applied"] is True
+    assert outcome["message"] == "Saved."
+
+
+async def test_an_answered_intent_leaves_no_tail_running(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intent answers on the turn's first terminal frame, returning out of the middle of the
+    tail — which owns a hub subscription and the pump and poll feeding it. Every tail the route
+    opens is held for the length of the test, so what the route itself released is what this
+    asserts: an answer costs the turn's live leg nothing beyond the answer."""
+    client, workspace_id, agent_id = web
+    opened: list[AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]] = []
+    tail = hub_tail.HubTailer.tail
+
+    def recorded_tail(
+        self: hub_tail.HubTailer, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
+        opened.append(tail(self, turn_id, since))
+        return opened[-1]
+
+    monkeypatch.setattr(hub_tail.HubTailer, "tail", recorded_tail)
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    submitted = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=INTENT_BODY,
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert submitted.json()["applied"] is True
+    assert opened, "the intent answered without tailing its turn"
+    running = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_coro().__qualname__ in ("_pump", "_poll_status")
+    ]
+    assert not running
 
 
 SKILL_MD = "---\nname: release-notes\ndescription: How release notes read.\n---\nWrite tersely.\n"

@@ -31,7 +31,7 @@ import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from secrets import token_hex
@@ -223,9 +223,14 @@ class TurnTailer(Protocol):
     """Tail one turn's live frames until it ends, each frame with its replay cursor — the live
     surface's read half, mirroring `MemberAdmitter`'s write half. The concrete tailer binds the
     process hub and ends the stream on the durable terminal-or-parked state; a live surface never
-    touches the hub directly, it reaches it through this one primitive."""
+    touches the hub directly, it reaches it through this one primitive.
 
-    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]: ...
+    A tail is a scope: it holds a hub subscription and the tasks feeding it, and the block's exit
+    releases them — a surface that renders one frame and answers included."""
+
+    def tail(
+        self, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
 
 
 TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
@@ -1306,9 +1311,12 @@ class SurfaceContext:
             ).one_or_none()
         return None if row is None else row.id
 
-    def tail(self, turn_id: UUID, since: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
+    def tail(
+        self, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
         """Tail a turn's live frames off the hub until it ends — a live surface streams these to the
-        member's held connection (SSE), reaching the hub only through the injected tailer."""
+        member's held connection (SSE), reaching the hub only through the injected tailer. Leaving
+        the scope ends the subscription and the tasks behind it, however the block ends."""
         return self._tailer.tail(turn_id, since)
 
     async def spend_rollup(self, window_seconds: int) -> SpendReport:

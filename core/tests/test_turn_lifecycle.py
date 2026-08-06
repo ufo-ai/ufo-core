@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -409,8 +409,11 @@ class Turns:
     async def consume(self, seed: Seed, turn_id: str) -> tuple[str, dict[str, object]]:
         deltas: list[str] = []
         with ws(seed.workspace_id):
-            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+            async with (
+                aclosing(hub_tail.tail_frames(self.hub, UUID(turn_id))) as frames,
+                asyncio.timeout(STREAM_TIMEOUT_SECONDS),
+            ):
+                async for _cursor, frame in frames:
                     match frame:
                         case TextDelta():
                             deltas.append(frame.text)
@@ -420,8 +423,11 @@ class Turns:
 
     async def consume_park(self, seed: Seed, turn_id: str) -> str:
         with ws(seed.workspace_id):
-            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+            async with (
+                aclosing(hub_tail.tail_frames(self.hub, UUID(turn_id))) as frames,
+                asyncio.timeout(STREAM_TIMEOUT_SECONDS),
+            ):
+                async for _cursor, frame in frames:
                     if isinstance(frame, Parked):
                         return frame.message
         raise AssertionError("stream ended without a park frame")
@@ -429,8 +435,11 @@ class Turns:
     async def consume_costs(self, seed: Seed, turn_id: str) -> list[dict[str, object]]:
         costs: list[dict[str, object]] = []
         with ws(seed.workspace_id):
-            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-                async for _cursor, frame in hub_tail.tail_frames(self.hub, UUID(turn_id)):
+            async with (
+                aclosing(hub_tail.tail_frames(self.hub, UUID(turn_id))) as frames,
+                asyncio.timeout(STREAM_TIMEOUT_SECONDS),
+            ):
+                async for _cursor, frame in frames:
                     match frame:
                         case CostTick():
                             costs.append(frame.model_dump(mode="json"))

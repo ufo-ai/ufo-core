@@ -1629,36 +1629,37 @@ async def _turn_files(ctx: SurfaceContext, turn_id: UUID) -> list[dict[str, obje
 async def _events(
     ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str
 ) -> AsyncIterator[bytes]:
-    async for cursor, frame in ctx.tail(turn_id, since):
-        if isinstance(frame, Terminal):
-            detail = await ctx.turn_detail(turn_id)
-            if detail is not None:
-                for run in _subagent_runs(detail.children).get(str(turn_id), []):
-                    yield _event(
-                        "subagent",
-                        {
-                            "profile": run["profile"],
-                            "conversation_id": run["conversation_id"],
-                        },
-                    )
-            if frame.frame.connect_request is not None:
-                try:
-                    url = await ctx.connect_url(turn_id, member_id)
-                except ConnectRequestInvalid:
-                    yield _event(
-                        "connect_error",
-                        {"message": "Connection request unavailable; ask me to connect again."},
-                    )
-                else:
-                    yield _event("connect", {"url": url})
-            if frame.frame.credential_request is not None:
-                prompts = await _pending_prompts(ctx, frame.frame.credential_request)
-                if prompts is not None:
-                    yield _event("credentials", prompts)
-            files = await _turn_files(ctx, turn_id)
-            if files:
-                yield _event("files", {"files": files})
-        yield _sse(cursor, frame)
+    async with ctx.tail(turn_id, since) as frames:
+        async for cursor, frame in frames:
+            if isinstance(frame, Terminal):
+                detail = await ctx.turn_detail(turn_id)
+                if detail is not None:
+                    for run in _subagent_runs(detail.children).get(str(turn_id), []):
+                        yield _event(
+                            "subagent",
+                            {
+                                "profile": run["profile"],
+                                "conversation_id": run["conversation_id"],
+                            },
+                        )
+                if frame.frame.connect_request is not None:
+                    try:
+                        url = await ctx.connect_url(turn_id, member_id)
+                    except ConnectRequestInvalid:
+                        yield _event(
+                            "connect_error",
+                            {"message": "Connection request unavailable; ask me to connect again."},
+                        )
+                    else:
+                        yield _event("connect", {"url": url})
+                if frame.frame.credential_request is not None:
+                    prompts = await _pending_prompts(ctx, frame.frame.credential_request)
+                    if prompts is not None:
+                        yield _event("credentials", prompts)
+                files = await _turn_files(ctx, turn_id)
+                if files:
+                    yield _event("files", {"files": files})
+            yield _sse(cursor, frame)
 
 
 async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:

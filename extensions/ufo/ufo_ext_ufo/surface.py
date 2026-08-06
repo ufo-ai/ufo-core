@@ -16,7 +16,8 @@ that outruns the hold ends the stream with `poll` and the shell reconnects with 
 admits nothing and resumes tailing the conversation's latest turn."""
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from functools import partial
 from uuid import UUID
 
@@ -146,7 +147,7 @@ def _say_lines(text: str) -> tuple[bytes, ...]:
 
 
 async def stream_directives(
-    frames: AsyncIterator[tuple[str, LiveFrame]],
+    tail: AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]],
     hold_seconds: float,
     pending: Callable[[str, str], Awaitable[bool]] | None = None,
     connect: Callable[[], Awaitable[str]] | None = None,
@@ -155,12 +156,13 @@ async def stream_directives(
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
     `poll` so the shell reconnects to drain the durable answer. `pending` gates each prompt of a
     terminal frame's credential request, so a fulfilled or expired prompt never re-renders on
-    reconnect while an unanswered sibling keeps asking."""
+    reconnect while an unanswered sibling keeps asking. The tail's scope is entered here because the
+    route returns its response before a single frame is read."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
     terminated = False
-    try:
+    async with tail as frames:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -201,9 +203,6 @@ async def stream_directives(
             if isinstance(frame, Terminal | Parked):
                 terminated = True
                 break
-    finally:
-        if isinstance(frames, AsyncGenerator):
-            await frames.aclose()
     if not terminated:
         yield directive("poll", str(POLL_SECONDS))
 

@@ -299,8 +299,11 @@ async def submit_intent(
         intent=intent,
     )
     try:
-        async with asyncio.timeout(INTENT_RESULT_TIMEOUT_SECONDS):
-            async for _cursor, frame in ctx.tail(admitted.turn_id):
+        async with (
+            ctx.tail(admitted.turn_id) as frames,
+            asyncio.timeout(INTENT_RESULT_TIMEOUT_SECONDS),
+        ):
+            async for _cursor, frame in frames:
                 match frame:
                     case Terminal():
                         return _outcome(frame.frame, admitted.turn_id)

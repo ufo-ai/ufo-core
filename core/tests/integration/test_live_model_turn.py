@@ -11,6 +11,7 @@ process-singleton DBOS executor with the rest of the suite."""
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -155,8 +156,11 @@ async def _admit(seed: Seed, body: str) -> UUID:
 async def _consume(hub: Hub, seed: Seed, turn_id: UUID) -> tuple[str, dict[str, object]]:
     deltas: list[str] = []
     with ws(seed.workspace_id):
-        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-            async for _cursor, frame in tail_frames(hub, turn_id):
+        async with (
+            aclosing(tail_frames(hub, turn_id)) as frames,
+            asyncio.timeout(STREAM_TIMEOUT_SECONDS),
+        ):
+            async for _cursor, frame in frames:
                 match frame:
                     case TextDelta():
                         deltas.append(frame.text)
