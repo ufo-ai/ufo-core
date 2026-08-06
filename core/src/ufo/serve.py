@@ -89,6 +89,7 @@ from ufo.jobs import (
 )
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
+from ufo.loop.subagent_catalog import subagent_catalog_skill
 from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
@@ -187,7 +188,10 @@ def run() -> None:
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
-    skills = skill_registry(manifests, (model_catalog_skill(registry),))
+    subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
+    skills = skill_registry(
+        manifests, (model_catalog_skill(registry), subagent_catalog_skill(subagents))
+    )
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
     runtime = Runtime(
@@ -209,7 +213,7 @@ def run() -> None:
         connectors=connectors,
         run_tokens=run_tokens,
         dbos=dbos_client,
-        subagents=SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))),
+        subagents=subagents,
         subagent_grants=turn_subagent_grants(manifests),
         manifests=manifests,
         registry=registry,

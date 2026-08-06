@@ -12,7 +12,9 @@ metadata:
 ## Delegate a subtask
 
 `spawn_subagent` runs a named profile as a child working in the same `/workspace`, so it can pick
-up files you leave and leave files you read back. Delegate when a task has a self-contained chunk —
+up files you leave and leave files you read back. Load the `subagent-catalog` skill first unless you
+already know the profile name and its payload keys: it is generated from this deploy's own registry,
+and both are exact — a guessed name or key is refused, and the refusal costs a round. Delegate when a task has a self-contained chunk —
 a focused investigation, a batch of similar work — that a fresh context handles better than
 crowding your own.
 
