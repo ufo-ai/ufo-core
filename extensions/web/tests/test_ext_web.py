@@ -62,7 +62,7 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
-from ufo.ext.surface import record_transcript_access
+from ufo.ext.surface import SurfaceContext, record_transcript_access
 from ufo.grants import (
     ConnectFlow,
     GrantStore,
@@ -88,7 +88,7 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.objects import OBJECT_LIST_PAGE
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox, WorkspaceFile
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.scheduling import ScheduleStore
@@ -5819,7 +5819,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     client, workspace_id, agent_id = web
-    _config, _hub, blob, _sandboxes = dbos_runtime
+    _config, _hub, blob, sandboxes = dbos_runtime
     member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -5856,6 +5856,9 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
             messages=_change_messages(1, lambda _index: "+private child change\n"),
         )
     )
+    with ws(workspace_id):
+        private_png = _png()
+        await sandboxes.write(child_conversation, "images/private.png", private_png)
     unrelated = await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -5898,8 +5901,23 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     rooted_changes = await client.get(f"{child_changes}?root={theirs}", headers=admin_cookie)
     assert rooted_changes.status_code == 200
     assert rooted_changes.json()["changes"][0]["patch"] == "+private child change\n"
+    child_files = f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/slots/files"
+    assert (await client.get(child_files, headers=admin_cookie)).status_code == 404
+    rooted_files = await client.get(f"{child_files}?root={theirs}", headers=admin_cookie)
+    assert rooted_files.status_code == 200
+    preview_url = rooted_files.json()["files"][0]["preview"]["url"]
+    preview_query = parse_qs(urlsplit(preview_url).query)
+    assert preview_query["root"] == [str(theirs)]
+    assert len(preview_query["preview"][0]) > 40
+    preview = await client.get(preview_url, headers=admin_cookie)
+    assert preview.status_code == 200
+    assert preview.content == private_png
+    assert preview.headers["content-type"] == "image/png"
     assert (
         await client.get(f"{child_changes}?root={unrelated}", headers=admin_cookie)
+    ).status_code == 404
+    assert (
+        await client.get(f"{child_files}?root={unrelated}", headers=admin_cookie)
     ).status_code == 404
     files = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{theirs}/files", headers=admin_cookie
@@ -6304,6 +6322,7 @@ async def test_conversation_changes_stay_with_their_execution_conversation(
 async def test_live_workspace_files_fill_the_typed_conversation_slot(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, workspace_id, agent_id = web
     _config, _hub, _blob, sandboxes = dbos_runtime
@@ -6317,6 +6336,40 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
     )
     with ws(workspace_id):
         await sandboxes.write(conversation_id, "notes/brief draft.md", b"# Brief\n\nShip it.\n")
+        chart_png = _png()
+        backslash_path = "images/back\\slash.png"
+        control_path = "images/control\nname.png"
+        long_path = "/".join(("界" * 20,) * 50) + ".png"
+        await sandboxes.write(conversation_id, "images/bad.png", b"not an image")
+        await sandboxes.write(conversation_id, backslash_path, chart_png)
+        await sandboxes.write(conversation_id, "images/chart.png", chart_png)
+        await sandboxes.write(conversation_id, control_path, chart_png)
+        await sandboxes.write(conversation_id, "images/fake.jpg", chart_png)
+        await sandboxes.write(
+            conversation_id,
+            "images/oversize.png",
+            b"x" * (IMAGE_PREVIEW_MAX_BYTES + 1),
+        )
+        await sandboxes.write(conversation_id, "images/vector.svg", b"<svg></svg>")
+
+    original_list_workspace_files = SurfaceContext.list_workspace_files
+
+    async def list_with_long_path(
+        surface_ctx: SurfaceContext, target_conversation_id: UUID
+    ) -> tuple[WorkspaceFile, ...]:
+        files = await original_list_workspace_files(surface_ctx, target_conversation_id)
+        if target_conversation_id != conversation_id:
+            return files
+        return (
+            *files,
+            WorkspaceFile(
+                path=long_path,
+                size_bytes=len(chart_png),
+                modified_at=datetime(2026, 8, 6, tzinfo=UTC),
+            ),
+        )
+
+    monkeypatch.setattr(SurfaceContext, "list_workspace_files", list_with_long_path)
 
     base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -6325,6 +6378,11 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
     downloaded = await client.get(
         f"{base}/files/{quote('notes/brief draft.md', safe='/')}", headers=headers
     )
+    image_download = await client.get(f"{base}/files/images/chart.png", headers=headers)
+    vector = await client.get(f"{base}/files/images/vector.svg", headers=headers)
+    vector_preview = await client.get(
+        f"{base}/files/images/vector.svg?preview=true", headers=headers
+    )
 
     assert inventory.status_code == 200
     assert inventory.json()["slots"][-1] == {
@@ -6332,15 +6390,50 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
         "label": "Files",
         "icon": "file",
         "kind": "files",
-        "count": 1,
+        "count": 9,
     }
     assert payload.status_code == 200
     assert payload.json()["type"] == "files"
     assert payload.json()["truncated"] is False
-    assert payload.json()["files"][0]["path"] == "notes/brief draft.md"
-    assert payload.json()["files"][0]["size_bytes"] == 18
+    files = {entry["path"]: entry for entry in payload.json()["files"]}
+    assert files["notes/brief draft.md"]["size_bytes"] == 18
+    assert files["notes/brief draft.md"]["preview"] is None
+    image_preview = files["images/chart.png"]["preview"]
+    assert image_preview["type"] == "image"
+    assert image_preview["media_type"] == "image/png"
+    assert image_preview["url"].startswith(f"{base}/files/images/chart.png?preview=")
+    assert files["images/vector.svg"]["preview"] is None
+    assert files["images/oversize.png"]["preview"] is None
+    assert files[backslash_path]["preview"] is None
+    assert files[control_path]["preview"] is None
+    assert len(f"{base}/files/{quote(long_path, safe='/')}?preview=x") > 8_192
+    assert files[long_path]["preview"] is None
+    assert all("media_type" not in file for file in files.values())
     assert downloaded.status_code == 200
     assert downloaded.content == b"# Brief\n\nShip it.\n"
+    assert downloaded.headers["content-type"] == "application/octet-stream"
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+    image = await client.get(image_preview["url"], headers=headers)
+    assert image.status_code == 200
+    assert image.content == chart_png
+    assert image.headers["content-type"] == "image/png"
+    assert image.headers["x-content-type-options"] == "nosniff"
+    preview_token = parse_qs(urlsplit(image_preview["url"]).query)["preview"][0]
+    wrong_path = await client.get(
+        f"{base}/files/images/other.png?preview={quote(preview_token, safe='')}",
+        headers=headers,
+    )
+    assert wrong_path.status_code == 404
+    fake = await client.get(files["images/fake.jpg"]["preview"]["url"], headers=headers)
+    assert fake.status_code == 404
+    bad = await client.get(files["images/bad.png"]["preview"]["url"], headers=headers)
+    assert bad.status_code == 404
+    assert image_download.status_code == 200
+    assert image_download.headers["content-type"] == "application/octet-stream"
+    assert vector.status_code == 200
+    assert vector.headers["content-type"] == "application/octet-stream"
+    assert vector.headers["x-content-type-options"] == "nosniff"
+    assert vector_preview.status_code == 404
 
 
 async def test_durable_shared_files_fill_the_typed_artifacts_slot(

@@ -34,7 +34,12 @@ type ArtifactsPayload = {
   artifacts: ConversationArtifact[];
   truncated: boolean;
 };
-type ConversationFile = { path: string; size_bytes: number; modified_at: string };
+type ConversationFile = {
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+  preview: ImagePreview | null;
+};
 type FilesPayload = { type: "files"; files: ConversationFile[]; truncated: boolean };
 type ImagePreview = {
   type: "image";
@@ -331,19 +336,28 @@ function FilesContent({
   conversationId: string;
   rootConversationId?: string;
 }) {
-  const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
+  const [preview, setPreview] = useState<
+    | { type: "image"; path: string; image: ImagePreview }
+    | { type: "text"; path: string; text: string }
+    | null
+  >(null);
 
   async function view(file: ConversationFile) {
-    setPreview({ path: file.path, text: "Reading…" });
+    if (file.preview) {
+      setPreview({ type: "image", path: file.path, image: file.preview });
+      return;
+    }
+    setPreview({ type: "text", path: file.path, text: "Reading…" });
     const path = filePath(agentId, conversationId, file.path, rootConversationId);
     try {
       const response = await fetch(BASE + path, { credentials: "same-origin" });
       setPreview({
+        type: "text",
         path: file.path,
         text: response.ok ? await response.text() : "Error " + response.status + " — retry.",
       });
     } catch {
-      setPreview({ path: file.path, text: "Network error — retry." });
+      setPreview({ type: "text", path: file.path, text: "Network error — retry." });
     }
   }
 
@@ -358,11 +372,19 @@ function FilesContent({
           return (
             <li key={file.path} className="min-w-0 rounded-panel border border-edge p-lg">
               <div className="flex min-w-0 items-start gap-md">
+                {file.preview ? (
+                  <img
+                    loading="lazy"
+                    alt={"Thumbnail of " + file.path}
+                    src={file.preview.url}
+                    className="h-16 w-16 shrink-0 rounded-sm border border-edge object-cover"
+                  />
+                ) : null}
                 <div className="min-w-0 flex-1">
                   <button
                     type="button"
                     className="max-w-full border-0 bg-transparent p-0 text-left font-mono text-label font-strong text-inherit underline disabled:no-underline"
-                    disabled={file.size_bytes > MAX_FILE_PREVIEW_BYTES}
+                    disabled={!file.preview && file.size_bytes > MAX_FILE_PREVIEW_BYTES}
                     onClick={() => view(file)}
                   >
                     <span className="block break-all">{file.path}</span>
@@ -371,7 +393,9 @@ function FilesContent({
                     {formatSize(file.size_bytes)} · {day(file.modified_at)}
                   </p>
                 </div>
-                <a href={BASE + path}>Download</a>
+                <a href={BASE + path} download={file.path.split("/").at(-1)}>
+                  Download
+                </a>
               </div>
             </li>
           );
@@ -382,9 +406,20 @@ function FilesContent({
           <h2 className="m-0 break-all border-b border-edge bg-fill-subtle px-lg py-sm font-mono text-label font-strong">
             {preview.path}
           </h2>
-          <pre className="m-0 max-h-[32rem] overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
-            {preview.text}
-          </pre>
+          {preview.type === "image" ? (
+            <div className="flex max-h-[40rem] justify-center overflow-auto p-lg">
+              <img
+                loading="lazy"
+                alt={"Preview of " + preview.path}
+                src={preview.image.url}
+                className="max-h-[36rem] max-w-full object-contain"
+              />
+            </div>
+          ) : (
+            <pre className="m-0 max-h-[32rem] overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
+              {preview.text}
+            </pre>
+          )}
         </section>
       ) : null}
       {payload.truncated ? (

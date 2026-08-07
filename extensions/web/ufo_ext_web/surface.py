@@ -30,7 +30,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -1253,10 +1253,13 @@ def _conversation_changes(
     return tuple(changes), total > len(changes)
 
 
-async def _slot_target(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response:
+async def _slot_target(
+    ctx: SurfaceContext, request: Request
+) -> tuple[UUID, UUID, UUID | None] | Response:
     root = request.query_params.get("root")
     if root is None:
         authorized = await _readable_conversation(ctx, request)
+        root_id = None
     else:
         try:
             conversation_id = UUID(request.path_params["conversation_id"])
@@ -1275,7 +1278,7 @@ async def _slot_target(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUI
             authorized = agent_id, conversation_id
     if isinstance(authorized, Response):
         return authorized
-    return authorized
+    return *authorized, root_id
 
 
 async def _slot_context(
@@ -1303,21 +1306,46 @@ async def _project_slot_context(
     ctx: SurfaceContext,
     slot_context: ConversationSlotContext,
     content: type[BaseModel],
+    root_conversation_id: UUID | None,
 ) -> ConversationSlotContext:
     if content is FilesSlotPayload:
         listed_files = await ctx.list_workspace_files(slot_context.conversation_id)
-        files = tuple(
-            ConversationFile(
-                path=entry.path,
-                size_bytes=entry.size_bytes,
-                modified_at=entry.modified_at,
+        files: list[ConversationFile] = []
+        for file_entry in listed_files[:CONVERSATION_FILES_MAX]:
+            preview_media_type = raster_image_media_type(file_entry.path)
+            file_preview = None
+            preview_token = ctx.workspace_file_preview_token(
+                slot_context.conversation_id, file_entry
             )
-            for entry in listed_files[:CONVERSATION_FILES_MAX]
-        )
+            if preview_media_type is not None and preview_token is not None:
+                encoded_path = quote(file_entry.path, safe="/")
+                file_url = (
+                    f"/surface/{SURFACE_WEB}/agents/{slot_context.agent_id}"
+                    f"/conversations/{slot_context.conversation_id}/files/{encoded_path}"
+                )
+                if root_conversation_id is not None:
+                    file_url = (
+                        f"{file_url}?root={root_conversation_id}"
+                        f"&preview={quote(preview_token, safe='')}"
+                    )
+                else:
+                    file_url = f"{file_url}?preview={quote(preview_token, safe='')}"
+                try:
+                    file_preview = ImagePreview(media_type=preview_media_type, url=file_url)
+                except ValidationError:
+                    file_preview = None
+            files.append(
+                ConversationFile(
+                    path=file_entry.path,
+                    size_bytes=file_entry.size_bytes,
+                    modified_at=file_entry.modified_at,
+                    preview=file_preview,
+                )
+            )
         return replace(
             slot_context,
             projection=FilesSlotPayload(
-                files=files,
+                files=tuple(files),
                 truncated=len(listed_files) > CONVERSATION_FILES_MAX,
             ),
         )
@@ -1327,12 +1355,12 @@ async def _project_slot_context(
         )
         truncated = len(listed_artifacts) > CONVERSATION_ARTIFACTS_MAX
         artifacts: list[ConversationArtifact] = []
-        for entry in listed_artifacts[:CONVERSATION_ARTIFACTS_MAX]:
+        for artifact_entry in listed_artifacts[:CONVERSATION_ARTIFACTS_MAX]:
             try:
-                artifact_url = ctx.artifact_link(entry.artifact)
-                artifact_media_type = raster_image_media_type(entry.artifact.filename)
+                artifact_url = ctx.artifact_link(artifact_entry.artifact)
+                artifact_media_type = raster_image_media_type(artifact_entry.artifact.filename)
                 artifact_preview = None
-                artifact_preview_url = ctx.artifact_preview_link(entry.artifact)
+                artifact_preview_url = ctx.artifact_preview_link(artifact_entry.artifact)
                 if artifact_preview_url is not None and artifact_media_type is not None:
                     parsed = urlsplit(artifact_preview_url)
                     artifact_preview = ImagePreview(
@@ -1341,11 +1369,11 @@ async def _project_slot_context(
                     )
                 artifacts.append(
                     ConversationArtifact(
-                        filename=entry.artifact.filename,
-                        subject=entry.artifact.subject,
-                        media_type=entry.artifact.media_type,
-                        size_bytes=entry.artifact.size_bytes,
-                        created_at=entry.created_at,
+                        filename=artifact_entry.artifact.filename,
+                        subject=artifact_entry.artifact.subject,
+                        media_type=artifact_entry.artifact.media_type,
+                        size_bytes=artifact_entry.artifact.size_bytes,
+                        created_at=artifact_entry.created_at,
                         url=artifact_url,
                         preview=artifact_preview,
                     )
@@ -1364,7 +1392,7 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    agent_id, conversation_id = authorized
+    agent_id, conversation_id, root_conversation_id = authorized
     slots: list[dict[str, object]] = []
     if not ctx.conversation_slots:
         return JSONResponse({"slots": slots})
@@ -1382,6 +1410,7 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
                     ext=replace(bound.ext, audience=shared_context.audience),
                 ),
                 bound.provider.content,
+                root_conversation_id,
             )
             count = await bound.provider.summarize(slot_context)
         except Exception as error:
@@ -1411,7 +1440,7 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    agent_id, conversation_id = authorized
+    agent_id, conversation_id, root_conversation_id = authorized
     slot_id = request.path_params["slot_id"]
     bound = next((entry for entry in ctx.conversation_slots if entry.provider.id == slot_id), None)
     if bound is None:
@@ -1419,7 +1448,9 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     slot_context = await _slot_context(ctx, agent_id, conversation_id, bound.ext)
     if slot_context is None:
         return Response("no such conversation", status_code=404)
-    slot_context = await _project_slot_context(ctx, slot_context, bound.provider.content)
+    slot_context = await _project_slot_context(
+        ctx, slot_context, bound.provider.content, root_conversation_id
+    )
     payload = await bound.provider.read(slot_context)
     if type(payload) is not bound.provider.content:
         raise TypeError(
@@ -1506,14 +1537,29 @@ async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id = authorized
+    _agent_id, conversation_id, _root_conversation_id = authorized
+    path = request.path_params["path"]
+    preview_token = request.query_params.get("preview")
+    if preview_token is not None:
+        preview = await ctx.read_workspace_file_preview(conversation_id, path, preview_token)
+        if preview is None:
+            return Response("no such file preview", status_code=404)
+        return Response(
+            preview.content,
+            media_type=preview.media_type,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
     try:
-        stream = await ctx.read_workspace_file(conversation_id, request.path_params["path"])
+        stream = await ctx.read_workspace_file(conversation_id, path)
     except ValueError:
         return Response("no such file", status_code=404)
     if stream is None:
         return Response("no such file", status_code=404)
-    return StreamingResponse(stream, media_type="application/octet-stream")
+    return StreamingResponse(
+        stream,
+        media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 async def _subagent_gate(

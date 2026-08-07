@@ -103,6 +103,13 @@ PNG, JPEG, GIF, or WebP container with Pillow before responding with the signed 
 `X-Content-Type-Options: nosniff`. Validation decodes every frame under explicit dimension, frame,
 and aggregate decoded-pixel caps.
 
+Files carry an `ImagePreview` only for eligible raster entries. Its capability binds the workspace,
+conversation, fixed-size digest of the exact path, media type, and size; the URL retains the
+root-conversation proof for spawned work. A path that cannot form a bounded safe same-origin URL
+keeps its file row without a preview. Downloads and every non-raster file remain octet-streams. The
+portal loads thumbnails lazily, expands images in place, and decodes only non-image files as text
+under its 256 KiB text bound.
+
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it
 has no conversation provenance.

@@ -20,6 +20,7 @@ from ufo.ext.conversation_slots import (
     ImagePreview,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
+from ufo.image_previews import raster_image_media_type
 
 
 async def _summary(_ctx: ConversationSlotContext) -> int:
@@ -100,6 +101,7 @@ def test_files_payload_bounds_its_collection() -> None:
         path="notes/brief.md",
         size_bytes=42,
         modified_at=datetime(2026, 8, 6, tzinfo=UTC),
+        preview=None,
     )
 
     with pytest.raises(ValidationError, match="too_long"):
@@ -159,6 +161,21 @@ def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
 def test_image_previews_accept_only_same_origin_root_relative_urls(url: str) -> None:
     with pytest.raises(ValueError, match="same-origin"):
         ImagePreview(media_type="image/png", url=url)
+
+
+@pytest.mark.parametrize(
+    ("path", "media_type"),
+    [
+        ("chart.GIF", "image/gif"),
+        ("chart.jpeg", "image/jpeg"),
+        ("chart.jpg", "image/jpeg"),
+        ("chart.PNG", "image/png"),
+        ("chart.webp", "image/webp"),
+        ("chart.svg", None),
+    ],
+)
+def test_raster_image_media_types_are_a_closed_set(path: str, media_type: str | None) -> None:
+    assert raster_image_media_type(path) == media_type
 
 
 @pytest.mark.parametrize(

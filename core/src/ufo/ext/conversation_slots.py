@@ -115,6 +115,7 @@ class ConversationFile(BaseModel):
     path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
     size_bytes: int = Field(ge=0)
     modified_at: datetime
+    preview: ImagePreview | None = None
 
 
 class FilesSlotPayload(BaseModel):

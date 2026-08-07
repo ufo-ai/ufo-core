@@ -288,6 +288,7 @@ test("files slot previews and downloads a workspace file in place", async () => 
             path: "notes/brief draft.md",
             size_bytes: 18,
             modified_at: "2026-08-06T12:00:00Z",
+            preview: null,
           },
         ],
         truncated: false,
@@ -316,6 +317,54 @@ test("files slot previews and downloads a workspace file in place", async () => 
   await userEvent.click(file);
   await waitFor(() =>
     expect(document.querySelector("aside pre")?.textContent).toBe("# Brief\n\nShip it.\n"),
+  );
+});
+
+test("files slot lazily renders raster thumbnails and expands without text decoding", async () => {
+  const imagePath =
+    "/surface/web/agents/" +
+    AGENT.id +
+    "/conversations/" +
+    CONVO_ID +
+    "/files/images/chart.png?preview=signed";
+  let textReads = 0;
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/files"]: () =>
+      json({
+        type: "files",
+        files: [
+          {
+            path: "images/chart.png",
+            size_bytes: 2048,
+            modified_at: "2026-08-06T12:00:00Z",
+            preview: { type: "image", media_type: "image/png", url: imagePath },
+          },
+        ],
+        truncated: false,
+      }),
+    ["/conversations/" + CONVO_ID + "/files/images/chart.png"]: () => {
+      textReads += 1;
+      return new Response("not text");
+    },
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [{ id: "files", label: "Files", icon: "file", kind: "files", count: 1 }],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Files 1" }));
+  const thumbnail = await screen.findByRole("img", { name: "Thumbnail of images/chart.png" });
+  expect(thumbnail.getAttribute("src")).toBe(imagePath);
+  expect(thumbnail.getAttribute("loading")).toBe("lazy");
+
+  await userEvent.click(screen.getByRole("button", { name: "images/chart.png" }));
+  const expanded = await screen.findByRole("img", { name: "Preview of images/chart.png" });
+  expect(expanded.getAttribute("src")).toBe(imagePath);
+  expect(textReads).toBe(0);
+  expect(screen.getByRole("link", { name: "Download" }).getAttribute("download")).toBe(
+    "chart.png",
   );
 });
 
