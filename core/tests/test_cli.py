@@ -4,6 +4,7 @@
 import io
 import os
 import threading
+import tomllib
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
@@ -12,8 +13,10 @@ import click
 import httpx
 import pytest
 from click.testing import CliRunner
+from cryptography.fernet import Fernet
 
 from ufo.cli import (
+    DEFAULT_CONFIG,
     BrowserHandoff,
     _ChatStream,
     _load_dotenv,
@@ -24,8 +27,11 @@ from ufo.cli import (
     portal,
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.credentials import CredentialStore
+from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import Manifest
 from ufo.ext.surface import SurfaceSpec
+from ufo.serve import _connect_redirect_uri, _validate_requires
 
 BROWSER_JOIN_SECONDS = 5.0
 
@@ -278,6 +284,33 @@ def test_load_dotenv_fills_unset_vars_without_overriding(
     assert os.environ["UFO_TEST_EXPORTED"] == "exported"
 
 
+def test_load_dotenv_carries_a_pem_across_its_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GitHub App key is a PEM, and `.env` is where a local deploy keeps its secrets, so the
+    format has to hold one — otherwise the key needs a second home the runtime does not read."""
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\nline two\n-----END RSA PRIVATE KEY-----"
+    (tmp_path / ".env").write_text(f'BEFORE=head\nUFO_TEST_PEM="{pem}"\nAFTER=tail\n')
+    monkeypatch.chdir(tmp_path)
+    for name in ("BEFORE", "UFO_TEST_PEM", "AFTER"):
+        monkeypatch.delenv(name, raising=False)
+
+    _load_dotenv()
+
+    assert os.environ["UFO_TEST_PEM"] == pem
+    assert os.environ["AFTER"] == "tail"
+
+
+def test_load_dotenv_fails_loud_on_a_quote_that_never_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text('UFO_TEST_OPEN="-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n')
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(RuntimeError, match="never closes"):
+        _load_dotenv()
+
+
 @pytest.mark.parametrize("address", ["jane doe", "root", "a@b@example.com", "trailing@"])
 def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain(address: str) -> None:
     """`--email` is the one unvalidated way an address reached a member row: the owner row is
@@ -373,3 +406,16 @@ def test_portal_refuses_before_init_has_minted_a_token(
 
     assert result.exit_code == 1
     assert "no CLI token — run `ufoctl init` first" in result.output
+
+
+def test_the_config_init_writes_boots_the_pack_it_names() -> None:
+    """`ufoctl init` writes DEFAULT_CONFIG and `ufoctl serve` is the next command a member runs, so
+    every seam that pack's extensions require must already be answered by what init wrote."""
+    config = Config.model_validate(tomllib.loads(DEFAULT_CONFIG))
+    manifests = load_manifests(config.pack.name)
+
+    _validate_requires(config, manifests, CredentialStore(fernet=Fernet(Fernet.generate_key())))
+
+    providers = {c.oauth.provider: c.oauth for m in manifests for c in m.connectors}
+    assert providers, "the pack registers no connector, so this proves nothing about connect"
+    assert _connect_redirect_uri(config, providers).startswith(f"{config.connect.public_base_url}/")

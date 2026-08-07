@@ -14,7 +14,10 @@ dockerfile="$1"
 rendered="$dockerfile.rendered"
 uv run python sandbox/build_template.py --dockerfile >"$rendered"
 
-mapfile -t from_lines < <(grep -n '^FROM[[:space:]]' "$rendered")
+from_lines=()
+while IFS= read -r from_line; do
+  from_lines+=("$from_line")
+done < <(grep -n '^FROM[[:space:]]' "$rendered")
 if [ "${#from_lines[@]}" -ne 1 ]; then
   echo "expected exactly one FROM in $rendered, found ${#from_lines[@]}" >&2
   exit 1
@@ -39,4 +42,4 @@ fi
 
 awk -v number="$number" -v pinned="FROM $repository@$digest" \
   'NR == number { print pinned; next } { print }' "$rendered" >"$dockerfile"
-sha256sum <"$dockerfile" | cut -c1-16
+shasum -a 256 <"$dockerfile" | cut -c1-16

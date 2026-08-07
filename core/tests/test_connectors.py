@@ -40,7 +40,7 @@ from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.session import RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
-from ufo.serve import _connect_flow, _connect_redirect_uri
+from ufo.serve import CONNECT_CALLBACK_PATH, _connect_flow, _connect_redirect_uri
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
@@ -119,11 +119,19 @@ def test_connect_is_inert_without_a_connector_and_needs_no_callback_config() -> 
     assert flow.redirect_uri == ""
 
 
-@pytest.mark.parametrize("base", ["http://0.0.0.0:8710", "http://127.0.0.1:8710"])
-def test_redirect_uri_rejects_a_bind_address_when_a_connector_is_registered(base: str) -> None:
+@pytest.mark.parametrize("base", ["http://0.0.0.0:8710", "http://[::]:8710"])
+def test_redirect_uri_rejects_a_wildcard_bind_when_a_connector_is_registered(base: str) -> None:
     providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
-    with pytest.raises(RuntimeError, match="bind address"):
+    with pytest.raises(RuntimeError, match="wildcard bind"):
         _connect_redirect_uri(_config(base), providers)
+
+
+@pytest.mark.parametrize("base", ["http://localhost:8710", "http://127.0.0.1:8710"])
+def test_redirect_uri_accepts_loopback_because_a_local_node_serves_the_same_browser(
+    base: str,
+) -> None:
+    providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
+    assert _connect_redirect_uri(_config(base), providers) == f"{base}{CONNECT_CALLBACK_PATH}"
 
 
 def test_redirect_uri_rejects_a_scheme_less_callback() -> None:

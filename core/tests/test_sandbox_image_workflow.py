@@ -1,6 +1,7 @@
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -154,6 +155,8 @@ def _run_step(
     if shorten_walls:
         script, walled = re.subn(r"timeout \d+ ", "timeout 1 ", script)
         assert walled == WALLED_CALLS, f"{name} walls {walled} calls, not {WALLED_CALLS}"
+    if "timeout " in script and shutil.which("timeout") is None:
+        pytest.skip("coreutils timeout is absent, so the step's walls would not run at all")
     return subprocess.run(
         ["bash", "-e", "-c", script],
         cwd=ROOT,

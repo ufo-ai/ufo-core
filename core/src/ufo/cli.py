@@ -67,6 +67,9 @@ name = "assistant"
 
 [research]
 search_provider = "exa"
+
+[connect]
+public_base_url = "http://localhost:8710"
 """
 
 
@@ -81,10 +84,15 @@ def _dotenv_path() -> Path:
 
 def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
     """Parse `.env` text into (key, value) pairs — the whole format: one `KEY=VALUE` per line, blank
-    lines and `#` comments skipped, a leading `export` and matching surrounding quotes stripped."""
+    lines and `#` comments skipped, a leading `export` and matching surrounding quotes stripped. A
+    quoted value whose closing quote lands on a later line carries those lines verbatim, so a PEM
+    private key is one entry like every other secret; an unclosed quote is malformed and raises."""
     pairs: list[tuple[str, str]] = []
-    for raw in text.splitlines():
-        line = raw.strip()
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        index += 1
         if not line or line.startswith("#"):
             continue
         key, sep, value = line.partition("=")
@@ -92,9 +100,22 @@ def _dotenv_pairs(text: str) -> list[tuple[str, str]]:
             continue
         name = key.strip().removeprefix("export ").strip()
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        pairs.append((name, value))
+        quote = value[:1] if value[:1] in ('"', "'") else ""
+        if not quote:
+            pairs.append((name, value))
+            continue
+        if len(value) >= 2 and value.endswith(quote):
+            pairs.append((name, value[1:-1]))
+            continue
+        body = [value[1:]]
+        while index < len(lines) and not lines[index].rstrip().endswith(quote):
+            body.append(lines[index])
+            index += 1
+        if index == len(lines):
+            raise RuntimeError(f"{name} opens a {quote} in .env that never closes")
+        body.append(lines[index].rstrip()[:-1])
+        index += 1
+        pairs.append((name, "\n".join(body)))
     return pairs
 
 

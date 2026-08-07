@@ -12,16 +12,19 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 
 ## Run it
 
+`make` lists every target below and the rest of the working set (`check`, `test`, `fmt`,
+`reinstall`).
+
 **Zero services** — SQLite, filesystem blobs, in-process hub; one process, no Docker:
 
 ```bash
 export ANTHROPIC_API_KEY=...
-uv run ufoctl init --email you@example.com  # writes ufo.toml; SQLite — zero services
-npm --prefix extensions/web/frontend ci     # only if you want the web portal; chat needs no build
-npm --prefix extensions/web/frontend run build
-uv run ufoctl serve                         # one process: surfaces + workers
-uv run ufoctl chat                          # second terminal; sessions persist across runs
-uv run ufoctl portal                        # third: opens the portal in your browser, signed in
+make install                          # uv sync, both npm trees, git hooks
+make init EMAIL=you@example.com       # writes ufo.toml; SQLite — zero services
+make build                            # only if you want the web portal; chat needs no build
+make serve                            # one process: surfaces + workers
+make chat                             # second terminal; sessions persist across runs
+make portal                           # third: opens the portal in your browser, signed in
 ```
 
 A node with no sign-in page in front of it has one browser door: `ufoctl portal` hands this
@@ -32,10 +35,8 @@ sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 **gateway** (`/login`), and the **serve** fleet (surfaces + DBOS workers + embedded egress proxy):
 
 ```bash
-npm --prefix extensions/web/frontend ci     # the portal is a built app; serve reads its output
-npm --prefix extensions/web/frontend run build
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
-docker compose up
+make stack                     # builds the portal, then docker compose up
 ```
 
 One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`dev/entrypoint.sh`):
@@ -48,8 +49,8 @@ carrier). Sign in at `http://localhost:8080/login` with a work email and the cod
 log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`), then open your workspace from the
 signed-in card, which posts the bearer to `http://localhost:8710/surface/web` and lands the session
 cookie; `http://localhost:8710/` redirects there too, and back to the sign-in page without a
-session. The portal is built by npm, not tracked in git, so the
-build above runs before the stack; skip it and the portal route fails with the command in the
+session. The portal is built by npm and not tracked in git, which is why `make stack` builds it
+first; reach for `docker compose up` directly and the portal route fails with the command in the
 serve log. Host ports override via
 `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`, and `UFO_DEV_PACK` selects the pack the serve config names
@@ -58,8 +59,8 @@ serve log. Host ports override via
 backends for local ones; the Turbopuffer/Exa index, the Redis hub (multi-replica), and the Docker
 sandbox carrier each need their extension added to a local pack — out of scope for this single node.
 
-Postgres (this compose, or an existing instance) also backs the Postgres half of the test matrix;
-Docker enters for sandboxes (U2+).
+Postgres (this compose, or an existing instance) also backs the Postgres half of the test matrix —
+`make db` starts that service alone; Docker enters for sandboxes (U2+).
 
 ## Evals
 

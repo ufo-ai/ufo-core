@@ -1038,7 +1038,7 @@ def _local_egress_proxy(
     return asyncio.run_coroutine_threadsafe(_boot(), loop).result(PROXY_STARTUP_TIMEOUT_SECONDS)
 
 
-BIND_ADDRESSES = frozenset({"0.0.0.0", "127.0.0.1", "localhost", "::", "::1"})
+WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})
 
 
 def _connector_registry(
@@ -1097,8 +1097,10 @@ def _connect_flow(
 
 def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str:
     """The external callback URL both OAuth legs present, derived from `connect.public_base_url`. A
-    provider redirects the member's browser here, so a bind address (0.0.0.0 / 127.0.0.1) or a
-    scheme-less value is unreachable and fails loud the moment a connector is registered. With no
+    provider redirects the member's *browser* here, so the value must be a URL that browser can
+    open: a scheme-less value or a wildcard bind (0.0.0.0, ::) never is, and fails loud the moment a
+    connector is registered. Loopback is fine — on a local node the browser runs on that same
+    machine, which is the loopback redirect providers already accept from native apps. With no
     connector installed connect is inert, so the config may be absent."""
     base = config.connect.public_base_url
     if not providers:
@@ -1114,9 +1116,9 @@ def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]
             f"connect.public_base_url {base!r} must include a scheme and host — the provider "
             "redirects the member's browser to it"
         )
-    if parsed.hostname in BIND_ADDRESSES:
+    if parsed.hostname in WILDCARD_BINDS:
         raise RuntimeError(
-            f"connect.public_base_url {base!r} is a bind address, not reachable by the provider's "
-            "OAuth redirect; set the deploy's public URL"
+            f"connect.public_base_url {base!r} is a wildcard bind, not a host a browser can open; "
+            "set the deploy's public URL"
         )
     return f"{base.rstrip('/')}{CONNECT_CALLBACK_PATH}"

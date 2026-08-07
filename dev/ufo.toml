@@ -40,8 +40,7 @@ backend = "in_process"
 backend = "local"
 workspace_root = "/data/workspaces"
 
-# A non-bind placeholder host: the assistant pack's connectors gate on a publicly-reachable base
-# for OAuth redirects (which don't resolve locally anyway). Members still reach serve on
-# localhost:8710 via the gateway's workspace URL; this only names the OAuth redirect base.
+# Where a provider sends the member's browser back after consent. The browser is on the host, which
+# reaches this container's serve on the published port.
 [connect]
-public_base_url = "http://ufo.local:8710"
+public_base_url = "http://localhost:8710"
