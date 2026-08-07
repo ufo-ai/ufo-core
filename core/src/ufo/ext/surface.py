@@ -85,6 +85,11 @@ from ufo.grants import (
     installed_connect_flow,
 )
 from ufo.hub import LiveFrame
+from ufo.image_previews import (
+    IMAGE_PREVIEW_MAX_BYTES,
+    ImagePreviewGrant,
+    raster_image_media_type,
+)
 from ufo.listings import page_of, page_query
 from ufo.o11y import log
 from ufo.sandbox.containment import contained_leaf
@@ -951,6 +956,27 @@ class SurfaceContext:
         expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
         token = mint_artifact_token(
             self._artifact_token_secret, artifact.blob_key, artifact.filename, expires_at
+        )
+        return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
+
+    def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
+        """A signed raster-preview link, or None when its type, size, or delivery is ineligible."""
+        if not self._artifact_token_secret or not self._public_base_url:
+            return None
+        media_type = raster_image_media_type(artifact.filename)
+        if (
+            media_type is None
+            or media_type != artifact.media_type
+            or artifact.size_bytes > IMAGE_PREVIEW_MAX_BYTES
+        ):
+            return None
+        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
+        token = mint_artifact_token(
+            self._artifact_token_secret,
+            artifact.blob_key,
+            artifact.filename,
+            expires_at,
+            preview=ImagePreviewGrant(media_type=media_type, size_bytes=artifact.size_bytes),
         )
         return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
 

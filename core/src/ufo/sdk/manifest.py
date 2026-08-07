@@ -61,6 +61,9 @@ from ufo.ext.conversation_slots import (
     FilesSlotPayload as FilesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
+    ImagePreview as ImagePreview,
+)
+from ufo.ext.conversation_slots import (
     SourcesSlotPayload as SourcesSlotPayload,
 )
 from ufo.ext.manifest import (
@@ -167,4 +170,10 @@ from ufo.ext.manifest import (
 )
 from ufo.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
+)
+from ufo.image_previews import (
+    IMAGE_PREVIEW_MAX_BYTES as IMAGE_PREVIEW_MAX_BYTES,
+)
+from ufo.image_previews import (
+    raster_image_media_type as raster_image_media_type,
 )

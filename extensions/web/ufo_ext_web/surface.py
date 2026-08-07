@@ -30,6 +30,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -71,6 +72,8 @@ from ufo.sdk.manifest import (
     ConversationSlotContext,
     ConversationSlotProvider,
     FilesSlotPayload,
+    ImagePreview,
+    raster_image_media_type,
 )
 from ufo.sdk.manifest import (
     CONVERSATION_CHANGE_PATCH_MAX_CHARS as SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS,
@@ -1326,6 +1329,16 @@ async def _project_slot_context(
         artifacts: list[ConversationArtifact] = []
         for entry in listed_artifacts[:CONVERSATION_ARTIFACTS_MAX]:
             try:
+                artifact_url = ctx.artifact_link(entry.artifact)
+                artifact_media_type = raster_image_media_type(entry.artifact.filename)
+                artifact_preview = None
+                artifact_preview_url = ctx.artifact_preview_link(entry.artifact)
+                if artifact_preview_url is not None and artifact_media_type is not None:
+                    parsed = urlsplit(artifact_preview_url)
+                    artifact_preview = ImagePreview(
+                        media_type=artifact_media_type,
+                        url=urlunsplit(("", "", parsed.path, parsed.query, "")),
+                    )
                 artifacts.append(
                     ConversationArtifact(
                         filename=entry.artifact.filename,
@@ -1333,7 +1346,8 @@ async def _project_slot_context(
                         media_type=entry.artifact.media_type,
                         size_bytes=entry.artifact.size_bytes,
                         created_at=entry.created_at,
-                        url=ctx.artifact_link(entry.artifact),
+                        url=artifact_url,
+                        preview=artifact_preview,
                     )
                 )
             except ValidationError:

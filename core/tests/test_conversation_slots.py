@@ -17,6 +17,7 @@ from ufo.ext.conversation_slots import (
     ConversationSlotProvider,
     ConversationSource,
     FilesSlotPayload,
+    ImagePreview,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
 
@@ -116,6 +117,7 @@ def test_artifacts_payload_bounds_its_collection() -> None:
         size_bytes=42,
         created_at=datetime(2026, 8, 6, tzinfo=UTC),
         url="https://ufo.example/artifacts/report.pdf",
+        preview=None,
     )
 
     with pytest.raises(ValidationError, match="too_long"):
@@ -139,6 +141,24 @@ def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
             created_at=datetime(2026, 8, 6, tzinfo=UTC),
             url=url,
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/image.png",
+        "//example.com/image.png",
+        "/image.png#fragment",
+        "/\\evil.example/image.png",
+        "/%5cevil.example/image.png",
+        "/image\x00.png",
+        "/image%0d.png",
+        "/image\x7f.png",
+    ],
+)
+def test_image_previews_accept_only_same_origin_root_relative_urls(url: str) -> None:
+    with pytest.raises(ValueError, match="same-origin"):
+        ImagePreview(media_type="image/png", url=url)
 
 
 @pytest.mark.parametrize(

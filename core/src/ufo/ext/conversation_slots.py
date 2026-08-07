@@ -4,13 +4,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
-from urllib.parse import urlsplit
+from unicodedata import category
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ufo.audience import Audience
 from ufo.ext.context import ExtensionContext
+from ufo.image_previews import RasterImageMediaType
 from ufo.models.interface import Message
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 
@@ -29,6 +31,31 @@ CONVERSATION_SOURCE_DATE_MAX_CHARS = 40
 CONVERSATION_SOURCES_MAX = 100
 PortalIcon = Literal["artifact", "diff", "file", "link"]
 PORTAL_ICONS = frozenset(("artifact", "diff", "file", "link"))
+
+
+class ImagePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["image"] = "image"
+    media_type: RasterImageMediaType
+    url: str = Field(min_length=1, max_length=CONVERSATION_ARTIFACT_URL_MAX_CHARS)
+
+    @field_validator("url")
+    @classmethod
+    def same_origin_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        decoded = unquote(value)
+        if (
+            not value.startswith("/")
+            or value.startswith("//")
+            or parsed.scheme
+            or parsed.netloc
+            or parsed.fragment
+            or "\\" in decoded
+            or any(category(char) == "Cc" for char in decoded)
+        ):
+            raise ValueError("image preview URL must be same-origin and root-relative")
+        return value
 
 
 class ConversationChange(BaseModel):
@@ -56,6 +83,7 @@ class ConversationArtifact(BaseModel):
     size_bytes: int = Field(ge=0)
     created_at: datetime
     url: str | None = Field(default=None, max_length=CONVERSATION_ARTIFACT_URL_MAX_CHARS)
+    preview: ImagePreview | None = None
 
     @field_validator("url")
     @classmethod

@@ -27,6 +27,7 @@ type ConversationArtifact = {
   size_bytes: number;
   created_at: string;
   url: string | null;
+  preview: ImagePreview | null;
 };
 type ArtifactsPayload = {
   type: "artifacts";
@@ -35,6 +36,11 @@ type ArtifactsPayload = {
 };
 type ConversationFile = { path: string; size_bytes: number; modified_at: string };
 type FilesPayload = { type: "files"; files: ConversationFile[]; truncated: boolean };
+type ImagePreview = {
+  type: "image";
+  media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp";
+  url: string;
+};
 export type PortalIcon = "artifact" | "diff" | "file" | "link";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
@@ -284,11 +290,11 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
           key={[artifact.created_at, artifact.filename, index].join(":")}
           className="min-w-0 rounded-panel border border-edge p-lg"
         >
-          {artifact.media_type.startsWith("image/") && artifact.url ? (
+          {artifact.preview ? (
             <img
               loading="lazy"
               alt=""
-              src={artifact.url}
+              src={artifact.preview.url}
               className="mb-md max-h-[20rem] max-w-full rounded-sm border border-edge object-contain"
             />
           ) : null}

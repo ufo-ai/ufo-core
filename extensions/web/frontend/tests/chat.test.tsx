@@ -333,6 +333,11 @@ test("artifacts slot renders durable shared outputs with their download metadata
             size_bytes: 2048,
             created_at: "2026-08-06T12:00:00Z",
             url,
+            preview: {
+              type: "image",
+              media_type: "image/png",
+              url: "/artifacts/preview/chart.png?token=signed",
+            },
           },
         ],
         truncated: false,
@@ -358,7 +363,9 @@ test("artifacts slot renders durable shared outputs with their download metadata
   expect(artifact.getAttribute("href")).toBe(url);
   expect(artifact.getAttribute("download")).toBe("chart.png");
   expect(screen.getByText("The final chart")).toBeTruthy();
-  expect(document.querySelector('aside img[src="' + url + '"]')).toBeTruthy();
+  expect(
+    document.querySelector('aside img[src="/artifacts/preview/chart.png?token=signed"]'),
+  ).toBeTruthy();
 });
 
 test.each([

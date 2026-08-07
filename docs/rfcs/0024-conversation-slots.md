@@ -36,8 +36,8 @@ class ConversationSlotProvider:
     label: str
     icon: PortalIcon
     content: type[ConversationSlotPayload]
-    summarize: ConversationSlotSummarizer
-    read: ConversationSlotReader
+    summarize: ConversationSlotSummary
+    read: ConversationSlotRead
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,10 @@ GET .../conversations/{conversation}/slots/{slot}
     -> one bounded, discriminated payload
 ```
 
-Initial payloads are exact models for changes, files, sources, and artifacts. The portal owns their
+Initial payloads are exact models for changes, files, sources, and artifacts. An item may carry an
+`ImagePreview` with a same-origin URL and one of `image/png`, `image/jpeg`, `image/gif`, or
+`image/webp`, limited to 20 MiB per image; the portal renders an image only from that typed
+capability and never infers one from a broad media type or filename. The portal owns their
 renderers, panel chrome, ordering, loading, empty, unavailable, truncated, error, retry, and
 responsive states. Extension HTML, JavaScript, CSS, arbitrary fetch URLs, and arbitrary JSON do not
 enter the portal origin. A new layout requires a new host renderer or RFC 0023's isolated-frame
@@ -93,6 +96,12 @@ The first owners are:
 | `files` | core/web | live conversation sandbox |
 | `artifacts` | core/web | durable artifact records |
 | `sources` | research | new typed conversation-keyed observation records |
+
+Every preview URL carries a signed capability binding its media type and byte size. The byte route
+accepts only a claim no larger than 20 MiB, reads exactly that many bytes, and validates the claimed
+PNG, JPEG, GIF, or WebP container with Pillow before responding with the signed media type and
+`X-Content-Type-Options: nosniff`. Validation decodes every frame under explicit dimension, frame,
+and aggregate decoded-pixel caps.
 
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it

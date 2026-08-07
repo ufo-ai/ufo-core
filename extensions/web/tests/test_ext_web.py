@@ -6,8 +6,9 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 from uuid import UUID, uuid4
 
 import lz4.frame
@@ -17,6 +18,7 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
+from PIL import Image
 from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
@@ -69,6 +71,7 @@ from ufo.grants import (
     install_connect_flow,
 )
 from ufo.hub import InProcessHub, LiveFrame, SkillLoad, Terminal, ToolCall
+from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
@@ -107,10 +110,19 @@ from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
+from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
 from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
+
+
+def _png() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (2, 2), (12, 34, 56)).save(output, format="PNG")
+    return output.getvalue()
+
+
 SCHEDULED_TASK_KIND_ONLY = Manifest(
     name="scheduled_tasks",
     version="0.1.0",
@@ -625,6 +637,9 @@ async def web(
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     app = FastAPI()
+    app.state.blob = blob
+    app.state.artifact_token_secret = SECRET
+    app.include_router(artifacts_router)
     _mount_shared_surfaces(
         app,
         (web_manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED),
@@ -6330,8 +6345,10 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
 
 async def test_durable_shared_files_fill_the_typed_artifacts_slot(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "artifacts@example.com")
     conversation_id = await _seed_agent_conversation(
         workspace_id,
@@ -6344,16 +6361,44 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
         workspace_id, conversation_id, agent_id, seq=1, inbound="share the report"
     )
     shared_at = datetime(2026, 8, 6, 12, tzinfo=UTC)
+    chart_png = _png()
+    await blob.put("artifacts/report/chart.png", chart_png)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
                 turn_id=turn_id,
-                blob_key="artifacts/report/report.pdf",
+                blob_key="artifacts/report/chart.png",
                 workspace_id=workspace_id,
-                filename="report.pdf",
-                subject="Quarterly report",
-                media_type="application/pdf",
-                size_bytes=42,
+                filename="chart.png",
+                subject="Quarterly chart",
+                media_type="image/png",
+                size_bytes=len(chart_png),
+                created_at=shared_at,
+                updated_at=shared_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key="artifacts/report/poster.png",
+                workspace_id=workspace_id,
+                filename="poster.png",
+                subject="Large poster",
+                media_type="image/png",
+                size_bytes=IMAGE_PREVIEW_MAX_BYTES + 1,
+                created_at=shared_at,
+                updated_at=shared_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key="artifacts/report/diagram.svg",
+                workspace_id=workspace_id,
+                filename="diagram.svg",
+                subject="Vector diagram",
+                media_type="image/svg+xml",
+                size_bytes=84,
                 created_at=shared_at,
                 updated_at=shared_at,
             )
@@ -6370,20 +6415,34 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
         "label": "Artifacts",
         "icon": "artifact",
         "kind": "artifacts",
-        "count": 1,
+        "count": 3,
     }
     assert response.status_code == 200
     assert response.json()["type"] == "artifacts"
     assert response.json()["truncated"] is False
-    artifact = response.json()["artifacts"][0]
+    artifacts = {entry["filename"]: entry for entry in response.json()["artifacts"]}
+    artifact = artifacts["chart.png"]
     assert {key: artifact[key] for key in ("filename", "subject", "media_type", "size_bytes")} == {
-        "filename": "report.pdf",
-        "subject": "Quarterly report",
-        "media_type": "application/pdf",
-        "size_bytes": 42,
+        "filename": "chart.png",
+        "subject": "Quarterly chart",
+        "media_type": "image/png",
+        "size_bytes": len(chart_png),
     }
     assert artifact["created_at"].startswith("2026-08-06T12:00:00")
     assert artifact["url"].startswith("https://web/")
+    assert artifact["preview"]["type"] == "image"
+    assert artifact["preview"]["media_type"] == "image/png"
+    assert artifact["preview"]["url"].startswith("/artifacts/download?token=")
+    download_token = parse_qs(urlsplit(artifact["url"]).query)["token"][0]
+    preview_token = parse_qs(urlsplit(artifact["preview"]["url"]).query)["token"][0]
+    assert preview_token != download_token
+    preview = await client.get(artifact["preview"]["url"])
+    assert preview.status_code == 200
+    assert preview.content == chart_png
+    assert preview.headers["content-type"] == "image/png"
+    assert preview.headers["x-content-type-options"] == "nosniff"
+    assert artifacts["diagram.svg"]["preview"] is None
+    assert artifacts["poster.png"]["preview"] is None
 
 
 async def test_conversation_reads_ride_the_same_gate(
