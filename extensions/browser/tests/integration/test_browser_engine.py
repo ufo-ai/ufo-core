@@ -11,7 +11,6 @@ integration gate and skips an optional local run."""
 import base64
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -60,52 +59,57 @@ def _chrome() -> str | None:
 pytestmark = pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium binary for live CDP")
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 @pytest.fixture
 def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     binary = _chrome()
     assert binary is not None
-    port = _free_port()
     profile = tmp_path / "chrome-profile"
-    process = subprocess.Popen(
-        [
-            binary,
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            f"--remote-debugging-port={port}",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={profile}",
-            "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + READY_TIMEOUT_S
-    try:
-        while time.monotonic() < deadline:
-            try:
-                if httpx.get(f"{url}/json/version", timeout=0.5).status_code == 200:
-                    break
-            except httpx.HTTPError:
-                time.sleep(READY_POLL_S)
-        else:
-            raise RuntimeError("Chrome did not expose its CDP endpoint in time")
-        monkeypatch.setenv("BROWSER_CDP_URL", url)
-        yield url
-    finally:
-        process.terminate()
+    chrome_log = tmp_path / "chrome.log"
+    with chrome_log.open("wb") as log:
+        process = subprocess.Popen(
+            [
+                binary,
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--remote-debugging-port=0",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={profile}",
+                "about:blank",
+            ],
+            stdout=log,
+            stderr=log,
+        )
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        url = None
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            while process.poll() is None and time.monotonic() < deadline:
+                try:
+                    port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
+                    candidate = f"http://127.0.0.1:{port}"
+                    if httpx.get(f"{candidate}/json/version", timeout=0.5).status_code == 200:
+                        url = candidate
+                        break
+                except (FileNotFoundError, IndexError, ValueError, httpx.HTTPError):
+                    pass
+                time.sleep(READY_POLL_S)
+            if url is None:
+                log.flush()
+                details = chrome_log.read_text(errors="replace").strip()
+                raise RuntimeError(
+                    f"Chrome CDP startup failed with exit {process.poll()}: {details[-2000:]}"
+                )
+            monkeypatch.setenv("BROWSER_CDP_URL", url)
+            yield url
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 @dataclass(frozen=True)
