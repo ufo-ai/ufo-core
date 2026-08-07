@@ -230,6 +230,17 @@ async def test_bash_zero_exit_is_not_error(tmp_path: Path) -> None:
     assert result.content[0].text == "ok"
 
 
+def test_edit_and_write_state_the_read_first_rule_in_their_descriptions() -> None:
+    """Both tools refuse a path the turn has not read, and the refusal is a hard raise. A rule
+    enforced in code and written only in a profile prompt is one the model carries across every
+    round from memory; the description is the sentence it re-reads at the moment it calls."""
+    schemas = {schema.name: schema for schema in REGISTRY.schemas()}
+    assert "Read the file first" in schemas["edit"].description
+    assert "REFUSED" in schemas["edit"].description
+    assert "Read the file first if it already exists" in schemas["write"].description
+    assert "REFUSED" in schemas["write"].description
+
+
 async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValueError, match="must be read before it is edited"):

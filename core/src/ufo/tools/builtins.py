@@ -843,9 +843,10 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="write",
         description=(
-            "Create a file in workspace storage at a given path. Does NOT send to user — call "
-            "share_file afterward to share it. Use for creating new files; use edit for modifying "
-            "existing ones."
+            "Create a file in workspace storage at a given path. Read the file first if it already "
+            "exists: overwriting a path this turn has not read is REFUSED. Does NOT send to user — "
+            "call share_file afterward to share it. Use for creating new files; use edit for "
+            "modifying existing ones."
         ),
         input_model=WriteInput,
         handler=write_handler,
@@ -853,7 +854,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="edit",
         description=(
-            "Performs exact string replacements in files. An edit FAILS if old_string is not "
+            "Performs exact string replacements in files. Read the file first: an edit to a path "
+            "this turn has not read is REFUSED. An edit FAILS if old_string is not "
             "unique in the file (unless replace_all=true). Multiple edits are applied "
             "sequentially; all must succeed or none are applied."
         ),
