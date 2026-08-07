@@ -1233,7 +1233,7 @@ class TurnEngine:
             except ModelStreamError as error:
                 if error.model_error_class != MODEL_TRUNCATED_ERROR_CLASS:
                     raise
-                emit_metric("turn_truncation_recovered_total")
+                emit_metric("turn_truncation_recovered_total", profile=self.profile)
                 log(
                     "turn.truncation_recovered",
                     turn_id=str(self.turn.id),
@@ -1486,7 +1486,7 @@ class TurnEngine:
         ordinary tool error, never a crash. Exhaustion is a distinct terminal shape — a metric
         and log fire so an operator can spot an agent chronically hitting its ceiling (a prompt or
         tool-loop bug) that a plain `done` would hide."""
-        emit_metric("turn_round_budget_exhausted_total")
+        emit_metric("turn_round_budget_exhausted_total", profile=self.profile)
         log("turn.force_final", turn_id=str(self.turn.id), rounds=self.max_rounds)
         await self._enforce_spend(usage_events, requesters)
         active_requests = tuple(message.rendered for message in requesters.values())
@@ -1570,7 +1570,7 @@ class TurnEngine:
                 raise
             usage_events.extend(compaction_usage)
             self._reseed_loaded_skills(compacted)
-            emit_metric("turn_context_overflow_recovered_total")
+            emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
             result = await self._stream_once(compacted, system, offer_tools, force_finish)
             usage_events.extend(result.usages)
@@ -1916,11 +1916,11 @@ class TurnEngine:
         path = f"{TOOL_OUTPUT_DIR}/{name}"
         try:
             if await self.sandbox.ensure_tool_output_dir():
-                emit_metric("sandbox_tool_output_dir_reclaimed_total")
+                emit_metric("sandbox_tool_output_dir_reclaimed_total", profile=self.profile)
                 log("sandbox.tool_output_dir_reclaimed", turn_id=str(self.turn.id))
             await self.sandbox.write_file(path, content.encode())
         except Exception as error:
-            emit_metric("tool_offload_failed_total")
+            emit_metric("tool_offload_failed_total", profile=self.profile)
             log(
                 "tool.offload_failed",
                 turn_id=str(self.turn.id),

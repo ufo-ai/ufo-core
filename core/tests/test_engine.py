@@ -3479,6 +3479,23 @@ async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
     assert stored.messages[-1] == Message(role="assistant", content="best effort")
 
 
+async def test_round_budget_exhaustion_meters_under_the_turn_profile(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exhaustion is the closest thing the fleet emits to an agent giving up, and it is read to find
+    which agent is doing it — a prompt or tool-loop bug lives in one profile. Untagged, the count
+    answers only that someone hit a ceiling, which no operator can act on."""
+    reader = _metric_capture(monkeypatch)
+    turn = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "coding"})
+    with ws(turn.workspace_id):
+        frame = await replace(_engine(turn, NeverAnsweringModel(), tmp_path), max_rounds=2).run()
+    assert frame.status == "done"
+    points = _exported_metrics(reader)
+    assert [
+        dict(point.attributes) for point in points["ufo.turn_round_budget_exhausted_total"]
+    ] == [{"profile": "coding"}]
+
+
 async def test_a_lone_valid_finish_call_ends_a_subagent_turn_with_its_payload(
     db: None, tmp_path: Path
 ) -> None:
