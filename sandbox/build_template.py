@@ -71,7 +71,8 @@ BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
 # poppler-utils → pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the
 # headless browser skills; libreoffice-{writer,calc,impress} → soffice for the office convert/recalc
 # paths; pandoc → docx↔markdown text extraction; qpdf → pdf CLI merge/split/encrypt/repair;
-# tesseract-ocr → the pytesseract OCR path for scanned PDFs.
+# tesseract-ocr → the pytesseract OCR path for scanned PDFs; ffmpeg → the video/GIF encoder the
+# media paths shell out to (imageio-ffmpeg wraps the same binary).
 APT_PACKAGES = (
     "python3",
     "ca-certificates",
@@ -88,6 +89,7 @@ APT_PACKAGES = (
     "pandoc",
     "qpdf",
     "tesseract-ocr",
+    "ffmpeg",
 )
 # gh is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN (the egress proxy forwards its
 # sentinel-carrying requests through the connector broker). It installs from GitHub's own apt repo —
@@ -118,6 +120,7 @@ PIP_PACKAGES = (
     "pdf2image",
     "pdf2docx",
     "pytesseract",
+    "imageio-ffmpeg",
 )
 # Globally installed under the npm --prefix (/usr/local) so the pptx/docx/pdf/website/game scripts
 # `require()` them from any cwd; SANDBOX_ENV exports NODE_PATH so resolution is base-independent.

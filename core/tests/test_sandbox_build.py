@@ -42,6 +42,7 @@ EXPECTED_APT = (
     "pandoc",
     "qpdf",
     "tesseract-ocr",
+    "ffmpeg",
 )
 EXPECTED_PIP = (
     "urllib3",
@@ -57,6 +58,7 @@ EXPECTED_PIP = (
     "pdf2image",
     "pdf2docx",
     "pytesseract",
+    "imageio-ffmpeg",
 )
 EXPECTED_NPM = (
     "pptxgenjs",
