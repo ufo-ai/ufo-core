@@ -542,6 +542,26 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
+  # The one number here drawn from the agent's own work rather than from the machinery around it:
+  # `bash_handler` marks any non-zero exit an error, so this is the share of commands the agent ran
+  # that came back red — a test, a build, a lint it invoked on the code it had just written.
+  #
+  # Uncoloured deliberately. Low is not good: an agent that never sees a failing command is an agent
+  # that never ran its own tests, and the healthy shape is a rate that exists and then falls within a
+  # turn as failures get fixed. A `grep` with no match exits non-zero too, so read this as a ceiling.
+  widget {
+    query_value_definition {
+      title       = "failed commands"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.tool_call_total{$env,$profile,tool:bash,outcome:handler_error}.as_count() / sum:ufo.tool_call_total{$env,$profile,tool:bash}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
   # Rounds and tokens are per execution, terminals are per turn, so both ratios read high wherever a
   # turn parked and resumed. They are trend series, not absolute counts.
   widget {
@@ -638,6 +658,36 @@ resource "datadog_dashboard" "coding_quality" {
       request {
         q            = "sum:ufo.tool_call_total{$env,$profile,!outcome:ok} by {outcome}.as_count()"
         display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        The four failure outcomes do not share a culprit, and the next two graphs separate them.
+
+        `handler_error` is the tool reporting that what it was asked to do did not work: a command
+        that exited non-zero, an edit whose anchor matched nothing, a read of a path that is not
+        there. On `bash` and `js_repl` that is the agent's own work failing, which is the only view
+        of correctness this board has. `invalid_call` is the model emitting a call that failed
+        validation — a prompt or schema problem, never a tool one. `handler_raised` and
+        `step_failed` are the machinery breaking underneath, and belong to whoever owns the tool.
+      EOT
+      background_color = "white"
+      font_size        = "13"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  # Split from the rate below because that one folds infrastructure faults in with these: a tool the
+  # agent drove into a wall reads the same there as one that fell over on its own.
+  widget {
+    toplist_definition {
+      title = "the agent's own actions that failed, by tool"
+      request {
+        q = "sum:ufo.tool_call_total{$env,$profile,outcome:handler_error} by {tool}.as_count()"
       }
     }
   }
