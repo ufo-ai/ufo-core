@@ -169,6 +169,10 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
         "issue #1112: the logical guard for a container path this process cannot stat; it must"
         " accept /workspace itself, so it stays beside the canonical guard rather than inside it"
     ),
+    (CORE_SRC / "workspace_file_preview_token.py", "workspace_file_preview_path_digest"): (
+        "the path is hashed for token identity, never opened: the digest must cover the exact"
+        " string the request carried, so no guard that rewrites it can stand here"
+    ),
     (CORE_SRC / "sources" / "sync.py", "_read"): (
         "issue #1112 row F10: a folder source's root is operator config; deferred with the"
         " symlink-following read it does under that root"
