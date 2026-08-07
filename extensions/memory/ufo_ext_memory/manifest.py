@@ -1,5 +1,5 @@
 """The memory extension's declared points: the two tools, the `memory` object kind, the recall
-hook, two page-change consumers, two derivation jobs, the skill.
+hook, two page-change consumers, two derivation jobs.
 
 `memory_search` and `memory_update` are the agent's durable-memory tools; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
@@ -17,7 +17,6 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
-from pathlib import Path
 from typing import get_args
 from uuid import UUID
 
@@ -36,7 +35,6 @@ from ufo.sdk.manifest import (
     Manifest,
     MemorySearchProviderSpec,
     PageChangeBatch,
-    SkillSpec,
     UserPromptSubmit,
 )
 from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
@@ -88,8 +86,6 @@ MEMORY_INDEX_JOB = "memory_index"
 MEMORY_INDEX_SCHEDULE = "0 * * * * *"
 CONSOLIDATE_JOB = "memory_consolidate"
 CONSOLIDATE_SCHEDULE = "0 0 * * * *"
-SKILL_DIR = Path(__file__).parent / "skills" / "memory"
-
 logger = logging.getLogger(__name__)
 
 
@@ -541,7 +537,6 @@ def manifest() -> Manifest:
                 candidates=owner_candidates(_consolidatable_workspaces),
             ),
         ),
-        skills=(SkillSpec(path=SKILL_DIR),),
         memory_search=(
             MemorySearchProviderSpec(
                 name=DEFAULT_MEMORY_SEARCH_PROVIDER, build=MemorySearchService

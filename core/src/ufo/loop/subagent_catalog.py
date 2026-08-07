@@ -1,8 +1,8 @@
 """The subagent-catalog skill, generated at boot from the live subagent registry — so the profiles a
 spawn can name, and the payload each takes, cannot drift from what `spawn_subagent` actually
 dispatches against. Rendered from the same `SubagentProfile`s the registry resolves, never
-hand-written; `delegation` pulls it through `depends`, so an agent reaching for how to delegate
-mounts the catalog with it."""
+hand-written; it carries its own index entry, so an agent reaching for how to delegate loads it by
+name and has the profiles before its first spawn."""
 
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry

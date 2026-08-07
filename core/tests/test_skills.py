@@ -50,7 +50,7 @@ def _write_skill(
     return skill_dir
 
 
-def test_core_ships_exactly_the_three_fixed_skills() -> None:
+def test_core_ships_exactly_the_fixed_skills() -> None:
     assert {skill.name for skill in CORE_SKILLS} == set(CORE_SKILL_NAMES)
 
 
@@ -246,9 +246,7 @@ def test_closure_follows_a_dependency_chain_to_its_end(tmp_path: Path) -> None:
 
 
 def test_closure_of_a_core_skill_returns_it() -> None:
-    assert [entry.skill.name for entry in CORE_SKILL_REGISTRY.closure("delegation")] == [
-        "delegation"
-    ]
+    assert [entry.skill.name for entry in CORE_SKILL_REGISTRY.closure("sandbox")] == ["sandbox"]
 
 
 def test_discover_registers_a_parent_and_its_nested_child_by_path_form(tmp_path: Path) -> None:

@@ -164,8 +164,7 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
     prompt = subagent_system_prompt(profile)
     assert "<available_skills>" in prompt
-    for skill in ("sandbox", "delegation"):
-        assert skill in prompt
+    assert "sandbox" in prompt
     assert FINISH_CONTRACT in prompt
 
 

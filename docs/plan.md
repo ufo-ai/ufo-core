@@ -74,8 +74,8 @@ services: SQLite + filesystem blobs + in-process hub.
 - `loop/compaction.py` (window trigger, before/after records), `loop/subagents.py` (profiles,
   DBOS child spawn, foreground/background), skills (`load_skill`, packs layout `packs/<name>/skills/…`),
   builtins `ask_user`, `spawn_subagent`, `share_file` (TTL token URL).
-- Core's three skills — `sandbox`, `memory`, `delegation` — land here (workflow guidance for
-  core builtins only; the skill-ships-with-what-it-teaches rule is in spec.md).
+- Core's skill — `sandbox` — lands here (workflow guidance for core builtins only; the
+  skill-ships-with-what-it-teaches rule is in spec.md).
 - **Proof**: a conversation exceeding the window compacts and later turns still recall pre-compaction
   facts verbatim from transcript; a typed subagent round-trips schema I/O; a shared file downloads
   via its token URL and rejects without it.
@@ -155,4 +155,4 @@ Manifest point + the negative cases; a change that breaks it is a public-SDK bre
 wrap · **import boundaries (from U1)**: declared edges between role-owning modules (`surfaces/`,
 `loop/`, jobs, `sandbox/proxy/`); a cross-role in-memory import fails CI — roles talk through
 queues/blob/hub/HTTP only · **core skills (from U5)**: a skill in core naming a non-core tool
-fails CI; core's skill set is exactly {`sandbox`, `memory`, `delegation`}.
+fails CI; core's skill set is exactly {`sandbox`}.

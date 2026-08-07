@@ -149,12 +149,19 @@ async def _seed_conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
 
 
 CHILD_SKILL = RuntimeSkill(
-    name="delegation/probe",
+    name="sandbox/probe",
     description="a child reached through its parent, never the index",
     instructions="probe",
-    parent="delegation",
+    parent="sandbox",
 )
-DEPLOY_SKILLS = skill_registry((web_manifest(), memory_manifest_module.manifest()), (CHILD_SKILL,))
+DEPLOY_ONLY_SKILL = RuntimeSkill(
+    name="deploy-probe",
+    description="a deploy skill the core default does not carry",
+    instructions="probe",
+)
+DEPLOY_SKILLS = skill_registry(
+    (web_manifest(), memory_manifest_module.manifest()), (CHILD_SKILL, DEPLOY_ONLY_SKILL)
+)
 
 
 class ProbeTask(BaseModel):
@@ -344,7 +351,7 @@ async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:
     assert all(skill["origin"] == "deploy" for skill in listed if skill["name"] != "release-notes")
     assert CHILD_SKILL.name in DEPLOY_SKILLS.by_name
     assert CHILD_SKILL.name not in by_name
-    assert by_name["memory"]["origin"] == "deploy"
+    assert by_name[DEPLOY_ONLY_SKILL.name]["origin"] == "deploy"
     theirs = (await client.get(f"/surface/web/agents/{agent_b}/skills", headers=headers)).json()
     assert [skill for skill in theirs["skills"] if skill["origin"] == "member"] == []
     assert [(skill["name"], skill["description"]) for skill in theirs["skills"]] == list(
@@ -995,7 +1002,7 @@ async def test_subagent_overview_composes_the_prompt_a_child_runs(portal) -> Non
     instructions carry `{{skill_index}}` has it filled from the deploy registry, so the whole
     rendered index reaches the prompt and the slot never does. The index asserted whole is what
     separates the deploy registry from the core default a spawn would otherwise fall back to —
-    `memory` is in one and not the other."""
+    `deploy-probe` is in one and not the other."""
     client, workspace_id, _agent_a, _agent_b = portal
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
 
@@ -1004,6 +1011,6 @@ async def test_subagent_overview_composes_the_prompt_a_child_runs(portal) -> Non
     ).json()["subagent"]["prompt"]
     assert SKILL_INDEX_SLOT not in prompt
     assert render_skill_index(DEPLOY_SKILLS.index()) in prompt
-    assert "memory" in {name for name, _ in DEPLOY_SKILLS.index()} - set(
+    assert DEPLOY_ONLY_SKILL.name in {name for name, _ in DEPLOY_SKILLS.index()} - set(
         name for name, _ in CORE_SKILL_INDEX
     )
