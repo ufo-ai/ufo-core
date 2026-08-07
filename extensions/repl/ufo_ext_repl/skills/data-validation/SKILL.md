@@ -1,6 +1,6 @@
 ---
 name: data-validation
-description: Load before certifying data as correct prior to delivery. E.g. validate schemas; check uniqueness, ranges, and foreign keys.
+description: Load when data or a computed result must be checked against rules that should already hold. E.g. validate rows against a schema; check uniqueness, ranges, and referential integrity across files; QA analysis output before delivery.
 ---
 # Data Validation
 

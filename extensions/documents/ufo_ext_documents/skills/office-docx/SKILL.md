@@ -1,6 +1,6 @@
 ---
 name: office-docx
-description: Load when creating, editing, reviewing, or styling Word documents (.docx) — content, formatting, comments, and tracked changes.
+description: Load when producing or changing a Word document (.docx) — writing one from source notes, styling it, applying edits as tracked changes or comments, flattening a redline, or exporting its pages.
 metadata:
   depends:
   - design-foundations
