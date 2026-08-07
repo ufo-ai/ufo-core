@@ -35,6 +35,7 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import (
+    PORTAL_BUILD,
     PORTAL_FILE,
     PORTAL_HTML,
     SESSION_COOKIE,
@@ -3059,7 +3060,7 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     client, workspace_id, _agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    assert PORTAL_HTML is not None
+    assert PORTAL_HTML is not None, f"portal app is not built — run `{PORTAL_BUILD}`"
     assert "<!doctype html>" in PORTAL_HTML
     for scheme in ("http://", "https://", "//cdn"):
         assert scheme not in PORTAL_HTML
