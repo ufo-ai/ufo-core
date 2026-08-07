@@ -495,27 +495,28 @@ def test_the_payload_is_bounded_at_the_tool_boundary() -> None:
         GenerateImageInput(**common, model="stability/whatever")
 
 
-def test_the_offered_resolution_tiers_are_the_ones_seedream_serves() -> None:
-    """Seed enumerates 1K, 2K and 4K when it rejects a tier, and those are what the field offers —
-    the whole ladder, so a member can pay for print size or save on a draft. A tier outside it is
-    not a cheaper image, it is a rejected call."""
+def test_the_offered_resolution_tiers_are_the_ones_seedream_draws() -> None:
+    """Seed's parameter list names `1K`, and Seed then refuses to render it: it draws at least
+    3,686,400 output pixels and 1K is 1,048,576 at every aspect ratio. What the field offers is
+    what came back as an image, so `1K` is not a tier here however the parameter list reads."""
     common = {"prompt": "p", "name": "poster", "user_description": "d"}
     tiers, _none = get_args(GenerateImageInput.model_fields["resolution"].annotation)
-    assert set(get_args(tiers)) == {"1K", "2K", "4K"}
+    assert set(get_args(tiers)) == {"2K", "4K"}
     assert openrouter.IMAGE_MODELS[openrouter.DEFAULT_IMAGE_MODEL].resolutions == set(
         get_args(tiers)
     )
-    with pytest.raises(ValidationError):
-        GenerateImageInput(**common, resolution="512")
+    for below in ("1K", "512"):
+        with pytest.raises(ValidationError):
+            GenerateImageInput(**common, resolution=below)
 
 
-def test_an_unasked_resolution_settles_on_the_cheap_middle_tier() -> None:
+def test_an_unasked_resolution_settles_on_the_cheapest_tier_that_draws() -> None:
     """A call that names no tier draws at 2K rather than whatever the provider would pick, and 4K
     stays reachable for the member who wants it."""
     common = {"prompt": "p", "name": "poster", "user_description": "d"}
     assert GenerateImageInput(**common).resolution == openrouter.DEFAULT_RESOLUTION
     assert openrouter.DEFAULT_RESOLUTION == "2K"
-    for tier in ("1K", "2K", "4K"):
+    for tier in ("2K", "4K"):
         assert GenerateImageInput(**common, resolution=tier).resolution == tier
 
 

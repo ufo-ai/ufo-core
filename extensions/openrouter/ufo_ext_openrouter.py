@@ -87,7 +87,7 @@ DEFAULT_IMAGE_MODEL: ImageModel = "bytedance-seed/seedream-4.5"
 AspectRatio = Literal["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "21:9"]
 EVERY_ASPECT_RATIO: frozenset[str] = frozenset(get_args(AspectRatio))
 
-Resolution = Literal["1K", "2K", "4K"]
+Resolution = Literal["2K", "4K"]
 EVERY_RESOLUTION: frozenset[str] = frozenset(get_args(Resolution))
 DEFAULT_RESOLUTION: Resolution = "2K"
 
@@ -97,7 +97,12 @@ class ImageModelLimits:
     """What one allowlisted model's providers actually serve, and what an image lists at when the
     response prices nothing. OpenRouter rejects a generation parameter the serving provider does not
     offer, so a model's bounds differ from the tool's own caps and are held on the way in. Empty
-    `resolutions` means the model derives its own size and takes no tier."""
+    `resolutions` means the model derives its own size and takes no tier.
+
+    A tier a provider names is not thereby a tier it draws: Seed's parameter list advertises `1K`,
+    and then refuses the generation because it renders at least 3,686,400 output pixels and 1K is
+    1,048,576 at any aspect ratio. Acceptance is settled at two layers and only the second one
+    draws, so what belongs here is what came back as an image."""
 
     max_images: int
     aspect_ratios: frozenset[str]
@@ -367,9 +372,9 @@ class GenerateImageInput(BaseModel):
         default=None,
         description=(
             f"Resolution tier, defaulting to {DEFAULT_RESOLUTION}. 4K costs more per image; ask "
-            "for it when the image will be printed or cropped into, and 1K when it is a thumbnail "
-            "or a draft. Only bytedance-seed/seedream-4.5 takes a tier; omit it for the others, "
-            "which size their own output."
+            "for it when the image will be printed or cropped into. Only "
+            "bytedance-seed/seedream-4.5 takes a tier, and it draws nothing smaller than 2K; omit "
+            "the field for the other models, which size their own output."
         ),
     )
     aspect_ratio: AspectRatio | None = Field(
