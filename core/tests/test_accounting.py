@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo import accounting
 from ufo.accounting import (
+    IMAGES_DIMENSION,
     MEMBER_SCOPE,
     TOKENS_DIMENSION,
     SpendRollup,
     TurnCost,
     read_turn_cost,
     record_egress_request,
+    record_image_usage,
     record_sandbox_tokens,
     record_turn_usage,
     record_workspace_usage,
@@ -461,6 +463,81 @@ async def test_spend_rollup_surfaces_sandbox_tokens(db: None) -> None:
     assert report.total_micro_usd == 96_500 + 55_000
 
 
+async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> None:
+    """Image spend is a count and a charge, not a token burn: the row carries the image count as its
+    amount, the provider's charge as its price, no price digest (no pinned rate table describes an
+    image model), and a second generation on the same turn accumulates into the same row."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_image_usage(
+            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
+        )
+        await record_image_usage(
+            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 1, 40_000
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                    tables.ledger.c.price_digest,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("images", 3, 120_000)
+    assert row.model == "bytedance-seed/seedream-4.5"
+    assert row.price_digest is None
+
+
+async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
+    """A turn that generated an image and burned tokens has two rows with distinct ids, and a cost
+    read that names `tokens` sees only the token row — the image charge is additive, never a
+    re-billing of the model round that called the tool."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_image_usage(
+            connection, workspace_id, turn_id, "openai/gpt-image-2", 1, 130_000
+        )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.ledger.c.id, tables.ledger.c.dimension).where(
+                    tables.ledger.c.turn_id == turn_id
+                )
+            )
+        ).all()
+        tokens = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
+        images = await read_turn_cost(connection, turn_id, IMAGES_DIMENSION)
+    assert len({row.id for row in rows}) == 2
+    assert {row.dimension for row in rows} == {"tokens", "images"}
+    assert tokens == TurnCost(
+        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
+    )
+    assert images == TurnCost(
+        tokens=1, micro_usd=130_000, model="openai/gpt-image-2", cache_percent=0
+    )
+
+
+async def test_spend_rollup_surfaces_generated_images(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_image_usage(
+            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
+        "images": (2, 80_000),
+        "tokens": (10_000, 96_500),
+    }
+    assert report.total_micro_usd == 96_500 + 80_000
+
+
 async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -740,6 +817,30 @@ async def test_usage_export_settlement_rules(db: None) -> None:
     sandbox = next(e for e in settled if e.dimension == "sandbox_tokens")
     assert (sandbox.amount, sandbox.from_amount, sandbox.turn_id) == (175, 0, turn_id)
     assert not any(export.dimension == "egress" for export in settled)
+
+
+async def test_images_export_with_their_settled_turn_as_platform_served(db: None) -> None:
+    """An `images` row accumulates while its turn runs, so it settles like `sandbox_tokens`: nothing
+    mints until the turn is terminal and past the margin. It exports as platform-served, because the
+    `byok` label resolves a key slot through the model registry and an image model is not in it."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_image_usage(
+            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
+        )
+    assert await _pending(workspace_id) == ()
+
+    async with workspace_tx() as connection:
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+    (export,) = await _pending(workspace_id)
+    assert (export.dimension, export.amount, export.from_amount) == ("images", 2, 0)
+    assert (export.priced_micro_usd, export.model, export.turn_id) == (
+        80_000,
+        "bytedance-seed/seedream-4.5",
+        turn_id,
+    )
+    assert export.byok is False
+    assert export.price_digest is None
 
 
 async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:

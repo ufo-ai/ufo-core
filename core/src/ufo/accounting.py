@@ -23,6 +23,7 @@ MICRO_USD_PER_USD = 1_000_000
 TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"
 SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
+IMAGES_DIMENSION = "images"
 
 CapScope = Literal["workspace", "member", "agent"]
 WORKSPACE_SCOPE: CapScope = "workspace"
@@ -282,6 +283,49 @@ async def record_sandbox_tokens(
     )
 
 
+async def record_image_usage(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    turn_id: UUID,
+    model: str,
+    images: int,
+    micro_usd: int,
+) -> None:
+    """Meter generated images as an `images` ledger row per turn: `amount` counts the images and
+    `priced_micro_usd` is what they cost, both accumulated atomically so several generations on one
+    turn never lose one. The caller prices them, because an image model is not a `ModelSpec` and its
+    unit is an image (or a megapixel, or an output image token) rather than the four token counters
+    `ModelPrice` rates — the provider extension reads the charge off its own response and books it
+    here, and the row carries no `price_digest` because no pinned rate table describes it. Keyed
+    with an empty attempt under a dimension distinct from `tokens`, so its id can never collide
+    with the row `record_turn_usage` writes for the same turn, and a parked-then-resumed turn keeps
+    accumulating into the one row."""
+    ledger_id = ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION)
+    insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+    await connection.execute(
+        insert(tables.ledger)
+        .values(
+            id=ledger_id,
+            workspace_id=workspace_id,
+            turn_id=turn_id,
+            dimension=IMAGES_DIMENSION,
+            amount=images,
+            priced_micro_usd=micro_usd,
+            model=model,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+        .on_conflict_do_update(
+            index_elements=[tables.ledger.c.id],
+            set_={
+                "amount": tables.ledger.c.amount + images,
+                "priced_micro_usd": tables.ledger.c.priced_micro_usd + micro_usd,
+                "updated_at": sa.func.now(),
+            },
+        )
+    )
+
+
 EXPORT_SETTLE_MARGIN_SECONDS = 900
 
 
@@ -313,20 +357,20 @@ async def mint_usage_exports(
 ) -> None:
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
     export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row is
-    insert-once and settles at creation; a `sandbox_tokens` row accumulates until its turn is
-    terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a
-    late egress-proxy write costs an extra top-up intent — a row that grows after minting mints a
-    further intent from the prior high-water mark, so no growth is ever lost to timing. Egress
-    rows (a zero-priced request count) never export. Usage settling before `floor` never mints —
-    the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id, from_amount)`
-    key makes concurrent or replayed mints collapse onto one frozen row.
+    insert-once and settles at creation; a `sandbox_tokens` or `images` row accumulates until its
+    turn is terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how
+    often a late egress-proxy write costs an extra top-up intent — a row that grows after minting
+    mints a further intent from the prior high-water mark, so no growth is ever lost to timing.
+    Egress rows (a zero-priced request count) never export. Usage settling before `floor` never
+    mints — the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
+    from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.
 
     Each intent freezes its `byok` label too: host-side `tokens` usage whose model's provider
     key slot (`key_slot_for` — the same resolution `client_for` applies) is stored by the
-    workspace is the workspace's spend; everything else — providers keyed from platform env, and
-    `sandbox_tokens`, whose egress proxy injects the platform key — is the platform's. Frozen at
-    mint, a re-send carries the label of the key state that served the usage, never the
-    drain-time state."""
+    workspace is the workspace's spend; everything else — providers keyed from platform env,
+    `sandbox_tokens`, whose egress proxy injects the platform key, and `images`, whose model is not
+    in the registry for a slot to be resolved from — is the platform's. Frozen at mint, a re-send
+    carries the label of the key state that served the usage, never the drain-time state."""
     now = datetime.now(UTC)
     settle_cutoff = now - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
     stored_slots = {
@@ -373,7 +417,7 @@ async def mint_usage_exports(
                 sa.or_(
                     (tables.ledger.c.dimension == TOKENS_DIMENSION)
                     & (tables.ledger.c.created_at >= floor),
-                    (tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION)
+                    tables.ledger.c.dimension.in_((SANDBOX_TOKENS_DIMENSION, IMAGES_DIMENSION))
                     & tables.turn.c.terminal.isnot(None)
                     & (tables.turn.c.updated_at <= settle_cutoff)
                     & (tables.turn.c.updated_at >= floor),

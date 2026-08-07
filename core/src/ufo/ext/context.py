@@ -240,6 +240,15 @@ class CredentialAccess:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential(slot)
 
+    async def stored(self, slot: str) -> bool:
+        """Whether the bound workspace holds its own secret for a declared slot rather than running
+        on the platform default. A handler that spends money on a provider key asks this to know
+        whose money it spent: the ledger meters what the platform is owed, and a call made on the
+        workspace's own key is billed to it by that provider directly."""
+        if slot not in self.declared:
+            raise UndeclaredCredentialSlot(slot)
+        return await ws_current().credential_is_stored(slot)
+
     async def resolve(self, slot: str) -> str:
         """Resolve a declared slot through its manifest source, then its stored or platform
         value."""

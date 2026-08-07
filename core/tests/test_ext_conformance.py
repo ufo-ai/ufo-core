@@ -956,6 +956,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
             "get",
             "resolve",
             "rotate",
+            "stored",
             "workspace_id",
             "declared",
         }
@@ -963,6 +964,8 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
             await context.credentials.get(sample.UNDECLARED_SLOT)
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.rotate(sample.UNDECLARED_SLOT, "old", "new")
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
+            await context.credentials.stored(sample.UNDECLARED_SLOT)
 
 
 def test_a_route_without_a_credential_key_fails_loud() -> None:

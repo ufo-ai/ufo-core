@@ -669,6 +669,17 @@ policy per agent (`auto` routes by task class); its `bedrock_api_key` credential
 deploy's `AWS_BEARER_TOKEN_BEDROCK`, as provider credentials come from workspace slots or deploy
 config.
 
+Image generation is not a `ModelClient`: `complete` yields text, tool calls and token usage, and a
+registered `ModelSpec` is a brain an agent can be pinned to. So an image model is a tool in the
+provider extension (`openrouter`'s `generate_image` over OpenRouter's Image API, on the same key as
+its chat models), never a registry entry. Its bytes land in the sandbox workspace and reach a member
+through `share_file`, and its charge — per image, not per token — meters under the ledger's `images`
+dimension: the extension reads what the provider charged and books it through the turn's context,
+because metering is core's. Only a generation on the platform's key meters. An `images` row exports
+as platform-served, since `byok` resolves a key slot through the model registry and no image model
+is in it, so a workspace running its own provider key — already billed by that provider — is not
+metered at all rather than billed twice.
+
 ## Deploy config bundling
 
 One declarative file, `ufo.toml`: Postgres URL, blob store (filesystem root or S3 endpoint),

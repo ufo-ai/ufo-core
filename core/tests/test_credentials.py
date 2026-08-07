@@ -44,6 +44,7 @@ from ufo.sandbox.proxy.rules import (
     derive_credential_rules,
 )
 from ufo.schema import tables
+from ufo.workspace import init_workspace_credentials, ws, ws_current
 
 
 class _StubOAuth:
@@ -167,6 +168,24 @@ async def test_unset_slot_raises(db: None) -> None:
     store = _store()
     with pytest.raises(CredentialSlotUnset, match="missing"):
         await store.get(await _workspace(), "missing")
+
+
+async def test_a_stored_slot_is_told_apart_from_the_platform_default(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`credential` resolves stored-then-env, so both answer the same secret; a handler spending
+    money on a provider key needs to know which one served it, because spend on the workspace's own
+    key is already billed to it by that provider."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("SAMPLE_API", "platform-default")
+    with ws(workspace_id):
+        assert await ws_current().credential("sample_api") == "platform-default"
+        assert not await ws_current().credential_is_stored("sample_api")
+        await store.put(workspace_id, "sample_api", "workspace-owned")
+        assert await ws_current().credential("sample_api") == "workspace-owned"
+        assert await ws_current().credential_is_stored("sample_api")
 
 
 def test_credential_request_seal_round_trips_and_expires() -> None:

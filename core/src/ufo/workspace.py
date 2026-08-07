@@ -73,6 +73,18 @@ class WorkspaceScope:
             raise CredentialSlotUnset(slot)
         return value
 
+    async def credential_is_stored(self, slot: str) -> bool:
+        """Whether this workspace holds its own value for `slot` rather than running on the platform
+        default — what `credential` resolved, asked as a question. Spend on a workspace's own
+        provider key is already paid to that provider and is never the platform's to bill."""
+        if _store is None:
+            return False
+        try:
+            await _store.get(self.workspace_id, slot)
+        except CredentialSlotUnset:
+            return False
+        return True
+
     async def rotate_credential(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing encrypted workspace credential. A platform environment
         default has no row to rotate and remains unchanged."""
