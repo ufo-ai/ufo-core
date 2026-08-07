@@ -562,6 +562,42 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
+  # Every way an edit gets refused, in one number: the read-before-edit precondition in
+  # `edit_handler`, plus everything `sbxfs` rejects — an `old_string` matching nothing, an anchor
+  # matching more than once, a missing file, a path leaving the workspace. `run_sbxfs` turns each of
+  # those into the same `ValueError`, so this cannot separate the agent misremembering a file's
+  # contents from the agent skipping the read that would have shown them. Splitting them needs a
+  # distinct error class on the precondition; until then read the total, not a cause.
+  #
+  # All of it is the agent's doing rather than the tool failing, which is why it sits here.
+  widget {
+    query_value_definition {
+      title       = "edits the tool refused"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.tool_call_total{$env,$profile,tool:edit,outcome:handler_raised,error_class:valueerror}.as_count() / sum:ufo.tool_call_total{$env,$profile,tool:edit}.as_count()"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = ">"
+          value      = 10
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 2
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 2
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
   # Rounds and tokens are per execution, terminals are per turn, so both ratios read high wherever a
   # turn parked and resumed. They are trend series, not absolute counts.
   widget {
@@ -665,14 +701,19 @@ resource "datadog_dashboard" "coding_quality" {
   widget {
     note_definition {
       content          = <<-EOT
-        The four failure outcomes do not share a culprit, and the next two graphs separate them.
+        The failure outcomes do not share a culprit, and the next two graphs separate them. The
+        outcome alone does not decide it — `error_class` is half the answer.
 
-        `handler_error` is the tool reporting that what it was asked to do did not work: a command
-        that exited non-zero, an edit whose anchor matched nothing, a read of a path that is not
-        there. On `bash` and `js_repl` that is the agent's own work failing, which is the only view
-        of correctness this board has. `invalid_call` is the model emitting a call that failed
-        validation — a prompt or schema problem, never a tool one. `handler_raised` and
-        `step_failed` are the machinery breaking underneath, and belong to whoever owns the tool.
+        `handler_error` is a tool reporting that what it ran did not work; on `bash` and `js_repl`
+        that is the agent's own code failing. `handler_raised` splits: a `ValueError` is a handler
+        refusing the arguments or preconditions it was handed, which is the agent's doing, while a
+        `RuntimeError` or `OSError` is the machinery breaking underneath and belongs to whoever
+        owns the tool. `invalid_call` is a call that failed schema validation before any handler
+        saw it — a prompt or schema problem, never a tool one.
+
+        So the agent's own failures are `handler_error` plus the `ValueError` half of
+        `handler_raised`, which is what the graph below counts. Reading `handler_error` alone would
+        miss `edit` entirely: it never returns a failing result, it raises.
       EOT
       background_color = "white"
       font_size        = "13"
@@ -683,11 +724,14 @@ resource "datadog_dashboard" "coding_quality" {
 
   # Split from the rate below because that one folds infrastructure faults in with these: a tool the
   # agent drove into a wall reads the same there as one that fell over on its own.
+  #
+  # The `ValueError` arm is not decoration. `edit` never returns a failing result — it raises — so an
+  # `outcome:handler_error` filter alone reports zero for the tool the agent gets wrong most often.
   widget {
     toplist_definition {
       title = "the agent's own actions that failed, by tool"
       request {
-        q = "sum:ufo.tool_call_total{$env,$profile,outcome:handler_error} by {tool}.as_count()"
+        q = "sum:ufo.tool_call_total{$env AND $profile AND (outcome:handler_error OR (outcome:handler_raised AND error_class:valueerror))} by {tool}.as_count()"
       }
     }
   }
