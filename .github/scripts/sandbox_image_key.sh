@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Write the sandbox image's Dockerfile to $1 with its base pinned to a digest, and print the cache
 # key that names the image built from it. The key hashes that pinned file, which carries every layer
-# command, the baked build digest (so editing a COPY'd script under core/src/ufo/sandbox/image moves
-# the key), and the resolved digest of the floating base tag no source file records. Publisher and
+# command, the baked build digest (so editing a COPY'd script under core/src/ufo/sandbox/image, or
+# the containment module baked beside them, moves the key), and the resolved digest of the floating
+# base tag no source file records. Publisher and
 # consumer derive the tag from this one command, so a tag that exists was built from exactly this
 # definition on exactly this base. The rendered text is the SDK's, not ours: anything it emits that
 # this cannot pin exactly once — no FROM, several, an alias, a base whose digest does not resolve —

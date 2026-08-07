@@ -23,6 +23,7 @@ from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, SourceReader, context_for
+from ufo.sandbox.containment import ContainmentError
 from ufo.schema import tables
 from ufo.sources.sync import page_id_for
 from ufo.workspace import ws
@@ -173,6 +174,49 @@ def test_page_ref_validation_scales_and_rejects_file_directory_collisions(
     )
     with pytest.raises(ValueError, match="file/directory collision"):
         Memory100Materializer._page_refs(collision)
+
+
+@pytest.mark.parametrize("bad_ref", ["../escape.txt", "enterprise/../../escape.txt", "/escape.txt"])
+def test_staging_refuses_a_page_ref_that_leaves_the_stage(tmp_path: Path, bad_ref: str) -> None:
+    """A dataset's `source_ref` builds a host path, so it is confined by the shared containment
+    guard rather than by a lexical check of the harness's own: a ref climbing out of the stage
+    writes nothing and publishes no stage."""
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root)
+    page = snapshot.pages[0]
+    escaping = snapshot.model_copy(
+        update={"pages": (page.model_copy(update={"source_ref": bad_ref}),)}
+    )
+    pages_root = tmp_path / "stage" / "pages"
+
+    with pytest.raises(ContainmentError):
+        Memory100Materializer._stage_pages(escaping, pages_root)
+
+    assert not pages_root.exists()
+    assert list((tmp_path / "stage").iterdir()) == []
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_a_stage_holding_a_planted_symlink_is_not_this_snapshots(tmp_path: Path) -> None:
+    """A stage left by an earlier run is reused only when it matches the snapshot file for file. A
+    link planted where a page belongs is not a page of this snapshot: it is refused rather than read
+    through, and the outside file it points at is never taken for the page's body."""
+    snapshot_root = tmp_path / "snapshot"
+    _snapshot(snapshot_root)
+    snapshot = load_snapshot(snapshot_root)
+    pages_root = tmp_path / "stage" / "pages"
+    Memory100Materializer._stage_pages(snapshot, pages_root)
+    outside = tmp_path / "outside.md"
+    outside.write_text(snapshot.pages[0].body)
+    planted = pages_root.joinpath(*PurePosixPath(snapshot.pages[0].source_ref).parts)
+    planted.unlink()
+    planted.symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="does not match snapshot"):
+        Memory100Materializer._stage_pages(snapshot, pages_root)
+
+    assert outside.read_text() == snapshot.pages[0].body
 
 
 async def test_failed_database_precheck_leaves_no_stage_and_retry_materializes(

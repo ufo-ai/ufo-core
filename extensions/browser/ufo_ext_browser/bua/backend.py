@@ -28,14 +28,13 @@ import base64
 import shlex
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import PurePosixPath
 from uuid import UUID
 
 from pydantic import JsonValue
 
 from ufo.sdk.browser import CdpLease, CdpProvider, FindCompleter, SessionGone
 from ufo.sdk.context import ScopedStore
-from ufo.sdk.sandbox import SandboxSession, workspace_path
+from ufo.sdk.sandbox import SandboxSession, contained_leaf, workspace_path
 from ufo_ext_browser.bua.session import BrowserSession
 
 CDP_TOKEN_KEY = "cdp-token/{conversation_id}"
@@ -226,7 +225,7 @@ class BuaSurface:
         data = await self._lease().fetch_download(download.guid)
         encoded = await asyncio.to_thread(base64.b64encode, data)
         return {
-            "filename": _file_name(download.filename),
+            "filename": contained_leaf(download.filename, DEFAULT_DOWNLOAD_NAME),
             "content_base64": encoded.decode(),
             "size": len(data),
         }
@@ -246,15 +245,6 @@ class BuaSurface:
                 await self.lease.aclose()
                 self.lease = None
             await self._store_token(None)
-
-
-def _file_name(suggested: str) -> str:
-    """One path segment naming a downloaded file. The visited page chooses this string, and a caller
-    joins it into a workspace path, so a name that is really a path — `../notes.md`, `/etc/passwd` —
-    would put the write somewhere that caller never asked for. `.` and `..` name a directory rather
-    than a file, so they fall back too."""
-    name = PurePosixPath(suggested).name
-    return DEFAULT_DOWNLOAD_NAME if name in ("", ".", "..") else name
 
 
 def _tab_id(value: JsonValue) -> int | None:

@@ -1006,8 +1006,8 @@ async def test_carrier_read_classifies_by_reason_not_by_filename(
     PermissionError (on the container's own filesystem — a Docker Desktop bind mount does not
     enforce host ownership modes), a path through a plain file raises NotADirectoryError, a
     symlink cycle raises the base OSError carrying ELOOP, and only a genuinely absent path raises
-    FileNotFoundError — the class and errno the local carrier's open() gives for the same
-    paths."""
+    FileNotFoundError — the class and errno an open() of the path gives, read off cat's reason
+    rather than the caller's string."""
     ctx, _ = file_ctx
     carrier = ctx.sandbox.carrier
     handle = ctx.sandbox.handle

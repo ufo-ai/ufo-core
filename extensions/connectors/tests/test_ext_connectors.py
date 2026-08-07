@@ -558,10 +558,88 @@ async def test_a_produced_files_name_cannot_escape_its_workspace_dir(tmp_path: P
     assert not (tmp_path / "evil.txt").exists()
 
 
+async def test_a_produced_file_is_not_fetched_through_a_symlinked_connector_dir(
+    tmp_path: Path,
+) -> None:
+    """`connector_files/` is in the agent's own workspace, so the agent can replace it with a link
+    before the call and `curl -o` would follow it and truncate what it found. The path is claimed
+    through the containment guard first, so the fetch is refused at the linked component and nothing
+    outside the workspace is written."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / CONNECTOR_FILES_DIR).symlink_to(outside)
+    source = tmp_path / "store" / "legit.txt"
+    source.parent.mkdir()
+    source.write_bytes(b"payload")
+    broker = _FileBroker(outputs=(BrokerFile(name="legit.txt", url=f"file://{source}"),))
+
+    with pytest.raises(RuntimeError, match="escapes"):
+        await call_external_tool(
+            _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name="ANY",
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={},
+            ),
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+async def test_a_workspace_file_argument_cannot_climb_out_of_the_workspace(tmp_path: Path) -> None:
+    """The model chooses this path and the bytes leave for the provider's file store, so a name
+    climbing above `/workspace` is refused before anything is measured or staged."""
+    workspace = tmp_path / "workspace"
+    (workspace / "sub").mkdir(parents=True)
+    (tmp_path / "outside.txt").write_bytes(b"host secret")
+
+    with pytest.raises(ValueError, match="escapes"):
+        await call_external_tool(
+            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={"media": {"workspace_file": "/workspace/sub/../../outside.txt"}},
+            ),
+        )
+
+    assert not list(workspace.glob(f"{sample.BROKER_UPLOAD_PREFIX}*"))
+
+
+async def test_a_workspace_file_argument_that_is_a_planted_symlink_is_refused(
+    tmp_path: Path,
+) -> None:
+    """CVE-2026-56692's shape on the upload leg: a link the agent planted at a workspace name would
+    have its target hashed and PUT to the provider's store. The preflight reads through the guard's
+    own fd, so the link is refused and no slot is ever filled."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    (workspace / "report.csv").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        await call_external_tool(
+            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={"media": {"workspace_file": "/workspace/report.csv"}},
+            ),
+        )
+
+    assert not list(workspace.glob(f"{sample.BROKER_UPLOAD_PREFIX}*"))
+
+
 async def test_a_missing_workspace_file_argument_fails_loud(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with pytest.raises(ValueError, match=r"cannot read workspace file|No such file"):
+    with pytest.raises(ValueError, match=r"cannot read workspace file|not found"):
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
@@ -628,9 +706,13 @@ async def test_transfer_urls_are_passed_as_curl_url_operands() -> None:
     class _RecordingSandbox:
         async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
             commands.append(command)
-            if "hashlib" in command:
-                return ExecResult(stdout="deadbeef\n7\n", stderr="", exit_code=0)
             return ExecResult(stdout="", stderr="", exit_code=0)
+
+        async def python(
+            self, program: str, *args: str, timeout_s: int | None = None
+        ) -> ExecResult:
+            measured = "hashlib" in program
+            return ExecResult(stdout="deadbeef\n7\n" if measured else "", stderr="", exit_code=0)
 
     broker = _FileBroker(outputs=(BrokerFile(name="out.txt", url="-oPWNED"),), put_url="-oPWNED")
     await call_external_tool(
@@ -891,6 +973,73 @@ async def test_a_decoded_fields_name_cannot_escape_its_workspace_dir(tmp_path: P
     written = Path(escaped["workspace_path"])
     assert written.parent.parent.name == CONNECTOR_FILES_DIR
     assert (workspace / written.relative_to(WORKSPACE_DIR)).read_bytes() == png
+
+
+async def test_a_decoded_payload_placed_twice_leaves_one_file(tmp_path: Path) -> None:
+    """The path is the content's own digest, so a second decode of the same payload names a file
+    that already holds those bytes. It is left where it is and the staged copy is dropped, so the
+    workspace the member browses does not collect a `.part` per repeat."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+    arguments = {
+        "data": base64.b64encode(png).decode(),
+        "encoding": "base64",
+        "name": "report.png",
+    }
+    call = CallExternalToolInput(
+        user_description=TOOL_NARRATION,
+        tool_name=sample.BROKER_TOOL_SLUG,
+        source_id=sample.CONNECTOR_PROVIDER,
+        arguments=arguments,
+    )
+
+    first = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)), call
+    )
+    placed = _payload(first)["arguments"]["data"]["workspace_path"]
+    on_disk = workspace / Path(placed).relative_to(WORKSPACE_DIR)
+    inode = on_disk.stat().st_ino
+
+    second = await call_external_tool(
+        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)), call
+    )
+
+    assert _payload(second)["arguments"]["data"]["workspace_path"] == placed
+    assert [entry.name for entry in on_disk.parent.iterdir()] == ["report.png"]
+    assert on_disk.read_bytes() == png
+    assert on_disk.stat().st_ino == inode, "the second decode renamed a new inode over the first"
+
+
+async def test_a_decoded_payload_is_not_placed_over_a_planted_symlink(tmp_path: Path) -> None:
+    """A decoded payload's path is its own content digest, so the agent can compute it before the
+    call and leave a link at it. The placement runs through the containment guard, which refuses a
+    name a link holds instead of renaming over it — the outside file keeps its bytes."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"host secret")
+    planted = workspace / CONNECTOR_FILES_DIR / hashlib.sha256(png).hexdigest()
+    planted.mkdir(parents=True)
+    (planted / "report.png").symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        await call_external_tool(
+            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={
+                    "data": base64.b64encode(png).decode(),
+                    "encoding": "base64",
+                    "name": "report.png",
+                },
+            ),
+        )
+
+    assert outside.read_bytes() == b"host secret"
 
 
 async def test_a_non_ascii_marked_field_is_left_as_the_provider_sent_it(tmp_path: Path) -> None:

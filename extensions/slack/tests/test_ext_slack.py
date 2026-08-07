@@ -3485,6 +3485,72 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
     assert note not in inbound.partition(f"</member_message_{_marker(inbound)}>")[0]
 
 
+async def test_a_slack_supplied_filename_is_never_a_path(db: None, tmp_path, monkeypatch) -> None:
+    """Slack chooses the attachment's name, so it goes through the same guard the web upload does:
+    the leaf only, the charset collapsed, and the note naming exactly what landed. Nothing is
+    written above the conversation's own inbox directory."""
+    workspace_id, _ = await _seed()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        if url.endswith("/passwd"):
+            return httpx.Response(200, content=b"climbed")
+        if url.endswith("/quote.txt"):
+            return httpx.Response(200, content=b"quoted")
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"is_channel": True, "is_private": False}}
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    body = _event_body(
+        type="app_mention",
+        channel_type="channel",
+        user="U1",
+        channel="C1",
+        ts="7.0",
+        text="<@UBOT00000> files",
+        files=[
+            {
+                "id": "F1",
+                "name": "../../etc/passwd",
+                "url_private_download": "https://files.slack.com/files-pri/T-F1/passwd",
+                "mimetype": "text/plain",
+            },
+            {
+                "id": "F2",
+                "name": 'my "quote".txt',
+                "url_private_download": "https://files.slack.com/files-pri/T-F2/quote.txt",
+                "mimetype": "text/plain",
+            },
+        ],
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.conversation.c.queue_key == "C1:7.0",
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+            )
+        ).one()
+    inbox = _workspace_file(tmp_path, row.conversation_id, slack.SLACK_INBOX_DIR)
+    assert (inbox / "passwd").read_bytes() == b"climbed"
+    assert (inbox / "my--quote-.txt").read_bytes() == b"quoted"
+    assert f"{slack.SLACK_INBOX_DIR}/passwd" in row.inbound
+    assert f"{slack.SLACK_INBOX_DIR}/my--quote-.txt" in row.inbound
+    assert not (tmp_path / "workspaces" / "etc").exists()
+
+
 async def test_inbound_oversize_file_is_skipped_and_reported(
     db: None, tmp_path, monkeypatch
 ) -> None:

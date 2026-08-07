@@ -25,7 +25,9 @@ from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.containment import ContainmentError
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -149,7 +151,9 @@ async def _keyed_workspace() -> UUID:
     return workspace_id
 
 
-def _context(sandbox: _Sandbox, tmp_path: Path, idempotency_key: str | None = None) -> ToolContext:
+def _context(
+    sandbox: _Sandbox | SandboxSession, tmp_path: Path, idempotency_key: str | None = None
+) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
@@ -237,7 +241,7 @@ async def test_browser_task_creates_one_run_and_returns_its_result_and_files(
     assert body["browserSettings"] == {"proxyCountryCode": "us"}
     assert body["task"] == "Start at https://shop.test\n\nread the price"
 
-    assert sandbox.writes == {"data.csv": b"col\n1\n"}
+    assert sandbox.writes == {"/workspace/data.csv": b"col\n1\n"}
     payload = json.loads(result.content[0].text)
     assert payload == {
         "result": "found it",
@@ -397,7 +401,7 @@ async def test_an_output_file_past_the_size_bound_is_reported_not_written(
                 url="https://shop.test", task="t", task_name="n", user_description="d"
             ),
         )
-    assert list(sandbox.writes) == ["small.csv"]
+    assert list(sandbox.writes) == ["/workspace/small.csv"]
     payload = json.loads(result.content[0].text)
     assert payload["files"] == ["small.csv"]
     assert payload["files_not_fetched"] == [
@@ -441,6 +445,44 @@ async def test_an_output_path_escaping_the_workspace_is_a_fault(
             ),
         )
     assert not sandbox.writes
+
+
+async def test_an_output_path_is_not_written_through_a_planted_symlink(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
+) -> None:
+    """Through a real carrier: the vendor names a path under a directory the agent replaced with a
+    link in its own workspace. The write is refused at that component, so a run's output cannot be
+    steered onto a host file by a link the agent left behind."""
+    api = _Api(files=[{"path": "out/data.csv", "size": 6, "url": DOWNLOAD_URL}])
+    _wire(monkeypatch, api)
+    workspace_id = await _keyed_workspace()
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    carrier = LocalCarrier()
+    session = SandboxSession(
+        carrier=carrier,
+        handle=await carrier.create(
+            SandboxSpec(
+                conversation_id=uuid4(),
+                image_ref="ufo-sandbox:latest",
+                workspace_host_path=str(workspace),
+                proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+                run_token="run-token",
+            )
+        ),
+    )
+    (workspace / "out").symlink_to(outside)
+
+    with ws(workspace_id), pytest.raises(ContainmentError):
+        await _tool("browser_task").handler(
+            _context(session, tmp_path),
+            BrowserTaskInput(
+                url="https://shop.test", task="t", task_name="n", user_description="d"
+            ),
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 async def test_a_failed_output_download_fails_loud_rather_than_writing_an_error_body(

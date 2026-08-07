@@ -14,6 +14,7 @@ on:
     paths:
       - sandbox/build_template.py
       - core/src/ufo/sandbox/image/**
+      - core/src/ufo/sandbox/containment.py
       - extensions/e2b/ufo_ext_e2b.py
       - uv.lock
       - .github/scripts/sandbox_image_key.sh

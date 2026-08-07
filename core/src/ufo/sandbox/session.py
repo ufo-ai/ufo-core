@@ -19,6 +19,40 @@ from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
+WORKSPACE_WRITE_MODE = 0o644
+SANDBOX_MODULE_BOOTSTRAP = (
+    "import os, shutil, sys\n"
+    "_sbxfs = shutil.which('sbxfs')\n"
+    "if _sbxfs is None:\n"
+    "    raise SystemExit('sbxfs is not on PATH: this sandbox predates the containment guard')\n"
+    "sys.path.insert(0, os.path.dirname(_sbxfs))\n"
+)
+"""Put the directory holding the baked guard on `sys.path`, located through `sbxfs` because which
+directory that is differs by carrier. An image built before the guard was baked has neither, and
+what it does have is a workspace the agent writes — so the miss is named here and the program exits,
+rather than `dirname(None)` raising a TypeError that reads like a bug in the program itself."""
+SANDBOX_PYTHON_FLAG = "-I"
+"""Isolated mode, which is what makes the bootstrap above a hardening step rather than an ingress of
+its own: `python3 -c` otherwise puts the process cwd at `sys.path[0]`, and a carrier runs commands
+with cwd inside the workspace the agent writes to, so `import shutil` — then `import containment`
+itself — would resolve against a module the agent planted there, before the guard has checked
+anything. `-I` drops cwd and the `PYTHON*` variables from module resolution, leaving the stdlib and
+the directory the bootstrap names."""
+COPY_IN_PROG = """
+import sys
+from containment import ContainmentError, contained_file
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
+        target.replace_bytes(sys.stdin.buffer.read(), target.mode(0o644))
+except ContainmentError as error:
+    raise SystemExit(str(error))
+"""
+"""The copy-in a carrier whose `/workspace` lives inside a container runs instead of a shell
+redirect: `> "$1"` truncates through a planted link and `mkdir -p` follows a symlinked ancestor,
+while this builds each directory as the descent reaches it and renames a staged inode onto the
+target. The mode repeats `WORKSPACE_WRITE_MODE` because a `-c` program inside the sandbox cannot
+import it."""
 TOOL_OUTPUT_DIRNAME = ".tool-output"
 TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
@@ -195,7 +229,13 @@ class Carrier(Protocol):
         copy-in that pairs with `read`'s copy-out. Each carrier supplies its own (e2b uploads
         through its filesystem API, docker streams over a real stdin), because bytes must never ride
         `exec`'s argv: a carrier whose command API takes a shell string has to inline them, which
-        the provider rejects once they are large — exactly when a caller offloads a large result."""
+        the provider rejects once they are large — exactly when a caller offloads a large result.
+
+        The path is a filename an agent, a model, or an inbound surface chose, so the write runs
+        through the containment guard — `COPY_IN_PROG` where the bytes land inside a container —
+        rather than a shell redirect, and a refusal is an OSError. A non-regular target is replaced,
+        not refused: the rename cannot write through a link, and a link the agent left at an inbox
+        name must not deny every later delivery to that name."""
         ...
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
@@ -203,10 +243,12 @@ class Carrier(Protocol):
         buffering it whole in the host process — the copy-out that pairs with `write`. Each carrier
         supplies its own (e2b streams from its filesystem API, docker over a real stdout, the local
         carrier off the host directory). A missing path raises FileNotFoundError on every carrier;
-        the local and docker carriers raise each filesystem refusal as the OSError its errno names
-        (docker resolves cat's reason through strerror, so the two agree class-for-class and
-        errno-for-errno) while e2b surfaces its SDK's exception; a read that dies for a
-        non-filesystem reason raises the carrier's own error naming what is known."""
+        the local carrier confines the path through the containment guard first, so a target that
+        is a symlink, a directory, or outside the workspace is refused as a ContainmentError before
+        any open, and the docker carrier raises each filesystem refusal as the OSError its errno
+        names (resolving cat's reason through strerror) while e2b surfaces its SDK's exception; a
+        read that dies for a non-filesystem reason raises the carrier's own error naming what is
+        known."""
         ...
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
@@ -287,6 +329,22 @@ class SandboxSession:
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
 
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        """Run an in-sandbox python program with the containment guard importable, so a program that
+        builds a path from an argument runs the checks `sbxfs` runs rather than its own — the one
+        place every such program reaches the guard from.
+
+        The guard is baked beside `sbxfs` rather than installed as a package, so the bootstrap
+        locates the scripts through `sbxfs` itself: which directory holds them differs by carrier.
+        The interpreter runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap
+        from resolving against the very workspace it is about to guard. Run as argv, never through a
+        login shell, whose profile resets PATH and drops the local carrier's own bin directory."""
+        return await self.carrier.exec(
+            self.handle,
+            ("python3", SANDBOX_PYTHON_FLAG, "-c", f"{SANDBOX_MODULE_BOOTSTRAP}{program}", *args),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
     async def write_file(self, path: str, content: bytes) -> None:
         await self.carrier.write(self.handle, workspace_path(path), content)
 
@@ -325,12 +383,15 @@ class SandboxSession:
         """Run one in-sandbox file op through the `sbxfs` CLI and return its parsed JSON. The work
         (windowing, ripgrep, poppler render) runs inside the container and comes back as one bounded
         JSON object, so the host never pulls a whole file across the boundary to loop over it. A
-        `path` arg is workspace-scoped here so every op inherits the same subtree guard. A handled
-        `{"error": …}` surfaces as a ValueError — a recoverable tool error to the model."""
+        `path` arg is workspace-scoped here so every op inherits the same subtree guard, and the
+        `workspace` root each op confines itself to is set here rather than passed in: which subtree
+        a file op may touch is not a caller's choice. A handled `{"error": …}` surfaces as a
+        ValueError — a recoverable tool error to the model."""
         params = dict(args)
         raw_path = params.get("path")
         if isinstance(raw_path, str):
             params["path"] = workspace_path(raw_path)
+        params["workspace"] = WORKSPACE_DIR
         result = await self.carrier.exec(
             self.handle,
             ("sbxfs", op, json.dumps(params, separators=(",", ":"))),

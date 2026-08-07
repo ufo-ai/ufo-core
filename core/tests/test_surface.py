@@ -52,12 +52,14 @@ from ufo.ext.surface import (
     SurfaceSpec,
     Writeback,
     WritebackPoller,
+    inbox_name,
     record_transcript_access,
     writeback_workspaces,
 )
 from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
 from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sandbox.containment import ContainmentError
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_host import parse_site_label
 from ufo.sandbox.ingress_token import (
@@ -1007,6 +1009,95 @@ async def test_write_workspace_file_streams_into_the_conversation_workspace(
         await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
     landed = root / str(conversation_id) / "slack-inbox/note.txt"
     assert landed.read_bytes() == b"hello world"
+
+
+def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:
+    """The one guard both inboxes name a delivered file with. A traversing name keeps only its leaf,
+    both separators are read, a name with nothing usable in it falls back, the charset collapses and
+    the length caps — the cap and the charset used to be the web surface's alone, which is the
+    per-surface drift this replaces — and a repeat in one batch is numbered, never overwritten.
+
+    The charset is word characters, so a member whose filename is not ASCII reads their own name
+    back in the note: unifying the two surfaces must not cost Slack's names their script.
+
+    The cap falls on the stem so an ordinary long attachment keeps the suffix a read routes on —
+    a capped `.txt` that came back extensionless was read as a binary and refused. A suffix with no
+    room under the cap is not an extension and is cut like anything else."""
+    used: set[str] = set()
+    assert inbox_name("../../etc/passwd", used) == "passwd"
+    assert inbox_name(r"C:\\Users\\me\\report.txt", used) == "report.txt"
+    assert inbox_name("..", used) == "file"
+    assert inbox_name("we ird&name!!.txt", used) == "we-ird-name--.txt"
+    assert inbox_name("x" * 300 + ".txt", used) == "x" * 76 + ".txt"
+    assert inbox_name("y." + "z" * 300, used) == "z" * 79
+    assert inbox_name("passwd", used) == "passwd-1"
+    assert inbox_name("отчёт.pdf", used) == "отчёт.pdf"
+    assert used == {
+        "passwd",
+        "passwd-1",
+        "report.txt",
+        "file",
+        "we-ird-name--.txt",
+        "x" * 76 + ".txt",
+        "z" * 79,
+        "отчёт.pdf",
+    }
+
+
+async def test_write_workspace_file_replaces_a_planted_symlink(db: None, tmp_path) -> None:
+    """An inbound attachment lands through the carrier's containment guard, so a link the agent left
+    in its own inbox directory on an earlier turn is replaced rather than written through: the host
+    file it pointed at is untouched, and the member's attachment still arrives.
+
+    Replacing is what keeps the surface working. `slack-inbox/<name>` is Slack's name, not ours, so
+    refusing here would let one planted link deny every later message carrying a file of that
+    name — and the rename cannot follow the link anyway."""
+    workspace_id, _, _ = await _seed()
+    root = tmp_path / "workspaces"
+    context = _context(
+        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+
+    async def _chunks():
+        yield b"inbound bytes"
+
+    with ws(workspace_id):
+        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
+        inbox = root / str(conversation_id) / "slack-inbox"
+        inbox.mkdir(parents=True)
+        landed = inbox / "note.txt"
+        landed.symlink_to(outside)
+        await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
+    assert outside.read_bytes() == b"host secret"
+    assert not landed.is_symlink()
+    assert landed.read_bytes() == b"inbound bytes"
+
+
+async def test_write_workspace_file_refuses_a_link_out_of_the_workspace(db: None, tmp_path) -> None:
+    """A link at a *directory* on the way, pointing out of the conversation's workspace, is refused
+    outright: there is no name inside the workspace for the bytes to land on, so the delivery fails
+    loudly instead of writing into whatever the link named."""
+    workspace_id, _, _ = await _seed()
+    root = tmp_path / "workspaces"
+    context = _context(
+        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    async def _chunks():
+        yield b"inbound bytes"
+
+    with ws(workspace_id):
+        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
+        workspace = root / str(conversation_id)
+        workspace.mkdir(parents=True)
+        (workspace / "slack-inbox").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ContainmentError):
+            await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
+    assert list(outside.iterdir()) == []
 
 
 async def test_write_workspace_file_refuses_an_uncapped_stream_while_it_accumulates(

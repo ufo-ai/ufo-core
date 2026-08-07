@@ -14,8 +14,8 @@ creating one would make a GET a side effect."""
 
 import asyncio
 import os
-import shlex
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ufo.db import workspace_tx
 from ufo.o11y import warn
+from ufo.sandbox.containment import PathNotFound, configured_root, contained_dir
 from ufo.sandbox.session import (
     SANDBOX_GID,
     SANDBOX_HANDLE_SEP,
@@ -46,6 +47,7 @@ SANDBOX_IMAGE_REF = "ufo-sandbox:latest"
 UNSIGNED_RUN_TOKEN = "off-turn"
 WORKSPACE_WRITE_MAX_BYTES = 100 * 1024 * 1024
 OPEN_CLAIM_ATTEMPTS = 3
+WORKSPACE_ROOT_SETTING = "sandbox.workspace_root"
 
 
 class WorkspaceFile(BaseModel):
@@ -114,11 +116,18 @@ class ConversationSandbox:
         resume_id = sandbox_handle_id(self.backend, stored)
         if resume_id is None:
             return None
+        if self.off_cluster:
+            host_path = (self.workspace_root / str(conversation_id)).resolve()
+        else:
+            existing = await asyncio.to_thread(self._existing_dir, conversation_id)
+            if existing is None:
+                return None
+            host_path = existing
         return await self.carrier.attach(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
-                workspace_host_path=str((self.workspace_root / str(conversation_id)).resolve()),
+                workspace_host_path=str(host_path),
                 proxy=self.proxy,
                 run_token=UNSIGNED_RUN_TOKEN,
                 resume_id=resume_id,
@@ -147,8 +156,8 @@ class ConversationSandbox:
         if handle is None:
             return
         session = SandboxSession(carrier=self.carrier, handle=handle)
-        result = await session.bash(
-            f"python3 -c {shlex.quote(PRUNE_PROG)} {shlex.quote(workspace_path(rel_prefix))} {keep}"
+        result = await session.python(
+            PRUNE_PROG, workspace_path(rel_prefix), WORKSPACE_DIR, str(keep)
         )
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
@@ -212,22 +221,53 @@ class ConversationSandbox:
         run_token: str,
         env: Mapping[str, str],
     ) -> SandboxHandle:
-        host_path = self.workspace_root / str(conversation_id)
-        if not self.off_cluster:
-            await asyncio.to_thread(host_path.mkdir, parents=True, exist_ok=True)
+        if self.off_cluster:
+            host_path = (self.workspace_root / str(conversation_id)).resolve()
+        else:
+            host_path = await asyncio.to_thread(self._provisioned_dir, conversation_id)
             if os.geteuid() == 0:
                 await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
         return await self.carrier.create(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
-                workspace_host_path=str(host_path.resolve()),
+                workspace_host_path=str(host_path),
                 proxy=self.proxy,
                 run_token=run_token,
                 resume_id=None if stored is None else sandbox_handle_id(self.backend, stored),
                 env=env,
             )
         )
+
+    def _provisioned_dir(self, conversation_id: UUID) -> Path:
+        """The conversation's own directory under `workspace_root`, made if absent and then proved:
+        every component under the root is re-opened `O_NOFOLLOW`. A containment check cannot stand
+        in for that — with a symlinked directory planted under the root the `mkdir` follows the
+        link, the chown hands the link's target to the sandbox user, and every path the carrier
+        builds still resolves inside the root the check consulted.
+
+        The root itself is deploy config, so the one link an operator may have put there — the root
+        pointing at the volume the conversations live on — is followed once and canonicalized before
+        the descent, rather than refused into an outage of every turn and every browse. Anything
+        else already holding the name — a file, a broken link — is that check's to refuse with the
+        setting named, not `mkdir`'s to report as a bare errno."""
+        with suppress(FileExistsError):
+            self.workspace_root.mkdir(parents=True, exist_ok=True)
+        root = configured_root(self.workspace_root, WORKSPACE_ROOT_SETTING)
+        return contained_dir(root / str(conversation_id), root, create=True)
+
+    def _existing_dir(self, conversation_id: UUID) -> Path | None:
+        """The same directory on the read path, or None when nothing has made it — a read never
+        provisions. Absent is a conversation with no workspace; a link pointing out of the root is a
+        workspace pointed somewhere it may not go, and raises. A link to another directory *under*
+        the root resolves to it, which is the guard's policy on an ancestor everywhere: the
+        canonical directory is what the descent then pins. Nothing an agent reaches writes here —
+        a sandbox is mounted at its own conversation directory, never at the root above it."""
+        try:
+            root = configured_root(self.workspace_root, WORKSPACE_ROOT_SETTING)
+            return contained_dir(root / str(conversation_id), root)
+        except PathNotFound:
+            return None
 
     async def _stored(self, conversation_id: UUID) -> str | None:
         async with workspace_tx() as connection:
@@ -269,15 +309,33 @@ class ConversationSandbox:
 
 
 PRUNE_PROG = """
-import os, sys
-directory, keep = sys.argv[1], int(sys.argv[2])
-try:
+import sys
+from containment import (
+    ContainmentError,
+    PathNotFound,
+    contained_dir,
+    contained_file,
+    contained_root,
+    is_contained_regular,
+)
+
+
+def prune(directory, root, keep):
+    try:
+        workspace = contained_root(root)
+        base = contained_dir(directory, workspace)
+    except PathNotFound:
+        return
     names = sorted(
-        entry for entry in os.listdir(directory)
-        if os.path.isfile(os.path.join(directory, entry))
+        entry.name for entry in base.iterdir() if is_contained_regular(entry, workspace)
     )
-except FileNotFoundError:
-    sys.exit(0)
-for name in names[: max(len(names) - keep, 0)]:
-    os.unlink(os.path.join(directory, name))
+    for name in names[: max(len(names) - keep, 0)]:
+        with contained_file(base / name, workspace) as target:
+            target.unlink()
+
+
+try:
+    prune(sys.argv[1], sys.argv[2], int(sys.argv[3]))
+except ContainmentError as error:
+    raise SystemExit(str(error))
 """

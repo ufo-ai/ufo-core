@@ -810,6 +810,49 @@ async def test_distinct_hosts_get_distinct_contexts() -> None:
         await proxy.stop()
 
 
+async def test_a_host_that_is_really_a_path_never_names_a_file_outside_the_workdir(
+    tmp_path: Path,
+) -> None:
+    """The CONNECT host arrives from inside the sandbox, and the rule match that lets it through is
+    an equality allowlist, not a path check — so the host named the leaf files and openssl's `-out`
+    with no containment of its own. It is cut to one filename component now, and a host that leaves
+    nothing usable behind falls back rather than naming the workdir itself."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    proxy = await _proxy()
+    try:
+        workdir = Path(proxy._workdir.name)
+        with pytest.raises(RuntimeError, match="openssl"):
+            await proxy._leaf_context(f"../..{outside}/api.example.com")
+        assert list(outside.iterdir()) == []
+        assert (workdir / "leaf-api.example.com.ext").is_file()
+
+        assert await proxy._leaf_context("..") is proxy._contexts[".."]
+        assert (workdir / "leaf-unnamed.crt").is_file()
+    finally:
+        await proxy.stop()
+
+
+async def test_the_leaf_extension_file_is_staged_rather_than_written_through_a_name(
+    tmp_path: Path,
+) -> None:
+    """The extension file goes through the shared guard, which stages `O_CREAT|O_EXCL|O_NOFOLLOW`
+    and renames: a name a symlink holds takes the rename, never the write, so the bytes cannot land
+    in whatever it pointed at."""
+    outside = tmp_path / "outside.ext"
+    outside.write_text("untouched")
+    proxy = await _proxy()
+    try:
+        planted = Path(proxy._workdir.name) / "leaf-api.example.com.ext"
+        planted.symlink_to(outside)
+        await proxy._leaf_context("api.example.com")
+        assert outside.read_text() == "untouched"
+        assert not planted.is_symlink()
+        assert "subjectAltName=DNS:api.example.com" in planted.read_text()
+    finally:
+        await proxy.stop()
+
+
 async def test_the_ca_and_leaf_outlive_a_long_running_process() -> None:
     """The proxy outlives every turn for the life of the process, so its boot-minted CA and every
     cached per-host leaf must stay valid far beyond a day — a deploy running past 24h with a 1-day

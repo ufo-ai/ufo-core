@@ -87,6 +87,7 @@ from ufo.grants import (
 from ufo.hub import LiveFrame
 from ufo.listings import page_of, page_query
 from ufo.o11y import log
+from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
@@ -144,6 +145,9 @@ AMBIENT_CONTEXT_ELEMENT = "channel_context"
 MEMBER_MESSAGE_ELEMENT = "member_message"
 ATTACHMENTS_ELEMENT = "attachments"
 MARKER_BYTES = 4
+INBOX_NAME_MAX_CHARS = 80
+INBOX_FALLBACK_NAME = "file"
+INBOX_UNSAFE_NAME_CHARS = re.compile(r"[^\w.-]")
 _MEMBER_MESSAGE_RE = re.compile(
     rf"<{MEMBER_MESSAGE_ELEMENT}_(?P<marker>[0-9a-f]{{{MARKER_BYTES * 2}}})>\n"
     rf"(?P<said>.*)\n</{MEMBER_MESSAGE_ELEMENT}_(?P=marker)>",
@@ -176,6 +180,38 @@ def fence_member_message(marker: str, ambient: str, body: str, attachments: str)
         return fenced
     delivered = f"{ATTACHMENTS_ELEMENT}_{marker}"
     return f"{fenced}\n<{delivered}>\n{attachments}\n</{delivered}>"
+
+
+def inbox_name(raw: str, used: set[str]) -> str:
+    """A safe workspace leaf for a filename an inbound surface was handed, and the name it landed
+    under: path components dropped, separators and everything outside word characters, dot and dash
+    collapsed, length capped, dots-only and empty names falling back, and a name already used in
+    this batch numbered so no delivery overwrites another. A word charset rather than an ASCII one,
+    since a member who attaches `отчёт.pdf` reads the name back in the note this returns, and a
+    script is not a path separator.
+
+    The cap falls on the stem, so the suffix survives it. A file op routes on the suffix — a `.pdf`
+    is converted to text and page images, a `.png` is read as bytes and typed — so a cap that ate
+    the extension off an ordinary long attachment name turned a document the member sent into a
+    binary the read refuses. A suffix with no room left under the cap is not an extension, and gets
+    cut with everything else.
+
+    One implementation for every surface. A Slack attachment name, a browser's content-disposition,
+    and whatever a future surface is handed are the same untrusted input, and the CVE-2026-56692
+    follow-on is what a per-surface copy of this costs: the second ingress kept its own weaker idea
+    of what was safe. `used` is updated with the returned name."""
+    leaf = INBOX_UNSAFE_NAME_CHARS.sub("-", contained_leaf(raw, INBOX_FALLBACK_NAME))
+    stem, dot, suffix = leaf.partition(".")
+    stem = stem[: max(INBOX_NAME_MAX_CHARS - len(dot) - len(suffix), 0)]
+    leaf = f"{stem}{dot}{suffix}"[:INBOX_NAME_MAX_CHARS].strip(".") or INBOX_FALLBACK_NAME
+    stem, dot, suffix = leaf.partition(".")
+    name = leaf
+    index = 1
+    while name in used:
+        name = f"{stem}-{index}{dot}{suffix}"
+        index += 1
+    used.add(name)
+    return name
 
 
 def member_message_text(inbound: str) -> str:

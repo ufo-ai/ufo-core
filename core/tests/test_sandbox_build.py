@@ -19,6 +19,7 @@ from sandbox.build_template import (
     PIP_PACKAGES,
     RUNTIME_USER,
     SANDBOX_ENV,
+    SANDBOX_MODULES,
     SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
     TEMPLATE_MEMORY_MB,
@@ -123,6 +124,22 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
 
 def test_scripts_are_the_exec_and_workspace_helpers() -> None:
     assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs")
+
+
+def test_the_containment_guard_is_baked_beside_the_scripts() -> None:
+    """`sbxfs` confines a caller-supplied path with the module the serve process imports as
+    `ufo.sandbox.containment`, reached as a sibling of the script on `sys.path[0]` — so the image
+    has to carry that file beside the script, or the file ops lose their guard at import time."""
+    assert tuple(name for name, _ in SANDBOX_MODULES) == ("containment.py",)
+    assert "/usr/local/bin/containment.py" in pod_dockerfile()
+
+
+def test_baked_modules_are_covered_by_the_drift_digest(monkeypatch) -> None:
+    """A live template baked from an older guard must fail --check, not keep serving file ops with
+    checks the host no longer has."""
+    before = build_definition_digest()
+    monkeypatch.setattr(build_template, "SANDBOX_MODULES", (("containment.py", 99),))
+    assert build_definition_digest() != before
 
 
 def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:

@@ -27,8 +27,8 @@ from ufo.sdk.objects import (
     ObjectRow,
     object_page,
 )
-from ufo.sdk.sandbox import workspace_path
-from ufo.sdk.skills import RuntimeSkill, parse_skill_content
+from ufo.sdk.sandbox import ContainmentError, contained_relative, workspace_path
+from ufo.sdk.skills import RuntimeSkill, parse_skill_content, skill_mount_root
 from ufo.sdk.tools import ToolContext
 from ufo_ext_skill_create.store import UserSkillStore
 
@@ -100,6 +100,19 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
     if ext is None:
         raise RuntimeError("the skill kind dispatched without its ExtensionContext")
     return ext
+
+
+def _contained_keys(name: str, spec: UserSkillSpec) -> None:
+    """Every file key names a file inside the skill's own mount directory. A saved skill is written
+    into the workspace again by each later `load_skill`, so a key climbing out of `.skills/<name>/`
+    is a durable write primitive over the agent's other files — refused here, where the key is
+    persisted, as well as at the mount that would carry it out."""
+    root = skill_mount_root(name)
+    for path in spec.files:
+        try:
+            contained_relative(path, root)
+        except ContainmentError as error:
+            raise ValueError(f"skill file {path!r} is not a path inside the skill") from error
 
 
 def _text(path: str, content: bytes) -> str:
@@ -215,6 +228,7 @@ class SkillObjects:
         ext = _require_ext(ctx.ext)
         if len(spec.files) > MAX_SKILL_FILES:
             raise ValueError(f"a skill holds at most {MAX_SKILL_FILES} files")
+        _contained_keys(name, spec)
         resolved = await self._resolve(ctx, name, spec)
         total = sum(len(content) for content in resolved.values())
         if total > MAX_SKILL_TOTAL_BYTES:

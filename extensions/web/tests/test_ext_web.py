@@ -3789,7 +3789,8 @@ async def test_a_client_chosen_filename_is_never_a_path(
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     """The content-disposition leaf is untrusted: path components drop, everything outside the
-    safe charset collapses, and an absurd length caps — the note names exactly what landed."""
+    safe charset collapses, and an absurd length caps on the stem so the suffix a read routes on
+    survives it — the note names exactly what landed."""
     client, workspace_id, agent_id = web
     _config, _hub, _blob, sandboxes = dbos_runtime
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
@@ -3814,10 +3815,10 @@ async def test_a_client_chosen_filename_is_never_a_path(
             )
         ).one()
     assert "web-inbox/we-ird-name--.txt" in row.inbound
-    assert row.inbound.endswith("web-inbox/" + "x" * 80 + "]")
+    assert row.inbound.endswith("web-inbox/" + "x" * 76 + ".txt]")
     inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
     assert (inbox / "we-ird-name--.txt").read_bytes() == b"safe"
-    assert (inbox / ("x" * 80)).read_bytes() == b"capped"
+    assert (inbox / ("x" * 76 + ".txt")).read_bytes() == b"capped"
 
 
 async def test_a_files_note_cannot_blow_the_inbound_bound(

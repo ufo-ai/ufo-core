@@ -19,6 +19,7 @@ EXT_SHIPPED_MODULE = Path("extensions/exa/ufo_ext_exa.py")
 EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
 CORE_MIGRATIONS = Path("core/src/ufo/schema/migrations/versions")
 EXT_MIGRATIONS = Path("extensions/probe/migrations")
+INGRESS_FILE = Path("core/src/ufo/sandbox/ingress.py")
 
 
 def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
@@ -396,3 +397,208 @@ def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -
     assert failures == [
         "extensions/web/frontend/src/views/smuggled.tsx: only the entry module imports the theme"
     ]
+
+
+def test_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed() -> None:
+    """The rule issue #1112 is about: a site that builds a host path from agent, model, connector or
+    provider input and then opens it. Validating the name is not validating the path — the open is
+    where a planted symlink wins — so the write has to go through the shared guard."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def stage(name, root):\n    target = root / name\n    target.write_bytes(b'body')\n"
+        )
+    }
+    failures = gates._ingress_containment_failures(trees)
+    assert len(failures) == 1
+    assert ".write_bytes" in failures[0] and "stage" in failures[0]
+    assert "(target)" in failures[0], "the failure names the value the call opened"
+
+
+def test_containment_gate_passes_a_site_that_goes_through_the_guard() -> None:
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def stage(name, root):\n"
+            "    with contained_file(name, root) as target:\n"
+            "        target.replace_bytes(b'body', 0o644)\n"
+        )
+    }
+    assert gates._ingress_containment_failures(trees) == []
+
+
+def test_containment_gate_leaves_a_path_the_module_fixed_itself_alone() -> None:
+    """A path built from the package's own constants is not ingress, and a gate that fired on it
+    would be turned off within a week."""
+    trees = {
+        INGRESS_FILE: ast.parse("def read_template(kind):\n    return (TEMPLATES).read_text()\n")
+    }
+    assert gates._ingress_containment_failures(trees) == []
+
+
+def test_containment_gate_exempts_the_guard_itself_and_the_test_scaffold() -> None:
+    """The guard is the implementation every other file is held to, and a test names its own
+    roots."""
+    source = "def stage(name, root):\n    (root / name).write_bytes(b'body')\n"
+    trees = {gates.CONTAINMENT_MODULE: ast.parse(source), EXT_TEST: ast.parse(source)}
+    assert gates._ingress_containment_failures(trees) == []
+
+
+def test_containment_gate_honours_the_deferred_row_allowlist() -> None:
+    """A row #1112 deliberately left unrouted is named with its reason, which is the review the gate
+    exists to force — and every name in the allowlist still points at a site in the tree."""
+    trees = {
+        INGRESS_FILE: ast.parse("def stage(name, root):\n    (root / name).write_bytes(b'x')\n")
+    }
+    gates.DEFERRED_INGRESS[(INGRESS_FILE, "stage")] = "deferred for this test"
+    try:
+        assert gates._ingress_containment_failures(trees) == []
+    finally:
+        del gates.DEFERRED_INGRESS[(INGRESS_FILE, "stage")]
+    for rel, site in gates.DEFERRED_INGRESS:
+        assert (gates.ROOT / rel).is_file(), f"{rel} is allowlisted but not in the tree"
+        assert site in (gates.ROOT / rel).read_text(), f"{rel} no longer defines {site}"
+
+
+def test_containment_gate_reads_the_extensionless_in_sandbox_scripts() -> None:
+    """`sbxfs` runs inside the sandbox on paths the model named — the highest-risk ingress in the
+    tree — and carries no `.py` suffix, so a collection that globbed `*.py` could not see it and an
+    unguarded op there landed green."""
+    collected = {path.name for path in gates._sandbox_scripts()}
+    assert {"sbx", "sbxfs"} <= collected
+    assert all(not path.suffix for path in gates._sandbox_scripts())
+
+    script = gates.SANDBOX_IMAGE_DIR / "sbxfs"
+    trees = {
+        script: ast.parse("def op_leak(params):\n    return Path(params['path']).read_text()\n")
+    }
+    failures = gates._ingress_containment_failures(trees)
+    assert len(failures) == 1 and "op_leak" in failures[0]
+
+
+def test_containment_gate_does_not_let_one_guarded_call_launder_a_function() -> None:
+    """A name handed *to* a guard is not proved by it. In a handler shaped like the real ops,
+    marking every name mentioned in the guard call would prove `params` and pass every other
+    `params[...]` open in the same function."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def read(params):\n"
+            "    with contained_file(params['path'], params['workspace']) as target:\n"
+            "        target.lstat()\n"
+            "    return Path(params['other']).read_text()\n"
+        )
+    }
+    failures = gates._ingress_containment_failures(trees)
+    assert len(failures) == 1 and ".read_text" in failures[0]
+
+
+def test_containment_gate_proves_a_call_that_takes_the_guard_result_itself() -> None:
+    """What the guard returns may reach the filesystem, however it is spelled: bound to a name,
+    given straight to the call, or unpacked from a pair."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def walk(params, root):\n"
+            "    for base, _dirs, names in os.walk(contained_dir(params['path'], root)):\n"
+            "        yield base, names\n"
+            "\n"
+            "def enumerate_hits(params, root):\n"
+            "    start, pattern = contained_glob(params['pattern'], params['path'], root)\n"
+            "    return list(start.glob(pattern))\n"
+        )
+    }
+    assert gates._ingress_containment_failures(trees) == []
+
+
+def test_the_lexical_only_guard_is_not_in_the_guard_vocabulary() -> None:
+    """`workspace_path` resolves a container path this process cannot stat, so proving a name with
+    it and then opening that name is the gap the gate exists to find — it is allowlisted as a
+    deferred site, never counted as a guard."""
+    assert "workspace_path" not in gates.CONTAINMENT_GUARDS
+    assert (gates.CORE_SRC / "sandbox" / "session.py", "workspace_path") in gates.DEFERRED_INGRESS
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def stage(path):\n"
+            "    target = workspace_path(path)\n"
+            "    return Path(target).read_bytes()\n"
+        )
+    }
+    failures = gates._ingress_containment_failures(trees)
+    assert len(failures) == 1 and ".read_bytes" in failures[0]
+
+
+def test_the_lexical_tier_does_not_launder_the_open_that_follows_it() -> None:
+    """`contained_leaf(name)` joined under a module constant and written is CVE-2026-56692's own
+    shape: the leaf says nothing about the root, so a link at the root or at any component still
+    steers the bytes. Every lexical helper returns a string its caller must still open through a
+    canonical guard, so none of them may credit a name here."""
+    assert not gates.LEXICAL_GUARDS & gates.CONTAINMENT_GUARDS
+    sites = {
+        "contained_leaf": "safe = contained_leaf(name, FALLBACK)\n    (ROOT / safe).write_bytes(b)",
+        "contained_relative": (
+            "safe = contained_relative(name, ROOT)\n    Path(safe).write_bytes(b)"
+        ),
+        "inbox_name": "safe = inbox_name(name, set())\n    (ROOT / safe).write_bytes(b)",
+        "contained_pattern": "safe = contained_pattern(name, ROOT)\n    list(ROOT.glob(safe))",
+    }
+    assert sites.keys() == set(gates.LEXICAL_GUARDS)
+
+    for guard, body in sites.items():
+        trees = {INGRESS_FILE: ast.parse(f"def stage(name, b):\n    {body}\n")}
+
+        failures = gates._ingress_containment_failures(trees)
+
+        assert len(failures) == 1, guard
+        assert "safe" in failures[0] and "lexical tier" in failures[0], guard
+
+
+def test_containment_gate_follows_a_path_through_the_loop_that_hands_it_out() -> None:
+    """A staging site is shaped `for file in files:`, so a name the iteration hands out is as much
+    the caller's as the sequence it came from — a gate that lost the path at the loop would pass
+    every fetch-each-produced-file site in the tree."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def stage(files):\n"
+            "    for file in files:\n"
+            "        Path(file.name).write_bytes(file.body)\n"
+        )
+    }
+
+    failures = gates._ingress_containment_failures(trees)
+
+    assert len(failures) == 1 and "(file)" in failures[0]
+
+
+def test_containment_gate_flags_a_sandbox_program_that_checks_paths_itself() -> None:
+    """An in-sandbox program opens files on paths the model named, where a planted link needs no
+    race to win. The image bakes the guard beside sbxfs so the program can import it."""
+    trees = {INGRESS_FILE: ast.parse('READ_PROG = "import os\\nopen(sys.argv[1])\\n"\n')}
+    failures = gates._sandbox_program_failures(trees)
+    assert len(failures) == 1 and "READ_PROG" in failures[0]
+    guarded = {
+        INGRESS_FILE: ast.parse('READ_PROG = "from containment import contained_file\\nopen(p)"\n')
+    }
+    assert gates._sandbox_program_failures(guarded) == []
+
+
+def test_containment_gate_flags_a_seventh_hand_rolled_lexical_check() -> None:
+    """Six near-duplicate `..` checks is the census #1112 opened with, each a different subset of
+    the same rule. The lexical tier is published, so a fresh one is a finding, not a fix."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def safe(path):\n"
+            "    if '..' in PurePosixPath(path).parts:\n"
+            "        raise ValueError('escape')\n"
+            "    return path\n"
+        )
+    }
+    failures = gates._lexical_containment_failures(trees)
+    assert len(failures) == 1 and "'..' in" in failures[0]
+
+
+def test_containment_gate_ignores_a_membership_test_that_is_not_about_paths() -> None:
+    """`in` is the most common operator in the codebase; only the guard's own vocabulary is
+    fenced."""
+    trees = {
+        INGRESS_FILE: ast.parse(
+            "def kind(payload):\n    return 'value' in payload or payload in (None, '')\n"
+        )
+    }
+    assert gates._lexical_containment_failures(trees) == []

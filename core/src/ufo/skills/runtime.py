@@ -26,6 +26,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from ufo.o11y import log
+from ufo.sandbox.containment import contained_relative
 from ufo.sandbox.session import WORKSPACE_DIR, SandboxSession
 
 SKILL_MD = "SKILL.md"
@@ -38,6 +39,12 @@ SKILL_HEADER_PREFIX = "# Skill: "
 DEPENDENCY_SUFFIX = " (dependency of {puller})"
 SKILL_BLOCK_SEPARATOR = "\n\n---\n\n"
 ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
+
+
+def skill_mount_root(name: str) -> str:
+    """Where a skill's files live in the workspace — the root every one of its file keys is confined
+    at, both where a skill is saved and where a later load mounts it."""
+    return f"{SKILLS_MOUNT_DIR}/{name}"
 
 
 @dataclass(frozen=True)
@@ -60,7 +67,7 @@ class RuntimeSkill:
         return {SKILL_MD: self.raw_skill_md.encode(), **dict(self.files)}
 
     def mount_root(self) -> str:
-        return f"{SKILLS_MOUNT_DIR}/{self.name}"
+        return skill_mount_root(self.name)
 
 
 @dataclass(frozen=True)
@@ -338,6 +345,11 @@ def loaded_context(
 
 
 async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None:
+    """Write a skill's files under its own mount root. A file key is authored input — a member's
+    saved skill carries whatever keys it was applied with — so each is confined at `.skills/<name>/`
+    and not merely at the workspace: a key climbing out of the mount is still inside the
+    workspace, which would make a saved skill a durable write primitive over the agent's own
+    files, rewritten on every load in every conversation of that agent."""
     root = skill.mount_root()
     for path, content in skill.mounted_files().items():
-        await sandbox.write_file(f"{root}/{path}", content)
+        await sandbox.write_file(contained_relative(path, root), content)

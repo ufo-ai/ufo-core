@@ -45,6 +45,9 @@ UFO_DIR = "/etc/ufo"
 # The in-sandbox binaries live in core beside the local carrier, which installs them onto its
 # command PATH; the image bakes the same files, so a script behaves identically under every carrier.
 IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox" / "image"
+# The path-containment guard the serve process imports as `ufo.sandbox.containment`, baked beside
+# the scripts so the in-sandbox file ops confine paths with the same module, not a second copy.
+MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox"
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
 # RAM every E2B sandbox built from this template gets. E2B fixes memory at build time — the SDK's
@@ -142,7 +145,10 @@ NPM_PACKAGES = (
 # carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
 # every exec's envs, since e2b commands do not inherit the template ENV.
 # The scripts baked into the image, with a version bumped on any content change so the digest moves.
-SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 2))
+SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 4))
+# Importable modules baked beside them: a script's own directory is `sys.path[0]`, so a sibling here
+# is what `sbxfs` imports, under every carrier, with no installed package inside the sandbox.
+SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)
 SANDBOX_TEMPLATE_READY_COMMAND = """
 set -ex
 command -v python3 >/dev/null
@@ -185,6 +191,14 @@ def build_definition_digest() -> str:
             }
             for name, version in SANDBOX_SCRIPTS
         ],
+        "modules": [
+            {
+                "name": name,
+                "version": version,
+                "sha256": hashlib.sha256((MODULE_SOURCE_DIR / name).read_bytes()).hexdigest(),
+            }
+            for name, version in SANDBOX_MODULES
+        ],
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -215,6 +229,12 @@ def apply_layers(builder: object) -> object:
         builder.copy((IMAGE_SOURCE_DIR / name).relative_to(ROOT), target, mode=0o755)
         targets.append(target)
     builder.run_cmd(f"chmod 0755 {' '.join(targets)}")
+    modules = []
+    for name, _ in SANDBOX_MODULES:
+        target = f"{SBX_BIN_DIR}/{name}"
+        builder.copy((MODULE_SOURCE_DIR / name).relative_to(ROOT), target, mode=0o644)
+        modules.append(target)
+    builder.run_cmd(f"chmod 0644 {' '.join(modules)}")
     builder.set_user(RUNTIME_USER)
     return builder.set_start_cmd(START_COMMAND, SANDBOX_TEMPLATE_READY_COMMAND)
 

@@ -17,11 +17,13 @@ from botocore.exceptions import ClientError
 
 from ufo.config import BlobConfig
 from ufo.o11y import log
+from ufo.sandbox.containment import PathNotFound, configured_root
 
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024
 S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
 BLOB_LIST_MAX_KEYS = 10_000
+BLOB_ROOT_SETTING = "blob.root"
 S3_VIRTUAL_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
 S3_PATH_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
@@ -132,7 +134,7 @@ class FilesystemBlobStore:
         return await asyncio.to_thread(self._walk, prefix)
 
     def _walk(self, prefix: str) -> tuple[BlobEntry, ...]:
-        root = self.root.resolve()
+        root = self._contained_root()
         base_dir = self._resolve(prefix) if prefix.endswith("/") else self._resolve(prefix).parent
         if not base_dir.is_dir():
             return ()
@@ -155,11 +157,26 @@ class FilesystemBlobStore:
         return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
     def _resolve(self, key: str) -> Path:
-        root = self.root.resolve()
+        root = self._contained_root()
         path = (root / key).resolve()
         if path == root or not path.is_relative_to(root):
             raise ValueError(f"blob key escapes store root: {key!r}")
         return path
+
+    def _contained_root(self) -> Path:
+        """The store root, canonicalized once per operation, with every key contained against the
+        canonical result. It is refused only when it names something other than a directory, and the
+        message carries `BLOB_ROOT_SETTING` so an operator knows which key to fix.
+
+        A symlinked root is followed here, unlike a workspace root the agent can reach: this one
+        arrives as deploy config, where `/var/lib/ufo/blobs -> /mnt/data/blobs` is an ordinary
+        compose or k8s layout, and refusing it would take transcripts, compaction records and every
+        shared artifact down on a deploy doing nothing unusual. A root nothing has written yet holds
+        nothing to canonicalize, and the first write makes it."""
+        try:
+            return configured_root(self.root, BLOB_ROOT_SETTING)
+        except PathNotFound:
+            return self.root.resolve()
 
 
 def _is_missing_key(error: ClientError) -> bool:

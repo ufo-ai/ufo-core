@@ -23,6 +23,7 @@ from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    WORKSPACE_DIR,
     ExecResult,
     ProxyEndpoint,
     SandboxSession,
@@ -31,7 +32,12 @@ from ufo.sandbox.session import (
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
 from ufo.subjects import member_subject
-from ufo.tools.builtins import BUILTIN_TOOLS, FILE_TOOL_RESULT_MAX_CHARS, _file_tool_result
+from ufo.tools.builtins import (
+    BUILTIN_TOOLS,
+    FILE_TOOL_RESULT_MAX_CHARS,
+    SHARE_PREFLIGHT_PROG,
+    _file_tool_result,
+)
 from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
 from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
 
@@ -423,6 +429,70 @@ async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_pat
     with pytest.raises(RuntimeError, match="not configured"):
         await run("share_file", ctx, file_path="report.txt", user_description="sending the report")
     assert not (tmp_path / "artifacts").exists()
+
+
+async def _local_session(workspace: Path) -> SandboxSession:
+    carrier = LocalCarrier()
+    spec = SandboxSpec(
+        conversation_id=uuid4(),
+        image_ref="ufo-sandbox:latest",
+        workspace_host_path=str(workspace),
+        proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+        run_token="run-token",
+    )
+    return SandboxSession(carrier=carrier, handle=await carrier.create(spec))
+
+
+async def test_the_share_preflight_measures_the_workspace_file(tmp_path: Path) -> None:
+    """What the upload is bound to comes off the guard's own fd: the size and digest of the file the
+    descent proved, streamed rather than held whole."""
+    workspace = tmp_path / "workspace"
+    session = await _local_session(workspace)
+    payload = b"report bytes\n"
+    (workspace / "report.txt").write_bytes(payload)
+
+    preflight = await session.python(SHARE_PREFLIGHT_PROG, "/workspace/report.txt", WORKSPACE_DIR)
+
+    assert preflight.exit_code == 0, preflight.stderr
+    assert json.loads(preflight.stdout) == {
+        "size": len(payload),
+        "digest": f"sha256:{hashlib.sha256(payload).hexdigest()}",
+        "is_text": True,
+    }
+
+
+async def test_the_share_preflight_refuses_a_traversal_path(tmp_path: Path) -> None:
+    """The preflight runs the checks itself rather than trusting the scoping upstream of it: a share
+    is the one path a produced file leaves the sandbox on, and NanoClaw's second escape is the
+    lesson that an ingress resolving its own path needs its own guard."""
+    workspace = tmp_path / "workspace"
+    session = await _local_session(workspace)
+    (workspace / "sub").mkdir()
+    (tmp_path / "outside.txt").write_bytes(b"host secret")
+
+    preflight = await session.python(
+        SHARE_PREFLIGHT_PROG, "/workspace/sub/../../outside.txt", WORKSPACE_DIR
+    )
+
+    assert preflight.exit_code != 0
+    assert "escapes" in preflight.stderr
+    assert preflight.stdout == ""
+
+
+async def test_the_share_preflight_refuses_a_planted_symlink(tmp_path: Path) -> None:
+    """A share of a link the agent planted would copy the host file's bytes into the blob store and
+    mint a member download link for them — CVE-2026-56692 with one extra hop."""
+    workspace = tmp_path / "workspace"
+    session = await _local_session(workspace)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    (workspace / "report.txt").symlink_to(outside)
+
+    preflight = await session.python(SHARE_PREFLIGHT_PROG, "/workspace/report.txt", WORKSPACE_DIR)
+
+    assert preflight.exit_code != 0
+    assert "not a regular file" in preflight.stderr
+    assert preflight.stdout == ""
 
 
 async def test_ask_user_returns_the_structured_question_and_the_end_turn_directive(

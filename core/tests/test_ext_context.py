@@ -676,6 +676,71 @@ async def test_conversation_files_refuse_another_workspaces_conversation(
     assert not (root / str(foreign) / "note.txt").exists()
 
 
+async def test_conversation_files_write_replaces_a_planted_symlink(
+    db: None, tmp_path: Path
+) -> None:
+    """An off-turn write lands in a directory the agent writes to on its turns, so the name it is
+    given may already be a link the agent planted. The copy-in replaces the link instead of
+    delivering through it: the host file it pointed at is untouched, and the attachment still
+    arrives — refusing would hand the agent a way to deny that name for good."""
+    workspace_id = await _workspace()
+    root = tmp_path / "workspaces"
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        files = _files(_sandboxes(root))
+        await files.write(conversation_id, "inbox/first.txt", b"{}\n")
+        planted = root / str(conversation_id) / "inbox" / "planted.txt"
+        planted.symlink_to(outside)
+
+        await files.write(conversation_id, "inbox/planted.txt", b"delivered")
+
+    assert outside.read_bytes() == b"host secret"
+    assert not planted.is_symlink()
+    assert planted.read_bytes() == b"delivered"
+
+
+async def test_conversation_files_prune_refuses_a_symlinked_prefix(
+    db: None, tmp_path: Path
+) -> None:
+    """Prune is the sharpest verb here — it deletes. A link planted at the prefix would aim the
+    deletion at whatever it points to, so the directory is proved to be a real one inside the
+    workspace before a single name is unlinked."""
+    workspace_id = await _workspace()
+    root = tmp_path / "workspaces"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for minute in range(3):
+        (outside / f"host-{minute}.txt").write_bytes(b"host file")
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        files = _files(_sandboxes(root))
+        await files.write(conversation_id, "keep/anchor.jsonl", b"{}\n")
+        (root / str(conversation_id) / "log").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(OSError, match="escapes"):
+            await files.prune(conversation_id, "log", keep=1)
+
+    assert len(list(outside.iterdir())) == 3
+
+
+@pytest.mark.parametrize("rel_prefix", ["../..", "log/../../..", "/etc"])
+async def test_conversation_files_prune_refuses_a_prefix_outside_the_workspace(
+    db: None, tmp_path: Path, rel_prefix: str
+) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        files = _files(_sandboxes(tmp_path / "workspaces"))
+        await files.write(conversation_id, "log/keep.jsonl", b"{}\n")
+
+        with pytest.raises((ValueError, OSError)):
+            await files.prune(conversation_id, rel_prefix, keep=0)
+
+    assert (tmp_path / "workspaces" / str(conversation_id) / "log/keep.jsonl").exists()
+
+
 async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Path) -> None:
     """An unattended writer is bounded: prune keeps the newest `keep` entries under the prefix and
     drops the rest, and never reaches a sibling directory."""

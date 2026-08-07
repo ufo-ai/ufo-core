@@ -39,8 +39,10 @@ from ufo.loop.queue import (
     _open_sandbox,
 )
 from ufo.loop.subagents import SubagentRegistry, Subagents
+from ufo.sandbox.containment import LocationEscape, NonDirectoryAncestor
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
+    WORKSPACE_ROOT_SETTING,
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
 )
@@ -192,6 +194,109 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
         (tmp_path / "workspaces" / str(conversation_id)).resolve()
     )
     assert await _stored_handle(conversation_id) == "local:local"
+
+
+async def test_open_sandbox_follows_a_symlinked_workspace_root(db: None, tmp_path: Path) -> None:
+    """`workspace_root` is deploy config, and a root pointing at the volume the workspaces live on
+    is an ordinary compose or k8s layout — so the link is followed once and canonicalized, and a
+    turn runs. Refusing it would be an outage of every turn and every browse on that layout.
+
+    What the canonical root buys is asserted here too: the carrier is handed the resolved path, so
+    nothing downstream resolves the link a second time."""
+    workspace_id, conversation_id = await _conversation()
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    (tmp_path / "workspaces").symlink_to(volume, target_is_directory=True)
+
+    with ws(workspace_id):
+        handle = await _open_sandbox(
+            _sandboxes(LocalCarrier(), "local", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            None,
+            (),
+        )
+
+    assert handle.workspace_host_path == str(volume / str(conversation_id))
+    assert (volume / str(conversation_id)).is_dir()
+    assert await _stored_handle(conversation_id) == "local:local"
+
+
+async def test_open_sandbox_refuses_a_workspace_root_that_is_not_a_directory(
+    db: None, tmp_path: Path
+) -> None:
+    """An operator who pointed the key at a file reads the key back in the message, and no sandbox
+    is opened on it."""
+    workspace_id, conversation_id = await _conversation()
+    (tmp_path / "workspaces").write_bytes(b"not a directory")
+
+    with ws(workspace_id), pytest.raises(NonDirectoryAncestor, match=WORKSPACE_ROOT_SETTING):
+        await _open_sandbox(
+            _sandboxes(LocalCarrier(), "local", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            None,
+            (),
+        )
+
+    assert await _stored_handle(conversation_id) is None
+
+
+async def test_open_sandbox_refuses_a_symlinked_conversation_directory(
+    db: None, tmp_path: Path
+) -> None:
+    """A link already holding the conversation's own name is the same escape one level down: the
+    directory is re-opened without following it, so the workspace is never pointed out of the
+    root."""
+    workspace_id, conversation_id = await _conversation()
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / str(conversation_id)).symlink_to(outside, target_is_directory=True)
+
+    with ws(workspace_id), pytest.raises(LocationEscape):
+        await _open_sandbox(
+            _sandboxes(LocalCarrier(), "local", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            None,
+            (),
+        )
+
+    assert list(outside.iterdir()) == []
+    assert await _stored_handle(conversation_id) is None
+
+
+async def test_open_sandbox_provisions_a_traversing_root_at_its_canonical_place(
+    db: None, tmp_path: Path
+) -> None:
+    """The carrier is handed the canonical directory, never the configured spelling of it: a
+    `workspace_root` carrying a `..` segment lands its conversation directories at the one place it
+    resolves to, so what a later check compares against and what holds the files are one path."""
+    workspace_id, conversation_id = await _conversation()
+    sandboxes = ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=PROXY,
+        workspace_root=tmp_path / "roots" / ".." / "workspaces",
+    )
+
+    with ws(workspace_id):
+        handle = await _open_sandbox(
+            sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), None, {}, None, ()
+        )
+
+    assert handle.workspace_host_path == str(tmp_path / "workspaces" / str(conversation_id))
+    assert (tmp_path / "workspaces" / str(conversation_id)).is_dir()
 
 
 async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(

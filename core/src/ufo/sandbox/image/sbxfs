@@ -7,7 +7,10 @@ pulls whole files across the boundary to loop over them. Invoked as:
     sbxfs <op> '<json-params>'
 
 ops: read, write, edit, grep, glob. Output is a single JSON object on stdout — the
-result on success, or {"error": "..."} (exit 1) on a handled failure. grep shells out
+result on success, or {"error": "..."} (exit 1) on a handled failure. Every op that takes a
+caller-supplied path runs it through `containment`, the shared guard baked beside this script, so a
+read, a write and an enumeration are confined by one set of checks instead of each their own; the
+workspace root each op is confined to arrives as the `workspace` param. grep shells out
 to `rg --json` when ripgrep is on PATH and falls back to a stdlib walk with identical
 semantics otherwise; a .pdf read shells out to poppler-utils (pdfinfo/pdftotext/pdftoppm)
 to return extracted text plus page images, degrading to text-only when poppler is absent;
@@ -27,13 +30,24 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from uuid import uuid4
+
+from containment import (
+    ContainedFile,
+    ContainmentError,
+    contained_dir,
+    contained_file,
+    contained_glob,
+    contained_pattern,
+    contained_regular,
+    contained_root,
+    is_contained_regular,
+    rooted,
+)
 
 READ_DEFAULT_LIMIT = 2000
 LINE_CHAR_CAP = 2000
@@ -244,22 +258,43 @@ class FsError(RuntimeError):
     pass
 
 
+RECOVERABLE_ERRORS = (
+    FsError,
+    ContainmentError,
+    KeyError,
+    ValueError,
+    FileNotFoundError,
+    IsADirectoryError,
+    NotADirectoryError,
+    PermissionError,
+)
+"""What an op may answer the model as `{"error": ...}` — a refusal or a condition the model can act
+on by naming a different file. Every other `OSError` is the sandbox failing, not the request: a full
+disk, an I/O fault, a descriptor limit. Those leave as an unhandled traceback and a non-JSON stdout,
+because a model told `ENOSPC` is a recoverable tool error simply writes the file again."""
+
+
 def _has_binary_extension(path: Path) -> bool:
     return path.suffix.lower() in BINARY_EXTENSIONS
 
 
-def _is_binary(path: Path) -> bool:
+def _contained_text(path: Path, root: Path) -> str | None:
+    """One enumerated file's text, read off a pinned parent fd, or None when it is binary or the
+    guard does not vouch for it — what a scan reads its hits through. The bytes decide binary-ness,
+    sniffed on the bytes already read rather than through a second open of the name."""
     if _has_binary_extension(path):
-        return True
+        return None
     try:
-        with path.open("rb") as handle:
-            return b"\x00" in handle.read(BINARY_SNIFF_BYTES)
-    except OSError:
-        return True
-
-
-def _read_text(path: Path) -> str:
-    return path.read_text("utf-8", errors="replace")
+        with contained_file(path, root) as target:
+            existing = target.lstat()
+            if existing is None:
+                return None
+            data = target.read_bytes(existing.st_size)
+    except ContainmentError:
+        return None
+    if b"\x00" in data[:BINARY_SNIFF_BYTES]:
+        return None
+    return data.decode("utf-8", errors="replace")
 
 
 def _split_lines(text: str) -> list[str]:
@@ -276,18 +311,18 @@ def _number_lines(lines: list[str], start: int, width: int) -> list[str]:
     return [f"{number:>{width}}\t{_cap_line(line)}" for number, line in enumerate(lines, start)]
 
 
-def _read_image(path: Path) -> dict:
+def _read_image(target: ContainedFile, size: int) -> dict:
     """The extension routes here; the bytes decide the media type. A model provider validates
     image bytes against the declared type, so a mislabeled file (PDF bytes in a `.png`, a JPEG
     saved as `.png`) must surface as a recoverable error or the corrected type here — shipping
     the extension's claim fails the whole model request downstream."""
-    size = path.stat().st_size
+    path = target.path
     if size > IMAGE_MAX_BYTES:
         raise FsError(
             f"{path} is {size} bytes; over the {IMAGE_MAX_BYTES}-byte image read cap. "
             "Resize it (e.g. with a bash tool) before reading."
         )
-    data = path.read_bytes()
+    data = target.read_bytes(size)
     media_type = _image_media_type(data)
     if media_type is None:
         raise FsError(
@@ -441,35 +476,42 @@ def _read_pptx(path: Path, offset: int, limit: int) -> dict:
 
 
 def op_read(params: dict) -> dict:
-    path = Path(params["path"])
+    """A read is an ingress like any other: the path is confined before a byte is touched, and the
+    bytes come off the pinned parent fd rather than a re-opened name — a link planted at the target,
+    or at any directory on the way to it, is refused instead of followed. The converters that only
+    take a filename (poppler, soffice) get the canonical path the descent proved."""
     offset = max(int(params.get("offset") or 1), 1)
     limit = int(params.get("limit") or READ_DEFAULT_LIMIT)
-    if not path.exists():
-        raise FsError(f"{path} not found")
-    if path.is_dir():
-        raise FsError(f"{path} is a directory")
-    suffix = path.suffix.lower()
-    if suffix in IMAGE_MEDIA_TYPES:
-        return _read_image(path)
-    if suffix == ".pdf":
-        return _read_pdf(path, offset, limit)
-    if suffix == ".pptx":
-        return _read_pptx(path, offset, limit)
-    if path.stat().st_size == 0:
-        return {
-            "path": str(path),
-            "content": "",
-            "total_lines": 0,
-            "start_line": offset,
-            "lines_returned": 0,
-            "remaining_lines": 0,
-            "next_offset": None,
-            "truncated": False,
-            "is_empty": True,
-        }
-    if _is_binary(path):
-        raise FsError(f"{path} is a binary file")
-    text = _read_text(path)
+    with contained_file(params["path"], params["workspace"]) as target:
+        path = target.path
+        existing = target.lstat()
+        if existing is None:
+            raise FsError(f"{path} not found")
+        suffix = path.suffix.lower()
+        if suffix in IMAGE_MEDIA_TYPES:
+            return _read_image(target, existing.st_size)
+        if suffix == ".pdf":
+            return _read_pdf(path, offset, limit)
+        if suffix == ".pptx":
+            return _read_pptx(path, offset, limit)
+        if existing.st_size == 0:
+            return {
+                "path": str(path),
+                "content": "",
+                "total_lines": 0,
+                "start_line": offset,
+                "lines_returned": 0,
+                "remaining_lines": 0,
+                "next_offset": None,
+                "truncated": False,
+                "is_empty": True,
+            }
+        if _has_binary_extension(path):
+            raise FsError(f"{path} is a binary file")
+        data = target.read_bytes(existing.st_size)
+        if b"\x00" in data[:BINARY_SNIFF_BYTES]:
+            raise FsError(f"{path} is a binary file")
+        text = data.decode("utf-8", errors="replace")
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -494,61 +536,6 @@ def op_read(params: dict) -> dict:
     }
 
 
-def _inside(path: Path, workspace: Path) -> bool:
-    return path == workspace or workspace in path.parents
-
-
-@contextmanager
-def _file_target(params: dict, create_parent: bool = False):
-    workspace = Path(params["workspace"]).resolve()
-    path = Path(params["path"])
-    if path.name in {"", ".", ".."}:
-        raise FsError(f"{path} is not a file path")
-    parent = path.parent.resolve()
-    if not _inside(parent, workspace):
-        raise FsError(f"{path} escapes {workspace}")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    try:
-        descriptor = os.open(workspace, flags)
-    except OSError as error:
-        raise FsError(str(error)) from error
-    try:
-        for part in parent.relative_to(workspace).parts:
-            if create_parent:
-                try:
-                    os.mkdir(part, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-            try:
-                child = os.open(part, flags, dir_fd=descriptor)
-            except FileNotFoundError as error:
-                raise FsError(f"{path} not found") from error
-            except OSError as error:
-                raise FsError(str(error)) from error
-            os.close(descriptor)
-            descriptor = child
-        yield parent / path.name, workspace, descriptor
-    finally:
-        os.close(descriptor)
-
-
-def _regular_text(parent: int, path: Path, limit: int) -> str:
-    descriptor = os.open(
-        path.name,
-        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        dir_fd=parent,
-    )
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError(f"{path} is not a regular file")
-        with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
-            descriptor = -1
-            return handle.read(limit)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-
-
 @contextmanager
 def _file_lock(path: Path):
     root = Path(tempfile.gettempdir()) / "ufo-sbxfs-locks"
@@ -561,39 +548,6 @@ def _file_lock(path: Path):
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
-
-
-def _existing_regular(parent: int, path: Path) -> os.stat_result | None:
-    try:
-        existing = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(existing.st_mode):
-        raise FsError(f"{path} is not a regular file")
-    return existing
-
-
-def _replace_text(parent: int, path: Path, text: str, mode: int) -> None:
-    staged = f".ufo-edit-{uuid4().hex}"
-    descriptor = os.open(
-        staged,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=parent,
-    )
-    try:
-        os.fchmod(descriptor, mode & 0o777)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            descriptor = -1
-            handle.write(text)
-        os.replace(staged, path.name, src_dir_fd=parent, dst_dir_fd=parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            os.unlink(staged, dir_fd=parent)
-        except FileNotFoundError:
-            pass
 
 
 def _diff_lines(text: str | None) -> tuple[list[str], bool]:
@@ -649,52 +603,33 @@ def _decode_text(encoded: object) -> str:
 
 
 def op_write(params: dict) -> dict:
-    with _file_target(params, create_parent=True) as (path, workspace, parent):
-        with _file_target({"path": params["staged_path"], "workspace": params["workspace"]}) as (
-            staged,
-            staged_workspace,
-            staged_parent,
-        ):
-            if staged_workspace != workspace:
-                raise FsError("staged file is outside the workspace")
-            if staged == path:
+    with contained_file(params["path"], params["workspace"], create_parent=True) as target:
+        with contained_file(params["staged_path"], params["workspace"]) as staged:
+            if staged.path == target.path:
                 raise FsError("staged file must differ from its target")
             try:
-                with _file_lock(path):
-                    existing = _existing_regular(parent, path)
+                with _file_lock(target.path):
+                    existing = target.lstat()
                     if existing is not None and params.get("allow_existing") is not True:
-                        raise FsError(f"file {path} must be read before it is written")
-                    if _existing_regular(staged_parent, staged) is None:
-                        raise FsError(f"{staged} not found")
+                        raise FsError(f"file {target.path} must be read before it is written")
+                    if staged.lstat() is None:
+                        raise FsError(f"{staged.path} not found")
                     before = (
                         None
                         if existing is None
-                        else _regular_text(parent, path, FILE_CHANGE_INPUT_MAX_CHARS + 1)
+                        else target.read_text(FILE_CHANGE_INPUT_MAX_CHARS + 1)
                     )
-                    after = _regular_text(staged_parent, staged, FILE_CHANGE_INPUT_MAX_CHARS + 1)
+                    after = staged.read_text(FILE_CHANGE_INPUT_MAX_CHARS + 1)
                     change = _file_change(before, after)
                     if existing is not None:
-                        os.chmod(
-                            staged.name,
-                            existing.st_mode & 0o777,
-                            dir_fd=staged_parent,
-                            follow_symlinks=False,
-                        )
-                    os.replace(
-                        staged.name,
-                        path.name,
-                        src_dir_fd=staged_parent,
-                        dst_dir_fd=parent,
-                    )
+                        staged.chmod(existing.st_mode)
+                    target.replace_with(staged)
                     return {
                         "created": existing is None,
                         "change": change,
                     }
             finally:
-                try:
-                    os.unlink(staged.name, dir_fd=staged_parent)
-                except FileNotFoundError:
-                    pass
+                staged.unlink()
 
 
 def _edit_list(params: dict) -> list[dict]:
@@ -742,13 +677,14 @@ def _edit_snippet(text: str, marker: str) -> str:
 
 
 def op_edit(params: dict) -> dict:
-    with _file_target(params) as (path, _workspace, parent):
+    with contained_file(params["path"], params["workspace"]) as target:
+        path = target.path
         with _file_lock(path):
-            existing = _existing_regular(parent, path)
+            existing = target.lstat()
             if existing is None:
                 raise FsError(f"{path} not found")
             edits = _edit_list(params)
-            before = _regular_text(parent, path, existing.st_size + 1)
+            before = target.read_text(existing.st_size + 1)
             text = before
             total = 0
             for edit in edits:
@@ -761,12 +697,14 @@ def op_edit(params: dict) -> dict:
                 "snippet": _edit_snippet(text, edits[0]["new_string"])[:EDIT_SNIPPET_MAX_CHARS],
                 "change": _file_change(before, text),
             }
-            _replace_text(parent, path, text, existing.st_mode)
+            target.replace_text(text, existing.st_mode)
             return result
 
 
-def _walk(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
+def _walk(path: Path, root: Path):
+    """Every file under `path`, which is confined here rather than trusted from the caller: the
+    directory an enumeration starts from is an ingress of its own."""
+    for dirpath, dirnames, filenames in os.walk(contained_dir(path, root)):
         dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
         for name in sorted(filenames):
             yield Path(dirpath) / name
@@ -790,8 +728,15 @@ TYPE_EXTENSIONS: dict[str, frozenset[str]] = {
 }
 
 
-def _grep_candidates(root: Path, glob: str | None, type_name: str | None) -> list[Path]:
-    files = [root] if root.is_file() else list(_walk(root))
+def _grep_candidates(
+    start: Path, root: Path, glob: str | None, type_name: str | None
+) -> list[Path]:
+    """The files a scan may read: everything under `start` that is a regular file inside `root` no
+    symlink was crossed to reach. `os.walk` does not descend into a symlinked directory but does
+    hand back symlinked files, and a scan that read one would return a host file's lines through a
+    link the agent planted — the exact disclosure the guard exists to refuse."""
+    walked = [start] if start.is_file() else list(_walk(start, root))
+    files = [path for path in walked if is_contained_regular(path, root)]
     if glob:
         return [
             path
@@ -817,7 +762,9 @@ def _grep_context(params: dict) -> tuple[int, int]:
     return before, after
 
 
-def _rg_argv(params: dict, before: int, after: int) -> list[str] | None:
+def _rg_argv(
+    params: dict, start: Path, glob: str | None, before: int, after: int
+) -> list[str] | None:
     rg = shutil.which("rg")
     if rg is None:
         return None
@@ -830,13 +777,12 @@ def _rg_argv(params: dict, before: int, after: int) -> list[str] | None:
         argv += ["-B", str(before)]
     if after:
         argv += ["-A", str(after)]
-    glob = params.get("glob")
     if glob:
         argv += ["--glob", glob]
     type_name = params.get("type")
     if type_name:
         argv += ["-t", str(type_name)]
-    argv += ["--", params["pattern"], str(Path(params.get("path") or "."))]
+    argv += ["--", params["pattern"], str(start)]
     return argv
 
 
@@ -854,6 +800,19 @@ def _rg_run(argv: list[str]) -> list[dict]:
     return events
 
 
+def _rg_contained(events: list[dict], root: Path) -> list[dict]:
+    """The events about files the guard vouches for. Ripgrep skips a symlink it meets while walking
+    by default, which is a third-party default rather than a check of ours — the same filter the
+    stdlib walk's hits pass is applied to its results, so the two branches refuse the same files."""
+    kept = []
+    for event in events:
+        data = event.get("data")
+        raw = data.get("path") if isinstance(data, dict) else None
+        if raw is None or is_contained_regular(Path(_rg_text(raw)), root):
+            kept.append(event)
+    return kept
+
+
 def _rg_text(field: object) -> str:
     if isinstance(field, dict):
         text = field.get("text")
@@ -863,11 +822,20 @@ def _rg_text(field: object) -> str:
     return field if isinstance(field, str) else ""
 
 
-def _grep_rg(params: dict, mode: str, head: int, before: int, after: int) -> dict:
-    argv = _rg_argv(params, before, after)
+def _grep_rg(
+    params: dict,
+    start: Path,
+    root: Path,
+    glob: str | None,
+    mode: str,
+    head: int,
+    before: int,
+    after: int,
+) -> dict:
+    argv = _rg_argv(params, start, glob, before, after)
     if argv is None:
         raise FsError("rg unavailable")
-    events = _rg_run(argv)
+    events = _rg_contained(_rg_run(argv), root)
 
     if mode == "files_with_matches":
         files: list[str] = []
@@ -927,7 +895,16 @@ def _rg_content(events: list[dict], head: int, before: int, after: int) -> dict:
     return {"matches": matches, "count": len(matches), "truncated": truncated}
 
 
-def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) -> dict:
+def _grep_stdlib(
+    params: dict,
+    start: Path,
+    root: Path,
+    glob: str | None,
+    mode: str,
+    head: int,
+    before: int,
+    after: int,
+) -> dict:
     flags = re.IGNORECASE if params.get("ignore_case") else 0
     if params.get("multiline"):
         flags |= re.DOTALL | re.MULTILINE
@@ -935,18 +912,15 @@ def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) ->
         regex = re.compile(params["pattern"], flags)
     except re.error as error:
         raise FsError(f"invalid regex: {error}") from error
-    root = Path(params.get("path") or ".")
-    if not root.exists():
-        raise FsError(f"{root} not found")
-    files = _grep_candidates(root, params.get("glob"), params.get("type"))
+    files = _grep_candidates(start, root, glob, params.get("type"))
     multiline = bool(params.get("multiline"))
 
     if mode == "files_with_matches":
         matched: list[str] = []
         for path in files:
-            if _is_binary(path):
+            text = _contained_text(path, root)
+            if text is None:
                 continue
-            text = _read_text(path)
             hit = (
                 regex.search(text)
                 if multiline
@@ -962,9 +936,9 @@ def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) ->
         counts: list[dict] = []
         total = 0
         for path in files:
-            if _is_binary(path):
+            text = _contained_text(path, root)
+            if text is None:
                 continue
-            text = _read_text(path)
             hit = (
                 len(regex.findall(text))
                 if multiline
@@ -977,9 +951,10 @@ def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) ->
 
     matches: list[dict] = []
     for path in files:
-        if _is_binary(path):
+        text = _contained_text(path, root)
+        if text is None:
             continue
-        lines = _read_text(path).split("\n")
+        lines = text.split("\n")
         for index, line in enumerate(lines):
             if not regex.search(line):
                 continue
@@ -1006,27 +981,41 @@ def _grep_stdlib(params: dict, mode: str, head: int, before: int, after: int) ->
 
 
 def op_grep(params: dict) -> dict:
+    """A scan is two ingresses, not one: the directory it starts from and every file it hands back.
+    Both go through the guard — the start directory by descent, each hit by the enumeration filter
+    and a read off a pinned parent fd — and so does the `glob`, which selects paths of its own. What
+    ripgrep does with a link it meets while walking is its default, not our check, so its results are
+    filtered by the same rule the stdlib walk's are.
+
+    Whether `path` names one file or a directory to walk decides which guard it goes through, and
+    that question is asked before either of them runs. It is asked of the guard's own rooting, so a
+    relative name is read against the workspace and never against whatever the process holds as its
+    cwd — a probe rooted elsewhere answers for one path while the guard then runs on another."""
     mode = params.get("output_mode") or "files_with_matches"
     if mode not in {"content", "files_with_matches", "count"}:
         raise FsError(f"invalid output_mode: {mode}")
     head = int(params.get("head_limit") or GREP_DEFAULT_HEAD)
     before, after = _grep_context(params)
+    root = contained_root(params["workspace"])
+    raw = params.get("path") or root
+    named = rooted(raw, root)
+    start = contained_regular(raw, root) if named.is_file() else contained_dir(raw, root)
+    glob = params.get("glob")
+    pattern = None if glob is None else contained_pattern(str(glob), root)
     if shutil.which("rg") is not None:
-        return _grep_rg(params, mode, head, before, after)
-    return _grep_stdlib(params, mode, head, before, after)
+        return _grep_rg(params, start, root, pattern, mode, head, before, after)
+    return _grep_stdlib(params, start, root, pattern, mode, head, before, after)
 
 
 def op_glob(params: dict) -> dict:
-    pattern = params["pattern"]
-    root = Path(params.get("path") or ".")
-    if Path(pattern).is_absolute():
-        root = Path(Path(pattern).anchor)
-        pattern = str(Path(pattern).relative_to(root))
-        if pattern == ".":
-            raise FsError(f"pattern {params['pattern']!r} matches a directory root")
-    if not root.exists():
-        raise FsError(f"{root} not found")
-    hits = [path for path in root.glob(pattern) if path.is_file()]
+    """Scoping the directory the walk starts from does not scope the pattern: an absolute pattern
+    re-roots the walk and the scoped `path` is never consulted, so the guard answers both at once —
+    the pattern is confined to the workspace and re-roots there rather than at the filesystem anchor.
+    Hits are filtered the same way, since a non-recursive pattern can still name a path through a
+    symlinked directory."""
+    workspace = contained_root(params["workspace"])
+    root, pattern = contained_glob(params["pattern"], params.get("path"), workspace)
+    hits = [path for path in root.glob(pattern) if is_contained_regular(path, workspace)]
     hits.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
     truncated = len(hits) > GLOB_MAX_RESULTS
     capped = hits[:GLOB_MAX_RESULTS]
@@ -1065,8 +1054,12 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(params, dict):
             raise FsError("params must be a JSON object")
         result = OPS[argv[0]](params)
-    except (FsError, KeyError, ValueError) as error:
-        message = str(error) if isinstance(error, FsError) else f"{type(error).__name__}: {error}"
+    except RECOVERABLE_ERRORS as error:
+        message = (
+            str(error)
+            if isinstance(error, FsError | ContainmentError)
+            else f"{type(error).__name__}: {error}"
+        )
         sys.stdout.write(json.dumps({"error": message}))
         return 1
     sys.stdout.write(json.dumps(result))

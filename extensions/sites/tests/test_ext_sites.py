@@ -14,6 +14,7 @@ from ufo_ext_sites.objects import CONVERSATION_DIGEST_HEX, site_object_name
 from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
+    LOG_CLEAR_PROG,
     SITES_TOOL_NAMES,
     StartServerInput,
     WebsiteInput,
@@ -43,6 +44,8 @@ class FakeSandbox:
 
     scripted: dict[str, ExecResult] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
+    programs: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         self.commands.append(command)
@@ -50,6 +53,10 @@ class FakeSandbox:
             if needle in command:
                 return result
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        self.programs.append((program, args))
+        return self.claim
 
 
 async def _unavailable_spawn(profile: str, payload: dict, background: bool = False) -> SpawnResult:
@@ -309,6 +316,95 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
                 user_description=TOOL_NARRATION, command="python3 app.py", project_path="/workspace"
             ),
         )
+
+
+async def test_a_model_named_path_is_scoped_to_the_workspace(tmp_path: Path) -> None:
+    """These tools quote their path arguments into `cd` and `>` rather than opening them, and under
+    the local carrier those run on the host. So every path the model names is resolved under
+    /workspace first: a traversal is refused before a command is built, and nothing runs."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(ValueError, match="escapes"):
+        await website(
+            ctx,
+            WebsiteInput(
+                user_description=TOOL_NARRATION,
+                run_command="npm run build",
+                project_path="/workspace/../etc",
+            ),
+        )
+    with pytest.raises(ValueError, match="escapes"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION,
+                command="python3 app.py",
+                project_path="/workspace",
+                log_file="/etc/cron.d/server.log",
+            ),
+        )
+    assert sandbox.commands == []
+
+
+async def test_a_server_log_defaults_into_the_engines_own_offload_dir(tmp_path: Path) -> None:
+    """A log path defaulted into a shared directory is a predictable name in a place the agent can
+    write, which is the setup for a swap rather than merely untidy. The default is `.tool-output`,
+    the engine's own directory under the workspace the tool already serves from — a server log is
+    scaffolding, and the workspace listing is the member's own file list. The tool reports it."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    result = await start_server(
+        ctx,
+        StartServerInput(
+            user_description=TOOL_NARRATION,
+            command="python3 app.py",
+            project_path="site",
+            port=5173,
+        ),
+    )
+    payload = json.loads(result.content[0].text)
+    assert payload["log"] == "/workspace/.tool-output/server-5173.log"
+    assert payload["project_path"] == "/workspace/site"
+    assert sandbox.programs == [
+        (LOG_CLEAR_PROG, ("/workspace/.tool-output/server-5173.log", "/workspace"))
+    ]
+    launch = next(
+        command
+        for command in sandbox.commands
+        if ">/workspace/.tool-output/server-5173.log" in command
+    )
+    redirect = launch.index(">/workspace/.tool-output/server-5173.log")
+    assert "set -C\n" in launch[:redirect], "the redirect must create the log, never truncate it"
+    assert "set +C\n" in launch[redirect:], "noclobber must not outlive the log's own redirect"
+
+
+async def test_the_log_name_is_freed_through_the_guard_before_the_redirect_creates_it(
+    tmp_path: Path,
+) -> None:
+    """`nohup … >log` follows a link and truncates what it points at, and the log's name is a
+    predictable one in a directory the agent writes. So the name is emptied through the containment
+    guard first and the redirect runs under `set -C`, which creates the file `O_CREAT|O_EXCL`: a
+    link replanted between the two commands fails the launch rather than steering it. A clear the
+    guard refuses stops the launch instead of running the redirect anyway."""
+    sandbox = FakeSandbox(
+        claim=ExecResult(stdout="", stderr="log.txt is not a regular file", exit_code=1)
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION,
+                command="python3 app.py",
+                project_path="/workspace",
+                log_file="log.txt",
+            ),
+        )
+
+    assert sandbox.programs == [(LOG_CLEAR_PROG, ("/workspace/log.txt", "/workspace"))]
+    assert "containment" in LOG_CLEAR_PROG
+    assert sandbox.commands == []
 
 
 def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:

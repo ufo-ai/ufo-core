@@ -10,12 +10,14 @@ interpreter present, no container."""
 import asyncio
 import json
 import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from ufo.sandbox.containment import ContainmentError, LocationEscape, NotRegularFile
 from ufo.sandbox.local import (
     EXEC_TIMEOUT_CODE,
     LOCAL_CONTAINER_ID,
@@ -23,6 +25,9 @@ from ufo.sandbox.local import (
     LocalCarrier,
 )
 from ufo.sandbox.session import (
+    COPY_IN_PROG,
+    SANDBOX_MODULE_BOOTSTRAP,
+    SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
     ProxyEndpoint,
     SandboxSession,
@@ -273,6 +278,51 @@ async def test_read_confines_to_the_workspace(tmp_path: Path) -> None:
         [chunk async for chunk in carrier.read(handle, "/etc/passwd")]
 
 
+async def test_read_of_a_traversal_path_is_refused(tmp_path: Path) -> None:
+    """A name that climbs out of the workspace is refused where the path becomes a real one: the
+    lexical guard upstream contains at the workspace root, and a copy-out is what reads."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    (workspace / "sub").mkdir()
+    (tmp_path / "outside.txt").write_bytes(b"host secret")
+
+    with pytest.raises(LocationEscape):
+        [chunk async for chunk in carrier.read(handle, "/workspace/sub/../../outside.txt")]
+
+
+async def test_read_of_a_planted_symlink_is_refused(tmp_path: Path) -> None:
+    """The copy-out is CVE-2026-56692's shape: a link the agent plants in its own workspace, then a
+    share or a browse that resolves it. The host file's bytes never cross."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    (workspace / "linked.txt").symlink_to(outside)
+
+    with pytest.raises(NotRegularFile):
+        [chunk async for chunk in carrier.read(handle, "/workspace/linked.txt")]
+
+
+async def test_read_through_a_symlinked_directory_out_of_the_workspace_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The link need not be at the target: a directory whose link leaves the workspace is enough,
+    and canonicalizing the parent is what turns that into a refusal instead of a read of the link's
+    target — check 2's work, not the descent's, which walks components already canonical."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"host secret")
+    (workspace / "dir").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LocationEscape):
+        [chunk async for chunk in carrier.read(handle, "/workspace/dir/secret.txt")]
+
+
 async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
     """The default carrier ships sbxfs on the command PATH, so the file tools work with only a
     Python interpreter present: a write lands in the workspace and the sbxfs read reflects it."""
@@ -285,6 +335,131 @@ async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
 
     read = await session.run_sbxfs("read", {"path": "notes.txt"})
     assert "alpha" in json.dumps(read)
+
+
+GUARD_PROBE_PROG = """
+import sys
+from containment import ContainmentError, contained_file
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
+        target.lstat()
+except ContainmentError as error:
+    raise SystemExit(str(error))
+print("accepted")
+"""
+
+
+def _plant_fake_guard(workspace: Path) -> None:
+    """What the agent can do with its own `write` tool: leave modules named after the ones the
+    bootstrap imports in the directory the carrier runs commands in."""
+    (workspace / "shutil.py").write_text("def which(name):\n    return '/nonexistent/sbxfs'\n")
+    (workspace / "containment.py").write_text(
+        "class ContainmentError(Exception):\n    pass\n"
+        "from contextlib import contextmanager\n"
+        "@contextmanager\n"
+        "def contained_file(path, root, **kw):\n"
+        "    import os\n"
+        "    class T:\n"
+        "        def lstat(self):\n            return os.stat(path)\n"
+        "    yield T()\n"
+    )
+
+
+async def test_an_in_sandbox_program_cannot_be_pointed_at_a_planted_guard(tmp_path: Path) -> None:
+    """Every in-sandbox program — the share preflight, the prune, a connector's claim — decides its
+    verdict with the module the bootstrap imports, and commands run with cwd inside the workspace
+    the agent writes to. A plain `python3 -c` puts that cwd at `sys.path[0]`, so `shutil` and then
+    `containment` itself resolve to whatever the agent left there, and the guard's verdict becomes
+    the agent's to choose. The interpreter runs isolated for exactly that reason."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "host-secret.txt"
+    outside.write_bytes(b"host secret")
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    session = SandboxSession(carrier=carrier, handle=handle)
+    (workspace / "link.txt").symlink_to(outside)
+    (workspace / "real.txt").write_bytes(b"the workspace's own file")
+    _plant_fake_guard(workspace)
+
+    refused = await session.python(GUARD_PROBE_PROG, "/workspace/link.txt", "/workspace")
+
+    assert refused.exit_code == 1
+    assert "not a regular file" in refused.stderr
+    assert "accepted" not in refused.stdout
+
+    reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")
+
+    assert reachable.exit_code == 0 and "accepted" in reachable.stdout
+
+
+async def test_the_container_copy_in_program_replaces_a_planted_symlink(tmp_path: Path) -> None:
+    """The program the container carriers stream a copy-in into, run with a real stdin the way
+    `docker exec -i` gives it one. `mkdir -p && cat > "$1"` truncated through a link planted at the
+    name and followed a symlinked ancestor; this stages an inode and renames it onto the name, so
+    the host file is untouched and the delivery still lands."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    target = workspace / "inbox" / "report.pdf"
+    target.parent.mkdir()
+    target.symlink_to(outside)
+    _plant_fake_guard(workspace)
+
+    landed = await asyncio.to_thread(
+        subprocess.run,
+        [
+            "python3",
+            SANDBOX_PYTHON_FLAG,
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
+            str(target),
+            str(workspace),
+        ],
+        input=b"delivered bytes",
+        capture_output=True,
+        cwd=str(workspace),
+        env={"PATH": handle.egress_env["PATH"]},
+    )
+
+    assert landed.returncode == 0, landed.stderr
+    assert not target.is_symlink()
+    assert target.read_bytes() == b"delivered bytes"
+    assert target.stat().st_mode & 0o777 == 0o644
+    assert outside.read_bytes() == b"host secret"
+
+
+async def test_the_container_copy_in_program_refuses_a_path_out_of_the_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host secret")
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+
+    refused = await asyncio.to_thread(
+        subprocess.run,
+        [
+            "python3",
+            SANDBOX_PYTHON_FLAG,
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
+            str(outside),
+            str(workspace),
+        ],
+        input=b"delivered bytes",
+        capture_output=True,
+        cwd=str(workspace),
+        env={"PATH": handle.egress_env["PATH"]},
+    )
+
+    assert refused.returncode == 1
+    assert "escapes" in refused.stderr.decode()
+    assert outside.read_bytes() == b"host secret"
 
 
 async def test_ensure_tool_output_dir_creates_the_directory_when_absent(tmp_path: Path) -> None:
@@ -441,7 +616,7 @@ async def test_a_write_that_fails_leaves_nothing_behind(tmp_path: Path) -> None:
     handle = await carrier.create(_spec(workspace))
     await carrier.write(handle, "/workspace/inbox/keep.txt", b"kept")
 
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(NotRegularFile):
         await carrier.write(handle, "/workspace/inbox", b"onto the directory itself")
 
     assert [entry.name for entry in workspace.iterdir()] == ["inbox"]
@@ -452,28 +627,43 @@ async def test_a_write_that_fails_leaves_nothing_behind(tmp_path: Path) -> None:
 async def test_a_write_at_the_workspace_root_is_refused_before_any_byte_lands(
     tmp_path: Path, path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sidecar is the target's sibling, and the workspace root's sibling is another
+    """The staged name is the target's sibling, and the workspace root's sibling is another
     conversation's workspace — so a path resolving to the root is refused before it is staged, not
-    staged and cleaned up. The payload is asserted never written, since the cleanup would hide it
-    from the directory listing and leave it behind only when the process dies mid-write."""
+    staged and cleaned up. Nothing is asserted created at all, since the cleanup would hide a staged
+    file from the directory listing and leave it behind only when the process dies mid-write."""
     workspace = tmp_path / "conversations" / "one" / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(workspace))
-    written: list[Path] = []
-    unpatched = Path.write_bytes
+    created: list[str] = []
+    unpatched = os.open
 
-    def spy(self: Path, data: bytes) -> int:
-        written.append(Path(self))
-        return unpatched(self, data)
+    def spy(target, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            created.append(str(target))
+        return unpatched(target, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "write_bytes", spy)
+    monkeypatch.setattr(os, "open", spy)
 
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(ContainmentError):
         await carrier.write(handle, path, b"payload that must not land beside the workspace")
 
-    assert written == []
+    assert created == []
     assert [entry.name for entry in workspace.parent.iterdir()] == ["workspace"]
     assert list(workspace.iterdir()) == []
+
+
+async def test_a_write_at_a_traversal_path_is_refused(tmp_path: Path) -> None:
+    """A surface's inbound filename and a tool's path both arrive here as a `/workspace` string, so
+    the copy-in is where a name climbing out of the workspace has to be refused."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    (workspace / "inbox").mkdir()
+
+    with pytest.raises(LocationEscape):
+        await carrier.write(handle, "/workspace/inbox/../../escape.txt", b"landed outside")
+
+    assert not (tmp_path / "escape.txt").exists()
 
 
 async def test_an_overwrite_keeps_the_mode_the_file_already_had(tmp_path: Path) -> None:
@@ -509,9 +699,14 @@ async def test_an_overwrite_carries_permission_bits_and_not_the_others(tmp_path:
     assert target.stat().st_mode & 0o7777 == 0o755
 
 
-async def test_a_symlinked_target_never_pulls_an_outside_files_mode(tmp_path: Path) -> None:
-    """The probe does not follow links, so the mode of whatever a symlink points at stays out of
-    the workspace — and the copy-in replaces the link rather than writing through it."""
+async def test_a_write_onto_a_planted_symlink_replaces_the_link(tmp_path: Path) -> None:
+    """A copy-in stages under a name created `O_CREAT|O_EXCL` and renames it onto the target, so a
+    link the agent planted there is replaced rather than written through: neither the host file's
+    bytes nor its mode is reachable from the workspace, and the delivery still lands.
+
+    Replacing rather than refusing is the point. The name is a surface's to choose — `slack-inbox`,
+    an offload sidecar — so one link left at it would otherwise deny every later delivery under that
+    name, and the rename already cannot follow it."""
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside.sh"
     outside.write_bytes(b"outside")
@@ -522,13 +717,31 @@ async def test_a_symlinked_target_never_pulls_an_outside_files_mode(tmp_path: Pa
     link.symlink_to(outside)
 
     await carrier.write(handle, "/workspace/linked.sh", b"replaced")
-    await carrier.write(handle, "/workspace/control.sh", b"control")
 
     assert not link.is_symlink()
     assert link.read_bytes() == b"replaced"
-    control = workspace / "control.sh"
-    assert link.stat().st_mode & 0o7777 == control.stat().st_mode & 0o7777
+    assert link.stat().st_mode & 0o777 == 0o644
     assert outside.read_bytes() == b"outside"
+    assert [entry.name for entry in workspace.iterdir()] == ["linked.sh"]
+
+
+async def test_a_write_through_a_symlinked_directory_out_of_the_workspace_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A copy-in creates the directories it needs, so a link already holding one of their names
+    would otherwise carry the bytes out of the workspace — the parent is canonicalized and the
+    escape refused before a byte is staged."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    (workspace / "inbox").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LocationEscape):
+        await carrier.write(handle, "/workspace/inbox/note.txt", b"landed outside")
+
+    assert list(outside.iterdir()) == []
 
 
 async def test_the_mode_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -540,21 +753,21 @@ async def test_the_mode_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyP
     handle = await carrier.create(_spec(workspace))
     await carrier.write(handle, "/workspace/probed.txt", b"first")
     target = workspace / "probed.txt"
-    probes: list[str] = []
+    probes: list[tuple[str, bool]] = []
 
     for name in ("lstat", "stat"):
         unpatched = getattr(os, name)
 
         def counted(path, *args, _name=name, _unpatched=unpatched, **kwargs):
-            if Path(path) == target:
-                probes.append(_name)
+            if Path(path).name == target.name:
+                probes.append((_name, kwargs.get("follow_symlinks", True)))
             return _unpatched(path, *args, **kwargs)
 
         monkeypatch.setattr(os, name, counted)
 
     await carrier.write(handle, "/workspace/probed.txt", b"second")
 
-    assert probes == ["lstat"]
+    assert probes == [("stat", False)]
     assert target.read_bytes() == b"second"
 
 

@@ -1,7 +1,11 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from ufo.sandbox.containment import ContainmentError
+from ufo.sandbox.local import LocalCarrier
+from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
 from ufo.skills.runtime import (
     CORE_SKILL_NAMES,
     CORE_SKILL_REGISTRY,
@@ -513,3 +517,59 @@ async def test_mount_writes_the_verbatim_skill_md_and_assets_under_the_workspace
     await mount_skill(_Sandbox(), skill)
     assert written["/workspace/.skills/probe/SKILL.md"] == b"---\nname: probe\n---\nbody\n"
     assert written["/workspace/.skills/probe/data/notes.txt"] == b"kept"
+
+
+@pytest.mark.parametrize("key", ["../../evil.md", "data/../../../evil.md", "/workspace/evil.md"])
+async def test_mount_refuses_a_file_key_that_climbs_out_of_the_skill(key: str) -> None:
+    """A file key is contained at `.skills/<name>/`, not at the workspace: a key climbing to
+    `/workspace/evil.md` is inside the workspace and still refused, because a saved skill would
+    otherwise rewrite that file on every load, in every conversation of its agent."""
+    sandbox = _RecordingSandbox()
+    skill = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        files=((key, b"planted"),),
+        raw_skill_md="---\nname: probe\n---\nbody\n",
+    )
+
+    with pytest.raises(ContainmentError):
+        await mount_skill(sandbox, skill)
+
+    assert not any(path.endswith("evil.md") for path in sandbox.files)
+
+
+async def test_mount_refuses_a_planted_symlink_inside_the_mount(tmp_path: Path) -> None:
+    """Through a real carrier: the agent can write inside its own mounted skill directory, so it can
+    leave a link there between loads. The next mount is refused at the linked component rather than
+    writing the skill's file into whatever the link points at."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    session = SandboxSession(
+        carrier=carrier,
+        handle=await carrier.create(
+            SandboxSpec(
+                conversation_id=uuid4(),
+                image_ref="ufo-sandbox:latest",
+                workspace_host_path=str(workspace),
+                proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+                run_token="run-token",
+            )
+        ),
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / ".skills" / "probe").mkdir(parents=True)
+    (workspace / ".skills" / "probe" / "data").symlink_to(outside)
+    skill = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        files=(("data/notes.txt", b"kept"),),
+        raw_skill_md="---\nname: probe\n---\nbody\n",
+    )
+
+    with pytest.raises(ContainmentError):
+        await mount_skill(session, skill)
+
+    assert list(outside.iterdir()) == []

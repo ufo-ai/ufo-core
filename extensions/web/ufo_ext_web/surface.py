@@ -94,6 +94,7 @@ from ufo.sdk.surfaces import (
     TerminalFrame,
     Turn,
     TurnContext,
+    inbox_name,
     member_message_text,
 )
 from ufo.sdk.tools import FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
@@ -110,8 +111,6 @@ MAX_REQUEST_BYTES = 25 * 1024 * 1024
 MAX_FORM_BYTES = 64 * 1024
 MAX_SECRET_BYTES = 4_096
 UPLOAD_CHUNK_BYTES = 65_536
-MAX_NAME_CHARS = 80
-UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
@@ -498,7 +497,7 @@ async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]]
 def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]:
     used: set[str] = set()
     return tuple(
-        f"{WEB_INBOX_DIR}/{_inbox_name(upload.filename or 'file', used)}" for upload in uploads
+        f"{WEB_INBOX_DIR}/{inbox_name(upload.filename or 'file', used)}" for upload in uploads
     )
 
 
@@ -518,23 +517,6 @@ def _files_note(text: str, paths: tuple[str, ...]) -> str:
     """The admitted text naming the saved paths it carries."""
     note = f"[Attached files, saved in the workspace: {', '.join(paths)}]"
     return f"{text}\n\n{note}" if text.strip() else note
-
-
-def _inbox_name(raw: str, used: set[str]) -> str:
-    """A safe workspace leaf for a client-chosen filename: path components dropped, everything
-    outside a conservative charset collapsed, length capped, dots-only and empty names falling
-    back — the browser's content-disposition is untrusted input, never a path."""
-    leaf = raw.replace("\\", "/").rsplit("/", 1)[-1]
-    leaf = UNSAFE_NAME_CHARS.sub("-", leaf)[:MAX_NAME_CHARS].strip(".")
-    leaf = leaf or "file"
-    name = leaf
-    stem, dot, suffix = leaf.partition(".")
-    index = 1
-    while name in used:
-        name = f"{stem}-{index}{dot}{suffix}"
-        index += 1
-    used.add(name)
-    return name
 
 
 async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:

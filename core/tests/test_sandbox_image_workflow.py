@@ -24,6 +24,18 @@ BASE_DIGEST = "sha256:" + "1" * 64
 MOVED_DIGEST = "sha256:" + "2" * 64
 KEY_LENGTH = 16
 WALLED_CALLS = 3
+# Every input the image key moves with, as the publisher's `paths` names them.
+KEY_INPUTS = frozenset(
+    {
+        "sandbox/build_template.py",
+        "core/src/ufo/sandbox/image/**",
+        "core/src/ufo/sandbox/containment.py",
+        "extensions/e2b/ufo_ext_e2b.py",
+        "uv.lock",
+        ".github/scripts/sandbox_image_key.sh",
+        ".github/workflows/sandbox-image.yml",
+    }
+)
 HANG_SECONDS = "10"
 MISS_NOTICE = "no published image for {} — the fixture builds it"
 UNDERIVED_NOTICE = MISS_NOTICE.format("an underivable key")
@@ -324,17 +336,13 @@ def test_the_publisher_skips_a_key_it_already_published(tmp_path: Path) -> None:
 
 
 def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
+    """The paths list stays pinned exactly, and each file a layer COPYs has to be a named key
+    input — a key that moves with no publish behind it makes every PR rebuild the image, and a
+    sandbox running an image older than the guard baked into it cannot run a file op at all."""
     triggers = _workflow("sandbox-image.yml")["on"]["push"]["paths"]
 
-    assert set(triggers) == {
-        "sandbox/build_template.py",
-        "core/src/ufo/sandbox/image/**",
-        "extensions/e2b/ufo_ext_e2b.py",
-        "uv.lock",
-        ".github/scripts/sandbox_image_key.sh",
-        ".github/workflows/sandbox-image.yml",
-    }
-    prefixes = tuple(trigger.removesuffix("/**") for trigger in triggers)
+    assert set(triggers) == KEY_INPUTS
+    prefixes = tuple(entry.removesuffix("/**") for entry in KEY_INPUTS)
     copied = [line.split()[1] for line in pod_dockerfile().splitlines() if line.startswith("COPY ")]
     assert copied
     for source in copied:

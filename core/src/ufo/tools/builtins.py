@@ -77,21 +77,36 @@ ARTIFACT_PUT_TIMEOUT_SECONDS = 900
 
 SHARE_PREFLIGHT_PROG = """
 import hashlib, json, sys
-path = sys.argv[1]
-h = hashlib.sha256()
-size = 0
-head = b""
-with open(path, "rb") as f:
-    while True:
-        chunk = f.read(1048576)
-        if not chunk:
-            break
-        if len(head) < 4096:
-            head += chunk[: 4096 - len(head)]
-        size += len(chunk)
-        h.update(chunk)
-stat = {"size": size, "digest": "sha256:" + h.hexdigest(), "is_text": b"\\x00" not in head}
-print(json.dumps(stat))
+from containment import ContainmentError, contained_file
+
+
+def measure(path, root):
+    with contained_file(path, root) as target:
+        if target.lstat() is None:
+            raise SystemExit(path + " not found")
+        h = hashlib.sha256()
+        size = 0
+        head = b""
+        with target.open_bytes() as f:
+            while True:
+                chunk = f.read(1048576)
+                if not chunk:
+                    break
+                if len(head) < 4096:
+                    head += chunk[: 4096 - len(head)]
+                size += len(chunk)
+                h.update(chunk)
+    return {
+        "size": size,
+        "digest": "sha256:" + h.hexdigest(),
+        "is_text": b"\\x00" not in head,
+    }
+
+
+try:
+    print(json.dumps(measure(sys.argv[1], sys.argv[2])))
+except ContainmentError as error:
+    raise SystemExit(str(error))
 """
 
 
@@ -437,7 +452,6 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
         "write",
         {
             "path": args.file_path,
-            "workspace": WORKSPACE_DIR,
             "staged_path": staged,
             "allow_existing": args.file_path in ctx.read_paths,
         },
@@ -466,9 +480,7 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
         }
         for e in args.edits
     ]
-    result = await ctx.sandbox.run_sbxfs(
-        "edit", {"path": args.file_path, "workspace": WORKSPACE_DIR, "edits": edits}
-    )
+    result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
     result["path"] = args.file_path
     if not isinstance(result.get("change"), dict):
         raise RuntimeError("sbxfs edit returned no file change")
@@ -571,18 +583,19 @@ async def _store_artifact(
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
     """Land a produced workspace file in the artifact store under `artifacts/<uuid>/<name>`, record
     it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
-    serves — the only path a produced file leaves the sandbox. A preflight in the container streams
-    the file to derive its size and sha256 without loading it whole, and the upload is then bound to
-    those two measurements, so nothing crosses on the sandbox's word and no whole-file buffer ever
-    forms in this process. The shared_artifact record is what an async surface (Slack) reads to
-    upload the file into the turn's posted reply; `subject` is an optional caption — absent, the
-    file renders under its plain name."""
+    serves — the only path a produced file leaves the sandbox. A preflight in the container confines
+    the path through the containment guard and streams the file off the fd that descent pinned to
+    derive its size and sha256 without loading it whole, so a link the agent planted at the name is
+    refused rather than copied out, and the upload is then bound to those two measurements, so
+    nothing crosses on the sandbox's word and no whole-file buffer ever forms in this process. The
+    shared_artifact record is what an async surface (Slack) reads to upload the file into the turn's
+    posted reply; `subject` is an optional caption — absent, the file renders under its plain
+    name."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     scoped = workspace_path(args.file_path)
-    preflight = await ctx.sandbox.bash(
-        f"python3 -c {shlex.quote(SHARE_PREFLIGHT_PROG)} {shlex.quote(scoped)}",
-        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
+    preflight = await ctx.sandbox.python(
+        SHARE_PREFLIGHT_PROG, scoped, WORKSPACE_DIR, timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS
     )
     if preflight.exit_code != 0:
         raise RuntimeError(preflight.stderr.strip() or "artifact preflight failed")

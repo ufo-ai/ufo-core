@@ -24,14 +24,15 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from io import BufferedReader
 from pathlib import Path, PurePosixPath
-from stat import S_ISREG
-from uuid import uuid4
 
+from ufo.sandbox.containment import PathNotFound, contained_file
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
+    WORKSPACE_WRITE_MODE,
     DialTarget,
     ExecResult,
     SandboxHandle,
@@ -44,9 +45,11 @@ LOCAL_PROXY_HOST = "127.0.0.1"
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
-WORKSPACE_WRITE_PREFIX = "ufo-write-"
-MODE_BITS = 0o777
 SANDBOX_BINARIES = ("sbx", "sbxfs")
+# Modules the scripts import, installed beside them exactly as the image bakes them: a script's own
+# directory is `sys.path[0]`, so this is how `sbxfs` reaches the containment guard under a carrier
+# that has no installed `ufo` package inside the sandbox.
+SANDBOX_MODULES = ("containment.py",)
 
 
 def _git_without_host_config(scratch: Path) -> dict[str, str]:
@@ -69,9 +72,10 @@ def _git_without_host_config(scratch: Path) -> dict[str, str]:
 
 
 def _provision_scratch() -> Path:
-    """A process-lifetime scratch dir holding the command PATH's `sbx`/`sbxfs` and a home for tools
-    that write under `$HOME` — created once per carrier, off the event loop at construction. The
-    workspace itself is never here: it is the durable bind-mount, kept clear of scaffolding."""
+    """A process-lifetime scratch dir holding the command PATH's `sbx`/`sbxfs`, the modules they
+    import, and a home for tools that write under `$HOME` — created once per carrier, off the event
+    loop at construction. The workspace itself is never here: it is the durable bind-mount, kept
+    clear of scaffolding."""
     root = Path(tempfile.mkdtemp(prefix="ufo-local-"))
     (root / "home").mkdir()
     bin_dir = root / "bin"
@@ -81,6 +85,10 @@ def _provision_scratch() -> Path:
         target = bin_dir / name
         target.write_bytes((source / name).read_bytes())
         target.chmod(0o755)
+    for name in SANDBOX_MODULES:
+        target = bin_dir / name
+        target.write_bytes((Path(__file__).parent / name).read_bytes())
+        target.chmod(0o644)
     return root
 
 
@@ -174,46 +182,56 @@ class LocalCarrier:
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """The workspace is a host directory, so the copy-in is a host write under it — off the
-        loop, since the filesystem has no async API. Written beside the target and renamed onto it,
-        so a reader of the path sees the whole of one write or the whole of the one before: two
-        writers racing the same path are ordinary here, since a surface may deliver a file twice.
+        loop, since the filesystem has no async API, and through the containment guard, since the
+        path was built from a tool argument or a surface's inbound filename. Every directory on the
+        way is created and re-opened `O_NOFOLLOW` as the descent reaches it, so a link planted at
+        any component cannot redirect the copy-in, and the bytes are staged under a name created
+        `O_CREAT|O_EXCL` beside the target and renamed onto it: a reader of the path sees the whole
+        of one write or the whole of the one before, which is what two writers racing one path need,
+        since a surface may deliver a file twice.
 
-        The sidecar's name is its own, not the target's with a suffix, so the longest filename that
-        fits a directory still fits; it is removed on any failure, since the workspace listing is
-        the member's own file list and an orphan would appear in it as a file they never made. It is
-        the target's sibling, so a target that is the workspace root is refused before any byte is
-        written: the root's sibling is another conversation's workspace. A rename installs a new
-        inode, so an overwrite carries the mode across and an executable a turn produced stays
-        executable for the turn that runs it — read once and without following links, so a delete
-        racing the write still ends in a created file and a symlinked target cannot pull an outside
-        file's mode onto an in-workspace one. Permission bits only: setuid, setgid and sticky do not
-        survive a copy-in through any other carrier."""
-        target = _write_target(handle, path)
-        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-        try:
-            existing = await asyncio.to_thread(os.lstat, target)
-        except FileNotFoundError:
-            existing = None
-        mode = existing.st_mode & MODE_BITS if existing and S_ISREG(existing.st_mode) else None
-        temp = target.with_name(f".{WORKSPACE_WRITE_PREFIX}{uuid4().hex}")
-        try:
-            await asyncio.to_thread(temp.write_bytes, content)
-            if mode is not None:
-                await asyncio.to_thread(temp.chmod, mode)
-            await asyncio.to_thread(temp.replace, target)
-        except BaseException:
-            await asyncio.to_thread(temp.unlink, missing_ok=True)
-            raise
+        The staged name is its own, not the target's with a suffix, so the longest filename a
+        directory takes still fits, and it is removed on any failure, since the workspace listing is
+        the member's own file list and an orphan would appear in it as a file they never made. A
+        path resolving to the workspace root, or above it, holds no file to write and is refused
+        before any byte is staged. A rename installs a new inode, so an overwrite carries the mode
+        across and an executable a turn produced stays executable for the turn that runs it — probed
+        once, without following a link, so a delete racing the write still ends in a created file.
+        Permission bits only: setuid, setgid and sticky do not survive a copy-in through any other
+        carrier. A file the copy-in creates lands 0o644 rather than under serve's umask, because the
+        sandbox user is the one that reads it, and so does one landing on a name something other
+        than a regular file holds — that name is replaced rather than refused, since the rename
+        cannot write through a link and a link left at an inbox name would otherwise deny every
+        later delivery to it."""
+        await asyncio.to_thread(self._write_contained, handle, path, content)
+
+    def _write_contained(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        with contained_file(_workspace_name(path), _root(handle), create_parent=True) as target:
+            target.replace_bytes(content, target.mode(WORKSPACE_WRITE_MODE))
 
     async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         """The workspace is a host directory, so the copy-out is a chunked host read under it — off
-        the loop, since the filesystem has no async API."""
-        source = await asyncio.to_thread(_host_path(handle, path).open, "rb")
+        the loop, since the filesystem has no async API. A copy-out is an ingress like any other:
+        the path is confined before a byte is touched and the stream comes off an `O_NOFOLLOW` fd
+        the descent proved regular, so a link the agent planted at the target — or at a directory on
+        the way to it — is refused instead of read out of the workspace."""
+        source = await asyncio.to_thread(self._contained_source, handle, path)
         try:
             while chunk := await asyncio.to_thread(source.read, READ_CHUNK_BYTES):
                 yield chunk
         finally:
             await asyncio.to_thread(source.close)
+
+    def _contained_source(self, handle: SandboxHandle, path: str) -> BufferedReader:
+        """The pinned parent is released once the file's own fd is open, so the stream that outlives
+        this call names no path a later swap could redirect."""
+        try:
+            with contained_file(_workspace_name(path), _root(handle)) as target:
+                if target.lstat() is None:
+                    raise FileNotFoundError(str(target.path))
+                return target.open_bytes()
+        except PathNotFound as error:
+            raise FileNotFoundError(str(error)) from error
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,
@@ -232,18 +250,8 @@ def _root(handle: SandboxHandle) -> Path:
     return Path(handle.workspace_host_path)
 
 
-def _write_target(handle: SandboxHandle, path: str) -> Path:
-    """The host file a copy-in lands on. A path resolving to the workspace root, or above it, has no
-    sibling inside the workspace to stage beside — the root's sibling is another conversation's
-    workspace — so it is refused here rather than written and cleaned up."""
-    root = _root(handle)
-    target = Path(os.path.normpath(_host_path(handle, path)))
-    if target == root or root not in target.parents:
-        raise IsADirectoryError(path)
-    return target
-
-
-def _host_path(handle: SandboxHandle, path: str) -> Path:
-    """The host location of a logical `/workspace` path — the workspace is a host directory, so
-    every copy-in and copy-out lands here."""
-    return _root(handle) / PurePosixPath(path).relative_to(WORKSPACE_DIR)
+def _workspace_name(path: str) -> PurePosixPath:
+    """The name a logical `/workspace` path carries under the host workspace directory. Only the
+    mapping — every containment check is the guard's, run against the real filesystem the name lands
+    on rather than against the string."""
+    return PurePosixPath(path).relative_to(WORKSPACE_DIR)

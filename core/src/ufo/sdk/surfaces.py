@@ -112,6 +112,9 @@ from ufo.ext.surface import (
     fence_member_message as fence_member_message,
 )
 from ufo.ext.surface import (
+    inbox_name as inbox_name,
+)
+from ufo.ext.surface import (
     member_message_text as member_message_text,
 )
 from ufo.ext.surface import (

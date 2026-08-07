@@ -103,6 +103,9 @@ class FakeSandbox:
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
 
 @dataclass(frozen=True)
 class RefusingSandbox:
@@ -116,6 +119,11 @@ class RefusingSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         raise AssertionError(f"a refused deploy ran {command!r} in the member's container")
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        raise AssertionError(
+            f"a refused deploy ran a program on {args!r} in the member's container"
+        )
 
 
 @dataclass(frozen=True)
@@ -1295,6 +1303,9 @@ class FailingSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="port never opened", exit_code=1)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
 
 
 async def test_a_build_that_never_comes_up_leaves_the_members_site_alone(db: None) -> None:

@@ -257,8 +257,10 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The invariant the write seam exists for: a payload reaches the container through `docker exec
-    -i`'s stdin, never as an argv element. The real-container proof is the 26 MB write in
-    test_file_tools.py; this pins the call shape, which no successful write can distinguish."""
+    -i`'s stdin, never as an argv element, and the name it lands on goes through the containment
+    guard rather than a shell redirect that would truncate through a planted link. The real proof of
+    the stream is the 26 MB write in test_file_tools.py; this pins the call shape, which no
+    successful write can tell apart."""
     calls: list[tuple[tuple[str, ...], bytes]] = []
 
     async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
@@ -275,9 +277,11 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     argv, stdin = calls[-1]
     assert stdin == content
     assert not any(content[:64].decode() in arg for arg in argv)
-    assert argv[:3] == ("exec", "-i", "cid1")
-    assert argv[-1] == "/workspace/notes/report.txt"
-    assert 'mkdir -p "$(dirname "$1")" && cat > "$1"' in argv
+    assert argv[:5] == ("exec", "-i", "cid1", "python3", docker_ext.SANDBOX_PYTHON_FLAG)
+    assert argv[-2:] == ("/workspace/notes/report.txt", "/workspace")
+    assert docker_ext.COPY_IN_PROG in argv[-3]
+    assert "from containment import" in argv[-3]
+    assert not any("cat > " in arg for arg in argv)
 
 
 async def test_write_raises_with_the_container_error_on_a_nonzero_exit(
@@ -561,7 +565,9 @@ async def test_entries_lists_container_paths_workspace_relative(
     """The file browser's listing over this carrier: the in-container walk answers `/workspace/…`
     paths — not the host bind-mount paths the local carrier's argv rewrite produces — and each must
     come back relative to the workspace root. The daemon is faked at the CLI seam with the shapes
-    the real one answers; the mapping under test is the carrier's and the seam's own."""
+    the real one answers; the mapping under test is the carrier's and the seam's own. The workspace
+    directory is made first, as a turn's own open would: a read attaches only to a conversation
+    directory it can prove under the root, and never provisions one."""
     workspace_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -622,6 +628,7 @@ async def test_entries_lists_container_paths_workspace_relative(
         proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
         workspace_root=tmp_path / "workspaces",
     )
+    (tmp_path / "workspaces" / str(conversation_id)).mkdir(parents=True)
 
     with ws(workspace_id):
         entries = await sandboxes.entries(conversation_id)

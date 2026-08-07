@@ -60,6 +60,7 @@ from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.o11y import emit_metric, log, log_error
+from ufo.sandbox.containment import contained_file, contained_leaf
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
@@ -93,6 +94,9 @@ MIN_CONNECT_PORT = 1
 MAX_CONNECT_PORT = 65535
 CA_VALID_DAYS = "3650"
 LEAF_VALID_DAYS = "365"
+LEAF_NAME_PREFIX = "leaf-"
+LEAF_UNNAMED_HOST = "unnamed"
+LEAF_FILE_MODE = 0o600
 RULE_CACHE_MAX = 4096
 RULE_CACHE_TTL_SECONDS = 240
 METER_QUEUE_MAX = 4096
@@ -702,6 +706,13 @@ class EgressProxy:
             pass
 
     async def _leaf_context(self, host: str) -> ssl.SSLContext:
+        """The TLS context this proxy answers a CONNECT for `host` with, minting the leaf once.
+
+        The host is a string the sandbox sent, so it names none of these files directly: it is cut
+        to one filename component, and the extension file is written through the containment guard,
+        which stages `O_CREAT|O_EXCL|O_NOFOLLOW` under the proxy's own workdir. A rule host carrying
+        a `/` or a `..` would otherwise have named openssl's `-out` — the equality match against a
+        rule host is an allowlist, not a path check."""
         cached = self._contexts.get(host)
         if cached is not None:
             return cached
@@ -712,9 +723,14 @@ class EgressProxy:
             if cached is not None:
                 return cached
             root = Path(self._workdir.name)
-            cert_path = root / f"leaf-{host}.crt"
-            ext_path = root / f"leaf-{host}.ext"
-            ext_path.write_text(f"subjectAltName=DNS:{host}\nextendedKeyUsage=serverAuth\n")
+            stem = f"{LEAF_NAME_PREFIX}{contained_leaf(host, LEAF_UNNAMED_HOST)}"
+            cert_path = root / f"{stem}.crt"
+            csr_path = root / f"{stem}.csr"
+            with contained_file(f"{stem}.ext", root) as extensions:
+                extensions.replace_text(
+                    f"subjectAltName=DNS:{host}\nextendedKeyUsage=serverAuth\n", LEAF_FILE_MODE
+                )
+                ext_path = extensions.path
             await _openssl(
                 "req",
                 "-new",
@@ -723,13 +739,13 @@ class EgressProxy:
                 "-subj",
                 f"/CN={host}",
                 "-out",
-                str(root / f"leaf-{host}.csr"),
+                str(csr_path),
             )
             await _openssl(
                 "x509",
                 "-req",
                 "-in",
-                str(root / f"leaf-{host}.csr"),
+                str(csr_path),
                 "-CA",
                 str(root / "ca.crt"),
                 "-CAkey",

@@ -47,7 +47,12 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.skills.runtime import CORE_SKILL_NAMES, CORE_SKILL_REGISTRY, RuntimeSkill
+from ufo.skills.runtime import (
+    CORE_SKILL_NAMES,
+    CORE_SKILL_REGISTRY,
+    RuntimeSkill,
+    mount_skill,
+)
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -502,6 +507,65 @@ async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path)
         with pytest.raises(ValueError, match="must match"):
             await apply.handler(ctx, mismatch)
         assert await _store().load_all() == ()
+
+
+@pytest.mark.parametrize(
+    "bad_key", ["../../notes.md", "assets/../../../notes.md", "/workspace/notes.md", "."]
+)
+async def test_apply_refuses_a_file_key_outside_the_skill(db: None, tmp_path, bad_key: str) -> None:
+    """A saved skill's file keys are written into the workspace afresh by every later load, so a key
+    that is not a path inside `.skills/<name>/` is refused where it would be persisted — a key
+    landing at `/workspace/notes.md` is inside the workspace and still not this skill's to write."""
+    workspace_id, agent_id = await _workspace_agent()
+    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
+    apply = _object_tool("object_apply")
+    escaping = apply.input_model.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "manifest": _skill_manifest(
+                "greet",
+                {"SKILL.md": _skill_md("greet", "greets people").decode(), bad_key: "planted"},
+            ),
+        }
+    )
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(ValueError, match="not a path inside the skill"):
+            await apply.handler(ctx, escaping)
+        assert await _store().load_all() == ()
+
+
+async def test_a_saved_skills_mount_replaces_a_planted_symlink(db: None, tmp_path) -> None:
+    """The durable half, through the real store and a real carrier: a skill saved on one turn mounts
+    on the next, and the agent can leave a link at one of its file names in between. The saved bytes
+    are renamed onto the name rather than written through the link, so the host file the link named
+    keeps its own bytes and a planted link cannot deny the mount for good."""
+    workspace_id, agent_id = await _workspace_agent()
+    session = await _local_session(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"host secret")
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx=_tool_ctx(workspace_id, session, tmp_path, agent_id),
+            manifest=_skill_manifest(
+                "greet",
+                {
+                    "SKILL.md": _skill_md("greet", "greets people").decode(),
+                    "references/tone.md": "warm",
+                },
+            ),
+        )
+        saved = await _store().load_all()
+    mount = tmp_path / "workspace" / ".skills" / "greet" / "references"
+    mount.mkdir(parents=True)
+    (mount / "tone.md").symlink_to(outside)
+
+    await mount_skill(session, saved[0])
+
+    mounted = mount / "tone.md"
+    assert not mounted.is_symlink()
+    assert mounted.read_bytes() == b"warm"
+    assert outside.read_bytes() == b"host secret"
 
 
 async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> None:

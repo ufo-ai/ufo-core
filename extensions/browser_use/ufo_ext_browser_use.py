@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.context import CredentialAccess, ScopedStore
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
+from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, contained_relative
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "browser_use"
@@ -218,7 +219,10 @@ class HostedRun:
         """The run's own output files, written into the conversation workspace. A file past the
         size bound is reported rather than written, and a listing the count bound cut short says so
         through the vendor's own `hasMore`, so the caller can always say what it did not fetch; a
-        path that would escape the workspace is a fault, not a file."""
+        path that would escape the workspace is a fault, not a file — decided by the shared
+        containment guard rather than by a lexical check of this pack's own, with the carrier's
+        write proving the path against the filesystem after it, so a directory the vendor names
+        cannot be a link the agent left in the workspace."""
         if not self.save_outputs:
             return (), (), False
         listed = await self._json(
@@ -241,13 +245,17 @@ class HostedRun:
                     f"browser-use listed a file without a path and size: {info!r}"
                 )
             entry = RunFile(path, size)
-            if Path(entry.path).is_absolute() or ".." in Path(entry.path).parts:
-                raise BrowserUseError(f"run output path escapes the workspace: {entry.path!r}")
+            try:
+                scoped = contained_relative(entry.path, WORKSPACE_DIR)
+            except ContainmentError as error:
+                raise BrowserUseError(
+                    f"run output path escapes the workspace: {entry.path!r}"
+                ) from error
             url = info.get("url")
             if entry.size > MAX_OUTPUT_BYTES or not isinstance(url, str):
                 skipped.append(entry)
                 continue
-            await ctx.sandbox.write_file(entry.path, await self._download(url))
+            await ctx.sandbox.write_file(scoped, await self._download(url))
             saved.append(entry)
         return tuple(saved), tuple(skipped), bool(listed.get("hasMore"))
 

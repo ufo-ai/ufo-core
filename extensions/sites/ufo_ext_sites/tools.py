@@ -1,6 +1,16 @@
 """The website tools: build a site, serve one in the sandbox with port cleanup and a readiness
 probe, and host the served port at a permanent link.
 
+Every path argument these tools take — a project directory, a dist directory, a log file — goes
+through `workspace_path` before it reaches a command, so a model-named path is scoped to the
+workspace rather than merely quoted into `cd`/`>` (under the local carrier those are host paths in a
+host subprocess). The log files default under `.tool-output`, the engine's own offload directory,
+rather than the workspace root: a server log is scaffolding, and the workspace listing is the
+member's own file list. A predictable path in a directory the agent can write is still where a
+planted link would sit, so each log's name is emptied through the containment guard and the `>`
+redirect runs under `set -C`, which creates it `O_CREAT|O_EXCL` rather than truncating through a
+link.
+
 Each tool runs through `ctx.sandbox`, so the container's mount and egress scoping hold. `website`
 runs a build command and lists what it produced. `start_server`, `deploy_website`, and
 `publish_website` bring a server up in the background: they free the port, launch the command under
@@ -21,6 +31,7 @@ import shlex
 
 from pydantic import BaseModel, Field, model_validator
 
+from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import site_object_name
 from ufo_ext_sites.store import HostedSites, Visibility, site_name
@@ -31,11 +42,23 @@ START_SERVER_TOOL = "start_server"
 DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
 
-WORKSPACE_DIR = "/workspace"
 APP_SERVE_PORT = 8000
 START_SERVER_PORT = 5000
 READINESS_TIMEOUT_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 600
+SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
+DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
+PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
+LOG_CLEAR_PROG = """
+import sys
+from containment import ContainmentError, contained_file
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
+        target.unlink()
+except ContainmentError as error:
+    raise SystemExit(str(error))
+"""
 
 WEBSITE_DESCRIPTION = "Build a website in the sandbox."
 START_SERVER_DESCRIPTION = (
@@ -80,7 +103,8 @@ class StartServerInput(BaseModel):
         default=None, description="Port the server listens on; polled until it is reachable."
     )
     log_file: str | None = Field(
-        default=None, description="File to capture the server's stdout/stderr."
+        default=None,
+        description="File in the workspace to capture the server's stdout/stderr.",
     )
     user_description: str = Field(
         description="What you are starting up so they can see it, in plain language for the "
@@ -127,9 +151,29 @@ def _json_result(payload: dict[str, object]) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(payload)),))
 
 
+async def _free_log(ctx: ToolContext, log: str) -> None:
+    """Leave the log's name holding nothing, so the server's redirect is the thing that creates it.
+
+    A shell redirect follows a symlink and truncates what it points at, and the log's name is one a
+    model chooses or predicts in a directory the agent writes. Creating the file here and
+    redirecting onto it afterwards only narrows that — the two are separate commands, and a link
+    replanted between them is what the `>` then opens. So the name is emptied instead, through the
+    guard's own `O_NOFOLLOW` descent, which also makes `.tool-output` on the way; `set -C` then
+    makes the redirect an `O_CREAT|O_EXCL` create, so a replant fails the start rather than steers
+    it. A log an earlier run on this port left behind is this call's to clear.
+
+    Noclobber covers the redirect alone. The port cleanup writes to `/dev/null` and `command` is the
+    model's own, free to redirect where it likes; the background job keeps the setting it was forked
+    with, so restoring it in the parent cannot reach the redirect already made."""
+    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log, WORKSPACE_DIR)
+    if result.exit_code != 0:
+        raise RuntimeError(result.stderr.strip() or f"cannot clear {log}")
+
+
 async def _serve(
     ctx: ToolContext, command: str, project: str, port: int, log: str
 ) -> dict[str, object]:
+    await _free_log(ctx, log)
     port_cleanup = (
         f"(fuser -k {port}/tcp 2>/dev/null; "
         f"lsof -ti tcp:{port} 2>/dev/null | xargs -r kill 2>/dev/null) || true; sleep 1"
@@ -157,7 +201,9 @@ async def _serve(
     )
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)} && {port_cleanup}\n"
+        f"set -C\n"
         f"nohup {command} >{shlex.quote(log)} 2>&1 &\n"
+        f"set +C\n"
         f"{readiness_probe}",
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
@@ -250,7 +296,7 @@ async def _host(
 
 
 async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
-    project = args.project_path or WORKSPACE_DIR
+    project = workspace_path(args.project_path or WORKSPACE_DIR)
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)} && {args.run_command}", timeout_s=BUILD_TIMEOUT_SECONDS
     )
@@ -263,16 +309,18 @@ async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
 
 async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
-    log = args.log_file or f"/tmp/server-{port}.log"
-    served = await _serve(ctx, args.command, args.project_path, port, log)
-    return _json_result({**served, "project_path": args.project_path})
+    project = workspace_path(args.project_path)
+    log = workspace_path(args.log_file or SERVER_LOG.format(port=port))
+    served = await _serve(ctx, args.command, project, port, log)
+    return _json_result({**served, "project_path": project})
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
     name = await _refuse_before_serving(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
     command = f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
-    log = f"/tmp/deploy-{APP_SERVE_PORT}.log"
-    served = await _serve(ctx, command, args.project_path, APP_SERVE_PORT, log)
+    log = DEPLOY_LOG.format(port=APP_SERVE_PORT)
+    project = workspace_path(args.project_path)
+    served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
     hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
 
@@ -281,14 +329,14 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
     name = await _refuse_before_serving(ctx, args.app_name, APP_SERVE_PORT, args.visibility)
     if args.install_command:
         install = await ctx.sandbox.bash(
-            f"cd {shlex.quote(args.project_path)} && {args.install_command}",
+            f"cd {shlex.quote(workspace_path(args.project_path))} && {args.install_command}",
             timeout_s=BUILD_TIMEOUT_SECONDS,
         )
         if install.exit_code != 0:
             raise RuntimeError(install.stderr or install.stdout)
     command = args.run_command or f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
-    project = args.project_path if args.run_command else args.dist_path
-    log = f"/tmp/publish-{APP_SERVE_PORT}.log"
+    project = workspace_path(args.project_path if args.run_command else args.dist_path)
+    log = PUBLISH_LOG.format(port=APP_SERVE_PORT)
     served = await _serve(ctx, command, project, APP_SERVE_PORT, log)
     hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
     return _json_result({**served, **hosted})

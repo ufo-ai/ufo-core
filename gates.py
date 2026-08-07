@@ -45,6 +45,162 @@ CORE_OWNER = "core"
 NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
 ENV_ROOTS = Path("infra/envs")
+CONTAINMENT_MODULE = CORE_SRC / "sandbox" / "containment.py"
+SANDBOX_IMAGE_DIR = CORE_SRC / "sandbox" / "image"
+CONTAINMENT_IMPORT_PATH = "ufo.sandbox.containment"
+CONTAINMENT_IMPORT = "containment"
+CONTAINMENT_GUARDS = frozenset(
+    {
+        "contained_dir",
+        "contained_file",
+        "contained_glob",
+        "contained_regular",
+        "contained_root",
+        "configured_root",
+        "is_contained_regular",
+    }
+)
+"""The entry points that answer against the real filesystem — a canonicalization, a per-component
+`O_NOFOLLOW` descent, an `lstat`. Only what one of these returns may reach a filesystem call.
+
+`workspace_path` is not one, and neither is the lexical tier below: proving a name lexically and
+then opening that name is exactly the gap this gate exists to find. `workspace_path` stays in
+`DEFERRED_INGRESS`, which is where a site holding only a lexical check belongs."""
+LEXICAL_GUARDS = frozenset(
+    {
+        "contained_leaf",
+        "contained_pattern",
+        "contained_relative",
+        "inbox_name",
+    }
+)
+"""Check 1 on its own, for an ingress naming a path this process cannot stat. Each returns a string
+its caller still has to open through a canonical guard — `contained_leaf` drops directory components
+without asking what the root is, `contained_relative` resolves `a/../b` to `b` even where `a` is a
+symlink — so crediting one here would pass `(ROOT / contained_leaf(name)).write_bytes(...)`, the
+CVE-2026-56692 shape itself. They are named so a failure can say which tier the site stopped at."""
+FILESYSTEM_METHODS = frozenset(
+    {
+        "chmod",
+        "glob",
+        "iterdir",
+        "mkdir",
+        "read_bytes",
+        "read_text",
+        "rglob",
+        "symlink_to",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    }
+)
+ENUMERATION_METHODS = frozenset({"glob", "rglob"})
+FILESYSTEM_FUNCTIONS = {
+    "os": frozenset(
+        {
+            "chmod",
+            "chown",
+            "link",
+            "listdir",
+            "makedirs",
+            "mkdir",
+            "open",
+            "remove",
+            "rename",
+            "replace",
+            "rmdir",
+            "scandir",
+            "symlink",
+            "truncate",
+            "unlink",
+            "walk",
+        }
+    ),
+    "shutil": frozenset(
+        {
+            "copy",
+            "copy2",
+            "copyfile",
+            "copyfileobj",
+            "copytree",
+            "make_archive",
+            "move",
+            "rmtree",
+            "unpack_archive",
+        }
+    ),
+}
+RECEIVER_ARGUMENTS = frozenset({"self", "cls"})
+GUARD_HANDLE_TYPE = "ContainedFile"
+PARENT_NAME = ".."
+LEXICAL_CHECK_METHODS = frozenset({"is_absolute", "normpath"})
+SANDBOX_PROGRAM_SUFFIX = "_PROG"
+PROGRAM_FILESYSTEM_TOKENS = ("open(", "os.", "Path(", "shutil.")
+DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
+    (CORE_SRC / "artifact_token.py", "verify_artifact_token"): (
+        "the claim is a blob key, not a host path: the store contains keys at its own root"
+    ),
+    (CORE_SRC / "blob.py", "_walk"): (
+        "the walk starts from _resolve, which contains the key under the lstat'ed store root"
+    ),
+    (CORE_SRC / "config.py", "load_config"): "the config file is deploy input, read before a turn",
+    (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_assets"): (
+        "the portal's built asset directory is deploy input, listed at boot"
+    ),
+    (
+        CORE_SRC / "ext" / "loader.py",
+        "extension_digest",
+    ): "installed package files, not agent input",
+    (CORE_SRC / "ext" / "loader.py", "read_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
+    (CORE_SRC / "ext" / "loader.py", "write_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
+    (CORE_SRC / "ext" / "store.py", "read_catalog"): "the catalog path is deploy input",
+    (
+        CORE_SRC / "skills" / "runtime.py",
+        "_child_skill_dirs",
+    ): "skill dirs ship in the package tree",
+    (CORE_SRC / "skills" / "runtime.py", "_load_core_skills"): "core's own skills ship in the tree",
+    (CORE_SRC / "skills" / "runtime.py", "parse_skill"): "skill dirs ship in the package tree",
+    (SANDBOX_IMAGE_DIR / "sbxfs", "_file_lock"): (
+        "the lock name is a digest of the path, not the path: the lock file lives outside the"
+        " workspace on purpose, so no root contains it"
+    ),
+    (CORE_SRC / "sandbox" / "session.py", "workspace_path"): (
+        "issue #1112: the logical guard for a container path this process cannot stat; it must"
+        " accept /workspace itself, so it stays beside the canonical guard rather than inside it"
+    ),
+    (CORE_SRC / "sources" / "sync.py", "_read"): (
+        "issue #1112 row F10: a folder source's root is operator config; deferred with the"
+        " symlink-following read it does under that root"
+    ),
+    (
+        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_checkout.py",
+        "_review_relative_path",
+    ): (
+        "issue #1112: the near-duplicate lexical check to fold in next; the tool's own git-index"
+        " mode check is what refuses a symlink today"
+    ),
+    (
+        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_checkout.py",
+        "validate_repository",
+    ): "a repository slug is an identifier, not a path; the checkout root is the tool's own",
+    (
+        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_routing.py",
+        "repository_has_two_names",
+    ): "a repository slug is an identifier, not a path; the checkout root is the tool's own",
+    (Path(EXTENSIONS_ROOT) / "e2b" / "ufo_ext_e2b.py", "write"): (
+        "issue #1112 row F3: the copy-in is the provider's own `files.write`, which takes no stdin,"
+        " so it cannot run COPY_IN_PROG the way docker's `exec -i` does; closing it needs a staged"
+        " upload plus an in-sandbox rename through the guard"
+    ),
+    (
+        Path(EXTENSIONS_ROOT) / "skill_create" / "ufo_ext_skill_create" / "manifest.py",
+        "FILES_READ_PROG",
+    ): (
+        "issue #1112 row E5: still its own os.lstat check in a bash program; moves to"
+        " SandboxSession.python plus the guard"
+    ),
+}
 SHARED_SINGLETON_RESOURCES = (
     "datadog_integration_aws_account",
     "datadog_integration_aws_external_id",
@@ -82,6 +238,15 @@ def _python_files() -> list[Path]:
         for root in SOURCE_ROOTS
         for path in (ROOT / root).rglob("*.py")
         if not _vendored(path) and not _is_skill_content(path)
+    ]
+
+
+def _sandbox_scripts() -> list[Path]:
+    """The in-sandbox CLIs. They carry no `.py` suffix, so `_python_files` never collects them — and
+    they are the ingress that matters most: they run inside the sandbox on paths the model named,
+    where a planted link needs no race to win."""
+    return [
+        path for path in (ROOT / SANDBOX_IMAGE_DIR).iterdir() if path.is_file() and not path.suffix
     ]
 
 
@@ -443,6 +608,254 @@ def _to_thread_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _containment_scope(rel: Path) -> bool:
+    """Whether a file is one where a path can be built from agent, model, connector, or provider
+    input while a turn runs: core's own package and every shipped extension or pack module. A test
+    scaffold names its own `tmp_path` roots, and `evals/` is a harness a developer runs against
+    roots it chose itself, so neither carries the ingress these gates are about. The guard module is
+    its own exemption — it is the implementation every other file is held to."""
+    if rel == CONTAINMENT_MODULE or "tests" in rel.parts:
+        return False
+    return rel.is_relative_to(CORE_SRC) or rel.parts[0] in (EXTENSIONS_ROOT, PACKS_ROOT)
+
+
+def _functions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _expression_names(node: ast.expr) -> set[str]:
+    return {inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)}
+
+
+def _is_guard_call(node: ast.expr, vocabulary: frozenset[str]) -> bool:
+    match node:
+        case ast.Await(value=value):
+            return _is_guard_call(value, vocabulary)
+        case ast.Call(func=ast.Name(id=name) | ast.Attribute(attr=name)):
+            return name in vocabulary
+    return False
+
+
+def _bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple[str, ast.expr]]:
+    """Every name the function binds to an expression, with that expression — the edges a path
+    travels along between the argument it arrived as and the call that opens it. A loop target is
+    one of those edges: the real shape of a staging site is `for file in files:`, and a name the
+    iteration hands out is as much the caller's as the sequence it came from."""
+    bindings = []
+    for node in ast.walk(func):
+        match node:
+            case ast.Assign(targets=[ast.Name(id=name)], value=value):
+                bindings.append((name, value))
+            case ast.AnnAssign(target=ast.Name(id=name), value=ast.expr() as value):
+                bindings.append((name, value))
+            case ast.NamedExpr(target=ast.Name(id=name), value=value):
+                bindings.append((name, value))
+            case ast.withitem(context_expr=value, optional_vars=ast.Name(id=name)):
+                bindings.append((name, value))
+            case ast.Assign(targets=[ast.Tuple(elts=elts)], value=value):
+                bindings.extend(
+                    (element.id, value) for element in elts if isinstance(element, ast.Name)
+                )
+            case (
+                ast.For(target=ast.Name(id=name), iter=value)
+                | ast.AsyncFor(target=ast.Name(id=name), iter=value)
+                | ast.comprehension(target=ast.Name(id=name), iter=value)
+            ):
+                bindings.append((name, value))
+    return bindings
+
+
+def _guarded_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The names this function proves with the shared guard: the ones it binds to a guard call's
+    result, and nothing else.
+
+    A name merely *handed* to a guard is not proved by it. In a handler shaped like the real ones —
+    `contained_file(params["path"], params["workspace"])` — crediting every name mentioned in the
+    call would mark `params` proved and launder every other `params[...]` filesystem call in that
+    same function. What the guard returns is what may reach the filesystem."""
+    return {name for name, value in _bindings(func) if _is_guard_call(value, CONTAINMENT_GUARDS)}
+
+
+def _is_guard_handle(argument: ast.arg) -> bool:
+    """Whether a parameter is typed as the guard's own validated handle. Such a value can only have
+    come from a guard call, and its reads run off the pinned parent fd rather than a name, so a
+    helper that takes one is downstream of the checks rather than an ingress of its own."""
+    return isinstance(argument.annotation, ast.Name) and argument.annotation.id == GUARD_HANDLE_TYPE
+
+
+def _supplied_path_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Every name that may hold a path the function was handed rather than one it fixed itself: its
+    own arguments, plus whatever is derived from them, minus whatever the guard has proved."""
+    arguments = func.args
+    guarded = _guarded_names(func)
+    supplied = {
+        argument.arg
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+            *(() if arguments.vararg is None else (arguments.vararg,)),
+            *(() if arguments.kwarg is None else (arguments.kwarg,)),
+        )
+        if argument.arg not in RECEIVER_ARGUMENTS and not _is_guard_handle(argument)
+    } - guarded
+    bindings = _bindings(func)
+    growing = True
+    while growing:
+        growing = False
+        for name, value in bindings:
+            if name in supplied or name in guarded:
+                continue
+            if _expression_names(value) & supplied:
+                supplied.add(name)
+                growing = True
+    return supplied
+
+
+def _filesystem_calls(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, ast.expr]]:
+    """Each call in the function that reaches the real filesystem, paired with the expression that
+    names the file it reaches. A `Path` method is named by its receiver, an `os`/`shutil` function
+    and `open` by their first argument. `Path.open` is deliberately not one of the methods: `open`
+    is a verb half the codebase's own objects carry, and the builtin and `os.open` are where a path
+    that came from outside actually turns into a descriptor.
+
+    An enumeration names files twice. `root.glob(pattern)` is scoped by its receiver *and* by its
+    pattern, and an absolute pattern re-roots the walk at the filesystem anchor with the receiver
+    never consulted — issue #1112's own `op_glob` row — so both are paired here."""
+    calls = []
+    for node in ast.walk(func):
+        match node:
+            case ast.Call(
+                func=ast.Attribute(value=ast.Name(id=module), attr=name), args=[first, *_]
+            ) if name in FILESYSTEM_FUNCTIONS.get(module, frozenset()):
+                calls.append((f"{module}.{name}", first))
+            case ast.Call(
+                func=ast.Attribute(value=receiver, attr=str() as name), args=[first, *_]
+            ) if name in ENUMERATION_METHODS:
+                calls.extend(((f".{name}", receiver), (f".{name}", first)))
+            case ast.Call(func=ast.Attribute(value=receiver, attr=name)) if (
+                name in FILESYSTEM_METHODS
+            ):
+                calls.append((f".{name}", receiver))
+            case ast.Call(func=ast.Name(id="open"), args=[first, *_]):
+                calls.append(("open", first))
+    return calls
+
+
+def _ingress_containment_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """A file ingress opens a path it was handed only through `ufo.sandbox.containment`. Validating
+    the name and then resolving it leaves the resolution following symlinks, which is how an agent
+    plants a link in its own writable directory and reads a host file (CVE-2026-56692) — so a new
+    site that builds a host path from agent, model, connector, or provider input and reaches the
+    filesystem with it fails here until it goes through the guard. A site that deliberately does
+    not is named in `DEFERRED_INGRESS` with the reason — the review this gate exists to force.
+
+    A name the lexical tier returned is still a path it was handed: `contained_leaf` says nothing
+    about the root it is joined under and `contained_relative` resolves `a/../b` without asking
+    whether `a` is a link, so a site holding one of those is told which tier it stopped at rather
+    than told it has no check at all."""
+    failures: dict[str, None] = {}
+    for rel, tree in trees.items():
+        if not _containment_scope(rel):
+            continue
+        for func in _functions(tree):
+            if (rel, func.name) in DEFERRED_INGRESS:
+                continue
+            supplied = _supplied_path_names(func)
+            lexical = {
+                name for name, value in _bindings(func) if _is_guard_call(value, LEXICAL_GUARDS)
+            }
+            for label, expression in _filesystem_calls(func):
+                if _is_guard_call(expression, CONTAINMENT_GUARDS):
+                    continue
+                names = _expression_names(expression)
+                handed = sorted(names & supplied)
+                if not handed:
+                    continue
+                stopped = sorted(names & lexical)
+                tier = (
+                    f" — {', '.join(stopped)} carries only the lexical tier, which proves intent,"
+                    " not location"
+                    if stopped
+                    else ""
+                )
+                failures[
+                    f"{rel}: {func.name} reaches the filesystem with {label} on a path it was "
+                    f"handed ({', '.join(handed)}){tier} — open it through "
+                    f"{CONTAINMENT_IMPORT_PATH}, or name the site in DEFERRED_INGRESS"
+                ] = None
+    return list(failures)
+
+
+def _sandbox_program_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """An in-sandbox program that touches files imports the baked `containment` module rather than
+    checking paths itself. These programs run inside the sandbox on paths the model named, where a
+    planted symlink needs no race to win, and the image bakes the guard beside `sbxfs` precisely so
+    they can call it."""
+    failures = []
+    for rel, tree in trees.items():
+        if not _containment_scope(rel):
+            continue
+        for node in tree.body:
+            match node:
+                case ast.Assign(
+                    targets=[ast.Name(id=name)], value=ast.Constant(value=str() as program)
+                ) if name.endswith(SANDBOX_PROGRAM_SUFFIX):
+                    touches = any(token in program for token in PROGRAM_FILESYSTEM_TOKENS)
+                    if not touches or CONTAINMENT_IMPORT in program:
+                        continue
+                    if (rel, name) in DEFERRED_INGRESS:
+                        continue
+                    failures.append(
+                        f"{rel}: {name} opens files in the sandbox without importing "
+                        f"{CONTAINMENT_IMPORT!r} — the image bakes the guard beside sbxfs, or name "
+                        f"the program in DEFERRED_INGRESS"
+                    )
+    return failures
+
+
+def _lexical_containment_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Check 1 has one implementation. Six near-duplicate `".."`/`is_absolute` checks is the census
+    issue #1112 opened with, and each was a different subset of the same rule — so the lexical tier
+    is published (`contained_relative`, `contained_leaf`, `contained_pattern`) and written afresh
+    nowhere else."""
+    failures: dict[str, None] = {}
+    for rel, tree in trees.items():
+        if not _containment_scope(rel):
+            continue
+        for func in _functions(tree):
+            if (rel, func.name) in DEFERRED_INGRESS:
+                continue
+            for node in ast.walk(func):
+                match node:
+                    case ast.Compare(left=ast.Constant(value=str() as value), ops=[ast.In()]) if (
+                        value == PARENT_NAME
+                    ):
+                        found = f"{PARENT_NAME!r} in"
+                    case ast.Compare(
+                        ops=[ast.In()], comparators=[ast.Tuple(elts=elts) | ast.Set(elts=elts)]
+                    ) if any(
+                        isinstance(elt, ast.Constant) and elt.value == PARENT_NAME for elt in elts
+                    ):
+                        found = f"in (..., {PARENT_NAME!r})"
+                    case ast.Call(func=ast.Attribute(attr=str() as attr)) if (
+                        attr in LEXICAL_CHECK_METHODS
+                    ):
+                        found = f".{attr}()"
+                    case _:
+                        continue
+                failures[
+                    f"{rel}: {func.name} checks a path lexically with {found} — the guard's own "
+                    f"lexical tier lives in {CONTAINMENT_IMPORT_PATH}, or name the site in "
+                    f"DEFERRED_INGRESS"
+                ] = None
+    return list(failures)
+
+
 def _rogue_skill_failures(present: frozenset[str]) -> list[str]:
     failures = [
         f"skills: core ships skill {name!r}, outside the fixed set {sorted(CORE_SKILL_NAMES)}"
@@ -739,6 +1152,16 @@ def main() -> int:
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_to_thread_failures(trees))
+    ingress_trees = {
+        **trees,
+        **{
+            path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))
+            for path in _sandbox_scripts()
+        },
+    }
+    failures.extend(_ingress_containment_failures(ingress_trees))
+    failures.extend(_sandbox_program_failures(ingress_trees))
+    failures.extend(_lexical_containment_failures(ingress_trees))
     failures.extend(_set_cookie_failures(trees))
     failures.extend(_skill_failures())
     skill_trees = {

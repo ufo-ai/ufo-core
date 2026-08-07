@@ -110,6 +110,7 @@ from ufo.sdk.surfaces import (
     TurnContext,
     Writeback,
     fence_member_message,
+    inbox_name,
     mint_marker,
 )
 
@@ -1608,7 +1609,7 @@ async def _download_files(
     delivered: list[str] = []
     skipped: list[str] = []
     for file in files:
-        name = _inbox_name(file.name, used)
+        name = inbox_name(file.name, used)
         try:
             await ctx.write_workspace_file(
                 conversation_id, f"{SLACK_INBOX_DIR}/{name}", _stream_download(bot_token, file.url)
@@ -1618,19 +1619,6 @@ async def _download_files(
             continue
         delivered.append(name)
     return DownloadedFiles(tuple(delivered), tuple(skipped))
-
-
-def _inbox_name(raw: str, used: set[str]) -> str:
-    leaf = raw.replace("\\", "/").rsplit("/", 1)[-1]
-    leaf = leaf if leaf not in ("", ".", "..") else "file"
-    name = leaf
-    stem, dot, suffix = leaf.partition(".")
-    index = 1
-    while name in used:
-        name = f"{stem}-{index}{dot}{suffix}"
-        index += 1
-    used.add(name)
-    return name
 
 
 def files_note(downloaded: DownloadedFiles) -> str:
