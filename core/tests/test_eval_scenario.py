@@ -58,14 +58,15 @@ class ScriptedWorker:
     error_classes: tuple[str, ...] = ()
     invoked: int = 0
     idempotency_keys: list[str] = field(default_factory=list)
+    speakers: list[UUID | None] = field(default_factory=list)
     transcript: tuple[Message, ...] = ()
 
-    async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
     ) -> UUID:
         index = self.invoked
         self.invoked += 1
-        self.idempotency_keys.append(idempotency_key)
+        self.idempotency_keys.append(idempotency_key or "")
         status = self.statuses[index] if index < len(self.statuses) else "done"
         error_class = self.error_classes[index] if index < len(self.error_classes) else None
         turn_id = uuid4()
@@ -73,12 +74,21 @@ class ScriptedWorker:
         if error_class is not None:
             terminal["error_class"] = error_class
         async with workspace_tx() as connection:
+            conversation = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.agent_id, tables.conversation.c.member_id
+                    ).where(tables.conversation.c.id == conversation_id)
+                )
+            ).one()
+            self.speakers.append(conversation.member_id)
             await connection.execute(
                 sa.insert(tables.turn).values(
                     id=turn_id,
                     workspace_id=self.workspace_id,
                     conversation_id=conversation_id,
-                    agent_id=agent_id,
+                    agent_id=conversation.agent_id,
+                    speaker_member_id=conversation.member_id,
                     seq=index + 1,
                     status=status,
                     inbound=message,
@@ -96,6 +106,11 @@ class ScriptedWorker:
             Conversation(seq=index + 1, messages=self.transcript)
         )
         return turn_id
+
+    async def invoke(
+        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+    ) -> UUID:
+        return await self.admit(conversation_id, message, idempotency_key)
 
 
 @dataclass
@@ -115,6 +130,12 @@ class ScriptedMember:
 @dataclass
 class DbConversations:
     workspace_id: UUID
+    worker: ScriptedWorker
+
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID:
+        return await self.worker.admit(conversation_id, message, idempotency_key)
 
     def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
         return Path(gettempdir()) / "eval-scenario-workspaces" / str(conversation_id) / rel
@@ -190,7 +211,7 @@ def _target(
     return InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         simulator=member,
         blob=blob,

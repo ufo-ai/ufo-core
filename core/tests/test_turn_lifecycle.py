@@ -477,6 +477,7 @@ async def _bootstrap(model: str = "claude-opus-4-8", reasoning: ReasoningEffort 
                 id=member_id,
                 workspace_id=workspace_id,
                 email=f"{member_id.hex[:8]}@example.com",
+                is_admin=True,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

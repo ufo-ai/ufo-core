@@ -187,6 +187,7 @@ MODEL = "claude-opus-4-8"
 AGENT_REASONING = "high"
 PROMPT = "You are a helpful assistant."
 EXTENSION = "evals"
+OWNER_EMAIL = "owner@evalco.test"
 TURN_EVENT = "memory.pre_response_recall"
 
 
@@ -874,6 +875,19 @@ class StubWorker:
     child_tokens: int = 0
     child_cost_micro_usd: int = 0
 
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID:
+        async with workspace_tx() as connection:
+            agent_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()
+        return await self.invoke(conversation_id, agent_id, message, idempotency_key or "")
+
     async def invoke(
         self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
     ) -> UUID:
@@ -1183,8 +1197,47 @@ class StaticTurnLogReader:
 
 
 @dataclass
+class DriverConversations:
+    """The real driver's conversation handling with the stub worker's admission: these cases prove
+    opening, seeding and staging, so the turn itself stays scripted rather than enqueued."""
+
+    driver: WorkspaceDriver
+    worker: "StubWorker"
+
+    async def open(
+        self,
+        case_name: str,
+        member_key: str | None = None,
+        workspace_files: tuple[WorkspaceFile, ...] = (),
+        prior_messages: tuple[str, ...] = (),
+        undelivered: tuple[UndeliveredRound, ...] = (),
+    ) -> UUID:
+        return await self.driver.open(
+            case_name, member_key, workspace_files, prior_messages, undelivered
+        )
+
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID:
+        return await self.worker.admit(conversation_id, message, idempotency_key)
+
+    async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
+        await self.driver.stage(conversation_id, path, source)
+
+    def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
+        return self.driver.workspace_path(conversation_id, rel)
+
+
+@dataclass
 class DbConversations:
     workspace_id: UUID
+    worker: "StubWorker | None" = None
+
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID:
+        assert self.worker is not None, "this double was built to open only"
+        return await self.worker.admit(conversation_id, message, idempotency_key)
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
         raise AssertionError("this double stages no references")
@@ -1263,6 +1316,24 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+async def _seed_owner(workspace_id: UUID) -> UUID:
+    """The founding admin `ufoctl init` seats, which the real driver speaks a case as."""
+    owner_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email=OWNER_EMAIL,
+                is_admin=True,
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return owner_id
+
+
 async def _seed_agent(workspace_id: UUID) -> UUID:
     agent_id = uuid4()
     async with workspace_tx() as connection:
@@ -1311,7 +1382,7 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1377,7 +1448,7 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=RecordingConversations(workspace_id),
+        conversations=RecordingConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1430,7 +1501,7 @@ async def test_prepare_runs_after_the_workspace_exists_and_the_grader_reads_it(
     order: list[str] = []
     worker = StubWorker(blob, workspace_id, _research_transcript(), order=order)
     ctx = _context(blob, worker)
-    conversations = DbConversations(workspace_id)
+    conversations = DbConversations(workspace_id, worker)
     seen: dict[str, Path] = {}
 
     async def prepare(prepared_workspace: UUID, workspace_dir: Path) -> None:
@@ -1477,7 +1548,8 @@ async def test_a_grader_that_excludes_its_sample_excludes_the_case(db: None, tmp
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
-    ctx = _context(blob, StubWorker(blob, workspace_id, _research_transcript()))
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(False, "environment contaminated", excluded=True)
@@ -1485,7 +1557,7 @@ async def test_a_grader_that_excludes_its_sample_excludes_the_case(db: None, tmp
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1642,6 +1714,7 @@ async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_run
     case's rounds would silently arrive as its workspace files. The turn reads the transcript it
     was handed as it is admitted, so that is where this checks it."""
     workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     seeded = (
@@ -1668,8 +1741,11 @@ async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_run
     target = InProcessTarget(
         ctx=_context(blob, worker),
         agent_id=agent_id,
-        conversations=WorkspaceDriver(
-            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        conversations=DriverConversations(
+            WorkspaceDriver(
+                workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+            ),
+            worker,
         ),
         outcome=CorpusOutcome(_context(blob, worker)),
         blob=blob,
@@ -1720,6 +1796,12 @@ async def test_in_process_target_reads_durable_compaction_state(
     @dataclass(frozen=True)
     class ExistingConversation:
         conversation_id: UUID
+        worker: StubWorker
+
+        async def admit(
+            self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        ) -> UUID:
+            return await self.worker.admit(conversation_id, message, idempotency_key)
 
         async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
             raise AssertionError("this double stages no references")
@@ -1755,7 +1837,7 @@ async def test_in_process_target_reads_durable_compaction_state(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=ExistingConversation(conversation_id),
+        conversations=ExistingConversation(conversation_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1821,7 +1903,7 @@ async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_p
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1889,7 +1971,7 @@ async def test_eval_trajectory_names_reasoning_and_stores_no_signature(db: None,
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1936,7 +2018,7 @@ async def test_oversized_eval_trajectory_is_omitted_without_aborting_the_case(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -1964,7 +2046,7 @@ async def test_in_process_target_attaches_the_turn_logs(db: None, tmp_path) -> N
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         logs=logs,
     )
@@ -1995,7 +2077,7 @@ async def test_in_process_target_raises_when_a_required_turn_log_is_missing(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         logs=StaticTurnLogReader(missing=True),
     )
@@ -2015,7 +2097,7 @@ async def test_capability_case_fails_when_a_required_tool_is_absent(db: None, tm
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -2050,7 +2132,7 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         logs=logs,
     )
@@ -2078,7 +2160,7 @@ async def test_in_process_target_discards_logs_without_a_terminal_trajectory(
     target = InProcessTarget(
         ctx=_context(blob, worker),
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=MissingOutcome(),
         logs=logs,
     )
@@ -2106,7 +2188,7 @@ async def test_repeated_case_runs_use_conversation_scoped_idempotency_keys(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -2185,7 +2267,7 @@ async def test_model_judge_runs_through_case_runner_and_bills_workspace(db: None
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         judge=judge,
     )
@@ -2262,7 +2344,7 @@ async def test_skill_scorer_rejects_first_distractor_through_case_runner(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -2307,7 +2389,7 @@ async def test_web_dependent_case_behind_an_infra_outage_is_excluded_not_passed(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
     )
     case = CapabilityCase(
@@ -2798,7 +2880,7 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -2832,6 +2914,7 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
 
 async def test_target_stages_case_references_before_admission(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     source = tmp_path / "forecast.csv"
@@ -2853,8 +2936,11 @@ async def test_target_stages_case_references_before_admission(db: None, tmp_path
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=WorkspaceDriver(
-            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        conversations=DriverConversations(
+            WorkspaceDriver(
+                workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+            ),
+            worker,
         ),
         outcome=CorpusOutcome(ctx),
     )
@@ -4016,8 +4102,11 @@ async def test_in_process_target_opens_a_member_bound_eval_conversation(db: None
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=WorkspaceDriver(
-            workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+        conversations=DriverConversations(
+            WorkspaceDriver(
+                workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+            ),
+            worker,
         ),
         outcome=CorpusOutcome(ctx),
     )
@@ -4048,6 +4137,7 @@ async def test_in_process_target_records_a_terminal_turn_without_a_workflow(
     db: None, tmp_path
 ) -> None:
     workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     worker = StubWorker(blob, workspace_id, None, status="cancelled")
@@ -4057,7 +4147,7 @@ async def test_in_process_target_records_a_terminal_turn_without_a_workflow(
     target = InProcessTarget(
         ctx=_context(blob, worker),
         agent_id=agent_id,
-        conversations=driver,
+        conversations=DriverConversations(driver, worker),
         outcome=driver,
     )
 
@@ -4287,8 +4377,50 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
+async def test_workspace_driver_speaks_as_the_named_member_then_the_founding_admin(
+    db: None, tmp_path
+) -> None:
+    """Who a case speaks as, across the three shapes a workspace comes in. A named email binds that
+    member; the founding admin covers an ordinary workspace whose cases name none; and a corpus with
+    no admin — `memory_100` inserts only the members its audience bindings name — speaks unbound
+    rather than aborting the run or picking an arbitrary member, which would union a private subject
+    into what a shared-audience case may recall."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+    )
+    named = await _seed_member(workspace_id, "speaker@evalco.test")
+
+    with ws(workspace_id):
+        unbound = await driver.open("no-admin-corpus")
+        owner = await _seed_owner(workspace_id)
+        defaulted = await driver.open("ordinary-workspace")
+        bound = await driver.open("named-member", "speaker@evalco.test")
+        async with workspace_tx() as connection:
+            speakers = dict(
+                (
+                    await connection.execute(
+                        sa.select(tables.conversation.c.id, tables.conversation.c.member_id).where(
+                            tables.conversation.c.workspace_id == workspace_id
+                        )
+                    )
+                ).all()
+            )
+
+    assert speakers[unbound] is None
+    assert speakers[defaulted] == owner
+    assert speakers[bound] == named
+
+    with ws(workspace_id):
+        with pytest.raises(ValueError, match="is not a member email"):
+            await driver.open("absent-member", "ghost@evalco.test")
+
+
 async def test_workspace_driver_seeds_case_history_and_files(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     driver = WorkspaceDriver(
@@ -4339,6 +4471,7 @@ async def test_workspace_driver_seeds_an_undelivered_round_behind_the_case_messa
     message, its result in the user turn that follows — so the model reads it as its own working
     prose rather than as a reply the member already received."""
     workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     driver = WorkspaceDriver(
@@ -5056,7 +5189,7 @@ async def test_capability_case_records_complete_evidence_from_the_real_target(
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -5390,7 +5523,7 @@ def _delegating_target(
     return InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )
@@ -5610,7 +5743,7 @@ async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_p
     target = InProcessTarget(
         ctx=ctx,
         agent_id=agent_id,
-        conversations=DbConversations(workspace_id),
+        conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
         blob=blob,
     )

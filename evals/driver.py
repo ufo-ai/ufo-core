@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
@@ -32,6 +33,7 @@ from ufo.object_name import validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import PENDING, ReasoningEffort
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
 from ufo.workspace import ws
 
@@ -168,27 +170,16 @@ class WorkspaceDriver:
         prior_messages: tuple[str, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
     ) -> UUID:
-        """Open one isolated eval conversation. A member-bound case names its member by the exact
-        workspace `member.email`; an absent email fails rather than degrading to shared-only
-        recall. Seeded undelivered rounds land as the narration-plus-tool-call pairs they were, so
-        the case message reads to the model as a member writing into a turn already at work."""
+        """Open one isolated eval conversation, bound to the member who speaks in it. A case names
+        its member by the exact workspace `member.email`; one that names none speaks as the
+        workspace's founding admin, so a case reads to the runtime as the member message it is
+        written as rather than as a background fire. An absent email fails rather than degrading to
+        shared-only recall. Seeded undelivered rounds land as the narration-plus-tool-call pairs
+        they were, so the case message reads to the model as a member writing into a turn already
+        at work."""
         conversation_id = uuid4()
         async with workspace_tx() as connection:
-            member_id = None
-            if member_key is not None:
-                member_id = (
-                    await connection.execute(
-                        sa.select(tables.member.c.id).where(
-                            tables.member.c.workspace_id == self.workspace_id,
-                            tables.member.c.email == member_key,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if member_id is None:
-                    message = (
-                        f"eval member_key {member_key!r} is not a member email in this workspace"
-                    )
-                    raise ValueError(message)
+            member_id = await self._speaker(connection, member_key)
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
@@ -266,6 +257,60 @@ class WorkspaceDriver:
                 )
             )
         return tuple(steps)
+
+    async def _speaker(self, connection: AsyncConnection, member_key: str | None) -> UUID | None:
+        """The member a conversation speaks as: the one a case names — fail loud on an email this
+        workspace does not carry — else the workspace's founding admin, the member `ufoctl init`
+        seats.
+
+        A workspace with no admin at all speaks unbound. Only a materialized corpus builds one:
+        `memory_100` inserts exactly the members its audience bindings name, and its shared-audience
+        cases carry no email on purpose, since a speaker there would union that member's private
+        subject into what the case may recall and change what the grader sees. Choosing an arbitrary
+        member for them would corrupt the grade; refusing would abort the run. So the corpus keeps
+        the shared reading it was built for, and every ordinary workspace gets its owner."""
+        selection = sa.select(tables.member.c.id).where(
+            tables.member.c.workspace_id == self.workspace_id
+        )
+        if member_key is not None:
+            found = (
+                await connection.execute(selection.where(tables.member.c.email == member_key))
+            ).scalar_one_or_none()
+            if found is None:
+                raise ValueError(
+                    f"eval member_key {member_key!r} is not a member email in this workspace"
+                )
+            return found
+        return (
+            await connection.execute(
+                selection.where(tables.member.c.is_admin.is_(True))
+                .order_by(tables.member.c.created_at)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID:
+        """Admit one case message as the conversation's member, through the same
+        `MemberAdmission` every surface admits through — so a case exercises the member path it is
+        written as, pause consumption included."""
+        async with workspace_tx() as connection:
+            speaker = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+            ).scalar_one()
+        admitter = MemberAdmission(
+            admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
+            workspace_id=self.workspace_id,
+        )
+        admitted = await admitter.admit(
+            conversation_id, message, idempotency_key, speaker_member_id=speaker
+        )
+        return admitted.turn_id
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
         target = self.workspace_path(conversation_id, path)

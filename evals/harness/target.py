@@ -152,6 +152,10 @@ class EvalConversations(Protocol):
         undelivered: tuple[UndeliveredRound, ...] = (),
     ) -> UUID: ...
 
+    async def admit(
+        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+    ) -> UUID: ...
+
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None: ...
 
     def workspace_path(self, conversation_id: UUID, rel: str) -> Path: ...
@@ -219,9 +223,8 @@ class InProcessTarget:
             )
         started = perf_counter()
         try:
-            turn_id = await self.ctx.invoke(
+            turn_id = await self.conversations.admit(
                 conversation_id,
-                self.agent_id,
                 case.message,
                 f"{case.name}:{conversation_id}",
             )
@@ -289,9 +292,7 @@ class InProcessTarget:
         scenario runner's per-exchange seam. Log and artifact enrichment stay with `run`; a
         scenario grader reads durable state itself."""
         try:
-            turn_id = await self.ctx.invoke(
-                conversation_id, self.agent_id, message, idempotency_key
-            )
+            turn_id = await self.conversations.admit(conversation_id, message, idempotency_key)
         except Exception as error:
             return _invoke_failure(conversation_id, error)
         return (await self._settled(conversation_id, turn_id)).result

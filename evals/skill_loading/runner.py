@@ -32,7 +32,7 @@ from ufo.db import workspace_tx
 from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.schema import tables
 from ufo.schema.records import TurnStatus
-from ufo.sdk.context import ExtensionContext, Trajectory
+from ufo.sdk.context import Trajectory
 from ufo.skills.runtime import SKILL_MD, SKILLS_MOUNT_DIR
 
 GRADER_REVISION = "expected-present-3"
@@ -129,12 +129,6 @@ class TurnControl(Protocol):
 
 class SkillLoadRunTarget(Protocol):
     @property
-    def ctx(self) -> ExtensionContext: ...
-
-    @property
-    def agent_id(self) -> UUID: ...
-
-    @property
     def conversations(self) -> EvalConversations: ...
 
     @property
@@ -203,8 +197,8 @@ class SkillLoadingSuite:
             case.name, workspace_files=case.workspace_files
         )
         try:
-            turn_id = await target.ctx.invoke(
-                conversation_id, target.agent_id, case.message, f"{case.name}:{conversation_id}"
+            turn_id = await target.conversations.admit(
+                conversation_id, case.message, f"{case.name}:{conversation_id}"
             )
         except Exception as error:
             return EvalCaseResult(
