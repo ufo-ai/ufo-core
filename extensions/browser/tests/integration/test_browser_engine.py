@@ -34,7 +34,7 @@ CHROME_CANDIDATES = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
 )
-READY_TIMEOUT_S = 20.0
+READY_TIMEOUT_S = 60.0
 READY_POLL_S = 0.1
 
 PROBE_HTML = (
@@ -81,12 +81,16 @@ def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
             stdout=log,
             stderr=log,
         )
-        deadline = time.monotonic() + READY_TIMEOUT_S
+        launched = time.monotonic()
+        deadline = launched + READY_TIMEOUT_S
         url = None
+        port_file_at = None
         try:
             while process.poll() is None and time.monotonic() < deadline:
                 try:
                     port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
+                    if port_file_at is None:
+                        port_file_at = time.monotonic() - launched
                     candidate = f"http://127.0.0.1:{port}"
                     if httpx.get(f"{candidate}/json/version", timeout=0.5).status_code == 200:
                         url = candidate
@@ -95,10 +99,12 @@ def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]
                     pass
                 time.sleep(READY_POLL_S)
             if url is None:
-                log.flush()
                 details = chrome_log.read_text(errors="replace").strip()
+                written = "never" if port_file_at is None else f"{port_file_at:.1f}s"
                 raise RuntimeError(
-                    f"Chrome CDP startup failed with exit {process.poll()}: {details[-2000:]}"
+                    f"Chrome CDP startup failed after {time.monotonic() - launched:.1f}s "
+                    f"(exit {process.poll()}, DevToolsActivePort written {written}): "
+                    f"{details[-2000:]}"
                 )
             monkeypatch.setenv("BROWSER_CDP_URL", url)
             yield url
