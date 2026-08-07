@@ -60,6 +60,22 @@ test("a session that ends under the open page offers the one sign-in page", asyn
   expect(screen.queryByRole("textbox")).toBeNull();
 });
 
+test("a live session whose email holds no member row is told that, not to sign in again", async () => {
+  wire({
+    "/api/agents": () =>
+      new Response("no member with this email in this workspace", {
+        status: 401,
+        headers: { "x-ufo-session-fault": "no-member" },
+      }),
+  });
+  render(<Portal />);
+
+  expect(await screen.findByText("Not a member of this workspace")).toBeTruthy();
+  expect(screen.getByText(/An admin has to add the address/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Sign in with another email" })).toBeTruthy();
+  expect(screen.queryByText("Session ended")).toBeNull();
+});
+
 test("a boot that fails on the server states the status and renders no shell", async () => {
   wire({ "/api/agents": () => new Response("boom", { status: 502 }) });
   render(<Portal />);

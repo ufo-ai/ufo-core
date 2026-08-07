@@ -2,12 +2,12 @@ import { useEffect, useState } from "react";
 
 import { App } from "@/App";
 import { SignIn } from "@/views/SignIn";
-import { BASE } from "@/lib/api";
+import { BASE, sessionFault, type SessionFault } from "@/lib/api";
 import type { AgentsPayload } from "@/lib/types";
 
 type Boot =
   | { phase: "loading" }
-  | { phase: "signed-out" }
+  | { phase: "signed-out"; fault: SessionFault }
   | { phase: "failed"; message: string }
   | { phase: "ready"; payload: AgentsPayload };
 
@@ -29,7 +29,7 @@ export function Portal() {
         return;
       }
       if (res.status === 401) {
-        setBoot({ phase: "signed-out" });
+        setBoot({ phase: "signed-out", fault: sessionFault(res) });
         return;
       }
       if (!res.ok) {
@@ -53,7 +53,7 @@ export function Portal() {
 
   if (boot.phase === "loading")
     return <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">Loading…</div>;
-  if (boot.phase === "signed-out") return <SignIn />;
+  if (boot.phase === "signed-out") return <SignIn fault={boot.fault} />;
   if (boot.phase === "failed") {
     return (
       <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">

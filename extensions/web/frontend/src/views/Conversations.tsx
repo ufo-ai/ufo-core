@@ -54,7 +54,7 @@ export function turnTree(
   return rows;
 }
 
-function Disclose({
+export function Disclose({
   agent,
   conversation,
   onBack,

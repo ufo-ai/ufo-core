@@ -4,6 +4,16 @@ export const BASE = "/surface/web";
 
 export type Fetched<T> = { ok: true; payload: T } | { ok: false; message: string; status: number };
 
+export const SESSION_FAULT_HEADER = "x-ufo-session-fault";
+
+export type SessionFault = "expired" | "no-member";
+
+/** Which of the two 401s the surface answered: a bearer it could not read, or a live bearer whose
+ *  email holds no member row in this workspace. */
+export function sessionFault(res: Response): SessionFault {
+  return res.headers.get(SESSION_FAULT_HEADER) === "no-member" ? "no-member" : "expired";
+}
+
 export async function getJson<T>(path: string, signal?: AbortSignal): Promise<Fetched<T>> {
   try {
     const res = await fetch(BASE + path, { credentials: "same-origin", signal });

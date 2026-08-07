@@ -41,10 +41,12 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import (
+    NO_MEMBER_FAULT,
     PORTAL_BUILD,
     PORTAL_FILE,
     PORTAL_HTML,
     SESSION_COOKIE,
+    SESSION_FAULT_HEADER,
     _rendered_messages,
     _sse,
     load_assets,
@@ -2615,6 +2617,60 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
     }
 
 
+async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A `#/c/<id>` permalink reads the conversation the same way the panel lists it, admin flag
+    included: the id an admin sees offered as "Open as admin" resolves here as unreadable and
+    disclosable rather than as a conversation that does not exist, and an audience naming no member
+    resolves unreadable and undisclosable — the permalink opens no room. For anyone else both stay
+    absent."""
+    client, workspace_id, agent_id = web
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    owner_id, _owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="D1:1.0",
+        audience=str(conversation_audience(owner_id)),
+        member_id=owner_id,
+        surface="slack",
+    )
+    room = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C9:1.0",
+        audience="room:slack:C9",
+        member_id=None,
+        surface="slack",
+    )
+    for conversation_id in (theirs, room):
+        await _seed_listed_turn(
+            workspace_id, conversation_id, agent_id, seq=1, inbound="from Slack"
+        )
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    peer_cookie = {"cookie": f"{SESSION_COOKIE}={peer_token}"}
+
+    private = await client.get(
+        f"/surface/web/api/chats?conversation={theirs}", headers=admin_cookie
+    )
+    walled = await client.get(f"/surface/web/api/chats?conversation={room}", headers=admin_cookie)
+
+    assert private.json()["chats"] == []
+    assert private.json()["conversation"]["id"] == str(theirs)
+    assert private.json()["conversation"]["member_email"] == "owner@example.com"
+    assert private.json()["conversation"]["readable"] is False
+    assert private.json()["conversation"]["disclosable"] is True
+    assert walled.json()["conversation"]["readable"] is False
+    assert walled.json()["conversation"]["disclosable"] is False
+    for conversation_id in (theirs, room):
+        unprivileged = await client.get(
+            f"/surface/web/api/chats?conversation={conversation_id}", headers=peer_cookie
+        )
+        assert unprivileged.json() == {"chats": []}, conversation_id
+
+
 async def test_an_orphaned_chat_row_is_inert(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -3214,6 +3270,28 @@ async def test_an_unverified_bearer_authenticates_nobody(
         headers={"cookie": f"{SESSION_COOKIE}=not-a-signed-bearer"},
     )
     assert refused.status_code == 401
+
+
+async def test_a_bearer_whose_email_holds_no_member_row_names_that_fault(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The two refusals behind a 401 are told apart: a live bearer whose email holds no member row
+    in this workspace names that and carries the session-fault header, so the page states the cause
+    rather than advising a sign-in that cannot change it. Every other refusal carries no header,
+    and signing in again is the remedy it already offers."""
+    client, workspace_id, _agent_id = web
+    stranger_token = mint_token(
+        TOKEN_SECRET, str(workspace_id), "stranger@example.com", timedelta(hours=1)
+    )
+    stranger = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={stranger_token}"}
+    )
+    assert stranger.status_code == 401
+    assert stranger.text == "no member with this email in this workspace"
+    assert stranger.headers[SESSION_FAULT_HEADER] == NO_MEMBER_FAULT
+    sessionless = await client.get("/surface/web/api/agents")
+    assert sessionless.status_code == 401
+    assert SESSION_FAULT_HEADER not in sessionless.headers
 
 
 async def _seed_web_turn(

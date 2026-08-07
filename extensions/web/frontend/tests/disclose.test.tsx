@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, AGENT, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -145,6 +145,47 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
 
   await refusedNotice("Only an admin may read it.");
   expect(calls.some((url) => url.includes("/turns"))).toBe(false);
+});
+
+test("a permalink to another member's conversation offers the listing's acknowledgement", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const linked = { ...PRIVATE, id: CONVO_ID, agent_id: AGENT.id };
+  const { calls } = wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: linked })
+        : json({ chats: [] }),
+    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/files": () => json({ files: [] }),
+    "/intents": () => json({ applied: true, message: "Recorded." }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  expect(await screen.findByText(/private to owner@example.com/)).toBeTruthy();
+  expect(calls.some((url) => url.includes("/turns"))).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
+
+  expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(
+    screen.getByText("This conversation is read-only here. Reply in slack to continue it."),
+  ).toBeTruthy();
+});
+
+test("a permalink to a conversation naming no member is unshared, not missing", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const linked = { ...WALLED, id: CONVO_ID, agent_id: AGENT.id, member_email: null };
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: linked })
+        : json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  expect(
+    await screen.findByText("This conversation is not shared with this account."),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
 
 test("leaving the acknowledgement returns to the listing without reading", async () => {

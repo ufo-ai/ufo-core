@@ -27,6 +27,8 @@ beforeEach(() => {
 
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
 
+const NOT_SHARED = "This conversation is not shared with this account.";
+
 function hoursAgo(hours: number): string {
   return new Date(NOW.getTime() - hours * 3_600_000).toISOString();
 }
@@ -104,7 +106,7 @@ test("a deep link waits while the rail loads instead of denying the conversation
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findAllByText("Loading…")).toHaveLength(2);
-  expect(screen.queryByText("No such conversation.")).toBeNull();
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
 test("a new-conversation link naming no agent of this workspace says so", async () => {
@@ -150,7 +152,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();
-  expect(screen.queryByText("No such conversation.")).toBeNull();
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
 
   releaseRail!(
     json({
@@ -223,12 +225,39 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   expect(railRow.textContent).toContain("second · ");
 });
 
-test("a conversation the rail does not hold says so", async () => {
+test("a conversation no read of this account's answers is named unshared, not missing", async () => {
   location.hash = "#/c/99999999-9999-4999-8999-999999999999";
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  expect(await screen.findByText("No such conversation.")).toBeTruthy();
+  expect(await screen.findByText(NOT_SHARED)).toBeTruthy();
+});
+
+test("a permalink read refused for the session offers sign-in rather than a denial", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? new Response("missing or unknown session cookie", { status: 401 })
+        : json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("Session ended")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login");
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
+});
+
+test("a permalink read the server faults on states the fault rather than a denial", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=") ? new Response("boom", { status: 500 }) : json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
 test("a Slack conversation permalink opens its read-only transcript", async () => {
@@ -277,6 +306,9 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
   expect(screen.queryByLabelText("Message the agent")).toBeNull();
+  expect(
+    screen.getByText("This conversation is read-only here. Reply in slack to continue it."),
+  ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
     screen.getByRole("heading", { name: "slack · Shared · " + CONVO_ID.slice(0, 8) }),
@@ -341,7 +373,7 @@ test("a deep link is not blamed while the rail is the thing that failed", async 
 
   const notes = await screen.findAllByText("Couldn't load conversations.");
   expect(notes.length).toBe(2);
-  expect(screen.queryByText("No such conversation.")).toBeNull();
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
 test("a failed send neither bumps the rail nor reorders it", async () => {

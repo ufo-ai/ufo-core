@@ -6,7 +6,8 @@ import { Agents } from "@/views/Agents";
 import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
-import { ConversationDetail } from "@/views/Conversations";
+import { ConversationDetail, Disclose } from "@/views/Conversations";
+import { SignIn } from "@/views/SignIn";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -44,11 +45,16 @@ export type AppProps = { agents: Agent[]; subagents: Subagent[]; member: Member 
 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
 
+type Sought =
+  | { kind: "answered" }
+  | { kind: "signed-out" }
+  | { kind: "failed"; message: string };
+
 export function App({ agents, subagents, member }: AppProps) {
   const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
-  const [sought, setSought] = useState<readonly string[]>([]);
+  const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
   const [linked, setLinked] = useState<Record<string, LinkedConversation>>({});
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
@@ -168,13 +174,18 @@ export function App({ agents, subagents, member }: AppProps) {
   useEffect(() => {
     if (route.kind !== "chat" || rail.phase !== "ready") return;
     const wanted = route.conversationId;
-    if (rail.rows.some((row) => row.conversation_id === wanted) || sought.includes(wanted)) {
+    if (rail.rows.some((row) => row.conversation_id === wanted) || wanted in sought) {
       return;
     }
     let live = true;
     getJson<ChatsPayload>("/api/chats?conversation=" + wanted).then((result) => {
       if (!live) return;
-      setSought((current) => current.concat(wanted));
+      const outcome: Sought = result.ok
+        ? { kind: "answered" }
+        : result.status === 401
+          ? { kind: "signed-out" }
+          : { kind: "failed", message: result.message };
+      setSought((current) => ({ ...current, [wanted]: outcome }));
       if (!result.ok) return;
       if (result.payload.chats.length) {
         setRail((current) => ({ ...current, rows: mergeChats(current.rows, result.payload.chats) }));
@@ -294,7 +305,7 @@ function Pane({
   onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
-  sought: readonly string[];
+  sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, LinkedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
@@ -358,24 +369,31 @@ function Pane({
     if (!row && linkedConversation) {
       const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent_id);
       if (!linkedAgent) return <PaneNote>No such agent.</PaneNote>;
+      if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
       return (
-        <main className="flex min-h-0 min-w-0 flex-col">
-          <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
-            <ConversationDetail
-              agent={linkedAgent}
-              conversation={linkedConversation}
-              onBack={() => onOpenAgent(linkedAgent.id, "conversations")}
-            />
-          </div>
-        </main>
+        <LinkedPane
+          key={linkedConversation.id}
+          agent={linkedAgent}
+          conversation={linkedConversation}
+          onOpenAgent={onOpenAgent}
+        />
       );
     }
     const agent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
     if (!row || !agent) {
       if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
       if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
-      if (!sought.includes(route.conversationId)) return <PaneNote>Loading…</PaneNote>;
-      return <PaneNote>No such conversation.</PaneNote>;
+      const outcome = sought[route.conversationId];
+      if (!outcome) return <PaneNote>Loading…</PaneNote>;
+      if (outcome.kind === "signed-out") {
+        return (
+          <main className="flex min-h-0 min-w-0 flex-col">
+            <SignIn />
+          </main>
+        );
+      }
+      if (outcome.kind === "failed") return <PaneNote>{outcome.message}</PaneNote>;
+      return <NotShared />;
     }
     return (
       <ChatPane
@@ -406,6 +424,44 @@ function Pane({
       onOpenAgent={onOpenAgent}
     />
   );
+}
+
+function LinkedPane({
+  agent,
+  conversation,
+  onOpenAgent,
+}: {
+  agent: Agent;
+  conversation: LinkedConversation;
+  onOpenAgent: (agentId: string, tab?: AgentTab) => void;
+}) {
+  const [disclosed, setDisclosed] = useState(false);
+  const back = () => onOpenAgent(agent.id, "conversations");
+  return (
+    <main className="flex min-h-0 min-w-0 flex-col">
+      <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
+        {conversation.readable || disclosed ? (
+          <>
+            <ConversationDetail agent={agent} conversation={conversation} onBack={back} />
+            <p className="max-w-hint opacity-(--muted-soft)">
+              This conversation is read-only here. Reply in {conversation.surface} to continue it.
+            </p>
+          </>
+        ) : (
+          <Disclose
+            agent={agent}
+            conversation={conversation}
+            onBack={back}
+            onOpened={() => setDisclosed(true)}
+          />
+        )}
+      </div>
+    </main>
+  );
+}
+
+function NotShared() {
+  return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
 function PaneNote({ children }: { children: React.ReactNode }) {

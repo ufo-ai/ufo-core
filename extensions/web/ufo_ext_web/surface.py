@@ -123,6 +123,8 @@ UPLOAD_CHUNK_BYTES = 65_536
 WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
+SESSION_FAULT_HEADER = "x-ufo-session-fault"
+NO_MEMBER_FAULT = "no-member"
 MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
@@ -251,18 +253,25 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     return HTMLResponse(PORTAL_HTML)
 
 
-async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | None:
-    """The member and email a request's session cookie authenticates, or None when the cookie is
-    missing or its bearer names no email for this workspace. The email is the web
-    `surface_identity`, linked to (or created as) a member on first contact."""
+async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response:
+    """The member and email a request's session cookie authenticates, or the 401 that names which
+    of the two refusals happened: no bearer to read — absent, forged, or expired — which signing in
+    again fixes, or a live bearer whose email holds no member row in this workspace, which it does
+    not. The second carries `SESSION_FAULT_HEADER`, so the page states the cause instead of
+    advising a sign-in that cannot change it. The email is the web `surface_identity`, linked to
+    (or created as) a member on first contact."""
     token = request.cookies.get(SESSION_COOKIE, "")
-    if not token:
-        return None
-    email = verify_token(token, ctx.workspace_id)
+    email = verify_token(token, ctx.workspace_id) if token else None
     if email is None:
-        return None
+        return Response("missing or unknown session cookie", status_code=401)
     member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
-    return None if member_id is None else (member_id, email)
+    if member_id is None:
+        return Response(
+            "no member with this email in this workspace",
+            status_code=401,
+            headers={SESSION_FAULT_HEADER: NO_MEMBER_FAULT},
+        )
+    return member_id, email
 
 
 async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
@@ -410,8 +419,8 @@ async def _audience_for(
     ctx: SurfaceContext, request: Request
 ) -> tuple[UUID, str, WebAudience] | Response:
     auth = await _authenticate(ctx, request)
-    if auth is None:
-        return Response("missing or unknown session cookie", status_code=401)
+    if isinstance(auth, Response):
+        return auth
     member_id, email = auth
     return member_id, email, await web_audience(ctx, web_extension(), email)
 
@@ -859,9 +868,11 @@ async def _resolve_chat(
     email: str,
     requested: str,
 ) -> Response:
-    """The readable conversation a `#/c/<id>` permalink names: a web chat returns its rail row;
-    another surface returns its read-only conversation projection. The same audience gates as
-    their ordinary views answer; a malformed, turnless, or unreadable conversation is absent."""
+    """The conversation a `#/c/<id>` permalink names: a web chat returns its rail row; another
+    surface returns its read-only conversation projection. The same audience gates as their
+    ordinary views answer, down to the viewer's own admin flag — so a row the conversations panel
+    offers an admin to disclose resolves here too, carrying `readable: false` rather than reading
+    as a conversation that does not exist. A malformed or turnless id is absent."""
     try:
         named = UUID(requested)
     except ValueError:
@@ -896,7 +907,7 @@ async def _resolve_chat(
     listed = await ctx.list_agent_conversations(
         target_agent.id,
         member_id,
-        admin=False,
+        admin=audience.admin,
         limit=1,
         conversation_id=named,
     )
@@ -2037,8 +2048,8 @@ async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
     no transcript; the privileged fulfillment verifies the seal (workspace, requesting member,
     named slot, freshness) before the encrypted store takes it."""
     auth = await _authenticate(ctx, request)
-    if auth is None:
-        return Response("missing or unknown session cookie", status_code=401)
+    if isinstance(auth, Response):
+        return auth
     member_id, _email = auth
     refused = _framed_length(request, MAX_FORM_BYTES)
     if refused is not None:
