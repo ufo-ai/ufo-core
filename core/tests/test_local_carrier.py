@@ -13,6 +13,7 @@ import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -46,6 +47,38 @@ LOOPBACK_PROBE = (
     "import urllib.request;"
     "print(urllib.request.urlopen('http://127.0.0.1:{port}/json/version', timeout=2).read())"
 )
+
+
+DESCENDANT_MARKER = "descendant.pid"
+DESCENDANT_LIFETIME_SECONDS = 60
+DESCENDANT_COMMAND = (
+    f"sh -c 'echo $$ > {DESCENDANT_MARKER}; sleep {DESCENDANT_LIFETIME_SECONDS}' & "
+    f"sleep {DESCENDANT_LIFETIME_SECONDS}"
+)
+EXEC_TIMEOUT_SECONDS = 1
+EXEC_RETURN_BUDGET_SECONDS = 15
+DESCENDANT_POLL_SECONDS = 0.05
+DESCENDANT_POLL_ATTEMPTS = 100
+
+
+async def _descendant_pid(workspace: Path) -> int:
+    marker = workspace / DESCENDANT_MARKER
+    for _ in range(DESCENDANT_POLL_ATTEMPTS):
+        recorded = marker.read_text().strip() if marker.exists() else ""
+        if recorded:
+            return int(recorded)
+        await asyncio.sleep(DESCENDANT_POLL_SECONDS)
+    raise AssertionError("the command never recorded its descendant")
+
+
+async def _still_running(pid: int) -> bool:
+    for _ in range(DESCENDANT_POLL_ATTEMPTS):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        await asyncio.sleep(DESCENDANT_POLL_SECONDS)
+    return True
 
 
 def _spec(workspace: Path) -> SandboxSpec:
@@ -268,6 +301,42 @@ async def test_exec_maps_a_timeout_to_the_timeout_code(tmp_path: Path) -> None:
     result = await carrier.exec(handle, ("bash", "-lc", "sleep 5"), 1)
 
     assert result.exit_code == EXEC_TIMEOUT_CODE
+
+
+async def test_a_timed_out_command_takes_its_descendants_with_it(tmp_path: Path) -> None:
+    """Signalling the shell alone leaves everything it forked running, reparented to init and
+    holding the host's CPU for as long as it lives — one command that forks then outlives the turn
+    that could still name it. The descendant inherits the pipes the exec reads, so it also holds
+    the call open long past the timeout that was supposed to bound it: the elapsed budget is what
+    separates a killed group from a shell that merely died first."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+
+    started = monotonic()
+    result = await carrier.exec(handle, ("bash", "-lc", DESCENDANT_COMMAND), EXEC_TIMEOUT_SECONDS)
+    elapsed = monotonic() - started
+    descendant = await _descendant_pid(workspace)
+
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert elapsed < EXEC_RETURN_BUDGET_SECONDS
+    assert not await _still_running(descendant)
+
+
+async def test_a_cancelled_exec_takes_its_descendants_with_it(tmp_path: Path) -> None:
+    """A turn cancelled at its deadline unwinds the exec awaiting it, which is the path that leaks
+    a whole tree: the timeout never fires, so nothing signals the command on the way out."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+
+    running = asyncio.create_task(carrier.exec(handle, ("bash", "-lc", DESCENDANT_COMMAND), 60))
+    descendant = await _descendant_pid(workspace)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert not await _still_running(descendant)
 
 
 async def test_read_confines_to_the_workspace(tmp_path: Path) -> None:

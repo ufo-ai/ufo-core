@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from io import BufferedReader
 from pathlib import Path, PurePosixPath
+from signal import SIGKILL
 
 from ufo.sandbox.containment import PathNotFound, contained_file
 from ufo.sandbox.session import (
@@ -157,7 +158,15 @@ class LocalCarrier:
     ) -> ExecResult:
         """Run one command as a host subprocess in the workspace. The `/workspace` paths the tools
         pass are logical, so each argv element is rewritten to the host workspace directory before
-        the subprocess sees it, and the command inherits the turn's egress environment."""
+        the subprocess sees it, and the command inherits the turn's egress environment.
+
+        The command leads its own process group, and an exec that ends without the command's
+        consent — its timeout, or a cancelled turn — kills that group rather than the shell alone.
+        A signal to the direct child leaves its descendants running, reparented to init and holding
+        the host's CPU for as long as it lives, which is how one `bash -lc` that forks outlives
+        every turn, conversation and process that could still name it. A command that exits on its
+        own leaves its group alone: a backgrounded descendant outliving the exec that launched it
+        is how a turn starts a server."""
         root = _root(handle)
         rewritten = tuple(arg.replace(WORKSPACE_DIR, str(root)) for arg in argv)
         process = await asyncio.create_subprocess_exec(
@@ -167,13 +176,16 @@ class LocalCarrier:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            await _kill_process_group(process)
             return ExecResult(stdout="", stderr="timed out", exit_code=EXEC_TIMEOUT_CODE)
+        except BaseException:
+            await _kill_process_group(process)
+            raise
         return ExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
@@ -242,6 +254,14 @@ class LocalCarrier:
             "the local carrier exposes no external per-port host; reach an in-sandbox service "
             "through a remote carrier (e2b)"
         )
+
+
+async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(process.pid, SIGKILL)
+    except ProcessLookupError:
+        return
+    await process.wait()
 
 
 def _root(handle: SandboxHandle) -> Path:
