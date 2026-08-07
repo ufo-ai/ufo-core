@@ -140,6 +140,14 @@ def test_login_page_hands_the_token_off_by_post_after_the_whole_batch() -> None:
     assert LOGIN_PAGE.count("complete()") == 2
 
 
+def test_login_page_carries_a_clicked_conversation_onto_the_portal_action() -> None:
+    """The portal sends a signed-out click here as `/login?c=<uuid>`, and the card posts the token
+    to that conversation, so the member lands on the conversation they clicked rather than a new
+    chat. Only a uuid shape rides along, so nothing else in the query reaches the action."""
+    assert "new URLSearchParams(location.search).get('c')" in LOGIN_PAGE
+    assert "workspace + '/surface/web' + (target ? '?c=' + target[0] : '')" in LOGIN_PAGE
+
+
 def _grant(dsn: str, object_number: int, email: str) -> None:
     async def _mint() -> None:
         pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1)

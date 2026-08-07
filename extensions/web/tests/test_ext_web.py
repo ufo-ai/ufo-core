@@ -3151,6 +3151,29 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     assert "Domain" not in cookie
 
 
+async def test_a_clicked_conversation_survives_the_sign_in_it_lands_in(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A `view on web` click by a signed-out member keeps its target: the conversation names itself
+    in the query (a fragment would never reach the server), so it rides the redirect to the
+    sign-in page and the POST the card makes there redirects onto the same conversation. The
+    target is re-parsed as a UUID, so a mixed-case id normalizes and anything else is dropped
+    rather than reflected into the redirect."""
+    client, workspace_id, _agent_id = web
+    conversation_id = uuid4()
+    page = await client.get(f"/surface/web?c={conversation_id}")
+    assert page.status_code == 303
+    assert page.headers["location"] == f"/login?c={conversation_id}"
+    cased = await client.get(f"/surface/web?c={str(conversation_id).upper()}")
+    assert cased.headers["location"] == f"/login?c={conversation_id}"
+    junk = await client.get("/surface/web?c=../../login")
+    assert junk.headers["location"] == "/login"
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    opened = await client.post(f"/surface/web?c={conversation_id}", data={"token": token})
+    assert opened.status_code == 303
+    assert opened.headers["location"].endswith(f"/surface/web?c={conversation_id}")
+
+
 @pytest.mark.parametrize("pasted", ["tok\rnl", "tok\x00x", "tok日", "tok x"])
 async def test_a_token_outside_the_bearer_alphabet_answers_400(
     web: tuple[AsyncClient, UUID, UUID], pasted: str

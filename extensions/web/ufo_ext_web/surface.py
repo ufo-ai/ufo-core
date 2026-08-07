@@ -137,6 +137,7 @@ SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
 PORTAL_PATH = "/surface/web"
 LOGIN_PATH = "/login"
+CHAT_TARGET_PARAM = "c"
 PORTAL_BUILD = (
     "npm --prefix extensions/web/frontend ci && npm --prefix extensions/web/frontend run build"
 )
@@ -183,7 +184,9 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     the portal page redirects to the deploy's one sign-in page, so the portal offers no second way
     in and nothing of the shell is served to a stranger. Only a urlencoded body is read for the
     token — the type the signed-in card posts — so an unauthenticated multipart request is
-    rejected without its parse ever running. The handler re-verifies the same bearer for the
+    rejected without its parse ever running. A conversation the arrival names (`?c=<uuid>`) rides
+    on to the sign-in page, so the target survives signing in; it is re-parsed as a UUID, so only
+    a conversation id ever reaches that redirect. The handler re-verifies the same bearer for the
     member email — workspace here, identity there."""
     cookie = request.cookies.get(SESSION_COOKIE, "")
     workspace = workspace_claim(cookie) if cookie else None
@@ -206,8 +209,17 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
         and request.method == "GET"
         and request.url.path.rstrip("/") == PORTAL_PATH
     ):
-        return RedirectResponse(LOGIN_PATH, status_code=303)
+        target = _chat_target(request)
+        login = f"{LOGIN_PATH}?{CHAT_TARGET_PARAM}={target}" if target else LOGIN_PATH
+        return RedirectResponse(login, status_code=303)
     return workspace
+
+
+def _chat_target(request: Request) -> UUID | None:
+    try:
+        return UUID(request.query_params.get(CHAT_TARGET_PARAM, ""))
+    except ValueError:
+        return None
 
 
 def _static_response(request: Request) -> Response | None:

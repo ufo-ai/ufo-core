@@ -48,9 +48,12 @@ export type Route =
   | { kind: "agent"; agentId: string; tab: AgentTab }
   | { kind: "subagent"; name: string; tab: SubagentTab; conversationId?: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
-  | { kind: "admin" };
+  | { kind: "admin" }
+  | { kind: "bad-link" };
 
+const CHAT_PREFIX = "#/c/";
 const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})(?:\?(.*))?$/;
+const CHAT_TARGET_PARAM = "c";
 const CONVERSATION_SLOT_HASH =
   /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
@@ -106,6 +109,7 @@ export function parseHash(hash: string): Route {
       ...(slot && /^[a-z][a-z0-9_-]{0,63}$/.test(slot) ? { slot } : {}),
     };
   }
+  if (hash.startsWith(CHAT_PREFIX)) return { kind: "bad-link" };
   const conversationSlot = hash.match(CONVERSATION_SLOT_HASH);
   if (conversationSlot)
     return {
@@ -140,8 +144,15 @@ export function parseHash(hash: string): Route {
   return { kind: "home" };
 }
 
+export function bootRoute(hash: string, search: string): Route {
+  const route = parseHash(hash);
+  if (route.kind !== "home") return route;
+  const target = new URLSearchParams(search).get(CHAT_TARGET_PARAM);
+  return target ? parseHash(chatHash(target)) : route;
+}
+
 export function chatHash(conversationId: string, slot?: string): string {
-  return "#/c/" + conversationId + (slot ? "?slot=" + encodeURIComponent(slot) : "");
+  return CHAT_PREFIX + conversationId + (slot ? "?slot=" + encodeURIComponent(slot) : "");
 }
 
 export function conversationSlotHash(

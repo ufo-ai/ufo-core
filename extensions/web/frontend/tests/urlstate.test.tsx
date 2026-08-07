@@ -4,6 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import {
+  bootRoute,
   chatHash,
   conversationSlotHash,
   parseHash,
@@ -12,7 +13,7 @@ import {
   workspaceHash,
 } from "@/lib/route";
 
-import { AGENT, CONVO_ID, MEMBER, json, useStreamFake } from "./harness";
+import { AGENT, CHAT_ROW, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -27,6 +28,8 @@ const OLDER = {
 const NEWER = { ...OLDER, id: "a2", filename: "report.txt", created_at: "2026-07-31T09:00:00" };
 
 const OLDER_KEY = OLDER.created_at + "|" + OLDER.filename;
+
+const MIXED_CASE_CONVO_ID = "8C0ACA03-8d29-4959-af47-8ae69bed7e48";
 
 beforeEach(() => {
   useStreamFake();
@@ -130,6 +133,40 @@ test("the subagent conversation hash names its run and lands on the conversation
     name: "deep_research",
     tab: "conversations",
   });
+});
+
+test("a conversation named as a query target boots on that conversation", () => {
+  expect(bootRoute("", "?c=" + CONVO_ID)).toEqual({ kind: "chat", conversationId: CONVO_ID });
+  expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({ kind: "agents" });
+  expect(bootRoute("", "")).toEqual({ kind: "home" });
+});
+
+test("a conversation permalink that is not a lowercase uuid names no route", () => {
+  expect(parseHash(chatHash(MIXED_CASE_CONVO_ID))).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/c/not-a-conversation")).toEqual({ kind: "bad-link" });
+  expect(bootRoute("", "?c=" + MIXED_CASE_CONVO_ID)).toEqual({ kind: "bad-link" });
+});
+
+test("the conversation a sign-in carried through opens, and the hash names it", async () => {
+  history.replaceState(null, "", location.pathname + "?c=" + CONVO_ID);
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/transcript": () => json({ messages: [] }),
+    "/slots": () => json({ slots: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+  expect(location.hash).toBe(chatHash(CONVO_ID));
+});
+
+test("a wrong-cased permalink reports the bad link instead of opening a new chat", async () => {
+  location.hash = chatHash(MIXED_CASE_CONVO_ID);
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("This conversation link is not valid.")).toBeTruthy();
+  expect(screen.queryByLabelText("Message the agent")).toBeNull();
 });
 
 test("a reload lands on the page and the open artifact the hash names", async () => {

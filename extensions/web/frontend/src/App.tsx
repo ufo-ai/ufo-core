@@ -25,6 +25,7 @@ import {
   AGENT_TABS,
   SUBAGENT_TABS,
   agentHash,
+  bootRoute,
   chatHash,
   newChatHash,
   parseHash,
@@ -44,7 +45,7 @@ export type AppProps = { agents: Agent[]; subagents: Subagent[]; member: Member 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
 
 export function App({ agents, subagents, member }: AppProps) {
-  const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
+  const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<readonly string[]>([]);
@@ -54,6 +55,10 @@ export function App({ agents, subagents, member }: AppProps) {
   routeRef.current = route;
 
   useEffect(() => {
+    const booted = routeRef.current;
+    if (!location.hash && booted.kind === "chat") {
+      history.replaceState(null, "", chatHash(booted.conversationId));
+    }
     const onHash = () => setRoute(parseHash(location.hash));
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -293,6 +298,7 @@ function Pane({
   linked: Readonly<Record<string, LinkedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
+  if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
     return <Workspace view={route.view} place={route.place} onPlace={onPlaceWorkspace} />;
   }

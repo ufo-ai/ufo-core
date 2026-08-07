@@ -7,7 +7,11 @@ transcript lines, `ask` as the next input, and `token`+`workspace` as the signed
 the member's email, their workspace URL, the terminal install line — and, when the gateway's
 `debugger` directive arrived (an operator-domain email only), a form that POSTs the token to the
 operator session debugger, which exchanges it for its session cookie — the bearer never rides a
-URL."""
+URL.
+
+A conversation the portal redirected here with (`/login?c=<uuid>`) is carried onto the card's
+portal action, so the member lands on the conversation they clicked rather than a new chat. Only a
+uuid shape is carried."""
 
 WEB_CHANNEL = "web"
 
@@ -119,6 +123,8 @@ const promptRow = document.getElementById('prompt-row');
 const promptLabel = document.getElementById('prompt-label');
 const answer = document.getElementById('answer');
 const go = document.getElementById('go');
+const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(
+  new URLSearchParams(location.search).get('c') || '');
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
@@ -153,7 +159,7 @@ function complete() {
   document.getElementById('member-email').textContent = email || '';
   document.getElementById('workspace-url').textContent = workspace;
   const portal = document.getElementById('portal-row');
-  portal.action = workspace + '/surface/web';
+  portal.action = workspace + '/surface/web' + (target ? '?c=' + target[0] : '');
   document.getElementById('portal-token').value = token;
   document.getElementById('curl-line').textContent =
     'curl -fsSL ' + location.origin + '/ufo | sh';

@@ -597,7 +597,7 @@ async def _debug_footer(workspace_id: UUID, queue_key: str, turn_id: UUID) -> st
     return (
         f"{FOOTER_LABEL} · "
         f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={target.id}&t={turn_id}"
-        f"|debug> · <{PUBLIC_BASE_URL}/surface/web#/c/{target.id}|view on web> · "
+        f"|debug> · <{PUBLIC_BASE_URL}/surface/web?c={target.id}|view on web> · "
         f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
     )
 
@@ -613,7 +613,7 @@ async def _web_footer(workspace_id: UUID, queue_key: str) -> str:
             )
         ).one()
     return (
-        f"<{PUBLIC_BASE_URL}/surface/web#/c/{target.id}|view on web> · "
+        f"<{PUBLIC_BASE_URL}/surface/web?c={target.id}|view on web> · "
         f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
     )
 

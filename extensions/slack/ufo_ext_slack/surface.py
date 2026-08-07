@@ -2443,7 +2443,9 @@ async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
     Every reply links to its web conversation and agent configuration when the deploy has a public
-    base URL. The operator workspace's internal replies add accounting and a session-debugger link;
+    base URL. The conversation rides as the `?c=` query parameter, not a fragment: a fragment never
+    reaches the server, so a signed-out click would arrive at the portal with the target already
+    dropped. The operator workspace's internal replies add accounting and a session-debugger link;
     a Slack Connect or org-shared thread never exposes those operator fields. An `invalid_blocks`
     rejection is deterministic, so the reply re-posts once — as conservative section blocks when
     it carries an ask or connect handoff (the affordance survives the markdown blocks Slack
@@ -2458,10 +2460,10 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     )
     web_links = None
     if ctx.public_base_url is not None:
-        web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}#"
+        web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}"
         web_links = (
-            f"<{web_base}/c/{writeback.conversation_id}|view on web> · "
-            f"<{web_base}/agents/{writeback.agent_id}|config>"
+            f"<{web_base}?c={writeback.conversation_id}|view on web> · "
+            f"<{web_base}#/agents/{writeback.agent_id}|config>"
         )
     metadata = web_links
     if await ctx.is_operator_workspace() and not await _channel_is_externally_shared(

@@ -36,7 +36,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   if (typeof document !== "undefined") {
     cleanup();
-    location.hash = "";
+    history.replaceState(null, "", location.pathname);
   }
   if (faults.length) throw new Error(faults[0]);
 });
