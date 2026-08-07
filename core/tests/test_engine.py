@@ -167,6 +167,8 @@ from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.transcript import CompactionSummary, Conversation
 from ufo.workspace import init_workspace_credentials, ws
 
+HISTORY_PAD = "y" * 600
+
 
 @dataclass
 class CapturingModel:
@@ -2829,7 +2831,10 @@ async def test_a_load_after_an_overflow_compaction_costs_no_workflow(
         Conversation(
             seq=1,
             messages=tuple(
-                Message(role="user" if index % 2 == 0 else "assistant", content=f"history {index}")
+                Message(
+                    role="user" if index % 2 == 0 else "assistant",
+                    content=f"history {index} " + HISTORY_PAD,
+                )
                 for index in range(6)
             ),
         )
@@ -3786,7 +3791,7 @@ async def test_context_overflow_forces_a_compaction_then_completes(
             messages=tuple(
                 Message(
                     role="user" if index % 2 == 0 else "assistant",
-                    content=f"history {index}",
+                    content=f"history {index} " + HISTORY_PAD,
                 )
                 for index in range(6)
             ),
@@ -3845,7 +3850,7 @@ async def test_forced_compaction_keeps_each_request_bound_to_its_message_ref(
             messages=tuple(
                 Message(
                     role="user" if index % 2 == 0 else "assistant",
-                    content=f"history {index}",
+                    content=f"history {index} " + HISTORY_PAD,
                 )
                 for index in range(6)
             ),

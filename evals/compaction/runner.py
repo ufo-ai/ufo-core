@@ -40,7 +40,9 @@ from evals.harness.target import CapabilityTarget, EvalConversations, TargetResu
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    FILES_HEADING,
     MAX_REFERENCE_PATHS,
+    REFERENCES_HEADING,
 )
 
 COMPACTION_GRADER_REVISION = "literal-survival-2"
@@ -53,8 +55,6 @@ SUPERSESSION_MAX_STALE_RATE = 0.20
 CHAIN_PASS_FINAL_SURVIVAL = 0.25
 CHAIN_CRITICAL_WEIGHT = 4
 REFERENCE_PASS_WEIGHTED_COVERAGE = 0.5
-FILES_HEADING = "## Files and outputs"
-REFERENCES_HEADING = "## Durable references"
 LEAF_ORDER: tuple[CompactionLeaf, ...] = (
     "overload",
     "buried",

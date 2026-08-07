@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -9,13 +10,19 @@ from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
 
 from ufo.blob import FilesystemBlobStore
 from ufo.loop.compaction import (
+    ANCHOR_RETRY_INSTRUCTION,
     AUTOCOMPACT_BUFFER_TOKENS,
     CHARS_PER_TOKEN,
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_FORMAT_RESTATEMENT,
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    FILES_HEADING,
+    MAX_ANCHORS_PER_KIND,
+    MAX_REFERENCE_PATHS,
     Compaction,
+    harvest_anchors,
+    missing_anchors,
 )
 from ufo.loop.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
 from ufo.models.interface import (
@@ -34,17 +41,23 @@ from ufo.models.interface import (
 )
 from ufo.schema.records import Usage
 from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
-from ufo.transcript import CompactionSummary, FileRef
+from ufo.transcript import Anchor, CompactionSummary, FileRef
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
 TAIL_FACT = "the customer prefers Tuesday demos TAILSECRET"
+NOTES_PATH = "/workspace/notes.md"
+HISTORY_PAD = "x" * 400
+REAL_TRIGGER_TOKENS = 300
+SMALL_SUMMARY_RESERVE = 100
+HEAVY_TAIL_TOKENS = 830
 FIXED_SUMMARY = CompactionSummary(
     intent="condensed history",
     current_work="reviewing the deploy",
     next_step="ship the change",
     concepts=("compaction",),
-    files=(FileRef(path="/workspace/notes.md", why="the running notes"),),
+    files=(FileRef(path=NOTES_PATH, why="the running notes"),),
 )
+PLAIN_SUMMARY = FIXED_SUMMARY.model_copy(update={"files": ()})
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,59 @@ class OverflowingSummaryModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
+@dataclass
+class CountingSummaryModel:
+    """Answers every summarize call with the same summary and keeps each rendered input, so a test
+    can prove how many calls a verification spent and what the retry named."""
+
+    summary: CompactionSummary
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        content = request.messages[0].content
+        self.seen.append(content if isinstance(content, str) else "")
+        yield TextDelta(text=self.summary.model_dump_json())
+        yield Usage(input_tokens=9, output_tokens=4)
+
+
+@dataclass
+class RecoveringSummaryModel:
+    """Drops the head's older offloaded paths on the first call and cites them on the second — a
+    summarizer that takes the correction, so the retry's recovery is asserted end to end."""
+
+    paths: tuple[str, ...]
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        content = request.messages[0].content
+        self.seen.append(content if isinstance(content, str) else "")
+        summary = (
+            PLAIN_SUMMARY
+            if len(self.seen) == 1
+            else PLAIN_SUMMARY.model_copy(
+                update={
+                    "files": tuple(
+                        FileRef(path=path, why="the offloaded output") for path in self.paths
+                    )
+                }
+            )
+        )
+        yield TextDelta(text=summary.model_dump_json())
+        yield Usage(input_tokens=9, output_tokens=4)
+
+
+@dataclass
+class FailingAnchorRetryModel:
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("provider unavailable")
+        yield TextDelta(text=PLAIN_SUMMARY.model_dump_json())
+        yield Usage(input_tokens=9, output_tokens=4)
+
+
 @dataclass(frozen=True)
 class RawTextModel:
     """Returns fixed raw text (not JSON) so a test can prove an unparseable summary fails loud."""
@@ -115,12 +181,45 @@ def _compaction(tmp_path: Path, model: object = None, **overrides: object) -> Co
 
 
 def _history() -> tuple[Message, ...]:
+    """A head that outweighs any summary of it: the budget invariant fails a compaction whose
+    replacement window is not smaller than the window it replaced, which a five-line history only
+    satisfies when its messages carry more than the rendered sections do. `NOTES_PATH` is in the
+    head because `FIXED_SUMMARY` cites it — reference integrity cuts a path the head never named."""
     return (
-        Message(role="user", content=HEAD_FACT + " " + "x" * 60),
-        Message(role="assistant", content="acknowledged " + "x" * 60),
-        Message(role="user", content="keep going " + "x" * 60),
-        Message(role="assistant", content="working " + "x" * 60),
-        Message(role="user", content=TAIL_FACT + " " + "x" * 60),
+        Message(role="user", content=f"{HEAD_FACT} read {NOTES_PATH} {HISTORY_PAD}"),
+        Message(role="assistant", content="acknowledged " + HISTORY_PAD),
+        Message(role="user", content="keep going " + HISTORY_PAD),
+        Message(role="assistant", content="working " + HISTORY_PAD),
+        Message(role="user", content=TAIL_FACT + " " + HISTORY_PAD),
+    )
+
+
+def _offloaded_history(paths: tuple[str, ...]) -> tuple[Message, ...]:
+    """A head that offloaded more tool results than the durable-reference block can carry: with more
+    than `MAX_REFERENCE_PATHS` paths, the oldest reach the replacement window only if the summary
+    itself cites them."""
+    head: list[Message] = [Message(role="user", content="run the batch " + HISTORY_PAD)]
+    for index, path in enumerate(paths):
+        head.append(Message(role="assistant", content=f"call {index} " + HISTORY_PAD))
+        head.append(
+            Message(role="user", content="preview…" + OFFLOAD_NOTICE.format(total=9_999, path=path))
+        )
+    return (
+        *head,
+        Message(role="assistant", content="ran the last one " + HISTORY_PAD),
+        Message(role="user", content="tail " + HISTORY_PAD),
+    )
+
+
+def _heavy_head_history() -> tuple[Message, ...]:
+    """A window whose weight is all in the head and whose last round is a few tokens: with room to
+    spare under the trigger, the budget invariant is on the summary alone."""
+    return (
+        Message(role="user", content=f"{HEAD_FACT} {HISTORY_PAD}"),
+        Message(role="assistant", content="working " + HISTORY_PAD),
+        Message(role="user", content="more " + HISTORY_PAD),
+        Message(role="assistant", content="ok"),
+        Message(role="user", content="tail"),
     )
 
 
@@ -392,6 +491,256 @@ async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
     assert f"- {head_path}\n" in rendered or rendered.endswith(f"- {head_path}")
     assert head_path in rendered
     assert tail_path not in rendered
+
+
+def test_anchors_are_harvested_by_kind_from_the_head_and_the_pipeline_trackers() -> None:
+    """The anchor definition the runtime gate and the eval bars share: paths and error classes come
+    out of the head's own text by pattern, skills out of the load tracker, and a member request
+    contributes its ref — the authority line — rather than its prose."""
+    path = "/workspace/.tool-output/call-1.txt"
+    ref = UUID("33333333-3333-3333-3333-333333333333")
+    head = f"read {path}, the write raised ValidationError, retried once"
+    request = f"<context>\nmessage_ref: {ref}\nsender: Alice\n</context>\napprove access"
+
+    anchors = harvest_anchors(head, ("office-docx",), (request,))
+
+    assert {(anchor.kind, anchor.literal) for anchor in anchors} == {
+        ("tool_output", path),
+        ("error", "ValidationError"),
+        ("skill", "office-docx"),
+        ("request", str(ref)),
+    }
+
+
+def test_anchor_harvest_keeps_the_most_recent_of_a_kind() -> None:
+    paths = [
+        f"/workspace/.tool-output/call-{index}.txt" for index in range(MAX_ANCHORS_PER_KIND + 3)
+    ]
+    anchors = harvest_anchors(" ".join(paths), (), ())
+    assert [anchor.literal for anchor in anchors] == paths[3:]
+
+
+def test_an_anchor_survives_only_by_being_reproduced() -> None:
+    carried = "## Files and outputs\n- /workspace/notes.md — the running notes"
+    anchors = (
+        Anchor(kind="tool_output", literal="/workspace/notes.md"),
+        Anchor(kind="error", literal="ValidationError"),
+    )
+    assert missing_anchors(anchors, carried) == (anchors[1],)
+
+
+async def test_a_dropped_anchor_is_retried_once_then_recorded_as_a_lossy_compaction(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The harvester keeps only the most recent `MAX_REFERENCE_PATHS` paths, so an older offload can
+    only cross the boundary in the summary's own files field. A summary that carries neither buys
+    exactly one re-summarize naming the misses, and a second summary that still drops them is
+    accepted — recorded lossy in the compaction record and in one log record, never a dead turn."""
+    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    model = CountingSummaryModel(summary=PLAIN_SUMMARY)
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+
+    assert len(model.seen) == 2
+    assert len(usage) == 2
+    dropped = list(paths[: len(paths) - MAX_REFERENCE_PATHS])
+    assert ANCHOR_RETRY_INSTRUCTION not in model.seen[0]
+    assert ANCHOR_RETRY_INSTRUCTION in model.seen[1]
+    assert all(path in model.seen[1].split(ANCHOR_RETRY_INSTRUCTION)[1] for path in dropped)
+    record = await compaction.read_record(1)
+    assert record is not None
+    verification = record.summary.verification
+    assert verification is not None
+    assert verification.retried
+    assert [anchor.literal for anchor in verification.missing] == dropped
+    assert {anchor.kind for anchor in verification.missing} == {"tool_output"}
+    assert verification.anchors == len(paths)
+    assert verification.after_tokens < verification.before_tokens
+    assert all(path not in str(result[0].content) for path in dropped)
+    logged = next(record for record in caplog.records if record.message == "compaction.verified")
+    assert logged.ufo["missing"] == [f"tool_output:{path}" for path in dropped]
+    assert logged.ufo["anchors"] == len(paths)
+    assert logged.ufo["retried"] is True
+    assert logged.ufo["reason"] == "auto"
+
+
+async def test_a_retry_that_carries_the_named_anchors_records_a_clean_compaction(
+    tmp_path: Path,
+) -> None:
+    """The retry is worth its call: the second summary cites the paths the instruction named, they
+    render under the files heading, and the recorded verification carries no miss."""
+    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    dropped = paths[: len(paths) - MAX_REFERENCE_PATHS]
+    model = RecoveringSummaryModel(paths=dropped)
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
+
+    result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+
+    assert len(model.seen) == 2
+    assert len(usage) == 2
+    rendered = str(result[0].content)
+    assert FILES_HEADING in rendered
+    assert all(path in rendered for path in dropped)
+    record = await compaction.read_record(1)
+    assert record is not None
+    verification = record.summary.verification
+    assert verification is not None
+    assert verification.missing == ()
+    assert verification.retried
+
+
+async def test_a_failed_anchor_retry_installs_the_verified_first_summary(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    model = FailingAnchorRetryModel()
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+
+    assert model.calls == 2
+    assert len(usage) == 1
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+    record = await compaction.read_record(1)
+    assert record is not None
+    verification = record.summary.verification
+    assert verification is not None
+    assert verification.retried
+    assert [anchor.literal for anchor in verification.missing] == list(paths[:2])
+    failure = next(
+        record for record in caplog.records if record.message == "compaction.anchor_retry_failed"
+    )
+    assert failure.ufo["error_class"] == "RuntimeError"
+
+
+async def test_a_summary_path_the_window_never_mentioned_never_reaches_the_render(
+    tmp_path: Path,
+) -> None:
+    """Reference integrity: `files` is model-authored, and a path rendered under the files heading
+    is read as fact on the next round. A path absent from the pre-compaction window is cut from the
+    render and from the persisted summary, and named in the verification instead."""
+    invented = "/workspace/invented-by-the-model.md"
+    model = SummaryModel(
+        summary=FIXED_SUMMARY.model_copy(
+            update={"files": (FileRef(path=invented, why="the plan"),)}
+        )
+    )
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
+
+    result, _ = await compaction.maybe_compact(_history())
+
+    rendered = str(result[0].content)
+    assert invented not in rendered
+    assert FILES_HEADING not in rendered
+    record = await compaction.read_record(1)
+    assert record is not None
+    assert record.summary.files == ()
+    assert record.summary.verification is not None
+    assert record.summary.verification.dropped_paths == (invented,)
+
+
+async def test_a_summary_that_outweighs_the_window_fails_the_turn_loud(tmp_path: Path) -> None:
+    """The budget invariant: with a head heavier than the render's floor plus the summary's own
+    output ceiling, a replacement at or above the window it replaces is the pipeline's own doing, so
+    it never installs and nothing is persisted."""
+    bloated = PLAIN_SUMMARY.model_copy(update={"intent": "restated at length " * 1_000})
+    compaction = _compaction(
+        tmp_path,
+        model=SummaryModel(summary=bloated),
+        trigger_tokens=REAL_TRIGGER_TOKENS,
+        summary_max_tokens=SMALL_SUMMARY_RESERVE,
+        keep_messages=1,
+    )
+
+    with pytest.raises(RuntimeError, match="did not shrink the window"):
+        await compaction.maybe_compact(_heavy_head_history())
+
+    assert await compaction.read_record(1) is None
+
+
+async def test_a_replacement_still_over_the_trigger_fails_the_turn_loud(tmp_path: Path) -> None:
+    """The other half of the invariant: a window that comes back over the trigger compacts again on
+    the very next round, spending a summarize call per round for as long as the turn lives. Asserted
+    here because the tail plus the ceiling left room under the trigger, so the summary overspent."""
+    middling = PLAIN_SUMMARY.model_copy(update={"intent": "restated at length " * 40})
+    compaction = _compaction(
+        tmp_path,
+        model=SummaryModel(summary=middling),
+        trigger_tokens=REAL_TRIGGER_TOKENS,
+        summary_max_tokens=SMALL_SUMMARY_RESERVE,
+        keep_messages=1,
+    )
+
+    with pytest.raises(RuntimeError, match="stays over the compaction trigger"):
+        await compaction.maybe_compact(_heavy_head_history())
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        pytest.param(HEAVY_TAIL_TOKENS - 100, id="tail_over_the_trigger"),
+        pytest.param(HEAVY_TAIL_TOKENS + 50, id="tail_with_no_room_left"),
+    ],
+)
+async def test_a_tail_that_leaves_no_room_installs_the_window_and_records_staying_over(
+    tmp_path: Path, trigger: int
+) -> None:
+    """The head is the only thing a compaction compresses. `_select` keeps whole rounds, so one
+    round of parallel results or inline images can carry the verbatim tail past the trigger — or to
+    just under it, which is the same thing, since the summary still has to fit somewhere. No summary
+    brings either window under the trigger and no retry on the same transcript lands differently, so
+    the invariant is not asserted and the turn lives. The record says the window stayed over, and
+    `tail_tokens` says why."""
+    heavy_tail = (
+        Message(role="user", content=f"{HEAD_FACT} {HISTORY_PAD}"),
+        Message(role="assistant", content="ran the batch"),
+        Message(
+            role="user",
+            content=tuple(
+                ToolResultBlock(tool_use_id=f"t{index}", content="result " + HISTORY_PAD)
+                for index in range(4)
+            ),
+        ),
+    )
+    compaction = _compaction(
+        tmp_path,
+        trigger_tokens=trigger,
+        summary_max_tokens=SMALL_SUMMARY_RESERVE,
+        keep_messages=2,
+    )
+
+    result, usage = await compaction.maybe_compact(heavy_tail)
+
+    assert len(usage) == 1
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+    record = await compaction.read_record(1)
+    assert record is not None
+    verification = record.summary.verification
+    assert verification is not None
+    assert verification.after_tokens >= trigger
+    assert verification.tail_tokens + SMALL_SUMMARY_RESERVE >= trigger
+    assert verification.missing == ()
+    assert verification.retried is False
+
+
+async def test_a_clean_compaction_records_its_own_counts(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
+
+    result, _ = await compaction.maybe_compact(_history())
+
+    record = await compaction.read_record(1)
+    assert record is not None
+    verification = record.summary.verification
+    assert verification is not None
+    assert verification.after_tokens < verification.before_tokens
+    assert verification.tail_tokens < verification.after_tokens
+    assert verification.missing == ()
+    assert verification.dropped_paths == ()
+    assert verification.retried is False
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
 
 
 async def test_loaded_skills_come_from_the_tracker_and_the_tracker_ends_empty(

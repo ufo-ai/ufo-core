@@ -58,14 +58,48 @@ class FileRef(BaseModel):
     why: str
 
 
+AnchorKind = Literal["tool_output", "skill", "request", "error"]
+
+
+class Anchor(BaseModel):
+    """One fact the summarized head held that the window replacing it has to still carry, harvested
+    from the head by pattern and from the pipeline's own trackers — never from the model's summary,
+    so the grade cannot be authored by the thing it grades. `literal` is the exact substring a
+    carrying window must contain, so survival is containment and not a judgement."""
+
+    kind: AnchorKind
+    literal: str
+
+
+class CompactionVerification(BaseModel):
+    """What the deterministic check between the summary and the window swap found, persisted with
+    the summary and emitted through `o11y` so a boundary's loss is readable in production and not
+    only in the eval suite. `missing` names the anchors that reached neither the rendered summary
+    nor the retained tail — a compaction carrying entries here was accepted lossy after its retry;
+    `dropped_paths` names the model-authored file paths that appeared nowhere in the pre-compaction
+    window and were cut from the render instead of read as fact on the next round. `tail_tokens` is
+    what the verbatim tail cost on its own — the part of `after_tokens` no summary could have made
+    smaller, and the reason an installed window may still sit over the trigger."""
+
+    before_tokens: int
+    after_tokens: int
+    tail_tokens: int
+    anchors: int
+    missing: tuple[Anchor, ...] = ()
+    dropped_paths: tuple[str, ...] = ()
+    retried: bool = False
+
+
 class CompactionSummary(BaseModel):
     """The structured compression of a summarized head. It crosses a boundary — it re-enters the
     model context (rendered by the compaction pipeline's reconstruction) and persists in the `after`
     record — so it is a validated BaseModel, not a freeform blob: every field is a section the
     reconstruction renders deterministically, so the same summary always yields the same window.
     Sections adapted from Claude Code's compaction prompt, trimmed for a headless multi-surface
-    agent. Every field but `loaded_skills` comes from the summarizing model; `loaded_skills` the
-    pipeline fills from the turn's skill-load tracker, which knows what the head actually held."""
+    agent. The summarizing model authors every field but the last two: `loaded_skills` the pipeline
+    fills from the turn's skill-load tracker, which knows what the head actually held, and
+    `verification` it fills with the grade the swap passed, which is the one field no reader should
+    take the model's word for."""
 
     intent: str
     current_work: str
@@ -76,6 +110,7 @@ class CompactionSummary(BaseModel):
     decisions: tuple[str, ...] = ()
     pending: tuple[str, ...] = ()
     loaded_skills: tuple[str, ...] = ()
+    verification: CompactionVerification | None = None
 
 
 class CompactionWindow(BaseModel):

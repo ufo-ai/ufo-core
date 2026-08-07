@@ -1,19 +1,21 @@
 """Window-triggered transcript compaction: a deterministic compression pipeline, not one call.
 
 When the loaded history crosses the model's token window, the head is compressed into a validated
-structured summary and the recent tail is kept verbatim. The pipeline is deterministic around a
-single external model call: group into API rounds, render the head (images become markers,
-verbatim-repeated runs fold to one copy plus a count marker), summarize into a typed
+structured summary and the recent tail is kept verbatim. The pipeline is deterministic around its
+bounded external summarization attempts: group into API rounds, render the head (images become
+markers, verbatim-repeated runs fold to one copy plus a count marker), summarize into a typed
 `CompactionSummary` (retrying with fewer rounds if the summarize request itself overflows), harvest
-the durable `.tool-output` references the head offloaded, reconstruct the window, and persist. The
-whole pre-compaction window (`before`), the window that replaces it
-(`after`), and the typed summary persist above the live transcript at
+the durable `.tool-output` references the head offloaded, reconstruct the window, verify the
+reconstruction against the head it replaces, and persist. The whole pre-compaction window
+(`before`), the window that replaces it (`after`), and the typed summary — carrying the
+verification the swap passed — persist above the live transcript at
 `conversations/<cid>/compactions/<n>/{before,after,summary}.json.lz4`, so a pre-compaction fact
 survives verbatim and an eval reader gets the structured object, not just rendered text."""
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import chain
 from typing import Literal
 from uuid import UUID
 
@@ -38,12 +40,16 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.o11y import emit_metric, log, warn
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.skills.runtime import LoadedSkills
 from ufo.transcript import (
+    Anchor,
+    AnchorKind,
     CompactionRecord,
     CompactionSummary,
+    CompactionVerification,
     CompactionWindow,
     compaction_key,
     decode_compaction,
@@ -59,7 +65,20 @@ MAX_PTL_RETRIES = 3
 PTL_DROP_DENOMINATOR = 5
 MAX_REFERENCE_PATHS = 5
 COMPACTED_CONTEXT_PREFIX = "Compacted context:\n"
+FILES_HEADING = "## Files and outputs"
+REFERENCES_HEADING = "## Durable references (re-read with the file tools)"
 ACTIVE_REQUESTS_HEADING = "## Active member requests"
+MAX_ANCHORS_PER_KIND = 20
+ERROR_TOKEN_RE = re.compile(r"\b[A-Z][A-Za-z0-9]{2,}(?:Error|Exception)\b")
+MESSAGE_REF_RE = re.compile(r"message_ref: (\S+)")
+EMPTY_SUMMARY = CompactionSummary(intent="", current_work="", next_step="")
+"""The render with every model-authored section gone: what the replacement message costs whatever
+the summary says, because the prefix, the durable references, and each active request are carried
+verbatim. It is the floor the budget invariant holds a summary against."""
+ANCHOR_RETRY_INSTRUCTION = (
+    "\n\n---\nYour previous summary of this head dropped the facts below, and they are "
+    "load-bearing. Carry each one verbatim in the field of the JSON object it belongs to.\n"
+)
 COMPACTION_FORMAT_RESTATEMENT = (
     "\n\n---\nEnd of transcript head. Respond now with the SINGLE JSON object described in "
     "your instructions — no prose, no markdown fences, nothing else."
@@ -87,6 +106,71 @@ def is_context_overflow(error: Exception) -> bool:
     prompt-too-long recovery and the engine's round recovery share one detector."""
     text = f"{type(error).__name__} {error}".lower()
     return any(marker in text for marker in CONTEXT_OVERFLOW_MARKERS)
+
+
+def harvest_anchors(
+    head_text: str, loaded_skills: tuple[str, ...], active_requests: tuple[str, ...]
+) -> tuple[Anchor, ...]:
+    """The anchor set a replacement window is graded against: what the head demonstrably held and a
+    later round cannot reconstruct from anywhere else — the `.tool-output` paths the engine
+    offloaded large results to, the skill workflows the boundary drops, the refs of the member
+    requests still open, and the error classes the head named. Each is harvested by pattern from the
+    head's own text or from the pipeline's trackers, never from the summary, so the grade cannot be
+    authored by the thing it grades. Bounded per kind to the most recent, because a miss rides a log
+    line and a retry instruction, both of which are payloads.
+
+    Lives here, the lower module, so the runtime gate and the `evals/compaction` bars read one
+    anchor definition and cannot drift apart."""
+    harvested: tuple[tuple[AnchorKind, list[str]], ...] = (
+        ("tool_output", TOOL_OUTPUT_PATH_RE.findall(head_text)),
+        ("error", ERROR_TOKEN_RE.findall(head_text)),
+        ("skill", list(loaded_skills)),
+        (
+            "request",
+            [ref for request in active_requests for ref in MESSAGE_REF_RE.findall(request)],
+        ),
+    )
+    return tuple(
+        Anchor(kind=kind, literal=literal)
+        for kind, literals in harvested
+        for literal in tuple(dict.fromkeys(literals))[-MAX_ANCHORS_PER_KIND:]
+    )
+
+
+def missing_anchors(anchors: tuple[Anchor, ...], carried: str) -> tuple[Anchor, ...]:
+    """The anchors absent from the text the boundary carries forward — the rendered summary plus
+    the tail kept verbatim. Containment, not similarity: an anchor is a literal, and a window
+    carries it only by reproducing it."""
+    return tuple(anchor for anchor in anchors if anchor.literal not in carried)
+
+
+@dataclass(frozen=True)
+class _Boundary:
+    """What the pre-compaction window fixes about this boundary before any summary exists: the tail
+    kept verbatim, the references harvested out of the head, the requests and skills the pipeline
+    carries itself, the pre-compaction text a model-authored path is checked against, the anchors
+    the replacement has to carry, and the token count it has to beat. Both summarize attempts are
+    graded against one of these, so a retry is judged on identical terms."""
+
+    tail: tuple[Message, ...]
+    references: tuple[str, ...]
+    active_requests: tuple[str, ...]
+    loaded_skills: tuple[str, ...]
+    pre_text: str
+    anchors: tuple[Anchor, ...]
+    before_tokens: int
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One summarize attempt graded against the boundary: the summary as the pipeline would persist
+    it, the message that would replace the head, and the verification that decides whether the swap
+    happens, is retried, or fails the turn."""
+
+    summary: CompactionSummary
+    rendered: str
+    after: tuple[Message, ...]
+    verification: CompactionVerification
 
 
 @dataclass(frozen=True)
@@ -129,15 +213,17 @@ class Compaction:
         nothing to summarize and is returned unchanged, so a forced call still no-ops safely."""
         if len(messages) <= self.keep_messages:
             return messages, ()
-        window = self.context_window
-        trigger = (
-            self.trigger_tokens
-            if self.trigger_tokens is not None
-            else window - self.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
-        )
-        if not force and self._tokens(messages) <= trigger:
+        if not force and self._tokens(messages) <= self._trigger():
             return messages, ()
         return await self._compact(messages, "force" if force else "auto", active_requests)
+
+    def _trigger(self) -> int:
+        """The window size a compaction fires at, and the size its replacement has to come back
+        under: the model's real window less the summary's own output reserve and a buffer, unless an
+        operator or a test pinned `trigger_tokens`."""
+        if self.trigger_tokens is not None:
+            return self.trigger_tokens
+        return self.context_window - self.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
 
     @DBOS.step()
     async def _compact(
@@ -154,7 +240,14 @@ class Compaction:
         deterministic reads of the window — so a round that does not compact records no step and the
         step sequence lines up on replay. The summary's `loaded_skills` is drained from the tracker
         here rather than asked of the model: the tracker knows which workflows the head actually
-        held, and draining it is what tells the rest of the turn those bodies are gone."""
+        held, and draining it is what tells the rest of the turn those bodies are gone.
+
+        Nothing the model authored replaces the live window unverified. `_verify` grades the
+        reconstruction against the boundary the head fixed; anchors the first summary dropped buy
+        one re-summarize naming them. A valid retry replaces the first candidate; a failed retry
+        leaves that verified candidate installable and records its remaining loss. The budget
+        invariant is the one that fails loud — a boundary that did not shrink the window spent a
+        summarize call to make the next round worse."""
         selection = self._select(messages)
         if selection is None:
             return messages, ()
@@ -169,21 +262,52 @@ class Compaction:
         )
         index = await self._next_index()
         summary, usages = await self._summarize(head_rounds)
-        summary = summary.model_copy(update={"loaded_skills": self.loaded_skills.drain()})
-        references = self._references(head_rounds, tail)
-        rendered = self._render(summary, references, active_requests)
-        after = (Message(role="user", content=rendered), *tail)
-        await self._persist(index, messages, after, summary)
+        drained = self.loaded_skills.drain()
+        boundary = _Boundary(
+            tail=tail,
+            references=self._references(head_rounds, tail),
+            active_requests=active_requests,
+            loaded_skills=drained,
+            pre_text=self._window_text(messages),
+            anchors=harvest_anchors(
+                self._window_text(tuple(chain.from_iterable(head_rounds))),
+                drained,
+                active_requests,
+            ),
+            before_tokens=before_tokens,
+        )
+        candidate = self._verify(summary, boundary, retried=False)
+        if candidate.verification.missing:
+            try:
+                second, retry_usages = await self._summarize(
+                    head_rounds, candidate.verification.missing
+                )
+            except Exception as error:
+                verification = candidate.verification.model_copy(update={"retried": True})
+                candidate = replace(
+                    candidate,
+                    summary=candidate.summary.model_copy(update={"verification": verification}),
+                    verification=verification,
+                )
+                warn("compaction.anchor_retry_failed", error_class=type(error).__name__)
+            else:
+                usages = (*usages, *retry_usages)
+                candidate = self._verify(second, boundary, retried=True)
+        self._require_budget(candidate.verification, boundary)
+        await self._persist(index, messages, candidate.after, candidate.summary)
+        self._record_verification(index, reason, candidate.verification)
         await self.hooks.fire(
             "post_compact",
             PostCompact(
-                summary=rendered, before_tokens=before_tokens, after_tokens=self._tokens(after)
+                summary=candidate.rendered,
+                before_tokens=before_tokens,
+                after_tokens=candidate.verification.after_tokens,
             ),
             self.turn,
             self.agent,
             self.speaker_member_id,
         )
-        return after, usages
+        return candidate.after, usages
 
     def _select(
         self, messages: tuple[Message, ...]
@@ -220,18 +344,22 @@ class Compaction:
         return tuple(rounds)
 
     async def _summarize(
-        self, head_rounds: tuple[tuple[Message, ...], ...]
+        self, head_rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...] = ()
     ) -> tuple[CompactionSummary, tuple[Usage, ...]]:
         """One metered model call turning the head rounds into a validated CompactionSummary. When
         the summarize request itself overflows the provider context, drop the oldest head rounds and
         retry, up to `max_ptl_retries` — every successful attempt's usage is returned to meter.
         Exhausting the retries (or an empty/unparseable summary) raises: a compaction that cannot
         shrink fails the turn loud rather than looping, the circuit breaker in this system's shape.
-        The retry is legitimate — it is against a model call's proven external uncertainty."""
+        The retry is legitimate — it is against a model call's proven external uncertainty.
+
+        `missed` names the anchors a first summary of this same head dropped. They ride the input,
+        so a second attempt can carry a literal whose round the prompt-too-long ladder already
+        dropped — the instruction names the fact even where the head no longer does."""
         rounds = head_rounds
         for attempt in range(self.max_ptl_retries + 1):
             try:
-                summary, usage = await self._summarize_once(rounds)
+                summary, usage = await self._summarize_once(rounds, missed)
                 return summary, (usage,)
             except Exception as error:
                 if (
@@ -244,12 +372,12 @@ class Compaction:
         raise RuntimeError("compaction prompt-too-long recovery exhausted")
 
     async def _summarize_once(
-        self, rounds: tuple[tuple[Message, ...], ...]
+        self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]
     ) -> tuple[CompactionSummary, Usage]:
         request = ModelRequest(
             model=self.model,
             system=COMPACTION_SYSTEM_PROMPT,
-            messages=(Message(role="user", content=self._prepare(rounds)),),
+            messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
             reasoning="off",
         )
@@ -265,26 +393,29 @@ class Compaction:
             raise RuntimeError("compaction produced no usage")
         return self._parse_summary("".join(parts)), usage
 
-    def _prepare(self, rounds: tuple[tuple[Message, ...], ...]) -> str:
+    def _prepare(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> str:
         """Render the head rounds to the summarizer's input: one `role: content` block per message,
         preserving block structure. Inline images are already `[image]` markers in `_text` — they
         carry no text but must not vanish silently, so the summarizer knows one was there. The
         rendered head then folds verbatim repetition, so the summarize request carries the
-        information, not the bulk. The format restatement closes the input because the model's
-        response shape follows the nearest instruction: at a full-scale head the system prompt sits
-        hundreds of thousands of tokens back and the transcript's own momentum otherwise captures
-        the reply into continuing the conversation (measured 4/6 continuations on a captured
-        window, 0/12 with the restatement)."""
-        return (
-            self._fold_repeated_runs(
-                "\n\n".join(
-                    f"{message.role}: {self._text(message)}"
-                    for round_ in rounds
-                    for message in round_
-                )
+        information, not the bulk. Anchors a previous attempt dropped follow the head, so the model
+        reads them as a correction to what it just wrote rather than as part of the transcript. The
+        format restatement closes the input because the model's response shape follows the nearest
+        instruction: at a full-scale head the system prompt sits hundreds of thousands of tokens
+        back and the transcript's own momentum otherwise captures the reply into continuing the
+        conversation (measured 4/6 continuations on a captured window, 0/12 with the
+        restatement)."""
+        head = self._fold_repeated_runs(
+            "\n\n".join(
+                f"{message.role}: {self._text(message)}" for round_ in rounds for message in round_
             )
-            + COMPACTION_FORMAT_RESTATEMENT
         )
+        correction = (
+            ANCHOR_RETRY_INSTRUCTION + self._bullets(tuple(anchor.literal for anchor in missed))
+            if missed
+            else ""
+        )
+        return head + correction + COMPACTION_FORMAT_RESTATEMENT
 
     def _fold_repeated_runs(self, text: str) -> str:
         """Fold a short word-sequence repeated verbatim `REPEATED_RUN_MIN_OCCURRENCES`+ times in a
@@ -389,7 +520,8 @@ class Compaction:
             blocks.append("## Key technical concepts\n" + self._bullets(summary.concepts))
         if summary.files:
             blocks.append(
-                "## Files and outputs\n"
+                FILES_HEADING
+                + "\n"
                 + "\n".join(f"- {ref.path} — {ref.why}" for ref in summary.files)
             )
         if summary.errors:
@@ -405,15 +537,119 @@ class Compaction:
         if summary.loaded_skills:
             blocks.append("## Loaded skills\n" + self._bullets(summary.loaded_skills))
         if references:
-            blocks.append(
-                "## Durable references (re-read with the file tools)\n" + self._bullets(references)
-            )
+            blocks.append(REFERENCES_HEADING + "\n" + self._bullets(references))
         if active_requests:
             blocks.append(ACTIVE_REQUESTS_HEADING + "\n" + "\n\n".join(active_requests))
         return COMPACTED_CONTEXT_PREFIX + "\n".join(blocks)
 
     def _bullets(self, items: tuple[str, ...]) -> str:
         return "\n".join(f"- {item}" for item in items)
+
+    def _window_text(self, messages: tuple[Message, ...]) -> str:
+        return "\n".join(self._text(message) for message in messages)
+
+    def _verify(self, summary: CompactionSummary, boundary: _Boundary, retried: bool) -> _Candidate:
+        """Grade one summarize attempt against the boundary, before any of it can replace the live
+        window: cut the model-authored paths the pre-compaction window never mentioned, render, and
+        count the anchors that reached neither the render nor the retained tail.
+
+        Reference integrity runs on the summary's own `files`, because a path the model invented
+        renders under a heading the next round reads as fact. It does not run on the harvested
+        references, which this pipeline pulled out of the head's own text by pattern and which
+        therefore satisfy the check by construction. A path is checked against the pre-compaction
+        text and nothing else: the paths name a sandbox filesystem this process holds no view of, so
+        whether one resolves on disk is not a question answerable here.
+
+        The check reads the whole pre-compaction window, not the head the summarizer saw — the
+        prompt-too-long ladder can drop rounds from the input, and a path from a dropped round is a
+        real path the model may still name off the retry instruction."""
+        kept = tuple(ref for ref in summary.files if ref.path in boundary.pre_text)
+        dropped = tuple(ref.path for ref in summary.files if ref.path not in boundary.pre_text)
+        checked = summary.model_copy(
+            update={"loaded_skills": boundary.loaded_skills, "files": kept}
+        )
+        rendered = self._render(checked, boundary.references, boundary.active_requests)
+        after = (Message(role="user", content=rendered), *boundary.tail)
+        verification = CompactionVerification(
+            before_tokens=boundary.before_tokens,
+            after_tokens=self._tokens(after),
+            tail_tokens=self._tokens(boundary.tail),
+            anchors=len(boundary.anchors),
+            missing=missing_anchors(boundary.anchors, self._window_text(after)),
+            dropped_paths=dropped,
+            retried=retried,
+        )
+        return _Candidate(
+            summary=checked.model_copy(update={"verification": verification}),
+            rendered=rendered,
+            after=after,
+            verification=verification,
+        )
+
+    def _require_budget(self, verification: CompactionVerification, boundary: _Boundary) -> None:
+        """The budget invariant, the one verification failure that is loud: a replacement that did
+        not shrink the window spent a summarize call to make the next round worse, and one still
+        over the trigger compacts again on the very next round, spending a call per round for as
+        long as the turn lives. Neither is a window this pipeline may install.
+
+        Each half is asserted only where the pipeline could have satisfied it within its own output
+        ceiling, because the rest of the after-window is fixed before the summarize call ever runs.
+        The tail is verbatim by the recency contract and whole-round by `_select`, so one round of
+        parallel tool results or inline images can leave no room under the trigger for any summary;
+        the render also carries the active requests and durable references whatever the model
+        writes, so a head lighter than that block cannot be compressed into anything smaller than
+        itself. Where either holds, the arithmetic was decided before the model spoke and no
+        re-summarize would land differently — raising would end a turn that completes today, over a
+        shape this pipeline cannot fix. The counts are recorded either way, `tail_tokens` among
+        them, so an installed window that stayed over the trigger says so."""
+        trigger = self._trigger()
+        carried = self._tokens(
+            (
+                Message(
+                    role="user",
+                    content=self._render(
+                        EMPTY_SUMMARY, boundary.references, boundary.active_requests
+                    ),
+                ),
+            )
+        )
+        head_tokens = verification.before_tokens - verification.tail_tokens
+        room = carried + self.summary_max_tokens
+        if head_tokens > room and verification.after_tokens >= verification.before_tokens:
+            raise RuntimeError(
+                "compaction did not shrink the window: "
+                f"{verification.after_tokens} >= {verification.before_tokens} tokens"
+            )
+        if verification.tail_tokens + room < trigger and verification.after_tokens >= trigger:
+            raise RuntimeError(
+                "compacted window stays over the compaction trigger: "
+                f"{verification.after_tokens} >= {trigger} tokens"
+            )
+
+    def _record_verification(
+        self, index: int, reason: Literal["auto", "force"], verification: CompactionVerification
+    ) -> None:
+        """Every compaction reports its own grade, so the fleet's loss rate is a query rather than
+        an eval-suite inference: one log record naming the anchors that died and the paths that were
+        cut, and one count split by whether anything died and whether the retry was spent."""
+        log(
+            "compaction.verified",
+            conversation_id=str(self.conversation_id),
+            index=index,
+            reason=reason,
+            before_tokens=verification.before_tokens,
+            after_tokens=verification.after_tokens,
+            tail_tokens=verification.tail_tokens,
+            anchors=verification.anchors,
+            missing=[f"{anchor.kind}:{anchor.literal}" for anchor in verification.missing],
+            dropped_paths=list(verification.dropped_paths),
+            retried=verification.retried,
+        )
+        emit_metric(
+            "compaction_verified_total",
+            outcome="lossy" if verification.missing else "clean",
+            retried="true" if verification.retried else "false",
+        )
 
     async def _persist(
         self,

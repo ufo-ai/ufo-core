@@ -115,8 +115,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   skill-load tracker, which knows what the head held. Draining empties the tracker, so a compaction
   that may be followed by another `load_skill` re-derives it from the window it just wrote — the kept
   tail can still carry a load whose workflow is still in front of the model. The compaction forcing a
-  final answer is the exception: that round never offers the tool again. The trigger derives
-  from the model's real window less the summary reserve, so a long turn never exceeds it.
+  final answer is the exception: that round never offers the tool again. The trigger derives from
+  the model window less the summary reserve. Before swapping, deterministic checks remove
+  ungrounded paths, retry once for missing head anchors, reject a feasible replacement that fails to
+  shrink or clear the trigger, and record any remaining loss. An irreducible verbatim tail may
+  remain over the trigger.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, the read-only `memory` object kind (each search hit carries its
   `memory/<id>` or `page/<id>` ref and date; `object_get` opens it — `created_from` links a
