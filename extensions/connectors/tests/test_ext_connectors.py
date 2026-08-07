@@ -64,17 +64,25 @@ TOOL_NARRATION = "using the connected account"
 OTHER_PROVIDER = "other_widgets"
 OTHER_LABEL = "Other Widgets"
 
+SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
+SLACK_UPDATE_SLUG = "SLACK_UPDATES_A_SLACK_MESSAGE"
+SLACK_HISTORY_SLUG = "SLACK_FETCH_CONVERSATION_HISTORY"
+SLACK_SCHEDULED_LIST_SLUG = "SLACK_LIST_SCHEDULED_MESSAGES"
+GMAIL_SEND_SLUG = "GMAIL_SEND_EMAIL"
+SLACK_ACCOUNT = "slack-acct"
+
 
 @dataclass(frozen=True)
 class _Grants(GrantStore):
     accounts: tuple[str, ...]
+    provider: str = sample.CONNECTOR_PROVIDER
 
     async def active_grants(self) -> tuple[Grant, ...]:
         return tuple(
             Grant(
                 id=uuid4(),
                 connection_id=uuid4(),
-                provider=sample.CONNECTOR_PROVIDER,
+                provider=self.provider,
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 owner_member_id=uuid4(),
@@ -100,6 +108,23 @@ class _UnmatchedSearchBroker(sample._SampleBroker):
         return BrokerSearch(tools=())
 
 
+@dataclass(frozen=True)
+class _AnySlugBroker(sample._SampleBroker):
+    """The sample broker widened past its one canned slug, so a call can name a real provider tool.
+    Its execute still echoes back what it was dispatched."""
+
+    async def execute(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        arguments: Mapping[str, object],
+        account_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, object]:
+        return {"slug": slug, "arguments": dict(arguments), "account": account_id}
+
+
 def _registry() -> ConnectorRegistry:
     broker = sample._SampleBroker()
     return ConnectorRegistry(
@@ -118,6 +143,7 @@ def _ctx(
     registry: ConnectorRegistry | None,
     accounts: tuple[str, ...] = (),
     sandbox: SandboxSession | None = None,
+    provider: str = sample.CONNECTOR_PROVIDER,
 ) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
@@ -137,7 +163,7 @@ def _ctx(
         speaker_member_id=None,
         audience=conversation_audience(None),
         artifact_token_secret="",
-        grants=_Grants(accounts),
+        grants=_Grants(accounts, provider),
         connectors=registry,
         idempotency_key="t1/call_external_tool/c1",
     )
@@ -299,6 +325,78 @@ async def test_call_external_tool_requires_a_choice_between_connected_accounts()
         ),
     )
     assert _payload(result)["account"] == "acct-two"
+
+
+def test_slack_attributed_marks_the_message_text_of_a_send() -> None:
+    assert connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        {"channel": "C1", "text": "the plan is posted", "markdown_text": "the *plan* is posted"},
+    ) == {
+        "channel": "C1",
+        "text": f"the plan is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
+        "markdown_text": f"the *plan* is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "slug", "arguments"),
+    [
+        (connector_tools.SLACK_PROVIDER, SLACK_UPDATE_SLUG, {"ts": "1.0", "text": "corrected"}),
+        (connector_tools.SLACK_PROVIDER, SLACK_HISTORY_SLUG, {"channel": "C1"}),
+        (connector_tools.SLACK_PROVIDER, SLACK_SCHEDULED_LIST_SLUG, {"channel": "C1"}),
+        (connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "text": "  "}),
+        ("gmail", GMAIL_SEND_SLUG, {"to": "a@b.test", "text": "the plan is attached"}),
+        (sample.CONNECTOR_PROVIDER, SLACK_SEND_SLUG, {"text": "the plan is posted"}),
+    ],
+    ids=["edit", "read", "listing", "empty_text", "other_provider", "other_broker_slug"],
+)
+def test_slack_attributed_leaves_every_other_call_alone(
+    provider: str, slug: str, arguments: dict
+) -> None:
+    """Only a Slack send is marked. An edit, a read, and a listing publish nothing new, an empty
+    text is not a body, and another provider's send is another product's message — outbound email
+    included, which this deploy originates through no path of its own."""
+    assert connector_tools.slack_attributed(provider, slug, arguments) == arguments
+
+
+def test_slack_attributed_never_stacks_the_line() -> None:
+    once = connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": "the plan is posted"}
+    )
+    assert (
+        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, once)
+        == once
+    )
+
+
+async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution() -> None:
+    """The mark rides the arguments core dispatches, read back off the broker's echo — the same
+    seam the send would reach on a live broker."""
+    registry = ConnectorRegistry(
+        entries={
+            connector_tools.SLACK_PROVIDER: ConnectorEntry(
+                provider=connector_tools.SLACK_PROVIDER,
+                label="Slack",
+                broker=_AnySlugBroker(),
+            )
+        }
+    )
+    result = await call_external_tool(
+        _ctx(registry, accounts=(SLACK_ACCOUNT,), provider=connector_tools.SLACK_PROVIDER),
+        CallExternalToolInput(
+            user_description=TOOL_NARRATION,
+            tool_name=SLACK_SEND_SLUG,
+            source_id=connector_tools.SLACK_PROVIDER,
+            arguments={"channel": "C1", "text": "the plan is posted"},
+        ),
+    )
+    payload = _payload(result)
+    assert payload["slug"] == SLACK_SEND_SLUG
+    assert payload["arguments"] == {
+        "channel": "C1",
+        "text": f"the plan is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
+    }
 
 
 async def test_tools_fail_loud_without_the_registry_or_the_provider() -> None:

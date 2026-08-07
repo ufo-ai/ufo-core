@@ -9,7 +9,10 @@ listing whose query matched nothing falls back to the connector's unqueried top 
 answer, so discovery is never a dead end and a fallback head is never read as a relevance ranking;
 `call_external_tool` executes on the broker's server-side API, authenticated by the turn-agent's
 connected account (bound through `/connect`). The broker holds the account's token and injects it
-itself, so an execute reaches only the broker's own API.
+itself, so an execute reaches only the broker's own API. A Slack message sent through a connector
+is the one call that publishes text this deploy wrote into someone else's surface, so its body
+carries the ufo attribution (`slack_attributed`) — the Slack surface marks its own replies with the
+footer it renders, and a connector send reaches no renderer of ours.
 
 Files cross through the workspace, moved by the sandbox itself: an argument carrying the
 `workspace_file` vocabulary is hashed in the container, staged to where the broker mints
@@ -69,6 +72,12 @@ AVAILABLE_TOOLS_FALLBACK_NOTE = (
 AVAILABLE_TOOLS_OMITTED_NOTE = (
     "{omitted} of the {total} tools listed are omitted here; narrow the query to reach them."
 )
+
+UFO_ATTRIBUTION = "Sent using ufo"
+SLACK_PROVIDER = "slack"
+SLACK_MESSAGE_NOUN = "message"
+SLACK_SEND_VERBS = ("send", "post", "reply", "schedule")
+SLACK_MESSAGE_TEXT_ARGUMENTS = ("markdown_text", "text")
 
 BASE64_MARKER = "base64"
 INLINED_MARKER = "utf-8"
@@ -208,11 +217,33 @@ async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsI
     return _json_result(result)
 
 
+def slack_attributed(
+    provider: str, slug: str, arguments: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """`arguments` with the ufo attribution appended to the message text of a Slack send — the one
+    connector call that publishes a message this deploy wrote, and the only place it can be marked:
+    the Slack surface's own reply carries its footer, a message posted through a connector passes
+    through no renderer of ours. A read, an edit, and a listing are untouched, as is a text already
+    carrying the line, so a resend or an edit of a marked message never stacks it."""
+    if provider != SLACK_PROVIDER:
+        return arguments
+    name = slug.lower()
+    if SLACK_MESSAGE_NOUN not in name or not any(verb in name for verb in SLACK_SEND_VERBS):
+        return arguments
+    attributed = dict(arguments)
+    for key in SLACK_MESSAGE_TEXT_ARGUMENTS:
+        text = arguments.get(key)
+        if isinstance(text, str) and text.strip() and UFO_ATTRIBUTION not in text:
+            attributed[key] = f"{text}\n\n{UFO_ATTRIBUTION}"
+    return attributed
+
+
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
     account_id = await ctx.connector_account(args.source_id, args.account_id)
+    arguments = slack_attributed(entry.provider, args.tool_name, args.arguments)
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
-    return ToolResult(content=(TextContent(text=await call.run(args.arguments, account_id)),))
+    return ToolResult(content=(TextContent(text=await call.run(arguments, account_id)),))
 
 
 @dataclass(frozen=True)
