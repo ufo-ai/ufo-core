@@ -9,6 +9,7 @@ from ufo.ext.conversation_slots import (
     ConversationChange,
     ConversationSlotContext,
     ConversationSlotProvider,
+    ConversationSource,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
 
@@ -84,3 +85,12 @@ def test_changes_payload_bounds_its_collection() -> None:
             changes=(change,) * (CONVERSATION_CHANGES_MAX + 1),
             truncated=True,
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"],
+)
+def test_conversation_sources_reject_unsafe_links(url: str) -> None:
+    with pytest.raises(ValueError, match="source URL must be HTTP"):
+        ConversationSource(url=url, title="unsafe", snippet="", published_date=None)

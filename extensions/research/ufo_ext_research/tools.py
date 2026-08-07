@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.search import FetchRequest, SearchHit, SearchProvider, SearchQuery
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_research.observations import record_fetched_page, record_search_hits
 
 SEARCH_WEB_TOOL = "search_web"
 FETCH_URL_TOOL = "fetch_url"
@@ -180,6 +181,8 @@ async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult:
         )
         hits.extend(results.hits)
         answer = answer or results.answer
+    if ctx.ext is not None:
+        await record_search_hits(ctx.ext, ctx.turn.conversation_id, ctx.turn.id, tuple(hits))
     return ToolResult(content=(TextContent(text=_results_json(hits, answer)),))
 
 
@@ -195,6 +198,8 @@ async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
             force=bool(args.force_fetch),
         )
     )
+    if ctx.ext is not None:
+        await record_fetched_page(ctx.ext, ctx.turn.conversation_id, ctx.turn.id, page)
     reply: dict[str, object] = {
         "url": page.url,
         "text": page.text,
@@ -210,6 +215,8 @@ async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolR
     results = await provider.search(
         SearchQuery(query=args.query, num_results=DEFAULT_SEARCH_RESULTS, vertical=args.vertical)
     )
+    if ctx.ext is not None:
+        await record_search_hits(ctx.ext, ctx.turn.conversation_id, ctx.turn.id, results.hits)
     return ToolResult(
         content=(TextContent(text=_results_json(list(results.hits), results.answer)),)
     )

@@ -237,6 +237,47 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
+test("multiple slot types coexist and sources render as external links", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/sources"]: () =>
+      json({
+        type: "sources",
+        sources: [
+          {
+            url: "https://example.com/report",
+            title: "Quarterly report",
+            snippet: "**The retrieved result.**",
+            published_date: "2026-08-01",
+          },
+        ],
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "changes", label: "Changes", icon: "diff", kind: "changes", count: 2 },
+          { id: "sources", label: "Sources", icon: "link", kind: "sources", count: 1 },
+        ],
+      }),
+  });
+  open();
+
+  expect(await screen.findByRole("button", { name: "Changes 2" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Sources 1" }));
+
+  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=sources");
+  const source = await screen.findByRole("link", { name: "Quarterly report" });
+  expect(source.getAttribute("href")).toBe("https://example.com/report");
+  expect(source.getAttribute("target")).toBe("_blank");
+  const summary = screen.getByText("Summary");
+  const disclosure = summary.closest("details") as HTMLDetailsElement;
+  expect(disclosure.open).toBe(false);
+  await userEvent.click(summary);
+  expect(disclosure.open).toBe(true);
+  expect(screen.getByText("The retrieved result.").closest("strong")).toBeTruthy();
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],

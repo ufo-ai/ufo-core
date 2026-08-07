@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ufo.sdk.manifest import Manifest, PromptSection, SkillSpec
 from ufo_ext_research.delegation import WIDE_RESEARCH_TOOL
+from ufo_ext_research.observations import SOURCES_SLOT
 from ufo_ext_research.subagent import DEEP_RESEARCH_PROFILE, RESEARCH_PROFILE
 from ufo_ext_research.tools import RESEARCH_TOOLS
 
@@ -32,5 +33,6 @@ def manifest() -> Manifest:
         subagents=(RESEARCH_PROFILE, DEEP_RESEARCH_PROFILE),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
+        conversation_slots=(SOURCES_SLOT,),
         requires=("search_providers",),
     )

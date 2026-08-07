@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
+import { Markdown } from "@/lib/markdown";
 import type { Agent } from "@/lib/types";
 
 export type ConversationSlotSummary = {
@@ -16,8 +17,10 @@ export type ConversationSlotsPayload = { slots: ConversationSlotSummary[] };
 
 type Change = { path: string; patch: string; truncated: boolean };
 type ChangesPayload = { type: "changes"; changes: Change[]; truncated: boolean };
-type SlotPayload = ChangesPayload;
 export type PortalIcon = "artifact" | "diff" | "file" | "link";
+type Source = { url: string; title: string; snippet: string; published_date: string | null };
+type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
+type SlotPayload = ChangesPayload | SourcesPayload;
 
 function slotPath(
   agentId: string,
@@ -170,6 +173,38 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
       </div>
     );
   }
+  if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
+  return (
+    <div className="flex flex-col gap-xl">
+      {payload.sources.map((source) => (
+        <article key={source.url} className="min-w-0 rounded-panel border border-edge p-lg">
+          <h2 className="m-0 text-label font-strong">
+            <a href={source.url} target="_blank" rel="noreferrer">
+              {source.title || source.url}
+            </a>
+          </h2>
+          {source.published_date ? (
+            <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+              {source.published_date}
+            </p>
+          ) : null}
+          {source.snippet ? (
+            <details className="mt-sm">
+              <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
+                Summary
+              </summary>
+              <div className="mt-sm break-words">
+                <Markdown text={source.snippet} />
+              </div>
+            </details>
+          ) : null}
+        </article>
+      ))}
+      {payload.truncated ? (
+        <p className="m-0 opacity-(--muted-soft)">Some sources may not be shown.</p>
+      ) : null}
+    </div>
+  );
 }
 
 function ChangedFile({ change }: { change: Change }) {

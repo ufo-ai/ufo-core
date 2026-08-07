@@ -204,7 +204,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "sites_0001",
         "web_0001",
     } <= set(heads)
-    assert len(heads) == 9
+    assert len(heads) == 10
 
 
 @pytest.mark.parametrize("graph_installed", [False, True])

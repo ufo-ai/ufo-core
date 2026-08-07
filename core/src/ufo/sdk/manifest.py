@@ -27,6 +27,12 @@ from ufo.ext.conversation_slots import (
 from ufo.ext.conversation_slots import (
     ConversationSlotProvider as ConversationSlotProvider,
 )
+from ufo.ext.conversation_slots import (
+    ConversationSource as ConversationSource,
+)
+from ufo.ext.conversation_slots import (
+    SourcesSlotPayload as SourcesSlotPayload,
+)
 from ufo.ext.manifest import (
     CdpProviderSpec as CdpProviderSpec,
 )
