@@ -5,9 +5,12 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
+    ArtifactsSlotPayload,
     ChangesSlotPayload,
+    ConversationArtifact,
     ConversationChange,
     ConversationFile,
     ConversationSlotContext,
@@ -102,6 +105,39 @@ def test_files_payload_bounds_its_collection() -> None:
         FilesSlotPayload(
             files=(file,) * (CONVERSATION_FILES_MAX + 1),
             truncated=True,
+        )
+
+
+def test_artifacts_payload_bounds_its_collection() -> None:
+    artifact = ConversationArtifact(
+        filename="report.pdf",
+        subject="Quarterly report",
+        media_type="application/pdf",
+        size_bytes=42,
+        created_at=datetime(2026, 8, 6, tzinfo=UTC),
+        url="https://ufo.example/artifacts/report.pdf",
+    )
+
+    with pytest.raises(ValidationError, match="too_long"):
+        ArtifactsSlotPayload(
+            artifacts=(artifact,) * (CONVERSATION_ARTIFACTS_MAX + 1),
+            truncated=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"],
+)
+def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
+    with pytest.raises(ValueError, match="artifact URL must be HTTP"):
+        ConversationArtifact(
+            filename="unsafe.txt",
+            subject=None,
+            media_type="text/plain",
+            size_bytes=1,
+            created_at=datetime(2026, 8, 6, tzinfo=UTC),
+            url=url,
         )
 
 

@@ -16,6 +16,11 @@ from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 
 CONVERSATION_CHANGE_PATCH_MAX_CHARS = 25_000
 CONVERSATION_CHANGES_MAX = 100
+CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS = 500
+CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS = 2_000
+CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS = 200
+CONVERSATION_ARTIFACT_URL_MAX_CHARS = 8_192
+CONVERSATION_ARTIFACTS_MAX = 100
 CONVERSATION_FILES_MAX = 100
 CONVERSATION_SOURCE_URL_MAX_CHARS = 4_096
 CONVERSATION_SOURCE_TITLE_MAX_CHARS = 500
@@ -39,6 +44,40 @@ class ChangesSlotPayload(BaseModel):
 
     type: Literal["changes"] = "changes"
     changes: tuple[ConversationChange, ...] = Field(max_length=CONVERSATION_CHANGES_MAX)
+    truncated: bool
+
+
+class ConversationArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filename: str = Field(min_length=1, max_length=CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS)
+    subject: str | None = Field(default=None, max_length=CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS)
+    media_type: str = Field(min_length=1, max_length=CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS)
+    size_bytes: int = Field(ge=0)
+    created_at: datetime
+    url: str | None = Field(default=None, max_length=CONVERSATION_ARTIFACT_URL_MAX_CHARS)
+
+    @field_validator("url")
+    @classmethod
+    def http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("artifact URL must be HTTP(S) without embedded credentials")
+        return value
+
+
+class ArtifactsSlotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["artifacts"] = "artifacts"
+    artifacts: tuple[ConversationArtifact, ...] = Field(max_length=CONVERSATION_ARTIFACTS_MAX)
     truncated: bool
 
 
@@ -88,8 +127,11 @@ class SourcesSlotPayload(BaseModel):
     truncated: bool
 
 
-ConversationSlotPayload = ChangesSlotPayload | FilesSlotPayload | SourcesSlotPayload
+ConversationSlotPayload = (
+    ArtifactsSlotPayload | ChangesSlotPayload | FilesSlotPayload | SourcesSlotPayload
+)
 SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
+    ArtifactsSlotPayload,
     ChangesSlotPayload,
     FilesSlotPayload,
     SourcesSlotPayload,

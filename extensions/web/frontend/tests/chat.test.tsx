@@ -319,6 +319,48 @@ test("files slot previews and downloads a workspace file in place", async () => 
   );
 });
 
+test("artifacts slot renders durable shared outputs with their download metadata", async () => {
+  const url = "https://ufo.example/artifacts/chart.png?token=signed";
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "chart.png",
+            subject: "The final chart",
+            media_type: "image/png",
+            size_bytes: 2048,
+            created_at: "2026-08-06T12:00:00Z",
+            url,
+          },
+        ],
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          {
+            id: "artifacts",
+            label: "Artifacts",
+            icon: "artifact",
+            kind: "artifacts",
+            count: 1,
+          },
+        ],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
+  const artifact = await screen.findByRole("link", { name: "chart.png" });
+  expect(artifact.getAttribute("href")).toBe(url);
+  expect(artifact.getAttribute("download")).toBe("chart.png");
+  expect(screen.getByText("The final chart")).toBeTruthy();
+  expect(document.querySelector('aside img[src="' + url + '"]')).toBeTruthy();
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],

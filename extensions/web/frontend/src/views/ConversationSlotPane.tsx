@@ -20,12 +20,25 @@ export type ConversationSlotsPayload = { slots: ConversationSlotSummary[] };
 
 type Change = { path: string; patch: string; truncated: boolean };
 type ChangesPayload = { type: "changes"; changes: Change[]; truncated: boolean };
+type ConversationArtifact = {
+  filename: string;
+  subject: string | null;
+  media_type: string;
+  size_bytes: number;
+  created_at: string;
+  url: string | null;
+};
+type ArtifactsPayload = {
+  type: "artifacts";
+  artifacts: ConversationArtifact[];
+  truncated: boolean;
+};
 type ConversationFile = { path: string; size_bytes: number; modified_at: string };
 type FilesPayload = { type: "files"; files: ConversationFile[]; truncated: boolean };
 export type PortalIcon = "artifact" | "diff" | "file" | "link";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
-type SlotPayload = ChangesPayload | FilesPayload | SourcesPayload;
+type SlotPayload = ArtifactsPayload | ChangesPayload | FilesPayload | SourcesPayload;
 
 const MAX_FILE_PREVIEW_BYTES = 256 * 1024;
 
@@ -225,6 +238,7 @@ function SlotContent({
       />
     );
   }
+  if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
   return (
     <div className="flex flex-col gap-xl">
@@ -254,6 +268,47 @@ function SlotContent({
       ))}
       {payload.truncated ? (
         <p className="m-0 opacity-(--muted-soft)">Some sources may not be shown.</p>
+      ) : null}
+    </div>
+  );
+}
+
+function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
+  if (!payload.artifacts.length && !payload.truncated) {
+    return <PanelEmpty>No artifacts shared in this conversation.</PanelEmpty>;
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-xl">
+      {payload.artifacts.map((artifact, index) => (
+        <article
+          key={[artifact.created_at, artifact.filename, index].join(":")}
+          className="min-w-0 rounded-panel border border-edge p-lg"
+        >
+          {artifact.media_type.startsWith("image/") && artifact.url ? (
+            <img
+              loading="lazy"
+              alt=""
+              src={artifact.url}
+              className="mb-md max-h-[20rem] max-w-full rounded-sm border border-edge object-contain"
+            />
+          ) : null}
+          <h2 className="m-0 break-all font-mono text-label font-strong">
+            {artifact.url ? (
+              <a href={artifact.url} download={artifact.filename}>
+                {artifact.filename}
+              </a>
+            ) : (
+              artifact.filename
+            )}
+          </h2>
+          {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
+          <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+            {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
+          </p>
+        </article>
+      ))}
+      {payload.truncated ? (
+        <p className="m-0 opacity-(--muted-soft)">Some artifacts may not be shown.</p>
       ) : null}
     </div>
   );

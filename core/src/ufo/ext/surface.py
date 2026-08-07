@@ -1637,6 +1637,53 @@ class SurfaceContext:
             ),
         )
 
+    async def list_conversation_artifacts(
+        self, conversation_id: UUID, *, limit: int
+    ) -> tuple[ListedArtifact, ...]:
+        """A bounded newest-first projection of the durable files shared by one conversation.
+        Authorization remains the calling surface's responsibility; this seam fixes the workspace
+        and conversation predicates and never widens to another conversation's rows."""
+        query = (
+            sa.select(
+                tables.shared_artifact.c.blob_key,
+                tables.shared_artifact.c.filename,
+                tables.shared_artifact.c.subject,
+                tables.shared_artifact.c.media_type,
+                tables.shared_artifact.c.size_bytes,
+                tables.shared_artifact.c.created_at,
+            )
+            .select_from(
+                tables.shared_artifact.join(
+                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                )
+            )
+            .where(
+                tables.shared_artifact.c.workspace_id == self.workspace_id,
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == conversation_id,
+            )
+            .order_by(
+                tables.shared_artifact.c.created_at.desc(),
+                tables.shared_artifact.c.id.desc(),
+            )
+            .limit(limit)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return tuple(
+            ListedArtifact(
+                artifact=SharedArtifact(
+                    blob_key=row.blob_key,
+                    filename=row.filename,
+                    subject=row.subject,
+                    media_type=row.media_type,
+                    size_bytes=row.size_bytes,
+                ),
+                created_at=row.created_at,
+            )
+            for row in rows
+        )
+
     async def list_member_objects(
         self,
         kind: str,

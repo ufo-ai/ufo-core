@@ -8,7 +8,14 @@ portal."""
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
-from ufo_ext_web.surface import CHANGES_SLOT, FILES_SLOT, ROUTES, SURFACE_WEB, resolve_workspace
+from ufo_ext_web.surface import (
+    ARTIFACTS_SLOT,
+    CHANGES_SLOT,
+    FILES_SLOT,
+    ROUTES,
+    SURFACE_WEB,
+    resolve_workspace,
+)
 
 NAME = EXTENSION_WEB
 VERSION = "0.1.0"
@@ -19,7 +26,7 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         tools=WEB_ACCESS_TOOLS,
-        conversation_slots=(CHANGES_SLOT, FILES_SLOT),
+        conversation_slots=(CHANGES_SLOT, FILES_SLOT, ARTIFACTS_SLOT),
         surfaces=(
             SurfaceSpec(name=SURFACE_WEB, routes=ROUTES, identify=resolve_workspace, home=True),
         ),

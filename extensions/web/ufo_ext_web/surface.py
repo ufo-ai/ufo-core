@@ -60,17 +60,20 @@ from ufo.sdk.hub import (
 )
 from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.manifest import (
-    CONVERSATION_CHANGE_PATCH_MAX_CHARS as SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS,
-)
-from ufo.sdk.manifest import (
+    CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
+    ArtifactsSlotPayload,
     ChangesSlotPayload,
+    ConversationArtifact,
     ConversationChange,
     ConversationFile,
     ConversationSlotContext,
     ConversationSlotProvider,
     FilesSlotPayload,
+)
+from ufo.sdk.manifest import (
+    CONVERSATION_CHANGE_PATCH_MAX_CHARS as SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -1316,24 +1319,48 @@ async def _project_slot_context(
     slot_context: ConversationSlotContext,
     content: type[BaseModel],
 ) -> ConversationSlotContext:
-    if content is not FilesSlotPayload:
-        return slot_context
-    listed = await ctx.list_workspace_files(slot_context.conversation_id)
-    files = tuple(
-        ConversationFile(
-            path=entry.path,
-            size_bytes=entry.size_bytes,
-            modified_at=entry.modified_at,
+    if content is FilesSlotPayload:
+        listed_files = await ctx.list_workspace_files(slot_context.conversation_id)
+        files = tuple(
+            ConversationFile(
+                path=entry.path,
+                size_bytes=entry.size_bytes,
+                modified_at=entry.modified_at,
+            )
+            for entry in listed_files[:CONVERSATION_FILES_MAX]
         )
-        for entry in listed[:CONVERSATION_FILES_MAX]
-    )
-    return replace(
-        slot_context,
-        projection=FilesSlotPayload(
-            files=files,
-            truncated=len(listed) > CONVERSATION_FILES_MAX,
-        ),
-    )
+        return replace(
+            slot_context,
+            projection=FilesSlotPayload(
+                files=files,
+                truncated=len(listed_files) > CONVERSATION_FILES_MAX,
+            ),
+        )
+    if content is ArtifactsSlotPayload:
+        listed_artifacts = await ctx.list_conversation_artifacts(
+            slot_context.conversation_id, limit=CONVERSATION_ARTIFACTS_MAX + 1
+        )
+        truncated = len(listed_artifacts) > CONVERSATION_ARTIFACTS_MAX
+        artifacts: list[ConversationArtifact] = []
+        for entry in listed_artifacts[:CONVERSATION_ARTIFACTS_MAX]:
+            try:
+                artifacts.append(
+                    ConversationArtifact(
+                        filename=entry.artifact.filename,
+                        subject=entry.artifact.subject,
+                        media_type=entry.artifact.media_type,
+                        size_bytes=entry.artifact.size_bytes,
+                        created_at=entry.created_at,
+                        url=ctx.artifact_link(entry.artifact),
+                    )
+                )
+            except ValidationError:
+                truncated = True
+        return replace(
+            slot_context,
+            projection=ArtifactsSlotPayload(artifacts=tuple(artifacts), truncated=truncated),
+        )
+    return slot_context
 
 
 async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
@@ -1448,6 +1475,31 @@ FILES_SLOT = ConversationSlotProvider(
     content=FilesSlotPayload,
     summarize=_summarize_files,
     read=_read_files,
+)
+
+
+def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload:
+    if not isinstance(ctx.projection, ArtifactsSlotPayload):
+        raise RuntimeError("artifacts slot needs the host artifact projection")
+    return ctx.projection
+
+
+async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None:
+    artifacts = _artifacts_projection(ctx).artifacts
+    return len(artifacts) or None
+
+
+async def _read_artifacts(ctx: ConversationSlotContext) -> ArtifactsSlotPayload:
+    return _artifacts_projection(ctx)
+
+
+ARTIFACTS_SLOT = ConversationSlotProvider(
+    id="artifacts",
+    label="Artifacts",
+    icon="artifact",
+    content=ArtifactsSlotPayload,
+    summarize=_summarize_artifacts,
+    read=_read_artifacts,
 )
 
 

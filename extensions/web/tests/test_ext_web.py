@@ -6326,6 +6326,64 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
     assert downloaded.content == b"# Brief\n\nShip it.\n"
 
 
+async def test_durable_shared_files_fill_the_typed_artifacts_slot(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "artifacts@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="artifacts",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    turn_id = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="share the report"
+    )
+    shared_at = datetime(2026, 8, 6, 12, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key="artifacts/report/report.pdf",
+                workspace_id=workspace_id,
+                filename="report.pdf",
+                subject="Quarterly report",
+                media_type="application/pdf",
+                size_bytes=42,
+                created_at=shared_at,
+                updated_at=shared_at,
+            )
+        )
+
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    inventory = await client.get(f"{base}/slots", headers=headers)
+    response = await client.get(f"{base}/slots/artifacts", headers=headers)
+
+    assert inventory.status_code == 200
+    assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "artifacts") == {
+        "id": "artifacts",
+        "label": "Artifacts",
+        "icon": "artifact",
+        "kind": "artifacts",
+        "count": 1,
+    }
+    assert response.status_code == 200
+    assert response.json()["type"] == "artifacts"
+    assert response.json()["truncated"] is False
+    artifact = response.json()["artifacts"][0]
+    assert {key: artifact[key] for key in ("filename", "subject", "media_type", "size_bytes")} == {
+        "filename": "report.pdf",
+        "subject": "Quarterly report",
+        "media_type": "application/pdf",
+        "size_bytes": 42,
+    }
+    assert artifact["created_at"].startswith("2026-08-06T12:00:00")
+    assert artifact["url"].startswith("https://web/")
+
+
 async def test_conversation_reads_ride_the_same_gate(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],

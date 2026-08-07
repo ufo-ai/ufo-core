@@ -10,6 +10,21 @@ from ufo.credentials import (
     HostChoice as HostChoice,
 )
 from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS as CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS as CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS as CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACT_URL_MAX_CHARS as CONVERSATION_ARTIFACT_URL_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_ARTIFACTS_MAX as CONVERSATION_ARTIFACTS_MAX,
+)
+from ufo.ext.conversation_slots import (
     CONVERSATION_CHANGE_PATCH_MAX_CHARS as CONVERSATION_CHANGE_PATCH_MAX_CHARS,
 )
 from ufo.ext.conversation_slots import (
@@ -19,7 +34,13 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_FILES_MAX as CONVERSATION_FILES_MAX,
 )
 from ufo.ext.conversation_slots import (
+    ArtifactsSlotPayload as ArtifactsSlotPayload,
+)
+from ufo.ext.conversation_slots import (
     ChangesSlotPayload as ChangesSlotPayload,
+)
+from ufo.ext.conversation_slots import (
+    ConversationArtifact as ConversationArtifact,
 )
 from ufo.ext.conversation_slots import (
     ConversationChange as ConversationChange,
