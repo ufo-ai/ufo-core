@@ -34,6 +34,15 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_FILES_MAX as CONVERSATION_FILES_MAX,
 )
 from ufo.ext.conversation_slots import (
+    CONVERSATION_TASK_DESCRIPTION_MAX_CHARS as CONVERSATION_TASK_DESCRIPTION_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_TASK_TITLE_MAX_CHARS as CONVERSATION_TASK_TITLE_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_TASKS_MAX as CONVERSATION_TASKS_MAX,
+)
+from ufo.ext.conversation_slots import (
     ArtifactsSlotPayload as ArtifactsSlotPayload,
 )
 from ufo.ext.conversation_slots import (
@@ -58,6 +67,9 @@ from ufo.ext.conversation_slots import (
     ConversationSource as ConversationSource,
 )
 from ufo.ext.conversation_slots import (
+    ConversationTask as ConversationTask,
+)
+from ufo.ext.conversation_slots import (
     FilesSlotPayload as FilesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
@@ -65,6 +77,9 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.conversation_slots import (
     SourcesSlotPayload as SourcesSlotPayload,
+)
+from ufo.ext.conversation_slots import (
+    TasksSlotPayload as TasksSlotPayload,
 )
 from ufo.ext.manifest import (
     CdpProviderSpec as CdpProviderSpec,

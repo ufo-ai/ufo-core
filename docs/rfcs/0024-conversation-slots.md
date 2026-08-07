@@ -10,8 +10,8 @@ date: 2026-08-06
 > Replace the chat header's coding-specific Changes link with one right panel whose available views
 > come from the conversation. Extensions declare typed, read-only slot providers; the web surface
 > authorizes the conversation, lists the providers that have content, and lazily renders the selected
-> one. One conversation may therefore expose any combination of Changes, Files, Sources, and
-> Artifacts, or none.
+> one. One conversation may therefore expose any combination of Changes, Files, Sources,
+> Artifacts, and Tasks, or none.
 
 ## Current state
 
@@ -75,7 +75,7 @@ GET .../conversations/{conversation}/slots/{slot}
     -> one bounded, discriminated payload
 ```
 
-Initial payloads are exact models for changes, files, sources, and artifacts. An item may carry an
+Initial payloads are exact models for changes, files, sources, artifacts, and tasks. An item may carry an
 `ImagePreview` with a same-origin URL and one of `image/png`, `image/jpeg`, `image/gif`, or
 `image/webp`, limited to 20 MiB per image; the portal renders an image only from that typed
 capability and never infers one from a broad media type or filename. The portal owns their
@@ -96,6 +96,7 @@ The first owners are:
 | `files` | core/web | live conversation sandbox |
 | `artifacts` | core/web | durable artifact records |
 | `sources` | research | new typed conversation-keyed observation records |
+| `tasks` | todos | durable conversation-keyed todo board in the extension-scoped store |
 
 Every preview URL carries a signed capability binding its media type and byte size. The byte route
 accepts only a claim no larger than 20 MiB, reads exactly that many bytes, and validates the claimed
@@ -112,13 +113,17 @@ under its 256 KiB text bound.
 
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it
-has no conversation provenance.
+has no conversation provenance. The todo board qualifies because its existing durable key is the
+conversation id; the provider reads that record directly and does not infer task state from tool
+messages or transcript text.
 
 ## Doctrine fit / implications
 
-The manifest point is core only because the slot-id namespace and extension binding are deploy-wide;
-the panel and every renderer remain in web. A declaration grants nothing. It is presentation over a
-read projection, not an RFC 0022 member action, so mutations continue through audited turns.
+The manifest point and closed payload union are core because the slot-id namespace and extension
+binding are deploy-wide and every host renderer needs an exact, bounded trust-boundary contract;
+an extension cannot safely define arbitrary portal-origin data. The panel and every renderer remain
+in web. A declaration grants nothing. It is presentation over a read projection, not an RFC 0022
+member action, so mutations continue through audited turns.
 
 The conversation-to-slots relation is computed from each provider's source of truth. There is no
 `conversation_slot` table whose derived membership can become stale. One provider failure renders

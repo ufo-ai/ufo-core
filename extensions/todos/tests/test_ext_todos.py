@@ -14,6 +14,7 @@ from ufo.ext.context import ScopedStore, context_for
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.manifest import ConversationSlotContext
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import ws
 
@@ -82,6 +83,8 @@ def test_manifest_declares_both_tools_and_the_todo_section() -> None:
     (section,) = manifest.prompt_sections
     assert section.name == "todo_list"
     assert "<todo_list>" in section.body
+    (slot,) = manifest.conversation_slots
+    assert slot is todos.TASKS_SLOT
 
 
 async def test_update_status_round_trips_through_the_store(db: None, tmp_path: Path) -> None:
@@ -117,6 +120,93 @@ async def test_update_status_round_trips_through_the_store(db: None, tmp_path: P
         scoped = ScopedStore(extension=todos.NAME)
         stored = await scoped.get(f"{todos.TODO_KEY_PREFIX}{conversation_id}")
         assert stored["tasks"][0]["status"] == "completed"
+        assert "type" not in stored
+        slot_context = ConversationSlotContext(
+            ext=ctx.ext,
+            conversation_id=conversation_id,
+            agent_id=ctx.turn.agent_id,
+            audience=ctx.audience,
+            messages=(),
+            compacted=False,
+        )
+        assert await todos.TASKS_SLOT.summarize(slot_context) == 2
+        payload = await todos.TASKS_SLOT.read(slot_context)
+        assert payload.title == "Launch"
+        assert [task.status for task in payload.tasks] == ["completed", "pending"]
+        assert payload.total_count == 2
+        assert payload.completed_count == 1
+
+
+async def test_tasks_slot_distinguishes_no_board_from_an_empty_board(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _seed_workspace()
+    conversation_id = uuid4()
+    ctx = _context(workspace_id, conversation_id, tmp_path)
+    slot_context = ConversationSlotContext(
+        ext=ctx.ext,
+        conversation_id=conversation_id,
+        agent_id=ctx.turn.agent_id,
+        audience=ctx.audience,
+        messages=(),
+        compacted=False,
+    )
+    with ws(workspace_id):
+        assert await todos.TASKS_SLOT.summarize(slot_context) is None
+        missing = await todos.TASKS_SLOT.read(slot_context)
+        assert missing.title == ""
+        assert missing.tasks == ()
+        assert missing.total_count == 0
+        assert missing.completed_count == 0
+        assert missing.truncated is False
+        await todos.update_todo_list(
+            ctx,
+            todos.UpdateTodoListInput(
+                title="Nothing queued",
+                tasks=(),
+                user_description="cleared the board",
+            ),
+        )
+        assert await todos.TASKS_SLOT.summarize(slot_context) == 0
+
+
+async def test_tasks_slot_bounds_the_projection_without_changing_its_source_count(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _seed_workspace()
+    conversation_id = uuid4()
+    ctx = _context(workspace_id, conversation_id, tmp_path)
+    slot_context = ConversationSlotContext(
+        ext=ctx.ext,
+        conversation_id=conversation_id,
+        agent_id=ctx.turn.agent_id,
+        audience=ctx.audience,
+        messages=(),
+        compacted=False,
+    )
+    task_count = todos.CONVERSATION_TASKS_MAX + 1
+    with ws(workspace_id):
+        await ctx.ext.store.put(
+            f"{todos.TODO_KEY_PREFIX}{conversation_id}",
+            {
+                "title": "t" * (todos.CONVERSATION_TASK_TITLE_MAX_CHARS + 1),
+                "tasks": [
+                    {
+                        "description": "x" * (todos.CONVERSATION_TASK_DESCRIPTION_MAX_CHARS + 1),
+                        "status": "pending",
+                    }
+                    for _index in range(task_count)
+                ],
+            },
+        )
+        assert await todos.TASKS_SLOT.summarize(slot_context) == task_count
+        payload = await todos.TASKS_SLOT.read(slot_context)
+        assert len(payload.title) == todos.CONVERSATION_TASK_TITLE_MAX_CHARS
+        assert len(payload.tasks) == todos.CONVERSATION_TASKS_MAX
+        assert len(payload.tasks[0].description) == todos.CONVERSATION_TASK_DESCRIPTION_MAX_CHARS
+        assert payload.total_count == task_count
+        assert payload.completed_count == 0
+        assert payload.truncated is True
 
 
 async def test_status_before_any_list_fails_loud(db: None, tmp_path: Path) -> None:

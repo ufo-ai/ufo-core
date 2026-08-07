@@ -8,7 +8,7 @@ from unicodedata import category
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ufo.audience import Audience
 from ufo.ext.context import ExtensionContext
@@ -29,8 +29,11 @@ CONVERSATION_SOURCE_TITLE_MAX_CHARS = 500
 CONVERSATION_SOURCE_SNIPPET_MAX_CHARS = 2_000
 CONVERSATION_SOURCE_DATE_MAX_CHARS = 40
 CONVERSATION_SOURCES_MAX = 100
-PortalIcon = Literal["artifact", "diff", "file", "link"]
-PORTAL_ICONS = frozenset(("artifact", "diff", "file", "link"))
+CONVERSATION_TASK_DESCRIPTION_MAX_CHARS = 2_000
+CONVERSATION_TASK_TITLE_MAX_CHARS = 500
+CONVERSATION_TASKS_MAX = 100
+PortalIcon = Literal["artifact", "diff", "file", "link", "task"]
+PORTAL_ICONS = frozenset(("artifact", "diff", "file", "link", "task"))
 
 
 class ImagePreview(BaseModel):
@@ -156,14 +159,54 @@ class SourcesSlotPayload(BaseModel):
     truncated: bool
 
 
+class ConversationTask(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    description: str = Field(max_length=CONVERSATION_TASK_DESCRIPTION_MAX_CHARS)
+    status: Literal["pending", "in_progress", "completed"] = "pending"
+
+
+class TasksSlotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["tasks"] = "tasks"
+    title: str = Field(max_length=CONVERSATION_TASK_TITLE_MAX_CHARS)
+    tasks: tuple[ConversationTask, ...] = Field(max_length=CONVERSATION_TASKS_MAX)
+    total_count: int = Field(ge=0)
+    completed_count: int = Field(ge=0)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def consistent_progress(self) -> "TasksSlotPayload":
+        if self.completed_count > self.total_count:
+            raise ValueError("completed task count exceeds total task count")
+        if len(self.tasks) > self.total_count:
+            raise ValueError("visible task count exceeds total task count")
+        visible_completed = sum(task.status == "completed" for task in self.tasks)
+        visible_incomplete = len(self.tasks) - visible_completed
+        if visible_completed > self.completed_count:
+            raise ValueError("visible completed tasks exceed completed task count")
+        if visible_incomplete > self.total_count - self.completed_count:
+            raise ValueError("visible incomplete tasks exceed incomplete task count")
+        if not self.truncated:
+            if len(self.tasks) != self.total_count:
+                raise ValueError("untruncated task count must equal total task count")
+        return self
+
+
 ConversationSlotPayload = (
-    ArtifactsSlotPayload | ChangesSlotPayload | FilesSlotPayload | SourcesSlotPayload
+    ArtifactsSlotPayload
+    | ChangesSlotPayload
+    | FilesSlotPayload
+    | SourcesSlotPayload
+    | TasksSlotPayload
 )
 SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
     ArtifactsSlotPayload,
     ChangesSlotPayload,
     FilesSlotPayload,
     SourcesSlotPayload,
+    TasksSlotPayload,
 )
 
 

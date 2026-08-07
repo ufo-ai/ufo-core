@@ -417,6 +417,64 @@ test("artifacts slot renders durable shared outputs with their download metadata
   ).toBeTruthy();
 });
 
+test("tasks slot renders durable checklist progress and task status", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/tasks"]: () =>
+      json({
+        type: "tasks",
+        title: "Ship slots",
+        tasks: [
+          { description: "Define the payload", status: "completed" },
+          { description: "Render the board", status: "in_progress" },
+          { description: "Verify the flow", status: "pending" },
+        ],
+        total_count: 3,
+        completed_count: 1,
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [{ id: "tasks", label: "Tasks", icon: "task", kind: "tasks", count: 3 }],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Tasks 3" }));
+  expect(await screen.findByRole("heading", { name: "Ship slots" })).toBeTruthy();
+  expect(screen.getByText("1 of 3 completed.")).toBeTruthy();
+  expect(screen.getByText("Define the payload")).toBeTruthy();
+  expect(screen.getByText("Completed")).toBeTruthy();
+  expect(screen.getByText("In progress")).toBeTruthy();
+  expect(screen.getByText("Pending")).toBeTruthy();
+});
+
+test("tasks slot preserves an empty truncated board's context", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/tasks"]: () =>
+      json({
+        type: "tasks",
+        title: "Bounded board",
+        tasks: [],
+        total_count: 0,
+        completed_count: 0,
+        truncated: true,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [{ id: "tasks", label: "Tasks", icon: "task", kind: "tasks", count: 0 }],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Tasks" }));
+  expect(await screen.findByRole("heading", { name: "Bounded board" })).toBeTruthy();
+  expect(screen.getByText("0 of 0 completed.")).toBeTruthy();
+  expect(await screen.findByText("No tasks.")).toBeTruthy();
+  expect(screen.getByText("Some tasks may not be shown.")).toBeTruthy();
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],

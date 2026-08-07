@@ -12,11 +12,22 @@ surface shows the progress as it moves."""
 import json
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 from ufo.sdk.context import ExtensionContext
-from ufo.sdk.manifest import Manifest, PromptSection
+from ufo.sdk.manifest import (
+    CONVERSATION_TASK_DESCRIPTION_MAX_CHARS,
+    CONVERSATION_TASK_TITLE_MAX_CHARS,
+    CONVERSATION_TASKS_MAX,
+    ConversationSlotContext,
+    ConversationSlotProvider,
+    ConversationTask,
+    Manifest,
+    PromptSection,
+    TasksSlotPayload,
+)
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "todos"
@@ -85,8 +96,8 @@ def _require_ext(ctx: ToolContext) -> ExtensionContext:
     return ctx.ext
 
 
-def _board_key(ctx: ToolContext) -> str:
-    return f"{TODO_KEY_PREFIX}{ctx.turn.conversation_id}"
+def _board_key(conversation_id: UUID) -> str:
+    return f"{TODO_KEY_PREFIX}{conversation_id}"
 
 
 def _board_result(board: TodoBoard) -> ToolResult:
@@ -101,13 +112,13 @@ async def _read_board(ext: ExtensionContext, key: str) -> TodoBoard | None:
 async def update_todo_list(ctx: ToolContext, args: UpdateTodoListInput) -> ToolResult:
     ext = _require_ext(ctx)
     board = TodoBoard(title=args.title, tasks=list(args.tasks))
-    await ext.store.put(_board_key(ctx), json.loads(board.model_dump_json()))
+    await ext.store.put(_board_key(ctx.turn.conversation_id), json.loads(board.model_dump_json()))
     return _board_result(board)
 
 
 async def update_todo_status(ctx: ToolContext, args: UpdateTodoStatusInput) -> ToolResult:
     ext = _require_ext(ctx)
-    key = _board_key(ctx)
+    key = _board_key(ctx.turn.conversation_id)
     board = await _read_board(ext, key)
     if board is None or not board.tasks:
         raise ValueError("no todo list — call update_todo_list first")
@@ -117,6 +128,54 @@ async def update_todo_status(ctx: ToolContext, args: UpdateTodoStatusInput) -> T
         board.tasks[update.index - 1].status = update.status
     await ext.store.put(key, json.loads(board.model_dump_json()))
     return _board_result(board)
+
+
+async def _summarize_tasks(ctx: ConversationSlotContext) -> int | None:
+    board = await _read_board(ctx.ext, _board_key(ctx.conversation_id))
+    return None if board is None else len(board.tasks)
+
+
+async def _read_tasks(ctx: ConversationSlotContext) -> TasksSlotPayload:
+    board = await _read_board(ctx.ext, _board_key(ctx.conversation_id))
+    if board is None:
+        return TasksSlotPayload(
+            title="",
+            tasks=(),
+            total_count=0,
+            completed_count=0,
+            truncated=False,
+        )
+    truncated = (
+        len(board.title) > CONVERSATION_TASK_TITLE_MAX_CHARS
+        or len(board.tasks) > CONVERSATION_TASKS_MAX
+    )
+    tasks: list[ConversationTask] = []
+    for task in board.tasks[:CONVERSATION_TASKS_MAX]:
+        if len(task.description) > CONVERSATION_TASK_DESCRIPTION_MAX_CHARS:
+            truncated = True
+        tasks.append(
+            ConversationTask(
+                description=task.description[:CONVERSATION_TASK_DESCRIPTION_MAX_CHARS],
+                status=task.status,
+            )
+        )
+    return TasksSlotPayload(
+        title=board.title[:CONVERSATION_TASK_TITLE_MAX_CHARS],
+        tasks=tuple(tasks),
+        total_count=len(board.tasks),
+        completed_count=sum(task.status == "completed" for task in board.tasks),
+        truncated=truncated,
+    )
+
+
+TASKS_SLOT = ConversationSlotProvider(
+    id="tasks",
+    label="Tasks",
+    icon="task",
+    content=TasksSlotPayload,
+    summarize=_summarize_tasks,
+    read=_read_tasks,
+)
 
 
 def manifest() -> Manifest:
@@ -138,4 +197,5 @@ def manifest() -> Manifest:
             ),
         ),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        conversation_slots=(TASKS_SLOT,),
     )

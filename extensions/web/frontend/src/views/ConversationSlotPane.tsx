@@ -46,10 +46,20 @@ type ImagePreview = {
   media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp";
   url: string;
 };
-export type PortalIcon = "artifact" | "diff" | "file" | "link";
+export type PortalIcon = "artifact" | "diff" | "file" | "link" | "task";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
-type SlotPayload = ArtifactsPayload | ChangesPayload | FilesPayload | SourcesPayload;
+type TaskStatus = "pending" | "in_progress" | "completed";
+type ConversationTask = { description: string; status: TaskStatus };
+type TasksPayload = {
+  type: "tasks";
+  title: string;
+  tasks: ConversationTask[];
+  total_count: number;
+  completed_count: number;
+  truncated: boolean;
+};
+type SlotPayload = ArtifactsPayload | ChangesPayload | FilesPayload | SourcesPayload | TasksPayload;
 
 const MAX_FILE_PREVIEW_BYTES = 256 * 1024;
 
@@ -199,6 +209,7 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
     diff: "M8 5v6M5 8h6M14 8h5M5 17h6M14 17h5",
     file: "M6 2h8l4 4v16H6V2Zm8 0v5h5",
     link: "M9 15l6-6M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0",
+    task: "M9 6h11M9 12h11M9 18h11M3.5 6l1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2",
   }[icon];
   return (
     <svg
@@ -250,6 +261,7 @@ function SlotContent({
     );
   }
   if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
+  if (payload.type === "tasks") return <TasksContent payload={payload} />;
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
   return (
     <div className="flex flex-col gap-xl">
@@ -281,6 +293,42 @@ function SlotContent({
         <p className="m-0 opacity-(--muted-soft)">Some sources may not be shown.</p>
       ) : null}
     </div>
+  );
+}
+
+function TasksContent({ payload }: { payload: TasksPayload }) {
+  const labels: Record<TaskStatus, string> = {
+    pending: "Pending",
+    in_progress: "In progress",
+    completed: "Completed",
+  };
+  return (
+    <section className="min-w-0">
+      {payload.title ? <h2 className="m-0 text-title font-strong">{payload.title}</h2> : null}
+      <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+        {payload.completed_count} of {payload.total_count} completed.
+      </p>
+      {payload.tasks.length ? (
+        <ul className="m-0 mt-lg flex list-none flex-col gap-sm p-0">
+          {payload.tasks.map((task, index) => (
+            <li
+              key={[task.description, index].join(":")}
+              className="flex min-w-0 items-start gap-md rounded-panel border border-edge p-lg"
+            >
+              <span className="shrink-0 font-mono text-mono opacity-(--muted-strong)">
+                {labels[task.status]}
+              </span>
+              <span className="min-w-0 break-words">{task.description}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <PanelEmpty>No tasks.</PanelEmpty>
+      )}
+      {payload.truncated ? (
+        <p className="m-0 mt-lg opacity-(--muted-soft)">Some tasks may not be shown.</p>
+      ) : null}
+    </section>
   );
 }
 

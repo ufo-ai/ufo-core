@@ -8,12 +8,15 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from urllib.parse import parse_qs, quote, urlsplit
 from uuid import UUID, uuid4
 
 import lz4.frame
 import pytest
 import sqlalchemy as sa
+import ufo_ext_todos as todos
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
@@ -61,6 +64,7 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import workspace_tx
+from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
 from ufo.ext.surface import SurfaceContext, record_transcript_access
 from ufo.grants import (
@@ -111,6 +115,7 @@ from ufo.serve import _mount_shared_surfaces
 from ufo.subjects import SHARED_SUBJECT, member_subject
 from ufo.surfaces import hub_tail
 from ufo.surfaces.artifacts import router as artifacts_router
+from ufo.tools.context import ToolContext
 from ufo.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
 from ufo.workspace import ws
 
@@ -562,6 +567,7 @@ def dbos_runtime(
                 SCHEDULED_TASK_KIND_ONLY,
                 skill_create_manifest(),
                 sources_manifest(),
+                todos.manifest(),
                 SLOTTED,
             ),
             registry=STANDIN_REGISTRY,
@@ -642,7 +648,7 @@ async def web(
     app.include_router(artifacts_router)
     _mount_shared_surfaces(
         app,
-        (web_manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED),
+        (web_manifest(), todos.manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED),
         CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
         sandboxes,
@@ -3003,6 +3009,7 @@ async def test_admin_view_reads_the_workspace_shape(
     ] == [
         ("scheduled_tasks", "0.1.0", False),
         ("stub", "0", False),
+        ("todos", "0.1.0", False),
         ("web", "0.1.0", False),
     ]
 
@@ -6536,6 +6543,83 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
     assert preview.headers["x-content-type-options"] == "nosniff"
     assert artifacts["diagram.svg"]["preview"] is None
     assert artifacts["poster.png"]["preview"] is None
+
+
+async def test_durable_todo_board_fills_the_typed_tasks_slot(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "tasks@example.com")
+    _other_member_id, other_token = await _seed_member(workspace_id, "other-tasks@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="tasks",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    producer = cast(
+        ToolContext,
+        SimpleNamespace(
+            ext=context_for(todos.NAME, frozenset()),
+            turn=SimpleNamespace(conversation_id=conversation_id),
+        ),
+    )
+    with ws(workspace_id):
+        await todos.update_todo_list(
+            producer,
+            todos.UpdateTodoListInput(
+                title="Ship slots",
+                tasks=(
+                    todos.TodoTask(description="Define the payload", status="completed"),
+                    todos.TodoTask(description="Render the board", status="in_progress"),
+                    todos.TodoTask(description="Verify the flow", status="pending"),
+                ),
+                user_description="Track the slot rollout",
+            ),
+        )
+        assert await ScopedStore(extension=todos.NAME).get(
+            f"{todos.TODO_KEY_PREFIX}{conversation_id}"
+        ) == {
+            "title": "Ship slots",
+            "tasks": [
+                {"description": "Define the payload", "status": "completed"},
+                {"description": "Render the board", "status": "in_progress"},
+                {"description": "Verify the flow", "status": "pending"},
+            ],
+        }
+
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    inventory = await client.get(f"{base}/slots", headers=headers)
+    response = await client.get(f"{base}/slots/tasks", headers=headers)
+    denied = await client.get(
+        f"{base}/slots/tasks",
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    )
+
+    assert inventory.status_code == 200
+    assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "tasks") == {
+        "id": "tasks",
+        "label": "Tasks",
+        "icon": "task",
+        "kind": "tasks",
+        "count": 3,
+    }
+    assert response.status_code == 200
+    assert denied.status_code == 404
+    assert response.json() == {
+        "type": "tasks",
+        "title": "Ship slots",
+        "tasks": [
+            {"description": "Define the payload", "status": "completed"},
+            {"description": "Render the board", "status": "in_progress"},
+            {"description": "Verify the flow", "status": "pending"},
+        ],
+        "total_count": 3,
+        "completed_count": 1,
+        "truncated": False,
+    }
 
 
 async def test_conversation_reads_ride_the_same_gate(

@@ -8,6 +8,7 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
+    CONVERSATION_TASKS_MAX,
     ArtifactsSlotPayload,
     ChangesSlotPayload,
     ConversationArtifact,
@@ -16,8 +17,10 @@ from ufo.ext.conversation_slots import (
     ConversationSlotContext,
     ConversationSlotProvider,
     ConversationSource,
+    ConversationTask,
     FilesSlotPayload,
     ImagePreview,
+    TasksSlotPayload,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
 from ufo.image_previews import raster_image_media_type
@@ -125,6 +128,66 @@ def test_artifacts_payload_bounds_its_collection() -> None:
     with pytest.raises(ValidationError, match="too_long"):
         ArtifactsSlotPayload(
             artifacts=(artifact,) * (CONVERSATION_ARTIFACTS_MAX + 1),
+            truncated=True,
+        )
+
+
+def test_tasks_payload_bounds_its_collection() -> None:
+    task = ConversationTask(description="ship", status="pending")
+
+    with pytest.raises(ValidationError, match="too_long"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(task,) * (CONVERSATION_TASKS_MAX + 1),
+            total_count=CONVERSATION_TASKS_MAX + 1,
+            completed_count=0,
+            truncated=True,
+        )
+
+
+def test_tasks_payload_rejects_impossible_progress() -> None:
+    with pytest.raises(ValidationError, match="completed task count exceeds"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(),
+            total_count=1,
+            completed_count=2,
+            truncated=False,
+        )
+
+    with pytest.raises(ValidationError, match="visible task count exceeds"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(ConversationTask(description="build"),) * 2,
+            total_count=1,
+            completed_count=0,
+            truncated=True,
+        )
+
+    with pytest.raises(ValidationError, match="untruncated task count"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(ConversationTask(description="build"),),
+            total_count=2,
+            completed_count=0,
+            truncated=False,
+        )
+
+    with pytest.raises(ValidationError, match="visible completed tasks exceed"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(ConversationTask(description="build", status="completed"),),
+            total_count=2,
+            completed_count=0,
+            truncated=True,
+        )
+
+    with pytest.raises(ValidationError, match="visible incomplete tasks exceed"):
+        TasksSlotPayload(
+            title="Launch",
+            tasks=(ConversationTask(description="build", status="pending"),),
+            total_count=1,
+            completed_count=1,
             truncated=True,
         )
 
