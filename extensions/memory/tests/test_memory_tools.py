@@ -5,6 +5,8 @@ hook; each is driven here over an `ExtensionContext` carrying the deploy index/e
 exactly as core threads them onto a turn. The headline: a fact committed in one context is recalled
 in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook."""
 
+import asyncio
+import gc
 import json
 import logging
 from datetime import UTC, datetime
@@ -770,6 +772,43 @@ async def test_memory_search_keeps_each_legs_passage_of_one_document(
     text = found.content[0].text
     assert "13.4 Putaway authorisation" in text
     assert text.count("Template 24 — the post format") == 1, "an identical passage must collapse"
+
+
+async def test_memory_search_raises_a_failed_leg_and_abandons_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leg the index rejects reaches the caller as its error, and no other leg is left to fail
+    into asyncio's finalizer. Awaiting the source gather only after the recall gather had already
+    raised abandoned it: its index error — the same malformed request — surfaced as an
+    `exception was never retrieved` log from nobody's handler, and search lost a leg with no
+    signal."""
+
+    class _Store:
+        async def recall(self, query, subjects, limit, start, end, *, source_reader):
+            raise RuntimeError("recall leg rejected")
+
+        async def search_sources(self, query, subjects, limit, start, end, *, source_reader):
+            await asyncio.sleep(0)
+            raise RuntimeError("source leg rejected")
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
+    unhandled: list[str] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda loop, context: unhandled.append(str(context["message"]))
+    )
+    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
+    raised = ""
+    try:
+        with ws(uuid4()):
+            await _run("memory_search", ctx, queries=["alpha"])
+    except RuntimeError as error:
+        raised = str(error)
+    assert raised == "recall leg rejected"
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gc.collect()
+    await asyncio.sleep(0)
+    assert unhandled == []
 
 
 async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(

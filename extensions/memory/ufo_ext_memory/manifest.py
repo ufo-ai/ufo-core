@@ -173,38 +173,44 @@ class MemorySearchService:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> tuple[MemoryMatch, ...]:
+        """Every query's recall and source legs run under one gather, so a leg that raises reaches
+        this caller: a gather awaited only after a prior one has already raised is abandoned with
+        its exception unretrieved, and a search that loses a leg answers from a thinner index with
+        no signal that it did."""
         if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
             raise ValueError(f"memory search requires 1-{MAX_MEMORY_QUERIES} queries")
         store = store_for(self.ctx)
         subjects = reader.subjects
-        recall_batch = asyncio.gather(
-            *(
-                store.recall(
-                    query,
-                    subjects,
-                    MEMORY_SEARCH_LIMIT,
-                    start,
-                    end,
-                    source_reader=reader,
+        recalled_legs: list[tuple[Recalled, ...]]
+        source_legs: list[tuple[SourceMatch, ...]]
+        recalled_legs, source_legs = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    store.recall(
+                        query,
+                        subjects,
+                        MEMORY_SEARCH_LIMIT,
+                        start,
+                        end,
+                        source_reader=reader,
+                    )
+                    for query in queries
                 )
-                for query in queries
-            )
-        )
-        source_batch = asyncio.gather(
-            *(
-                store.search_sources(
-                    query,
-                    subjects,
-                    MEMORY_SEARCH_LIMIT,
-                    start,
-                    end,
-                    source_reader=reader,
+            ),
+            asyncio.gather(
+                *(
+                    store.search_sources(
+                        query,
+                        subjects,
+                        MEMORY_SEARCH_LIMIT,
+                        start,
+                        end,
+                        source_reader=reader,
+                    )
+                    for query in queries
                 )
-                for query in queries
-            )
+            ),
         )
-        recalled_legs: list[tuple[Recalled, ...]] = await recall_batch
-        source_legs: list[tuple[SourceMatch, ...]] = await source_batch
         recalled: dict[UUID, Recalled] = {}
         for recall_tier in zip_longest(*recalled_legs):
             for item in recall_tier:

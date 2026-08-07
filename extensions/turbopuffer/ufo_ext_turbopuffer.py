@@ -35,6 +35,7 @@ WRITE_BATCH = 1000
 EXPORT_PAGE = 1200
 NAMESPACE_PREFIX = "ufo-"
 ATTRIBUTES = ("owner_kind", "owner_id", "subject", "ordinal", "text")
+MAX_FULL_TEXT_QUERY_BYTES = 1024
 SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 ENCODED_ID_LEN = 43
 
@@ -77,6 +78,18 @@ def upsert_body(chunks: tuple[Chunk, ...]) -> dict[str, Any]:
         "distance_metric": "cosine_distance",
         "schema": {"text": {"type": "string", "full_text_search": True}},
     }
+
+
+def bm25_query(text: str) -> str:
+    """The lexical query bounded to Turbopuffer's 1024-byte full-text query limit — a longer one is
+    rejected as a malformed request, and the text is a member's or a model's of any length. The cut
+    drops the term it lands in, so the bounded query carries whole terms."""
+    query = text.strip()
+    encoded = query.encode()
+    if len(encoded) <= MAX_FULL_TEXT_QUERY_BYTES:
+        return query
+    clipped = encoded[:MAX_FULL_TEXT_QUERY_BYTES].decode(errors="ignore")
+    return " ".join(clipped.split()[:-1]) or clipped
 
 
 def query_filters(owner_kind: str, subjects: frozenset[str]) -> list[Any]:
@@ -174,9 +187,10 @@ class TurbopufferIndex:
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
-        if not query.strip() or not subjects:
+        text = bm25_query(query)
+        if not text or not subjects:
             return ()
-        rows = await self._query(["text", "BM25", query], owner_kind, subjects, limit)
+        rows = await self._query(["text", "BM25", text], owner_kind, subjects, limit)
         return tuple(
             hit_from_row(row, float(len(rows) - position)) for position, row in enumerate(rows)
         )
