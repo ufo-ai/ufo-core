@@ -1,11 +1,12 @@
 """The OpenRouter model-provider extension: id->slug projection, the streaming ModelClient
 (reasoning budget, dead-provider re-route, truncation), the registry seam that selects it and prices
-its slugs, and `generate_image` over the Image API. The client is driven against a scripted
-OpenAI-SDK stub — a fake stands in for the SDK; the ModelEvents and recorded request kwargs are what
-the tests assert, never the stub. The image tool runs its real handler over an `httpx.MockTransport`
-that records every request and answers canned Image API JSON — no live key or network — while the
-key comes from the REAL credential store and the charge lands in the REAL ledger, so the host-side
-key read and the `images` metering seam are exercised end to end."""
+its slugs, `generate_image` over the Image API and `generate_video` over the asynchronous Video API.
+The client is driven against a scripted OpenAI-SDK stub — a fake stands in for the SDK; the
+ModelEvents and recorded request kwargs are what the tests assert, never the stub. Both generation
+tools run their real handlers over an `httpx.MockTransport` that records every request and answers
+canned provider JSON — no live key or network — while the key comes from the REAL credential store
+and the charge lands in the REAL ledger, so the host-side key read and the `images` and `videos`
+metering seams are exercised end to end."""
 
 import base64
 import json
@@ -26,9 +27,9 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
-from ufo_ext_openrouter import GenerateImageInput
+from ufo_ext_openrouter import GenerateImageInput, GenerateVideoInput
 
-from ufo.accounting import IMAGES_DIMENSION
+from ufo.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.credentials import CredentialStore
@@ -49,9 +50,11 @@ from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.tools.context import ToolContext
 from ufo.workspace import init_workspace_credentials, ws
 
-IMAGE_KEY = "sk-or-v1-secret-0xfeedface"
+OPENROUTER_KEY = "sk-or-v1-secret-0xfeedface"
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-one").decode()
 SECOND_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-two").decode()
+MP4 = b"\x00\x00\x00\x18ftypmp42-frames-and-stereo-audio"
+VIDEO_JOB = "vid-01JB7"
 
 REQUEST = ModelRequest(
     model="google/gemini-2.5-pro",
@@ -384,7 +387,7 @@ async def _keyed_turn(stored: bool = False) -> tuple[UUID, UUID]:
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
     if stored:
-        await store.put(workspace_id, openrouter.OPENROUTER_KEY_SLOT, IMAGE_KEY)
+        await store.put(workspace_id, openrouter.OPENROUTER_KEY_SLOT, OPENROUTER_KEY)
     return workspace_id, turn_id
 
 
@@ -414,7 +417,7 @@ def _context(workspace_id: UUID, turn_id: UUID, sandbox: _Sandbox, tmp_path: Pat
 
 def _wire(monkeypatch: pytest.MonkeyPatch, api: _ImageApi) -> None:
     monkeypatch.setattr(openrouter, "IMAGE_TRANSPORT", httpx.MockTransport(api.handle))
-    monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, IMAGE_KEY)
+    monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, OPENROUTER_KEY)
 
 
 async def _images_ledger(turn_id: UUID) -> tuple[int, int, str, str | None] | None:
@@ -470,13 +473,12 @@ def test_every_advertised_aspect_ratio_is_served_by_the_default_model() -> None:
     assert openrouter.IMAGE_MODELS["recraft/recraft-v4.1"].aspect_ratios < limits.aspect_ratios
 
 
-def test_manifest_publishes_the_image_tool_and_the_key_slot() -> None:
+def test_manifest_publishes_the_generation_tools_and_the_key_slot() -> None:
     """The key slot is declared because a tool reads credentials only for slots its manifest names;
-    the model specs resolve the same slot, so models and images run on one key."""
+    the model specs resolve the same slot, so models, images and videos run on one key."""
     manifest = openrouter.manifest()
-    (tool,) = manifest.tools
-    assert tool.name == "generate_image"
-    assert tool.side_effecting
+    assert [tool.name for tool in manifest.tools] == ["generate_image", "generate_video"]
+    assert all(tool.side_effecting for tool in manifest.tools)
     (slot,) = manifest.credentials
     assert slot.name == openrouter.OPENROUTER_KEY_SLOT
     assert slot.injection is None
@@ -584,7 +586,7 @@ async def test_generate_image_posts_the_bounded_request_and_saves_every_image(
     )
 
     (request,) = api.requests
-    assert request.headers["authorization"] == f"Bearer {IMAGE_KEY}"
+    assert request.headers["authorization"] == f"Bearer {OPENROUTER_KEY}"
     assert api.sent() == {
         "model": "bytedance-seed/seedream-4.5",
         "prompt": "a red panda astronaut, studio lighting",
@@ -705,7 +707,7 @@ async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_spend(
     result = await _generate(workspace_id, turn_id, sandbox, tmp_path)
 
     (request,) = api.requests
-    assert request.headers["authorization"] == f"Bearer {IMAGE_KEY}"
+    assert request.headers["authorization"] == f"Bearer {OPENROUTER_KEY}"
     assert not result.is_error
     assert sorted(sandbox.writes) == ["generated-images/poster-1.png"]
     assert await _images_ledger(turn_id) is None
@@ -790,3 +792,342 @@ async def test_a_success_carrying_no_image_fails_loud(
     with pytest.raises(openrouter.OpenRouterImageError, match="no image data"):
         await _generate(workspace_id, turn_id, _Sandbox(), tmp_path)
     assert await _images_ledger(turn_id) is None
+
+
+@dataclass
+class _VideoApi:
+    """Plays OpenRouter's asynchronous Video API: the POST accepts a job, each poll answers the next
+    scripted status (the last one repeating), and the content route serves the MP4 bytes."""
+
+    statuses: list[dict[str, object]] = field(
+        default_factory=lambda: [
+            {"status": "in_progress"},
+            {"status": "completed", "usage": {"cost": 0.65, "is_byok": False}},
+        ]
+    )
+    video: bytes = MP4
+    accept_status: int = 202
+    error_body: dict[str, object] | None = None
+    content_status: int = 200
+    requests: list[httpx.Request] = field(default_factory=list)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if request.method == "POST" and path == "/api/v1/videos":
+            if self.error_body is not None:
+                return httpx.Response(self.accept_status, json=self.error_body)
+            return httpx.Response(
+                self.accept_status,
+                json={
+                    "id": VIDEO_JOB,
+                    "status": "pending",
+                    "polling_url": f"https://openrouter.ai/api/v1/videos/{VIDEO_JOB}",
+                },
+            )
+        if path == f"/api/v1/videos/{VIDEO_JOB}/content":
+            return httpx.Response(self.content_status, content=self.video)
+        if path == f"/api/v1/videos/{VIDEO_JOB}":
+            status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+            return httpx.Response(200, json={"id": VIDEO_JOB, **status})
+        raise AssertionError(f"unscripted request: {request.method} {request.url}")
+
+    def sent(self) -> dict[str, object]:
+        return json.loads(self.requests[0].content)
+
+    def polls(self) -> int:
+        return len([r for r in self.requests if r.url.path == f"/api/v1/videos/{VIDEO_JOB}"])
+
+
+def _wire_video(monkeypatch: pytest.MonkeyPatch, api: _VideoApi) -> None:
+    monkeypatch.setattr(openrouter, "VIDEO_TRANSPORT", httpx.MockTransport(api.handle))
+    monkeypatch.setattr(openrouter, "VIDEO_POLL_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, OPENROUTER_KEY)
+
+
+async def _videos_ledger(turn_id: UUID) -> tuple[int, int, str, str | None] | None:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                    tables.ledger.c.price_digest,
+                ).where(
+                    (tables.ledger.c.turn_id == turn_id)
+                    & (tables.ledger.c.dimension == VIDEOS_DIMENSION)
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        return None
+    return int(row.amount), int(row.priced_micro_usd), row.model, row.price_digest
+
+
+async def _film(
+    workspace_id: UUID, turn_id: UUID, sandbox: _Sandbox, tmp_path: Path, **overrides: object
+):
+    args = GenerateVideoInput(
+        **{
+            "prompt": "a red panda astronaut drifting down a station corridor",
+            "name": "teaser",
+            "user_description": "filming a teaser",
+            **overrides,
+        }
+    )
+    with ws(workspace_id):
+        return await openrouter.GENERATE_VIDEO_TOOL.handler(
+            _context(workspace_id, turn_id, sandbox, tmp_path), args
+        )
+
+
+def test_the_video_allowlist_and_its_limits_name_the_same_models() -> None:
+    """The wire schema's model enum and the limits table are one allowlist: a model the agent can
+    ask for that has no entry would price a cost-less job at a KeyError."""
+    assert set(get_args(openrouter.VideoModel)) == set(openrouter.VIDEO_MODELS)
+    assert openrouter.DEFAULT_VIDEO_MODEL == "minimax/hailuo-3"
+    assert openrouter.VIDEO_MODELS["minimax/hailuo-3"].second_micro_usd == 130_000
+
+
+def test_the_video_field_bounds_are_what_hailuo_3_serves() -> None:
+    """OpenRouter's video model listing gives H3 durations 5-15s and six aspect ratios; the field
+    offers one range and one ratio enum across every model, so the default must serve all of it and
+    no call is spent on a parameter its provider rejects."""
+    common = {"prompt": "p", "name": "teaser", "user_description": "d"}
+    limits = openrouter.VIDEO_MODELS[openrouter.DEFAULT_VIDEO_MODEL]
+    ratios, _none = get_args(GenerateVideoInput.model_fields["aspect_ratio"].annotation)
+    assert set(get_args(ratios)) == {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
+    assert set(get_args(ratios)) == limits.aspect_ratios
+    assert (limits.min_seconds, limits.max_seconds) == (
+        openrouter.MIN_VIDEO_SECONDS,
+        openrouter.MAX_VIDEO_SECONDS,
+    )
+    assert GenerateVideoInput(**common).duration == openrouter.DEFAULT_VIDEO_SECONDS
+    for seconds in range(openrouter.MIN_VIDEO_SECONDS, openrouter.MAX_VIDEO_SECONDS + 1):
+        assert GenerateVideoInput(**common, duration=seconds).duration == seconds
+    for refused in (openrouter.MIN_VIDEO_SECONDS - 1, openrouter.MAX_VIDEO_SECONDS + 1):
+        with pytest.raises(ValidationError):
+            GenerateVideoInput(**common, duration=refused)
+    with pytest.raises(ValidationError):
+        GenerateVideoInput(**common, aspect_ratio="5:4")
+
+
+def test_a_video_model_serving_less_than_the_field_offers_is_narrowed_at_the_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model whose provider serves a shorter take or fewer ratios than the field offers is held to
+    its own `VIDEO_MODELS` row, where the model reads why and can ask again, rather than spending
+    minutes of generation on a 400."""
+    common = {"prompt": "p", "name": "teaser", "user_description": "d"}
+    monkeypatch.setitem(
+        openrouter.VIDEO_MODELS,
+        openrouter.DEFAULT_VIDEO_MODEL,
+        openrouter.VideoModelLimits(
+            min_seconds=6,
+            max_seconds=10,
+            aspect_ratios=frozenset({"16:9", "9:16"}),
+            second_micro_usd=130_000,
+        ),
+    )
+    assert GenerateVideoInput(**common, duration=10, aspect_ratio="16:9").duration == 10
+    for refused in (5, 15):
+        with pytest.raises(ValidationError, match="films between 6 and 10 seconds"):
+            GenerateVideoInput(**common, duration=refused)
+    with pytest.raises(ValidationError, match="does not take aspect_ratio"):
+        GenerateVideoInput(**common, duration=6, aspect_ratio="4:3")
+
+
+def test_the_video_payload_is_bounded_at_the_tool_boundary() -> None:
+    common = {"prompt": "p", "name": "teaser", "user_description": "d"}
+    with pytest.raises(ValidationError):
+        GenerateVideoInput(**{**common, "prompt": "x" * (openrouter.MAX_VIDEO_PROMPT_CHARS + 1)})
+    with pytest.raises(ValidationError):
+        GenerateVideoInput(**{**common, "name": "../escape"})
+    with pytest.raises(ValidationError):
+        GenerateVideoInput(**common, model="minimax/hailuo-2.3")
+
+
+async def test_generate_video_posts_the_job_polls_it_and_saves_the_download(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole asynchronous flow on one key: the accepted job is polled until it completes, the
+    finished MP4 is downloaded from the job's content route and written into the workspace, and the
+    provider's reported charge is what the turn is metered."""
+    api = _VideoApi()
+    _wire_video(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    result = await _film(workspace_id, turn_id, sandbox, tmp_path, duration=10, aspect_ratio="16:9")
+
+    assert {request.headers["authorization"] for request in api.requests} == {
+        f"Bearer {OPENROUTER_KEY}"
+    }
+    assert api.sent() == {
+        "model": "minimax/hailuo-3",
+        "prompt": "a red panda astronaut drifting down a station corridor",
+        "duration": 10,
+        "aspect_ratio": "16:9",
+        "generate_audio": True,
+    }
+    assert api.polls() == 2
+    assert api.requests[-1].url.params["index"] == "0"
+    assert sandbox.writes == {"generated-videos/teaser.mp4": MP4}
+    assert json.loads(result.content[0].text) == {
+        "model": "minimax/hailuo-3",
+        "files": ["generated-videos/teaser.mp4"],
+        "duration_seconds": 10,
+        "machine_generated": True,
+        "cost_micro_usd": 650_000,
+    }
+    assert not result.is_error
+    assert await _videos_ledger(turn_id) == (1, 650_000, "minimax/hailuo-3", None)
+
+
+async def test_a_job_that_prices_nothing_meters_the_list_rate_per_second(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H3 lists at $0.13 per output second, so an unpriced job is metered over the seconds asked
+    for rather than at nothing."""
+    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed"}]))
+    workspace_id, turn_id = await _keyed_turn()
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, duration=15)
+    assert await _videos_ledger(turn_id) == (1, 15 * 130_000, "minimax/hailuo-3", None)
+
+
+async def test_a_byok_video_meters_the_upstream_charge_it_reports(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_video(
+        monkeypatch,
+        _VideoApi(
+            statuses=[
+                {
+                    "status": "completed",
+                    "usage": {
+                        "cost": 0,
+                        "is_byok": True,
+                        "cost_details": {"upstream_inference_cost": 0.78},
+                    },
+                }
+            ]
+        ),
+    )
+    workspace_id, turn_id = await _keyed_turn()
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, duration=6)
+    assert await _videos_ledger(turn_id) == (1, 780_000, "minimax/hailuo-3", None)
+
+
+async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_video(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenRouter bills a stored `openrouter_api_key` directly and a `videos` export carries no byok
+    label to hold the consumer off, so metering it would charge the workspace twice. The video is
+    still generated and saved."""
+    _wire_video(monkeypatch, _VideoApi())
+    workspace_id, turn_id = await _keyed_turn(stored=True)
+    sandbox = _Sandbox()
+    result = await _film(workspace_id, turn_id, sandbox, tmp_path)
+    assert not result.is_error
+    assert sorted(sandbox.writes) == ["generated-videos/teaser.mp4"]
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_two_generations_on_one_turn_accumulate_into_one_videos_row(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed", "usage": {"cost": 0.65}}]))
+    workspace_id, turn_id = await _keyed_turn()
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path)
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, name="second")
+    assert await _videos_ledger(turn_id) == (2, 1_300_000, "minimax/hailuo-3", None)
+
+
+async def test_a_rejected_video_request_returns_the_providers_message_and_bills_nothing(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _VideoApi(
+        accept_status=400, error_body={"error": {"message": "prompt rejected by the safety system"}}
+    )
+    _wire_video(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    result = await _film(workspace_id, turn_id, sandbox, tmp_path)
+    assert result.is_error
+    assert "prompt rejected by the safety system" in result.content[0].text
+    assert "minimax/hailuo-3" in result.content[0].text
+    assert api.polls() == 0
+    assert sandbox.writes == {}
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_a_job_that_fails_after_acceptance_reports_its_reason_and_bills_nothing(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generation OpenRouter accepted and then failed is the provider's refusal, so it reaches the
+    model as tool-result text it can act on rather than a raised failure, and nothing is downloaded
+    or metered."""
+    api = _VideoApi(
+        statuses=[{"status": "failed", "error": {"message": "sensitive content in frame 2"}}]
+    )
+    _wire_video(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    result = await _film(workspace_id, turn_id, sandbox, tmp_path)
+    assert result.is_error
+    assert "sensitive content in frame 2" in result.content[0].text
+    assert sandbox.writes == {}
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_a_generation_that_never_settles_gives_up_at_the_bound(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool holds a turn open only for its own bound: a job left pending past
+    `VIDEO_POLL_TIMEOUT_SECONDS` fails loud instead of polling forever."""
+    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "pending"}]))
+    monkeypatch.setattr(openrouter, "VIDEO_POLL_TIMEOUT_SECONDS", 0.0)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    with pytest.raises(openrouter.OpenRouterVideoError, match="left vid-01JB7 pending"):
+        await _film(workspace_id, turn_id, sandbox, tmp_path)
+    assert sandbox.writes == {}
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_a_video_over_the_byte_cap_is_never_written(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_video(monkeypatch, _VideoApi())
+    monkeypatch.setattr(openrouter, "MAX_VIDEO_BYTES", 8)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    with pytest.raises(openrouter.OpenRouterVideoError, match="saves at most 8"):
+        await _film(workspace_id, turn_id, sandbox, tmp_path)
+    assert sandbox.writes == {}
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_a_completed_job_carrying_no_content_fails_loud(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire_video(monkeypatch, _VideoApi(video=b""))
+    workspace_id, turn_id = await _keyed_turn()
+    with pytest.raises(openrouter.OpenRouterVideoError, match="no video data"):
+        await _film(workspace_id, turn_id, _Sandbox(), tmp_path)
+    assert await _videos_ledger(turn_id) is None
+
+
+async def test_a_silent_take_asks_the_provider_to_drop_the_audio_track(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = _VideoApi()
+    _wire_video(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, generate_audio=False)
+    assert api.sent() == {
+        "model": "minimax/hailuo-3",
+        "prompt": "a red panda astronaut drifting down a station corridor",
+        "duration": 5,
+        "generate_audio": False,
+    }

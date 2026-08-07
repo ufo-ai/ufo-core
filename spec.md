@@ -669,16 +669,19 @@ policy per agent (`auto` routes by task class); its `bedrock_api_key` credential
 deploy's `AWS_BEARER_TOKEN_BEDROCK`, as provider credentials come from workspace slots or deploy
 config.
 
-Image generation is not a `ModelClient`: `complete` yields text, tool calls and token usage, and a
-registered `ModelSpec` is a brain an agent can be pinned to. So an image model is a tool in the
-provider extension (`openrouter`'s `generate_image` over OpenRouter's Image API, on the same key as
-its chat models), never a registry entry. Its bytes land in the sandbox workspace and reach a member
-through `share_file`, and its charge — per image, not per token — meters under the ledger's `images`
-dimension: the extension reads what the provider charged and books it through the turn's context,
-because metering is core's. Only a generation on the platform's key meters. An `images` row exports
-as platform-served, since `byok` resolves a key slot through the model registry and no image model
-is in it, so a workspace running its own provider key — already billed by that provider — is not
-metered at all rather than billed twice.
+Image and video generation are not a `ModelClient`: `complete` yields text, tool calls and token
+usage, and a registered `ModelSpec` is a brain an agent can be pinned to. So a media model is a tool
+in the provider extension (`openrouter`'s `generate_image` over OpenRouter's Image API and
+`generate_video` over its asynchronous Video API, both on the same key as its chat models), never a
+registry entry. A video is minutes of provider work, so its tool posts the job and polls it to
+`completed` or `failed` under its own bound, and a failed job's reason reaches the model as tool
+text. The bytes land in the sandbox workspace and reach a member through `share_file`, and the
+charge — per image or per output second, not per token — meters under the ledger's `images` and
+`videos` dimensions: the extension reads what the provider charged and books it through the turn's
+context, because metering is core's. Only a generation on the platform's key meters. Those rows
+export as platform-served, since `byok` resolves a key slot through the model registry and no image
+or video model is in it, so a workspace running its own provider key — already billed by that
+provider — is not metered at all rather than billed twice.
 
 ## Deploy config bundling
 

@@ -13,6 +13,7 @@ from ufo.accounting import (
     IMAGES_DIMENSION,
     MEMBER_SCOPE,
     TOKENS_DIMENSION,
+    VIDEOS_DIMENSION,
     SpendRollup,
     TurnCost,
     read_turn_cost,
@@ -20,6 +21,7 @@ from ufo.accounting import (
     record_image_usage,
     record_sandbox_tokens,
     record_turn_usage,
+    record_video_usage,
     record_workspace_usage,
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -492,6 +494,38 @@ async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> N
     assert row.price_digest is None
 
 
+async def test_generated_videos_meter_under_their_own_dimension(db: None) -> None:
+    """Video spend is priced per output second, so its charge is the provider's and its amount is a
+    video count — a row of its own, keyed apart from the same turn's images and accumulating across
+    generations exactly as they do."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_video_usage(connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 650_000)
+        await record_video_usage(
+            connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 1_300_000
+        )
+        await record_image_usage(
+            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 1, 40_000
+        )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.id,
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                    tables.ledger.c.price_digest,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).all()
+    assert len({row.id for row in rows}) == 2
+    video = next(row for row in rows if row.dimension == VIDEOS_DIMENSION)
+    assert (int(video.amount), int(video.priced_micro_usd)) == (2, 1_950_000)
+    assert (video.model, video.price_digest) == ("minimax/hailuo-3", None)
+
+
 async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
     """A turn that generated an image and burned tokens has two rows with distinct ids, and a cost
     read that names `tokens` sees only the token row — the image charge is additive, never a
@@ -837,6 +871,28 @@ async def test_images_export_with_their_settled_turn_as_platform_served(db: None
     assert (export.priced_micro_usd, export.model, export.turn_id) == (
         80_000,
         "bytedance-seed/seedream-4.5",
+        turn_id,
+    )
+    assert export.byok is False
+    assert export.price_digest is None
+
+
+async def test_videos_export_with_their_settled_turn_as_platform_served(db: None) -> None:
+    """A `videos` row accumulates while its turn runs and settles like an `images` row: nothing
+    mints until the turn is terminal and past the margin, and it exports as platform-served because
+    no video model is in the registry for a key slot to be resolved from."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_video_usage(connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 650_000)
+    assert await _pending(workspace_id) == ()
+
+    async with workspace_tx() as connection:
+        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
+    (export,) = await _pending(workspace_id)
+    assert (export.dimension, export.amount, export.from_amount) == ("videos", 1, 0)
+    assert (export.priced_micro_usd, export.model, export.turn_id) == (
+        650_000,
+        "minimax/hailuo-3",
         turn_id,
     )
     assert export.byok is False

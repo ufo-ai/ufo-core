@@ -21,10 +21,10 @@ extension is active) — the research tools call it host-side, so the provider r
 serve process and the sandbox never sees it. `idempotency_key` is `{turn}/{name}/{call_id}`, folded
 on only for a `side_effecting` tool: its dedup key against a cross-attempt resume — an external
 write's header, a spawned child's identity — so the effect applies at most once; a read tool gets
-`None`. `meter_images` books what a paid image generation cost onto this turn's ledger: metering is
-core's, so a provider extension prices its own call and writes it through here. An extension tool
-also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin tool gets
-`ext=None`."""
+`None`. `meter_images` and `meter_videos` book what a paid image or video generation cost onto this
+turn's ledger: metering is core's, so a provider extension prices its own call and writes it through
+here. An extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a
+builtin tool gets `ext=None`."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -34,7 +34,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
 
-from ufo.accounting import record_image_usage
+from ufo.accounting import record_image_usage, record_video_usage
 from ufo.audience import SHARED_AUDIENCE, Audience, audience_subjects, conversation_audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider, FindCompleter
@@ -264,6 +264,16 @@ class ToolContext:
         async with workspace_tx() as connection:
             await record_image_usage(
                 connection, self.turn.workspace_id, self.turn.id, model, images, micro_usd
+            )
+
+    async def meter_videos(self, model: str, videos: int, micro_usd: int) -> None:
+        """Book a generated video's provider charge onto this turn under the ledger's `videos`
+        dimension, on the same terms as `meter_images`: a video model is priced per output second
+        rather than per token and is not in the `ModelRegistry`, so the extension that called the
+        provider reads the charge off its own response and core binds the spend to this turn."""
+        async with workspace_tx() as connection:
+            await record_video_usage(
+                connection, self.turn.workspace_id, self.turn.id, model, videos, micro_usd
             )
 
     async def speaker_is_admin(self) -> bool:

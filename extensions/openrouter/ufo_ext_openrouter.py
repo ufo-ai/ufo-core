@@ -1,5 +1,5 @@
 """OpenRouter model-provider extension: the OpenAI-wire router as a `ModelClient` backend, plus
-image generation as a tool.
+image and video generation as tools.
 
 Core ships direct Anthropic + OpenAI clients; OpenRouter is a router over many upstreams, so per
 spec it is an extension, never core. It speaks the OpenAI Chat Completions wire against
@@ -9,15 +9,18 @@ factory and adds only what is OpenRouter's own: an id->slug projection, a reason
 The manifest enumerates one complete `ModelSpec` per slug it offers — price, cutoff, context window,
 reasoning — so the registry serves those ids exactly like any other, with no catch-all router.
 
-Image models are not in that registry: `ModelClient.complete` yields text, tool calls and token
-usage, and a registered spec is a brain an agent can be pinned to, so an image model is instead one
-`generate_image` tool over OpenRouter's dedicated Image API on the same key and bill. It prices its
-own call — the unit is an image, not a token — and books it onto the turn through
-`ToolContext.meter_images`, the ledger's `images` dimension."""
+Image and video models are not in that registry: `ModelClient.complete` yields text, tool calls and
+token usage, and a registered spec is a brain an agent can be pinned to, so they are instead a
+`generate_image` tool over OpenRouter's dedicated Image API and a `generate_video` tool over its
+asynchronous Video API, both on the same key and bill. Each prices its own call — the unit is an
+image or an output second, not a token — and books it onto the turn through
+`ToolContext.meter_images` and `ToolContext.meter_videos`, the ledger's `images` and `videos`
+dimensions."""
 
 import asyncio
 import base64
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
@@ -152,6 +155,68 @@ GENERATE_IMAGE_DESCRIPTION = (
     f"work. Each call is billed per image and metered against the workspace. Up to "
     f"{MAX_IMAGES_PER_CALL} images per call, and one at a time on the flux.2 models. The result "
     "names the saved files; deliver one to a member with share_file."
+)
+
+
+VIDEOS_PATH = "/videos"
+VIDEO_REQUEST_TIMEOUT_SECONDS = 300.0
+VIDEO_POLL_INTERVAL_SECONDS = 5.0
+VIDEO_POLL_TIMEOUT_SECONDS = 600.0
+"""Sized to observed generation plus queue time, not a round number: OpenRouter's own hailuo-3
+example reports 162s for a 5-second 2K clip, so a 15-second clip settles well inside this bound.
+The headroom over that is queue time — MiniMax runs at most 2 concurrent tasks on a free account and
+15 on a paid one, so a job can sit pending behind others before generation starts. A wait past this
+is a job that is not coming back, and reporting that beats holding the turn open."""
+VIDEO_DIR = "generated-videos"
+VIDEO_SUFFIX = ".mp4"
+MAX_VIDEO_PROMPT_CHARS = 4_000
+MAX_VIDEO_NAME_CHARS = 64
+MAX_VIDEO_BYTES = 256 * 1024 * 1024
+MAX_VIDEO_ERROR_CHARS = 1_000
+VIDEO_TRANSPORT: httpx.AsyncBaseTransport | None = None
+
+VIDEO_PENDING_STATUSES = frozenset({"pending", "in_progress"})
+VIDEO_COMPLETED_STATUS = "completed"
+
+VideoModel = Literal["minimax/hailuo-3"]
+DEFAULT_VIDEO_MODEL: VideoModel = "minimax/hailuo-3"
+
+VideoAspectRatio = Literal["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
+EVERY_VIDEO_ASPECT_RATIO: frozenset[str] = frozenset(get_args(VideoAspectRatio))
+MIN_VIDEO_SECONDS = 5
+MAX_VIDEO_SECONDS = 15
+DEFAULT_VIDEO_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class VideoModelLimits:
+    """What one allowlisted model's providers actually serve, and what a second of output lists at
+    when the job prices nothing. OpenRouter rejects a generation parameter the serving provider does
+    not offer, so a model's bounds differ from the tool's own caps and are held on the way in."""
+
+    min_seconds: int
+    max_seconds: int
+    aspect_ratios: frozenset[str]
+    second_micro_usd: int
+
+
+VIDEO_MODELS: dict[VideoModel, VideoModelLimits] = {
+    "minimax/hailuo-3": VideoModelLimits(
+        min_seconds=MIN_VIDEO_SECONDS,
+        max_seconds=MAX_VIDEO_SECONDS,
+        aspect_ratios=EVERY_VIDEO_ASPECT_RATIO,
+        second_micro_usd=130_000,
+    ),
+}
+
+GENERATE_VIDEO_DESCRIPTION = (
+    "Generate a video from a text prompt and save it into the workspace under "
+    f"{VIDEO_DIR}/. {DEFAULT_VIDEO_MODEL} (MiniMax H3) films "
+    f"{MIN_VIDEO_SECONDS}-{MAX_VIDEO_SECONDS} seconds of 2K MP4 with a native stereo audio track. "
+    "Each call is billed per output second and metered against the workspace, so a longer take "
+    f"costs proportionally more; the default is {DEFAULT_VIDEO_SECONDS} seconds. Generation takes "
+    "minutes and this tool waits for it. The result names the saved file; deliver it to a member "
+    "with share_file."
 )
 
 
@@ -425,6 +490,21 @@ class OpenRouterImageError(RuntimeError):
     over the byte cap. Raised so the turn reports the failure instead of saving a broken file."""
 
 
+def _reported_cost_micro_usd(usage: object) -> int | None:
+    """What OpenRouter says a generation cost, in micro-USD: its own charge, else the upstream
+    charge a BYOK call reports in its place — the same money, billed one hop further out. A reported
+    zero prices nothing, so it reads as no charge and the caller falls back to a list rate."""
+    reported = usage if isinstance(usage, dict) else {}
+    details = reported.get("cost_details")
+    for cost in (
+        reported.get("cost"),
+        details.get("upstream_inference_cost") if isinstance(details, dict) else None,
+    ):
+        if isinstance(cost, int | float) and not isinstance(cost, bool) and cost > 0:
+            return round(float(cost) * MICRO_USD_PER_USD)
+    return None
+
+
 @dataclass(frozen=True)
 class GeneratedImage:
     media_type: str
@@ -553,17 +633,12 @@ class OpenRouterImages:
         return path
 
     def _charge(self, body: object, args: GenerateImageInput, images: int) -> int:
-        """What this generation cost, in micro-USD: OpenRouter's own charge, else the upstream
-        charge a BYOK call reports in its place, else the model's list rate per image. A reported
-        zero prices nothing, so it falls through rather than metering the turn at nothing."""
+        """What this generation cost, in micro-USD: what OpenRouter reports for it, else the model's
+        list rate per image."""
         usage = body.get("usage") if isinstance(body, dict) else None
-        details = usage.get("cost_details") if isinstance(usage, dict) else None
-        for cost in (
-            usage.get("cost") if isinstance(usage, dict) else None,
-            details.get("upstream_inference_cost") if isinstance(details, dict) else None,
-        ):
-            if isinstance(cost, int | float) and not isinstance(cost, bool) and cost > 0:
-                return round(float(cost) * MICRO_USD_PER_USD)
+        reported = _reported_cost_micro_usd(usage)
+        if reported is not None:
+            return reported
         return IMAGE_MODELS[args.model].list_micro_usd * images
 
 
@@ -584,19 +659,270 @@ GENERATE_IMAGE_TOOL = ToolDef(
 )
 
 
+class GenerateVideoInput(BaseModel):
+    prompt: str = Field(
+        max_length=MAX_VIDEO_PROMPT_CHARS,
+        description=(
+            "What to film. Describe subject, action, camera movement, lighting, and any speech or "
+            "sound the shot should carry."
+        ),
+    )
+    name: str = Field(
+        max_length=MAX_VIDEO_NAME_CHARS,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        description="File name stem for the saved video, without a directory or extension.",
+    )
+    model: VideoModel = DEFAULT_VIDEO_MODEL
+    duration: int = Field(
+        default=DEFAULT_VIDEO_SECONDS,
+        ge=MIN_VIDEO_SECONDS,
+        le=MAX_VIDEO_SECONDS,
+        description=(
+            f"Length in seconds, {DEFAULT_VIDEO_SECONDS} by default. Every second is billed, so "
+            "ask for a longer take only when the action needs it."
+        ),
+    )
+    aspect_ratio: VideoAspectRatio | None = Field(
+        default=None,
+        description="Aspect ratio. Omit it to take the model's own framing for the prompt.",
+    )
+    generate_audio: bool = Field(
+        default=True,
+        description="Whether the video carries its native audio track. False for a silent take.",
+    )
+    user_description: str = Field(
+        description="What you are generating, in plain language for the activity timeline."
+    )
+
+    @model_validator(mode="after")
+    def _within_model_limits(self) -> "GenerateVideoInput":
+        """Hold the call to what the chosen model serves. OpenRouter answers 400 for a generation
+        parameter its provider does not offer, so a combination the allowlist already knows is
+        unservable is refused here, where the model reads the reason and can pick another."""
+        limits = VIDEO_MODELS[self.model]
+        if not limits.min_seconds <= self.duration <= limits.max_seconds:
+            raise ValueError(
+                f"{self.model} films between {limits.min_seconds} and {limits.max_seconds} seconds "
+                "per call"
+            )
+        if self.aspect_ratio is not None and self.aspect_ratio not in limits.aspect_ratios:
+            raise ValueError(
+                f"{self.model} does not take aspect_ratio {self.aspect_ratio}; it accepts "
+                f"{', '.join(sorted(limits.aspect_ratios))}"
+            )
+        return self
+
+
+class OpenRouterVideoError(RuntimeError):
+    """OpenRouter accepted the generation and then answered with something this tool cannot use — no
+    job to poll, a refused poll or download, a wait past the tool's bound, or a video over the byte
+    cap. Raised so the turn reports the failure instead of saving a broken file."""
+
+
+@dataclass(frozen=True)
+class VideoJob:
+    """One asynchronous generation as OpenRouter last reported it: the job id to poll and download,
+    the status it is at, the reason a failed one gives, and what it charged when it is done."""
+
+    id: str
+    status: str
+    error: str | None
+    cost_micro_usd: int | None
+
+
+@dataclass(frozen=True)
+class OpenRouterVideos:
+    """One video generation, start to finish: POST the bounded request to OpenRouter's asynchronous
+    Video API, poll the job it returns until the generation settles, download the MP4 into the
+    workspace, and meter what it cost onto the turn.
+
+    A video is minutes of provider work, so the API answers 202 with a job rather than the file, and
+    the tool holds the call open until the job reaches `completed` or `failed`, bounded by
+    `VIDEO_POLL_TIMEOUT_SECONDS`. A `failed` job is the provider's refusal — a rejected prompt, an
+    exhausted balance — and reaches the model as tool-result text, the way a rejected request does.
+
+    Cost, key resolution and metering are the image tool's: `usage.cost` off the completed poll is
+    what OpenRouter charged, a BYOK account's `cost_details.upstream_inference_cost` prices the call
+    when it reports zero, and a job pricing neither is charged the model's list rate over the
+    seconds asked for (`VIDEO_MODELS`). Only a generation on the platform's key is
+    metered, since a workspace holding its own `openrouter_api_key` is billed directly and a
+    `videos` ledger row exports as platform-served. `transport` is the httpx testability seam;
+    production leaves it None."""
+
+    credentials: CredentialAccess
+    transport: httpx.AsyncBaseTransport | None = None
+
+    async def generate(self, ctx: ToolContext, args: GenerateVideoInput) -> ToolResult:
+        key = await self.credentials.get(OPENROUTER_KEY_SLOT)
+        workspace_keyed = await self.credentials.stored(OPENROUTER_KEY_SLOT)
+        async with httpx.AsyncClient(
+            base_url=OPENROUTER_BASE_URL,
+            timeout=VIDEO_REQUEST_TIMEOUT_SECONDS,
+            transport=self.transport,
+            headers={"Authorization": f"Bearer {key}"},
+        ) as http:
+            response = await http.post(
+                VIDEOS_PATH,
+                json=args.model_dump(exclude_none=True, exclude={"name", "user_description"}),
+            )
+            if response.is_error:
+                return ToolResult(
+                    content=(TextContent(text=self._refusal(args, response)),), is_error=True
+                )
+            job = await self._settled(args, http, self._job(response.json()))
+            if job.status != VIDEO_COMPLETED_STATUS:
+                return ToolResult(
+                    content=(TextContent(text=self._failure(args, job)),), is_error=True
+                )
+            video = await self._download(args, http, job)
+        path = await self._save(ctx, args, video)
+        micro_usd = self._charge(args, job)
+        if not workspace_keyed:
+            await ctx.meter_videos(args.model, 1, micro_usd)
+        return ToolResult(
+            content=(
+                TextContent(
+                    text=json.dumps(
+                        {
+                            "model": args.model,
+                            "files": [path],
+                            "duration_seconds": args.duration,
+                            "machine_generated": True,
+                            "cost_micro_usd": micro_usd,
+                        }
+                    ),
+                ),
+            )
+        )
+
+    def _refusal(self, args: GenerateVideoInput, response: httpx.Response) -> str:
+        """The provider's own words for why it started nothing — a content refusal, a rejected
+        parameter, an exhausted balance — surfaced as the tool's error text so the model can change
+        the prompt and try again, and bounded because the body is the provider's to choose."""
+        body = (
+            response.json()
+            if response.headers.get("content-type", "").startswith("application/json")
+            else None
+        )
+        error = body.get("error") if isinstance(body, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        detail = message if isinstance(message, str) and message else response.text
+        return (
+            f"{args.model} generated no video ({response.status_code}): "
+            f"{detail[:MAX_VIDEO_ERROR_CHARS]}"
+        )
+
+    def _job(self, body: object) -> VideoJob:
+        """The job an accept or a poll describes. A body naming no job or no status is unpollable,
+        so it fails the call rather than becoming a wait for something that was never started."""
+        reported = body if isinstance(body, dict) else {}
+        job_id = reported.get("id")
+        status = reported.get("status")
+        if not isinstance(job_id, str) or not isinstance(status, str):
+            raise OpenRouterVideoError("openrouter answered no video job")
+        error = reported.get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+        return VideoJob(
+            id=job_id,
+            status=status,
+            error=message if isinstance(message, str) else None,
+            cost_micro_usd=_reported_cost_micro_usd(reported.get("usage")),
+        )
+
+    async def _settled(
+        self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob
+    ) -> VideoJob:
+        """The job as it stands once it stops moving, polled at `VIDEO_POLL_INTERVAL_SECONDS`. The
+        wait is bounded because a provider job is external work that may never settle, and a turn
+        held open forever is worse than a reported failure."""
+        deadline = time.monotonic() + VIDEO_POLL_TIMEOUT_SECONDS
+        while job.status in VIDEO_PENDING_STATUSES:
+            if time.monotonic() >= deadline:
+                raise OpenRouterVideoError(
+                    f"{args.model} left {job.id} {job.status} after "
+                    f"{VIDEO_POLL_TIMEOUT_SECONDS:.0f}s"
+                )
+            await asyncio.sleep(VIDEO_POLL_INTERVAL_SECONDS)
+            poll = await http.get(f"{VIDEOS_PATH}/{job.id}")
+            if poll.is_error:
+                raise OpenRouterVideoError(
+                    f"polling {job.id} answered {poll.status_code}: "
+                    f"{poll.text[:MAX_VIDEO_ERROR_CHARS]}"
+                )
+            job = self._job(poll.json())
+        return job
+
+    def _failure(self, args: GenerateVideoInput, job: VideoJob) -> str:
+        """Why a job OpenRouter accepted produced nothing, in the provider's own words where it gave
+        them, so the model can change the prompt and try again."""
+        detail = job.error or f"the job ended {job.status}"
+        return f"{args.model} generated no video: {detail[:MAX_VIDEO_ERROR_CHARS]}"
+
+    async def _download(
+        self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob
+    ) -> bytes:
+        """The finished MP4, size-checked before it reaches disk — what a provider returns is not
+        ours to size, and an oversized video fails the call rather than filling the workspace."""
+        content = await http.get(f"{VIDEOS_PATH}/{job.id}/content", params={"index": 0})
+        if content.is_error:
+            raise OpenRouterVideoError(
+                f"downloading {job.id} answered {content.status_code}: "
+                f"{content.text[:MAX_VIDEO_ERROR_CHARS]}"
+            )
+        raw = content.content
+        if not raw:
+            raise OpenRouterVideoError("openrouter answered no video data")
+        if len(raw) > MAX_VIDEO_BYTES:
+            raise OpenRouterVideoError(
+                f"{args.model} returned a {len(raw)}-byte video; this tool saves at most "
+                f"{MAX_VIDEO_BYTES}"
+            )
+        return raw
+
+    async def _save(self, ctx: ToolContext, args: GenerateVideoInput, video: bytes) -> str:
+        """Write the finished video into the workspace, on disk under the member's own workspace."""
+        path = f"{VIDEO_DIR}/{args.name}{VIDEO_SUFFIX}"
+        await ctx.sandbox.write_file(path, video)
+        return path
+
+    def _charge(self, args: GenerateVideoInput, job: VideoJob) -> int:
+        """What this generation cost, in micro-USD: what OpenRouter reports for it, else the model's
+        list rate over the seconds asked for."""
+        if job.cost_micro_usd is not None:
+            return job.cost_micro_usd
+        return VIDEO_MODELS[args.model].second_micro_usd * args.duration
+
+
+async def _generate_video(ctx: ToolContext, args: GenerateVideoInput) -> ToolResult:
+    if ctx.ext is None:
+        raise RuntimeError("generate_video needs the openrouter extension context")
+    return await OpenRouterVideos(
+        credentials=ctx.ext.credentials, transport=VIDEO_TRANSPORT
+    ).generate(ctx, args)
+
+
+GENERATE_VIDEO_TOOL = ToolDef(
+    name="generate_video",
+    description=GENERATE_VIDEO_DESCRIPTION,
+    input_model=GenerateVideoInput,
+    handler=_generate_video,
+    side_effecting=True,
+)
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
         models=OPENROUTER_MODEL_SPECS,
-        tools=(GENERATE_IMAGE_TOOL,),
+        tools=(GENERATE_IMAGE_TOOL, GENERATE_VIDEO_TOOL),
         credentials=(
             CredentialSlot(
                 name=OPENROUTER_KEY_SLOT,
                 description=(
-                    "The OpenRouter API key this workspace's models and image generation run on. "
-                    "Read host-side and never exposed to chat or the sandbox; unset, the "
-                    f"platform's {OPENROUTER_API_KEY_ENV} serves the deploy."
+                    "The OpenRouter API key this workspace's models, image generation and video "
+                    "generation run on. Read host-side and never exposed to chat or the sandbox; "
+                    f"unset, the platform's {OPENROUTER_API_KEY_ENV} serves the deploy."
                 ),
             ),
         ),

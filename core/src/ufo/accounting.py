@@ -24,6 +24,7 @@ TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"
 SANDBOX_TOKENS_DIMENSION = "sandbox_tokens"
 IMAGES_DIMENSION = "images"
+VIDEOS_DIMENSION = "videos"
 
 CapScope = Literal["workspace", "member", "agent"]
 WORKSPACE_SCOPE: CapScope = "workspace"
@@ -300,7 +301,38 @@ async def record_image_usage(
     with an empty attempt under a dimension distinct from `tokens`, so its id can never collide
     with the row `record_turn_usage` writes for the same turn, and a parked-then-resumed turn keeps
     accumulating into the one row."""
-    ledger_id = ledger_id_for(workspace_id, turn_id, IMAGES_DIMENSION)
+    await _record_media_usage(
+        connection, workspace_id, turn_id, IMAGES_DIMENSION, model, images, micro_usd
+    )
+
+
+async def record_video_usage(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    turn_id: UUID,
+    model: str,
+    videos: int,
+    micro_usd: int,
+) -> None:
+    """Meter generated videos as a `videos` ledger row per turn, on the same terms as
+    `record_image_usage`: `amount` counts the videos, `priced_micro_usd` is what the provider
+    charged for them, and the caller prices the call because a video model is not a `ModelSpec` and
+    its unit is an output second rather than a token."""
+    await _record_media_usage(
+        connection, workspace_id, turn_id, VIDEOS_DIMENSION, model, videos, micro_usd
+    )
+
+
+async def _record_media_usage(
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    turn_id: UUID,
+    dimension: str,
+    model: str,
+    amount: int,
+    micro_usd: int,
+) -> None:
+    ledger_id = ledger_id_for(workspace_id, turn_id, dimension)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
         insert(tables.ledger)
@@ -308,8 +340,8 @@ async def record_image_usage(
             id=ledger_id,
             workspace_id=workspace_id,
             turn_id=turn_id,
-            dimension=IMAGES_DIMENSION,
-            amount=images,
+            dimension=dimension,
+            amount=amount,
             priced_micro_usd=micro_usd,
             model=model,
             created_at=sa.func.now(),
@@ -318,7 +350,7 @@ async def record_image_usage(
         .on_conflict_do_update(
             index_elements=[tables.ledger.c.id],
             set_={
-                "amount": tables.ledger.c.amount + images,
+                "amount": tables.ledger.c.amount + amount,
                 "priced_micro_usd": tables.ledger.c.priced_micro_usd + micro_usd,
                 "updated_at": sa.func.now(),
             },
@@ -357,10 +389,11 @@ async def mint_usage_exports(
 ) -> None:
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
     export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row is
-    insert-once and settles at creation; a `sandbox_tokens` or `images` row accumulates until its
-    turn is terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how
-    often a late egress-proxy write costs an extra top-up intent — a row that grows after minting
-    mints a further intent from the prior high-water mark, so no growth is ever lost to timing.
+    insert-once and settles at creation; a `sandbox_tokens`, `images` or `videos` row accumulates
+    until its turn is terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only
+    bounds how often a late egress-proxy write costs an extra top-up intent — a row that grows
+    after minting mints a further intent from the prior high-water mark, so no growth is ever lost
+    to timing.
     Egress rows (a zero-priced request count) never export. Usage settling before `floor` never
     mints — the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
     from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.
@@ -368,9 +401,10 @@ async def mint_usage_exports(
     Each intent freezes its `byok` label too: host-side `tokens` usage whose model's provider
     key slot (`key_slot_for` — the same resolution `client_for` applies) is stored by the
     workspace is the workspace's spend; everything else — providers keyed from platform env,
-    `sandbox_tokens`, whose egress proxy injects the platform key, and `images`, whose model is not
-    in the registry for a slot to be resolved from — is the platform's. Frozen at mint, a re-send
-    carries the label of the key state that served the usage, never the drain-time state."""
+    `sandbox_tokens`, whose egress proxy injects the platform key, and `images` and `videos`, whose
+    models are not in the registry for a slot to be resolved from — is the platform's. Frozen at
+    mint, a re-send carries the label of the key state that served the usage, never the drain-time
+    state."""
     now = datetime.now(UTC)
     settle_cutoff = now - timedelta(seconds=EXPORT_SETTLE_MARGIN_SECONDS)
     stored_slots = {
@@ -417,7 +451,9 @@ async def mint_usage_exports(
                 sa.or_(
                     (tables.ledger.c.dimension == TOKENS_DIMENSION)
                     & (tables.ledger.c.created_at >= floor),
-                    tables.ledger.c.dimension.in_((SANDBOX_TOKENS_DIMENSION, IMAGES_DIMENSION))
+                    tables.ledger.c.dimension.in_(
+                        (SANDBOX_TOKENS_DIMENSION, IMAGES_DIMENSION, VIDEOS_DIMENSION)
+                    )
                     & tables.turn.c.terminal.isnot(None)
                     & (tables.turn.c.updated_at <= settle_cutoff)
                     & (tables.turn.c.updated_at >= floor),
