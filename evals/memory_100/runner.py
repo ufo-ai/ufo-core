@@ -19,16 +19,22 @@ from evals.memory_100.models import Corpus, SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
 
-MEMORY_100_GRADER_REVISION = "memory-item-ids-1"
+MEMORY_100_GRADER_REVISION = "evidence-coverage-gate-1"
 MEMORY_JUDGE_MODEL = "gpt-5.4"
+ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE = 1.0
 
 
 @dataclass(frozen=True)
 class Memory100Leaf:
+    """One report leaf over one corpus. `min_mapped_evidence_coverage`, when set, makes the leaf's
+    bar the recall coverage of its cases' mapped evidence instead of the answer rubric: a case whose
+    injected recall misses one of those rows fails however well the judge reads its answer."""
+
     name: str
     corpus: Corpus
     categories: tuple[str, ...]
     expected_cases: int
+    min_mapped_evidence_coverage: float | None = None
 
 
 MEMORY_100_LEAVES = (
@@ -75,6 +81,13 @@ MEMORY_100_LEAVES = (
         ("member-isolation", "information-not-found", "mixed-scope"),
         3,
     ),
+    Memory100Leaf(
+        "memory_100.ufo.alias_identity",
+        "ufo",
+        ("alias-initialism", "alias-handle"),
+        2,
+        min_mapped_evidence_coverage=ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE,
+    ),
 )
 
 
@@ -103,8 +116,23 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
     unknown = sorted({case.audience for case in snapshot.cases} - audiences.keys())
     if unknown:
         raise ValueError(f"memory_100 readiness is missing audiences: {', '.join(unknown)}")
+    memberships = {
+        case.id: tuple(
+            leaf
+            for leaf in MEMORY_100_LEAVES
+            if leaf.corpus == case.corpus and case.category in leaf.categories
+        )
+        for case in snapshot.cases
+    }
+    unlabeled = sorted(case_id for case_id, leaves in memberships.items() if not leaves)
+    if unlabeled:
+        raise ValueError(f"memory_100 cases have no leaf: {', '.join(unlabeled)}")
+    repeated = sorted(case_id for case_id, leaves in memberships.items() if len(leaves) > 1)
+    if repeated:
+        raise ValueError(f"memory_100 cases belong to multiple leaves: {', '.join(repeated)}")
     cases: dict[str, CapabilityCase] = {}
     for case in snapshot.cases:
+        (leaf,) = memberships[case.id]
         expected = tuple(
             ExpectedEvidence(
                 source_ref,
@@ -127,28 +155,15 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
         cases[case.id] = CapabilityCase(
             name=case.id,
             message=case.question,
-            grader=Memory100Grader(expected),
+            grader=Memory100Grader(expected, leaf.min_mapped_evidence_coverage),
             digest_tag=(
                 f"{snapshot.manifest.digest}:{readiness.corpus_digest}:"
-                f"{MEMORY_100_GRADER_REVISION}:{case.id}:{evidence_identity}"
+                f"{MEMORY_100_GRADER_REVISION}:{case.id}:{evidence_identity}:"
+                f"{leaf.min_mapped_evidence_coverage}"
             ),
             rubric=_answer_rubric(case),
             member_key=audiences[case.audience],
         )
-    memberships = {
-        case.id: tuple(
-            leaf
-            for leaf in MEMORY_100_LEAVES
-            if leaf.corpus == case.corpus and case.category in leaf.categories
-        )
-        for case in snapshot.cases
-    }
-    unlabeled = sorted(case_id for case_id, leaves in memberships.items() if not leaves)
-    if unlabeled:
-        raise ValueError(f"memory_100 cases have no leaf: {', '.join(unlabeled)}")
-    repeated = sorted(case_id for case_id, leaves in memberships.items() if len(leaves) > 1)
-    if repeated:
-        raise ValueError(f"memory_100 cases belong to multiple leaves: {', '.join(repeated)}")
     tasks: list[EvalTask] = []
     for leaf in MEMORY_100_LEAVES:
         leaf_cases = tuple(
@@ -199,12 +214,23 @@ def _answer_rubric(case: SnapshotCase) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class Memory100Grader:
     expected: tuple[ExpectedEvidence, ...]
+    min_mapped_evidence_coverage: float | None = None
 
-    grading = (
-        "the turn exports a valid memory recall log whose selected memories are ranked "
-        "against each expected evidence owner and the answer is non-empty; answer substance "
-        "is judged against the semantic rubric"
-    )
+    @property
+    def grading(self) -> str:
+        statement = (
+            "the turn exports a valid memory recall log whose selected memories are ranked "
+            "against each expected evidence owner and the answer is non-empty; answer substance "
+            "is judged against the semantic rubric"
+        )
+        if self.min_mapped_evidence_coverage is None:
+            return statement
+        refs = ", ".join(owner.source_ref for owner in self.expected)
+        return (
+            f"{statement}; injected recall must additionally cover at least "
+            f"{self.min_mapped_evidence_coverage:.0%} of the evidence rows that own a memory item "
+            f"({refs}), so the verdict answers to retrieval rather than to the answer text"
+        )
 
     async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
         if output.log is None:
@@ -229,6 +255,7 @@ class Memory100Grader:
         }
         found = sum(rank is not None for rank in ranks.values())
         expected = sum(bool(owner.memory_ids) for owner in self.expected)
+        coverage = found / expected if expected else None
         evidence: JsonObject = {
             "recallError": recall.error_class,
             "selectedCount": len(selected),
@@ -237,10 +264,23 @@ class Memory100Grader:
             "unmappedEvidence": [
                 owner.source_ref for owner in self.expected if not owner.memory_ids
             ],
-            "coverage": found / expected if expected else None,
+            "coverage": coverage,
         }
         if not output.response.strip():
             return CapabilityVerdict(False, "answer is empty", evidence)
+        if self.min_mapped_evidence_coverage is not None:
+            if coverage is None:
+                return CapabilityVerdict(
+                    False, "no expected evidence row owns a memory item to recall", evidence
+                )
+            if coverage < self.min_mapped_evidence_coverage:
+                degraded = f" (recall degraded: {recall.error_class})" if recall.error_class else ""
+                return CapabilityVerdict(
+                    False,
+                    f"injected recall covered {found}/{expected} mapped evidence rows, below "
+                    f"{self.min_mapped_evidence_coverage:.0%}{degraded}",
+                    evidence,
+                )
         return CapabilityVerdict(
             True,
             f"answer is present; recall found {found}/{expected} mapped evidence",

@@ -18,6 +18,8 @@ from evals.harness.target import TargetResult
 from evals.harness.viewer import EvalRun, render_viewer
 from evals.memory_100.models import SnapshotCase, SnapshotMemory
 from evals.memory_100.runner import (
+    ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE,
+    MEMORY_100_LEAVES,
     MEMORY_JUDGE_MODEL,
     ExpectedEvidence,
     Memory100Grader,
@@ -54,6 +56,8 @@ MEMORY_100_CASE_GROUPS = (
     ("ufo", "member-isolation", 1),
     ("ufo", "information-not-found", 1),
     ("ufo", "mixed-scope", 1),
+    ("ufo", "alias-initialism", 1),
+    ("ufo", "alias-handle", 1),
 )
 MEMORY_100_LEAF_COUNTS = (
     ("memory_100.enterprise.basic", 4),
@@ -74,7 +78,9 @@ MEMORY_100_LEAF_COUNTS = (
     ("memory_100.ufo.pages", 3),
     ("memory_100.ufo.memories", 4),
     ("memory_100.ufo.boundaries", 3),
+    ("memory_100.ufo.alias_identity", 2),
 )
+ALIAS_LEAF = "memory_100.ufo.alias_identity"
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,66 @@ async def test_memory_100_grader_reports_observed_evidence_without_gating_the_an
     assert unmapped.evidence["evidenceRanks"] == {"page/handbook": None}
     assert unmapped.evidence["unmappedEvidence"] == ["page/handbook"]
     assert not (await grader(CapabilityOutput("", (), log=output.log))).passed
+
+
+def _recalled(*memory_ids: UUID) -> CapabilityOutput:
+    return CapabilityOutput(
+        "answer",
+        (),
+        log=TurnLog(
+            event=MEMORY_RECALL_EVENT,
+            turn_id=uuid4(),
+            attributes={"memory_ids": [str(memory_id) for memory_id in memory_ids]},
+        ),
+    )
+
+
+async def test_memory_100_alias_leaf_gates_the_verdict_on_mapped_evidence_coverage() -> None:
+    full_name = uuid4()
+    handle = uuid4()
+    unrelated = uuid4()
+    expected = (
+        ExpectedEvidence("ufo/page/halyard-charter", frozenset()),
+        ExpectedEvidence("ufo/memory/halyard-cutover-window", frozenset({full_name})),
+        ExpectedEvidence("ufo/memory/halyard-deputy", frozenset({handle})),
+    )
+    grader = Memory100Grader(expected, ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE)
+
+    partial = await grader(_recalled(unrelated, full_name))
+    covered = await grader(_recalled(handle, unrelated, full_name))
+    degraded = await grader(
+        CapabilityOutput(
+            "answer",
+            (),
+            log=TurnLog(
+                event=MEMORY_RECALL_EVENT,
+                turn_id=uuid4(),
+                attributes={"memory_ids": [], "error_class": "TimeoutError"},
+            ),
+        )
+    )
+    unmapped_only = await Memory100Grader((expected[0],), ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE)(
+        _recalled(full_name)
+    )
+
+    assert not partial.passed
+    assert partial.reason == "injected recall covered 1/2 mapped evidence rows, below 100%"
+    assert partial.evidence["coverage"] == 0.5
+    assert partial.evidence["unmappedEvidence"] == ["ufo/page/halyard-charter"]
+    assert (await Memory100Grader(expected)(_recalled(unrelated, full_name))).passed
+    assert covered.passed
+    assert covered.evidence["coverage"] == 1.0
+    assert not degraded.passed
+    assert degraded.reason == (
+        "injected recall covered 0/2 mapped evidence rows, below 100% "
+        "(recall degraded: TimeoutError)"
+    )
+    assert not unmapped_only.passed
+    assert unmapped_only.reason == "no expected evidence row owns a memory item to recall"
+    assert "100% of the evidence rows that own a memory item" in grader.grading
+    assert MEMORY_100_LEAVES[-1].name == ALIAS_LEAF
+    assert MEMORY_100_LEAVES[-1].min_mapped_evidence_coverage == 1.0
+    assert all(leaf.min_mapped_evidence_coverage is None for leaf in MEMORY_100_LEAVES[:-1])
 
 
 async def test_memory_100_grader_case_fails_invalid_or_missing_log() -> None:
@@ -422,7 +488,7 @@ async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
     assert tuple((task.name, len(task.cases)) for task in run.tasks) == MEMORY_100_LEAF_COUNTS
     assert {task.judge_model for task in run.tasks} == {MEMORY_JUDGE_MODEL}
     leaf_cases = tuple(case for task in run.tasks for case in task.cases)
-    assert len(leaf_cases) == len(set(leaf_cases)) == 100
+    assert len(leaf_cases) == len(set(leaf_cases)) == 102
     assert set(leaf_cases) == {case.id for case in _cases()}
     assert run.readiness.workspace_id == workspace_id
     assert tuple(task.digest for task in reordered.tasks) == tuple(
@@ -440,6 +506,28 @@ async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
     assert all(report.min_mapped_evidence_coverage == 1.0 for report in reports)
     assert all(report.degraded_recall_count == 0 for report in reports)
     assert all(report.unmapped_evidence_count == 0 for report in reports)
+    assert all(report.passed for report in reports)
+
+
+def test_memory_100_alias_leaf_pins_its_coverage_bar_into_the_suite_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_root, readiness_path = _memory_100_paths(tmp_path)
+    run = load_memory_100(snapshot_root, readiness_path)
+    leaves = memory_100_runner.MEMORY_100_LEAVES
+    monkeypatch.setattr(
+        memory_100_runner,
+        "MEMORY_100_LEAVES",
+        (*leaves[:-1], replace(leaves[-1], min_mapped_evidence_coverage=0.5)),
+    )
+
+    relaxed = load_memory_100(snapshot_root, readiness_path)
+
+    by_name = {task.name: task.digest for task in run.tasks}
+    relaxed_by_name = {task.name: task.digest for task in relaxed.tasks}
+    assert by_name.keys() == relaxed_by_name.keys()
+    assert by_name[ALIAS_LEAF] != relaxed_by_name[ALIAS_LEAF]
+    assert all(by_name[name] == relaxed_by_name[name] for name in by_name if name != ALIAS_LEAF)
 
 
 def test_memory_100_rejects_unlabeled_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,15 +11,18 @@ from evals.memory_100.build import (
     SELECTION_FILE,
     EnterpriseCorpus,
     EnterpriseQuestion,
+    Memory100Builder,
     Selection,
     _document,
     _enterprise_evidence_refs,
     _longmem,
     _ufo,
+    main,
     verify_asset,
 )
 from evals.memory_100.models import (
     SnapshotCase,
+    SnapshotManifest,
     SnapshotMemory,
     SnapshotPage,
     UpstreamAsset,
@@ -27,6 +30,7 @@ from evals.memory_100.models import (
 from evals.memory_100.snapshot import content_digest, load_snapshot, write_snapshot
 
 DIGEST = "sha256:" + "0" * 64
+ALIAS_QUERY_FORMS = {"ufo-alias-initialism": "MDW", "ufo-alias-handle": "@tnk"}
 
 
 def _cases() -> tuple[SnapshotCase, ...]:
@@ -62,7 +66,7 @@ def _cases() -> tuple[SnapshotCase, ...]:
                 question=f"ufo question {index}",
                 expected_answer="answer",
             )
-            for index in range(10)
+            for index in range(12)
         )
     )
 
@@ -134,7 +138,7 @@ def test_snapshot_rejects_a_tampered_record_file(tmp_path: Path) -> None:
 
 
 def test_snapshot_rejects_invalid_corpus_counts(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="exactly 100 cases"):
+    with pytest.raises(ValueError, match="exactly 102 cases"):
         write_snapshot(
             tmp_path,
             upstreams=(),
@@ -265,12 +269,75 @@ def test_checked_in_selections_and_ufo_cases_have_exact_counts() -> None:
     cases, pages, memories = _ufo()
     assert len(enterprise) == len(set(enterprise)) == 60
     assert len(longmem) == len(set(longmem)) == 30
-    assert len(cases) == 10
+    assert len(cases) == 12
     assert {case.corpus for case in cases} == {"ufo"}
     assert {ref for case in cases for ref in case.evidence_refs} <= {
         *(page.source_ref for page in pages),
         *(memory.source_ref for memory in memories),
     }
+
+
+def test_ufo_alias_cases_query_an_identity_by_a_form_no_recalled_row_carries() -> None:
+    cases, pages, memories = _ufo()
+    page_by_ref = {page.source_ref: page for page in pages}
+    memory_by_ref = {memory.source_ref: memory for memory in memories}
+    alias_cases = tuple(case for case in cases if case.id in ALIAS_QUERY_FORMS)
+
+    assert len(alias_cases) == len(ALIAS_QUERY_FORMS)
+    for case in alias_cases:
+        form = ALIAS_QUERY_FORMS[case.id]
+        evidence_pages = tuple(page_by_ref[ref] for ref in case.evidence_refs if ref in page_by_ref)
+        evidence_memories = tuple(
+            memory_by_ref[ref] for ref in case.evidence_refs if ref in memory_by_ref
+        )
+        assert len(case.evidence_refs) == len(evidence_pages) + len(evidence_memories)
+        assert len(evidence_pages) == 1
+        assert len(evidence_memories) == 2
+        assert case.audience != "shared"
+        assert evidence_pages[0].audience == "shared"
+        assert {memory.audience for memory in evidence_memories} == {"shared", case.audience}
+        assert form in case.question
+        assert form in evidence_pages[0].body
+        assert all(form.lower() not in memory.body.lower() for memory in evidence_memories)
+
+
+def test_build_cli_prints_the_canonical_snapshot_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, pages, memories = _ufo()
+
+    def _write(self: Memory100Builder) -> SnapshotManifest:
+        return write_snapshot(
+            self.output,
+            upstreams=(),
+            builder_digest=DIGEST,
+            cases=_cases(),
+            pages=pages,
+            memories=memories,
+        )
+
+    monkeypatch.setattr(Memory100Builder, "build", _write)
+    inputs = [
+        "--enterprise-questions",
+        str(tmp_path / "questions.jsonl"),
+        "--enterprise-documents",
+        str(tmp_path / "documents.zip"),
+        "--enterprise-overview",
+        str(tmp_path / "overview.md"),
+        "--longmem",
+        str(tmp_path / "longmem.json"),
+    ]
+    scratch = tmp_path / "scratch"
+
+    main([*inputs, "--out", str(tmp_path / "scratched"), "--scratch", str(scratch)])
+    scratched = capsys.readouterr().out
+    main([*inputs, "--out", str(tmp_path / "temporary")])
+    temporary = capsys.readouterr().out
+
+    assert scratched == f"{load_snapshot(tmp_path / 'scratched').manifest.digest}\n"
+    assert temporary == f"{load_snapshot(tmp_path / 'temporary').manifest.digest}\n"
+    assert scratched.startswith("sha256:")
+    assert scratch.is_dir()
 
 
 def test_enterprise_corpus_selects_evidence_and_deterministic_negatives(

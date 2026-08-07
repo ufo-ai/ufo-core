@@ -4,6 +4,7 @@ import heapq
 import json
 import re
 import sqlite3
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -20,11 +21,18 @@ from evals.memory_100.assets import (
 )
 from evals.memory_100.models import (
     SnapshotCase,
+    SnapshotManifest,
     SnapshotMemory,
     SnapshotPage,
     UpstreamAsset,
 )
-from evals.memory_100.snapshot import NULL_CHARACTER, canonical_json, content_digest, write_snapshot
+from evals.memory_100.snapshot import (
+    CORPUS_COUNTS,
+    NULL_CHARACTER,
+    canonical_json,
+    content_digest,
+    write_snapshot,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 SELECTION_FILE = DATA_DIR / "selection.json"
@@ -329,7 +337,7 @@ class Memory100Builder:
     output: Path
     scratch: Path
 
-    def build(self) -> None:
+    def build(self) -> SnapshotManifest:
         verify_asset(self.enterprise_questions, ENTERPRISE_QUESTIONS)
         verify_asset(self.enterprise_documents, ENTERPRISE_DOCUMENTS)
         verify_asset(self.enterprise_overview, ENTERPRISE_OVERVIEW)
@@ -355,7 +363,7 @@ class Memory100Builder:
             for question in enterprise
         )
         builder_digest = _builder_digest(selection)
-        write_snapshot(
+        manifest = write_snapshot(
             self.output,
             upstreams=UPSTREAMS,
             builder_digest=builder_digest,
@@ -373,6 +381,7 @@ class Memory100Builder:
         (self.output / THIRD_PARTY_NOTICES_FILE.name).write_bytes(
             THIRD_PARTY_NOTICES_FILE.read_bytes()
         )
+        return manifest
 
 
 def verify_asset(path: Path, asset: UpstreamAsset) -> None:
@@ -549,8 +558,9 @@ def _ufo() -> tuple[tuple[SnapshotCase, ...], tuple[SnapshotPage, ...], tuple[Sn
     seeds = tuple(
         UfoCaseSeed.model_validate(item) for item in json.loads(UFO_CASES_FILE.read_bytes())
     )
-    if len(seeds) != 10 or len({seed.case.id for seed in seeds}) != 10:
-        raise ValueError("UFO dataset must contain 10 unique cases")
+    expected = CORPUS_COUNTS["ufo"]
+    if len(seeds) != expected or len({seed.case.id for seed in seeds}) != expected:
+        raise ValueError(f"UFO dataset must contain {expected} unique cases")
     pages = tuple(
         SnapshotPage(
             **page.model_dump(),
@@ -604,7 +614,7 @@ def _builder_digest(selection: Selection) -> str:
     return f"sha256:{hashlib.sha256(policy).hexdigest()}"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals.memory_100.build")
     parser.add_argument("--enterprise-questions", type=Path, required=True)
     parser.add_argument("--enterprise-documents", type=Path, required=True)
@@ -612,10 +622,10 @@ def main() -> None:
     parser.add_argument("--longmem", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--scratch", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.scratch is not None:
         args.scratch.mkdir(parents=True, exist_ok=True)
-        Memory100Builder(
+        manifest = Memory100Builder(
             args.enterprise_questions,
             args.enterprise_documents,
             args.enterprise_overview,
@@ -623,16 +633,17 @@ def main() -> None:
             args.out,
             args.scratch,
         ).build()
-        return
-    with tempfile.TemporaryDirectory(prefix="memory-100-") as scratch:
-        Memory100Builder(
-            args.enterprise_questions,
-            args.enterprise_documents,
-            args.enterprise_overview,
-            args.longmem,
-            args.out,
-            Path(scratch),
-        ).build()
+    else:
+        with tempfile.TemporaryDirectory(prefix="memory-100-") as scratch:
+            manifest = Memory100Builder(
+                args.enterprise_questions,
+                args.enterprise_documents,
+                args.enterprise_overview,
+                args.longmem,
+                args.out,
+                Path(scratch),
+            ).build()
+    print(manifest.digest)
 
 
 if __name__ == "__main__":

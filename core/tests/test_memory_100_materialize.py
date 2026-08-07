@@ -95,7 +95,7 @@ def _snapshot(root: Path) -> None:
                 expected_answer="answer",
                 evidence_refs=("session/alice",),
             )
-            for index in range(10)
+            for index in range(12)
         )
     )
     pages = (

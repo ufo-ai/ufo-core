@@ -21,6 +21,8 @@ PAGES_FILE = "pages.jsonl.gz"
 MEMORIES_FILE = "memory_items.jsonl.gz"
 MANIFEST_FILE = "snapshot.json"
 NULL_CHARACTER = "\x00"
+CORPUS_COUNTS = {"enterprise": 60, "longmem": 30, "ufo": 12}
+CASE_COUNT = sum(CORPUS_COUNTS.values())
 
 
 def canonical_json(model: BaseModel) -> bytes:
@@ -121,13 +123,10 @@ def _validate_records(
     pages: tuple[SnapshotPage, ...],
     memories: tuple[SnapshotMemory, ...],
 ) -> None:
-    if len(cases) != 100:
-        raise ValueError(f"memory_100 requires exactly 100 cases, found {len(cases)}")
-    counts = {
-        corpus: sum(case.corpus == corpus for case in cases)
-        for corpus in ("enterprise", "longmem", "ufo")
-    }
-    if counts != {"enterprise": 60, "longmem": 30, "ufo": 10}:
+    if len(cases) != CASE_COUNT:
+        raise ValueError(f"memory_100 requires exactly {CASE_COUNT} cases, found {len(cases)}")
+    counts = {corpus: sum(case.corpus == corpus for case in cases) for corpus in CORPUS_COUNTS}
+    if counts != CORPUS_COUNTS:
         raise ValueError(f"memory_100 corpus counts are invalid: {counts}")
     nonportable = next(
         (

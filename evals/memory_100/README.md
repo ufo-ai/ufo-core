@@ -1,6 +1,6 @@
 # memory_100
 
-`memory_100` fixes 100 questions and their evidence into a portable logical snapshot:
+`memory_100` fixes 102 questions and their evidence into a portable logical snapshot:
 
 The runner pins semantic answer grading to `gpt-5.4`; retrieval coverage remains deterministic.
 
@@ -8,9 +8,9 @@ The runner pins semantic answer grading to `gpt-5.4`; retrieval coverage remains
 |---|---:|---|
 | EnterpriseRAG-Bench | 60 | shared source pages plus deterministic hard negatives |
 | LongMemEval | 30 | member-private recallable memories |
-| UFO | 10 | shared/private, synthesis, conflict, isolation, and no-answer fixtures |
+| UFO | 12 | shared/private, synthesis, conflict, isolation, no-answer, and alias-identity fixtures |
 
-One snapshot and materialized workspace serve 18 disjoint report leaves:
+One snapshot and materialized workspace serve 19 disjoint report leaves:
 
 | Prefix | Labels | Cases |
 |---|---|---:|
@@ -19,6 +19,15 @@ One snapshot and materialized workspace serve 18 disjoint report leaves:
 | `memory_100.ufo.pages` | shared, multi-page, conflicting evidence | 3 |
 | `memory_100.ufo.memories` | private, decision, preference, event memory | 4 |
 | `memory_100.ufo.boundaries` | member isolation, no answer, mixed scope | 3 |
+| `memory_100.ufo.alias_identity` | one person under an initialism, under a handle | 2 |
+
+`memory_100.ufo.alias_identity` is the one leaf whose bar is retrieval rather than the answer
+rubric. Each of its cases names one person by a surface form no recalled row carries — an
+initialism, a chat handle — while the rows about that person are written under other forms and split
+across a shared page, a shared memory, and a member-private memory. Its grader requires injected
+recall to cover every evidence row that owns a memory item, so a judge that infers the link from
+answer text cannot pass the case: `min_mapped_evidence_coverage` on `Memory100Leaf` is what turns
+the recorded `coverage` into the verdict, and the bar is part of the leaf's suite digest.
 
 The builder verifies every upstream byte against `assets.py`; `snapshot.json` pins the canonical
 gzip JSONL files. Source NUL characters become `U+FFFD` before selection and hashing so every
@@ -55,8 +64,10 @@ uv run python -m evals.memory_100.build \
   --out "$SNAPSHOT"
 ```
 
-The canonical snapshot digest is
-`sha256:724e05a8f6c2879686c808baa1e0da845ec9dd1787a878341d78a693b09bae7c`.
+The build prints the canonical snapshot digest on stdout as its last line; pin it here from a build
+run. `_builder_digest` hashes `build.py`, `selection.json`, `ufo_cases.json`, and
+`THIRD_PARTY_NOTICES.md`, so a change to the case corpus moves the snapshot digest, and
+`load_memory_100` refuses a readiness attested against a different snapshot.
 
 ## Run the eval
 
@@ -111,7 +122,7 @@ The template's OTLP endpoint is re-pointed to a free loopback port per run, so c
 never contend; database, blob root, and ports are likewise rewritten per run. Select a single leaf
 by adding `args = ["--only", "memory_100.longmem.multi_session"]` to the run block.
 
-Materialization is API-bound and may be quiet while embedding 1,429 memories and 12,239 pages.
+Materialization is API-bound and may be quiet while embedding 1,433 memories and 12,241 pages.
 It drains every selected pack's page-change consumer without model access, completing deterministic
 derivations without letting background corpus jobs race the eval. Target and judge turns still use
 Anthropic normally.
