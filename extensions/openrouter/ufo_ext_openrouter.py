@@ -87,15 +87,21 @@ DEFAULT_IMAGE_MODEL: ImageModel = "bytedance-seed/seedream-4.5"
 AspectRatio = Literal["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "21:9"]
 EVERY_ASPECT_RATIO: frozenset[str] = frozenset(get_args(AspectRatio))
 
+Resolution = Literal["1K", "2K", "4K"]
+EVERY_RESOLUTION: frozenset[str] = frozenset(get_args(Resolution))
+DEFAULT_RESOLUTION: Resolution = "2K"
+
 
 @dataclass(frozen=True)
 class ImageModelLimits:
     """What one allowlisted model's providers actually serve, and what an image lists at when the
     response prices nothing. OpenRouter rejects a generation parameter the serving provider does not
-    offer, so a model's bounds differ from the tool's own caps and are held on the way in."""
+    offer, so a model's bounds differ from the tool's own caps and are held on the way in. Empty
+    `resolutions` means the model derives its own size and takes no tier."""
 
     max_images: int
     aspect_ratios: frozenset[str]
+    resolutions: frozenset[str]
     list_micro_usd: int
 
 
@@ -103,26 +109,31 @@ IMAGE_MODELS: dict[ImageModel, ImageModelLimits] = {
     "bytedance-seed/seedream-4.5": ImageModelLimits(
         max_images=MAX_IMAGES_PER_CALL,
         aspect_ratios=EVERY_ASPECT_RATIO,
+        resolutions=EVERY_RESOLUTION,
         list_micro_usd=40_000,
     ),
     "openai/gpt-image-2": ImageModelLimits(
         max_images=MAX_IMAGES_PER_CALL,
         aspect_ratios=EVERY_ASPECT_RATIO,
+        resolutions=frozenset(),
         list_micro_usd=130_000,
     ),
     "black-forest-labs/flux.2-klein-4b": ImageModelLimits(
         max_images=1,
         aspect_ratios=EVERY_ASPECT_RATIO,
+        resolutions=frozenset(),
         list_micro_usd=14_000,
     ),
     "black-forest-labs/flux.2-pro": ImageModelLimits(
         max_images=1,
         aspect_ratios=EVERY_ASPECT_RATIO,
+        resolutions=frozenset(),
         list_micro_usd=30_000,
     ),
     "recraft/recraft-v4.1": ImageModelLimits(
         max_images=MAX_IMAGES_PER_CALL,
         aspect_ratios=frozenset({"1:1", "4:3", "3:4", "16:9", "9:16"}),
+        resolutions=frozenset(),
         list_micro_usd=35_000,
     ),
 }
@@ -352,10 +363,13 @@ class GenerateImageInput(BaseModel):
         le=MAX_IMAGES_PER_CALL,
         description="How many images to draw. The flux.2 models draw exactly one.",
     )
-    resolution: Literal["1K", "2K"] | None = Field(
+    resolution: Resolution | None = Field(
         default=None,
         description=(
-            "Resolution tier. Only bytedance-seed/seedream-4.5 takes one; omit it for the others."
+            f"Resolution tier, defaulting to {DEFAULT_RESOLUTION}. 4K costs more per image; ask "
+            "for it when the image will be printed or cropped into, and 1K when it is a thumbnail "
+            "or a draft. Only bytedance-seed/seedream-4.5 takes a tier; omit it for the others, "
+            "which size their own output."
         ),
     )
     aspect_ratio: AspectRatio | None = Field(
@@ -375,9 +389,12 @@ class GenerateImageInput(BaseModel):
 
     @model_validator(mode="after")
     def _within_model_limits(self) -> "GenerateImageInput":
-        """Hold the call to what the chosen model serves. OpenRouter answers 400 for a generation
-        parameter its provider does not offer, so a combination the allowlist already knows is
-        unservable is refused here, where the model reads the reason and can pick another."""
+        """Hold the call to what the chosen model serves, and settle its resolution. OpenRouter
+        answers 400 for a generation parameter its provider does not offer, so a combination the
+        allowlist already knows is unservable is refused here, where the model reads the reason and
+        can pick another. A model that takes a tier and was not given one draws at
+        `DEFAULT_RESOLUTION` — the cheap middle of the ladder, since an unasked-for size should be
+        the one nobody regrets paying for."""
         limits = IMAGE_MODELS[self.model]
         if self.n > limits.max_images:
             raise ValueError(f"{self.model} draws at most {limits.max_images} image(s) per call")
@@ -386,6 +403,15 @@ class GenerateImageInput(BaseModel):
                 f"{self.model} does not take aspect_ratio {self.aspect_ratio}; it accepts "
                 f"{', '.join(sorted(limits.aspect_ratios))}"
             )
+        if self.resolution is not None and self.resolution not in limits.resolutions:
+            raise ValueError(
+                f"{self.model} takes no resolution tier; it sizes its own output"
+                if not limits.resolutions
+                else f"{self.model} does not take resolution {self.resolution}; it accepts "
+                f"{', '.join(sorted(limits.resolutions))}"
+            )
+        if self.resolution is None and limits.resolutions:
+            self.resolution = DEFAULT_RESOLUTION
         return self
 
 

@@ -495,15 +495,38 @@ def test_the_payload_is_bounded_at_the_tool_boundary() -> None:
         GenerateImageInput(**common, model="stability/whatever")
 
 
-def test_only_the_resolution_tiers_seedream_serves_are_offered() -> None:
-    """OpenRouter answers 400 for a resolution its provider does not list, and seedream — the one
-    model taking the field — accepts 1K, 2K and 4K. A tier below that range is not a cheaper image,
-    it is a rejected call."""
+def test_the_offered_resolution_tiers_are_the_ones_seedream_serves() -> None:
+    """Seed enumerates 1K, 2K and 4K when it rejects a tier, and those are what the field offers —
+    the whole ladder, so a member can pay for print size or save on a draft. A tier outside it is
+    not a cheaper image, it is a rejected call."""
     common = {"prompt": "p", "name": "poster", "user_description": "d"}
     tiers, _none = get_args(GenerateImageInput.model_fields["resolution"].annotation)
-    assert set(get_args(tiers)) == {"1K", "2K"}
+    assert set(get_args(tiers)) == {"1K", "2K", "4K"}
+    assert openrouter.IMAGE_MODELS[openrouter.DEFAULT_IMAGE_MODEL].resolutions == set(
+        get_args(tiers)
+    )
     with pytest.raises(ValidationError):
         GenerateImageInput(**common, resolution="512")
+
+
+def test_an_unasked_resolution_settles_on_the_cheap_middle_tier() -> None:
+    """A call that names no tier draws at 2K rather than whatever the provider would pick, and 4K
+    stays reachable for the member who wants it."""
+    common = {"prompt": "p", "name": "poster", "user_description": "d"}
+    assert GenerateImageInput(**common).resolution == openrouter.DEFAULT_RESOLUTION
+    assert openrouter.DEFAULT_RESOLUTION == "2K"
+    for tier in ("1K", "2K", "4K"):
+        assert GenerateImageInput(**common, resolution=tier).resolution == tier
+
+
+def test_a_model_that_sizes_its_own_output_is_sent_no_tier() -> None:
+    """Only seedream takes a resolution, so the default is never applied to the others and naming
+    one for them is refused rather than sent as a parameter their providers do not serve."""
+    common = {"prompt": "p", "name": "poster", "user_description": "d"}
+    for model in ("openai/gpt-image-2", "black-forest-labs/flux.2-pro", "recraft/recraft-v4.1"):
+        assert GenerateImageInput(**common, model=model).resolution is None
+        with pytest.raises(ValidationError, match="takes no resolution tier"):
+            GenerateImageInput(**common, model=model, resolution="2K")
 
 
 def test_a_model_that_draws_one_image_refuses_a_batch() -> None:
@@ -649,6 +672,23 @@ async def test_a_byok_generation_meters_the_upstream_charge_it_reports(
     workspace_id, turn_id = await _keyed_turn()
     await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, model="openai/gpt-image-2")
     assert await _images_ledger(turn_id) == (1, 6_930, "openai/gpt-image-2", None)
+
+
+async def test_a_default_seedream_call_puts_the_cheap_tier_on_the_wire(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settled default is a real request field, not merely a validated value: a call naming no
+    tier reaches OpenRouter asking for 2K."""
+    api = _ImageApi()
+    _wire(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path)
+    assert api.sent() == {
+        "model": "bytedance-seed/seedream-4.5",
+        "prompt": "a red panda astronaut, studio lighting",
+        "n": 1,
+        "resolution": "2K",
+    }
 
 
 async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_spend(
