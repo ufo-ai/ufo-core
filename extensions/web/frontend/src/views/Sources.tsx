@@ -8,6 +8,7 @@ type Source = {
   stream: string;
   account_id: string | null;
   base_url: string | null;
+  backfill_days: number | "all" | null;
   owner_email: string | null;
   shared: boolean;
   consecutive_errors: number;
@@ -16,12 +17,17 @@ type Source = {
 
 type SourcesPayload = { sources: Source[] };
 
+// Mirrors the object's own spec: a row act submits `{...row.apply, <what it changes>}`, so every
+// field the binding's identity is built from belongs here even when no column shows it. Omit one
+// and it reaches the verb as its default, reading as an edit the member never made — which the
+// verb then refuses, taking the act with it.
 type SourceSpec = {
   provider: string;
   streams: string[];
   account_id: string | null;
   base_url: string | null;
   shared: boolean;
+  backfill_days: number | "all" | null;
 };
 
 type SourceRow = {
@@ -67,6 +73,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
         account_id: first.account_id,
         base_url: first.base_url,
         shared: first.shared,
+        backfill_days: first.backfill_days,
       },
     };
   });

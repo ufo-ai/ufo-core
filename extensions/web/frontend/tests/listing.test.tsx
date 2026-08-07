@@ -644,6 +644,7 @@ test("every declaration keys its rows on fields its own payload carries", () => 
           stream: "pages",
           account_id: "acct",
           base_url: null,
+          backfill_days: null,
           owner_email: null,
           shared: false,
           consecutive_errors: 0,

@@ -8,12 +8,15 @@ run re-drives `fetch_page` from `origin`, discards the first `skip` records, lan
 grows the count until the stream exhausts and the envelope dissolves to a plain watermark. A cursor
 that is a plain string or a connector's own JSON map is opaque and passes through untouched. A
 `delete_missing` (full-snapshot) stream is exempt from the cap and always returns `snapshot=True`:
-tombstone correctness requires the complete enumeration, so it is never sliced. Every assertion
-reads the adapter's `SyncResult`."""
+tombstone correctness requires the complete enumeration, so it is never sliced. The adapter also
+hands a row's pinned backfill window down on the `StreamSpec` it drives, which is how a connector
+floors a first sync. Every assertion reads the adapter's `SyncResult` or the specs the probe
+connector was driven with."""
 
 import json
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
@@ -44,6 +47,8 @@ class _FeedConnector(Connector):
         self._stream = stream
         self._feed = feed
         self.received_cursors: list[str | None] = []
+        self.received_streams: list[StreamSpec] = []
+        self.received_windows: list[datetime | None] = []
         self.closed = False
 
     def streams(self) -> list[StreamSpec]:
@@ -57,8 +62,11 @@ class _FeedConnector(Connector):
         credential: Credential,
         base_url: str,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         self.received_cursors.append(cursor)
+        self.received_streams.append(stream)
+        self.received_windows.append(backfill_after)
         try:
             for page in self._feed:
                 yield page
@@ -77,11 +85,17 @@ class _NoAuthProxy:
 
 
 async def _run(
-    connector: _FeedConnector, stream: StreamSpec, *, cursor: str | None = None
+    connector: _FeedConnector,
+    stream: StreamSpec,
+    *,
+    cursor: str | None = None,
+    backfill_after: datetime | None = None,
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
     return await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream.name), cursor, auth
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream.name, backfill_after=backfill_after),
+        cursor,
+        auth,
     )
 
 
@@ -117,6 +131,25 @@ async def test_capped_run_resumes_at_the_last_native_checkpoint(
     assert result.pages[0].title == "items/1"
     assert result.next_cursor == "ck3"
     assert result.snapshot is False
+
+
+async def test_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives() -> None:
+    """The window a row pins arrives as `fetch_page`'s own `backfill_after`, and the `StreamSpec`
+    is handed down exactly as the connector declared it. That separation is the point: a spec
+    carries only connector constants, so there is no per-run field on it for a connector to
+    recompute a floor from, and `backfill_window_days` stays a registration-time input that the run
+    path never reads. A row pinning nothing hands down nothing."""
+    cutoff = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)
+    stream = StreamSpec(name="items", source_object="items", backfill_window_days=30)
+    connector = _FeedConnector(stream, [_records(1)])
+
+    await _run(connector, stream, backfill_after=cutoff)
+    await _run(connector, stream)
+
+    assert connector.received_windows == [cutoff, None]
+    assert connector.received_streams == [stream, stream]
+    assert not hasattr(stream, "backfill_after")
+    assert connector.streams()[0].backfill_window_days == 30
 
 
 async def test_connector_backend_rejects_an_empty_rendered_title() -> None:

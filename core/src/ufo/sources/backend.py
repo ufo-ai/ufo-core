@@ -6,7 +6,9 @@ resolves the account's `Credential` through the runner's auth proxy, drives the 
 stream, and renders each record into a recallable `Page`. A full-collection stream
 (`delete_missing`) returns as an authoritative `snapshot` so the driver tombstones records that
 vanished; an incremental stream returns `snapshot=False`, advances a watermark over its
-`cursor_field`, and names any provider-reported removals in `deletes`.
+`cursor_field`, and names any provider-reported removals in `deletes`. A row whose config pins a
+`backfill_after` hands that instant to `fetch_page` beside the spec — never on it, so the spec holds
+only connector declarations and nothing on it invites a per-run recomputation.
 
 An incremental run lands `MAX_RECORDS_PER_RUN` records and then stops at the first checkpoint
 advance — immediately for a stream with per-page checkpoints or none at all (tier 2 resumes by
@@ -55,14 +57,21 @@ import hashlib
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from datetime import datetime
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.o11y import warn
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
 from ufo.sources.rest import get_path
-from ufo.sources.sync import Page, SourceAuth, SyncResult, normalize_page_timestamp
+from ufo.sources.sync import (
+    Page,
+    SourceAuth,
+    SourceRowConfig,
+    SyncResult,
+    normalize_page_timestamp,
+)
 
 MAX_RECORDS_PER_RUN = 5_000
 CAP_OVERRUN_FACTOR = 4
@@ -98,7 +107,7 @@ def binding_name(provider: str, account: str, base_url: str | None) -> str:
     return f"{provider.replace('_', '-')}-{digest}"
 
 
-class ConnectorSourceConfig(BaseModel):
+class ConnectorSourceConfig(SourceRowConfig):
     """Which account + stream one connector source row syncs. `account` is the handle the registry
     routes the credential on (a broker connected-account id under Composio, `DIRECT_ACCOUNT` under
     the direct backend, whose key is keyed by the provider name instead); `stream` is the connector
@@ -106,11 +115,24 @@ class ConnectorSourceConfig(BaseModel):
     (Freshdesk's `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose
     connector class leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so
     two tenants of the same provider settle on distinct rows. The backend never reads a raw token —
-    it asks the proxy for a `Credential`."""
+    it asks the proxy for a `Credential`.
+
+    `backfill_days` is what the registering member asked this row's first sync to reach — None takes
+    the stream's declared `backfill_window_days`, `"all"` the whole history — and `backfill_after`
+    is that request resolved against the instant of registration, replayed by every run so a
+    `CursorExpired` reset refetches the same window. It is None where the stream declares no window;
+    the request is still stored on every row of the binding, so the binding reads back one window
+    whichever row answers. `backfill_after` alone is `resolved`, since concurrent registrations of
+    one `backfill_days` differ by microseconds."""
+
+    non_identity_fields: ClassVar[frozenset[str]] = frozenset({"backfill_days", "backfill_after"})
+    resolved_fields: ClassVar[frozenset[str]] = frozenset({"backfill_after"})
 
     account: str
     stream: str
     base_url: str | None = None
+    backfill_days: int | Literal["all"] | None = None
+    backfill_after: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +180,7 @@ class ConnectorBackend:
             credential=credential,
             base_url=base_url,
             self_user_id=auth.self_user_id,
+            backfill_after=config.backfill_after,
         )
         try:
             async for page in stream_pages:

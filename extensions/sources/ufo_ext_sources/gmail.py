@@ -8,30 +8,44 @@ the default JSON dump of that tree is unrecallable. `render` decodes the MIME pa
 present), so a synced email recalls as what a member would read.
 
 Sync is a `historyId` delta, carried opaquely as the run cursor. With no cursor the run backfills —
-`GET /gmail/v1/users/me/messages` enumerates every message id, and the newest message's `historyId`
-is captured as the next cursor. With a cursor `GET /gmail/v1/users/me/history` from that id names
-the messages added and deleted since (label moves surface as add/delete pairs), the net-added ids
-are body-fetched, and the deleted ids land as tombstones alongside the new `historyId`. A `404` on
-the history walk means the id aged out of Gmail's window, so the connector raises `CursorExpired`
-and core refetches from scratch; a grant that lacks the scope (`401`/`403`) yields `StreamSkipped`
-so the run records a skip, not a failure; a message that vanished between the history walk and its
-body fetch (`404`) is skipped. The credential is resolved through the auth proxy the runner threads
-— this connector holds no token. The write path is intentionally absent — the source seam only
-reads."""
+`GET /gmail/v1/users/me/messages` enumerates the message ids inside the stream's pinned backfill
+window (`q=after:<epoch seconds>`, 30 days unless the binding named its own, the whole mailbox when
+it asked for all history), and the cursor is seeded from the newest message's `historyId` — or, when
+the window held no message at all, from the mailbox profile's, read before the enumeration so a
+message delivered during it lands above the seed rather than below. An empty window therefore still
+leaves backfill mode instead of re-enumerating itself every interval. With a cursor
+`GET /gmail/v1/users/me/history` from that id names the messages added and deleted since (label
+moves surface as add/delete pairs), the net-added ids are body-fetched, and the deleted ids land as
+tombstones alongside the new `historyId`. A `404` on the history walk means the id aged out of
+Gmail's window, so the connector raises `CursorExpired` and core refetches from scratch — the next
+run backfills the same pinned window, never a fresh one; a grant that lacks the scope (`401`/`403`)
+yields `StreamSkipped` so the run records a skip, not a failure; a message that vanished between the
+history walk and its body fetch (`404`) is skipped. The credential is resolved through the auth
+proxy the runner threads — this connector holds no token. The write path is intentionally absent —
+the source seam only reads."""
 
 import base64
 from collections.abc import AsyncIterator
+from datetime import datetime
 from email.utils import getaddresses
 from html.parser import HTMLParser
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import CursorExpired, RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    MAIL_BACKFILL_WINDOW_DAYS,
+    CursorExpired,
+    RestConnector,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+)
 
 GMAIL_API_BASE = "https://gmail.googleapis.com"
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
 HISTORY_PATH = "/gmail/v1/users/me/history"
+PROFILE_PATH = "/gmail/v1/users/me/profile"
 LIST_PAGE_SIZE = 500
 BODIES_CHUNK_SIZE = 200
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -63,6 +77,7 @@ GMAIL_STREAMS: list[StreamSpec] = [
         primary_key="id",
         created_at_field="internal_date",
         updated_at_field=None,
+        backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
     ),
 ]
 
@@ -72,14 +87,31 @@ class GmailConnector(RestConnector):
     base_url = GMAIL_API_BASE
     streams_list = GMAIL_STREAMS
 
+    def paginate_source(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        """Widen the seam by the row's pinned floor, which only the cursor-less backfill reads."""
+        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
+
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[StreamPage]:
         if stream.name != "messages":
             raise NotImplementedError(f"gmail: stream {stream.name!r} has no paginate dispatch")
         try:
             if cursor is None:
-                added_ids, next_history = await self._backfill(client)
+                added_ids, next_history = await self._backfill(client, after=backfill_after)
                 deleted_ids: list[str] = []
             else:
                 added_ids, deleted_ids, next_history = await self._history(client, cursor)
@@ -106,11 +138,19 @@ class GmailConnector(RestConnector):
                 ) from error
             raise
 
-    async def _backfill(self, client: httpx.AsyncClient) -> tuple[list[str], str | None]:
-        """Enumerate every message id, then seed the cursor from the newest message's `historyId`
-        so the next run walks the delta forward from here."""
+    async def _backfill(
+        self, client: httpx.AsyncClient, *, after: datetime | None
+    ) -> tuple[list[str], str | None]:
+        """Enumerate the message ids the pinned window reaches (every id when the row pins none),
+        then seed the cursor so the next run walks the delta forward from here. `after:` carries the
+        cutoff as epoch seconds because its bare-date form is resolved in the mailbox's own local
+        time, and a floor later than the pin drops the window's oldest edge for good — mail is not
+        `delete_missing` and every replay sends the same cutoff."""
+        floor = await self._profile_history_id(client)
         added: list[str] = []
         params: dict[str, Any] = {"maxResults": LIST_PAGE_SIZE}
+        if after is not None:
+            params["q"] = f"after:{int(after.timestamp())}"
         token: str | None = None
         while True:
             if token:
@@ -123,21 +163,38 @@ class GmailConnector(RestConnector):
                         added.append(message_id)
             token = data.get("nextPageToken")
             if not isinstance(token, str) or not token:
-                return added, await self._seed_history_id(client, added)
+                return added, await self._seed_history_id(client, added, floor=floor)
 
-    async def _seed_history_id(self, client: httpx.AsyncClient, added: list[str]) -> str | None:
-        if not added:
-            return None
-        try:
-            data = await self._get(
-                client, f"{MESSAGES_PATH}/{added[0]}", params={"format": "minimal"}
-            )
-        except httpx.HTTPStatusError as error:
-            if error.response.status_code == 404:
-                return None
-            raise
-        history_id = data.get("historyId")
+    async def _profile_history_id(self, client: httpx.AsyncClient) -> str | None:
+        profile = await self._get(client, PROFILE_PATH)
+        history_id = profile.get("historyId")
         return history_id if isinstance(history_id, str) else None
+
+    async def _seed_history_id(
+        self, client: httpx.AsyncClient, added: list[str], *, floor: str | None
+    ) -> str | None:
+        """The `historyId` the next run walks forward from: the newest listed message's, falling
+        back to `floor` when the window enumerated nothing or that message has gone. A run seeding
+        no cursor stays in backfill mode, re-enumerating every interval and never reaching the delta
+        path where a deletion becomes a tombstone.
+
+        `floor` is the mailbox profile's `historyId` read BEFORE the enumeration. Read after, mail
+        delivered during an empty window's walk would sit below the seed and the next
+        `history.list` would start past it. Re-reporting a listed message is free; skipping one is
+        not."""
+        if added:
+            try:
+                newest = await self._get(
+                    client, f"{MESSAGES_PATH}/{added[0]}", params={"format": "minimal"}
+                )
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != 404:
+                    raise
+            else:
+                newest_history_id = newest.get("historyId")
+                if isinstance(newest_history_id, str):
+                    return newest_history_id
+        return floor
 
     async def _history(
         self, client: httpx.AsyncClient, history_id: str

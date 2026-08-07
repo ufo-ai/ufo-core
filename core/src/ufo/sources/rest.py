@@ -17,6 +17,7 @@ import math
 import random
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from datetime import datetime
 from typing import Any, ClassVar
 
 import httpx
@@ -281,12 +282,19 @@ class RestConnector(Connector):
         credential: Credential,
         base_url: str,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         url = (base_url or self.base_url) or ""
         if not url:
             raise RuntimeError(f"{type(self).__name__}: no base_url available")
         async with self._make_client(url, credential) as client:
-            source = self.paginate_source(client, stream, cursor=cursor, self_user_id=self_user_id)
+            source = self.paginate_source(
+                client,
+                stream,
+                cursor=cursor,
+                self_user_id=self_user_id,
+                backfill_after=backfill_after,
+            )
             try:
                 async for page in source:
                     if not page:
@@ -312,7 +320,12 @@ class RestConnector(Connector):
         *,
         cursor: str | None,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        """The one seam between `fetch_page` and a connector's own `paginate`. Both run-scoped
+        extras — the acting identity and the row's pinned backfill floor — are dropped by default,
+        so a connector wanting either overrides this to widen its own `paginate` and the rest keep
+        the one they have."""
         return self.paginate(client, stream, cursor=cursor)
 
     async def paginate(

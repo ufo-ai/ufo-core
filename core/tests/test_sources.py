@@ -536,6 +536,49 @@ def test_brokered_source_row_id_includes_connection_generation() -> None:
     ) != source_row_id(workspace_id, "gmail", config, connection_id=second_connection)
 
 
+def test_source_row_id_ignores_the_fields_a_config_model_declares_non_identity() -> None:
+    """How far back a row backfills is a parameter of the dataset it syncs, not which dataset it is:
+    the id is the one the same account and stream always hashed to, so a window neither duplicates a
+    live row nor splits one stream across two.
+
+    The exclusion is the config model's to declare, never a name core matches across every backend.
+    A backend that declares nothing keeps every field in its identity — including one that happens
+    to be spelled `backfill_days` — so one backend naming a field cannot silently drop it from
+    another's identity, which a core-global set of key names would do."""
+    workspace_id = uuid4()
+    windowed = ConnectorSourceConfig.non_identity_fields
+    unwindowed = {"account": "acct", "stream": "messages"}
+    expected = source_row_id(workspace_id, "gmail", unwindowed, non_identity_keys=windowed)
+
+    assert source_row_id(workspace_id, "gmail", unwindowed) == expected
+    assert (
+        source_row_id(
+            workspace_id,
+            "gmail",
+            {**unwindowed, "backfill_days": 30, "backfill_after": "2026-01-15T09:30:00+00:00"},
+            non_identity_keys=windowed,
+        )
+        == expected
+    )
+    assert (
+        source_row_id(
+            workspace_id,
+            "gmail",
+            {**unwindowed, "backfill_days": "all"},
+            non_identity_keys=windowed,
+        )
+        == expected
+    )
+    assert (
+        source_row_id(
+            workspace_id, "gmail", {**unwindowed, "stream": "contacts"}, non_identity_keys=windowed
+        )
+        != expected
+    )
+    # a model that declares no non-identity fields — the default — hashes every one of them
+    assert source_row_id(workspace_id, "gmail", {**unwindowed, "backfill_days": 30}) != expected
+
+
 async def test_register_source_conflict_does_not_leak_the_owner_subject(db: None) -> None:
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
@@ -565,6 +608,343 @@ async def test_register_source_conflict_does_not_leak_the_owner_subject(db: None
     message = str(caught.value)
     assert str(owner_id) not in message
     assert "member:" not in message
+
+
+async def test_register_source_refuses_a_live_row_on_a_different_window(db: None) -> None:
+    """The window is deliberately not part of the row id, so two turns registering one binding on
+    different windows race onto the same row: the first insert lands and the second conflicts. The
+    loser must be told, under the same `for update` lock the authority check takes — the pages that
+    row syncs were selected by the window it holds, so silently keeping the first window would
+    report a binding that was never created, and a binding of several streams could end up with its
+    rows on two windows. Re-registering the window the row already holds stays the no-op it has
+    always been."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    owner_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    subject = member_subject(owner_id)
+    seven = ConnectorSourceConfig(
+        account="acct",
+        stream="messages",
+        backfill_days=7,
+        backfill_after=datetime(2026, 7, 30, 3, 50, 40, tzinfo=UTC),
+    )
+    ninety = ConnectorSourceConfig(
+        account="acct",
+        stream="messages",
+        backfill_days=90,
+        backfill_after=datetime(2026, 5, 8, 3, 50, 40, tzinfo=UTC),
+    )
+    with ws(workspace_id):
+        source_id = await ctx.register_source(
+            "gmail", seven, subject=subject, owner_member_id=owner_id
+        )
+        with pytest.raises(ValueError, match="asking for a different backfill_days"):
+            await ctx.register_source("gmail", ninety, subject=subject, owner_member_id=owner_id)
+        assert (
+            await ctx.register_source("gmail", seven, subject=subject, owner_member_id=owner_id)
+            == source_id
+        )
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.source.c.config).where(tables.source.c.id == source_id)
+            )
+        ).scalar_one()
+    assert stored["backfill_days"] == 7
+    assert stored["backfill_after"] == seven.backfill_after.isoformat().replace("+00:00", "Z")
+
+
+async def test_a_losing_racer_on_one_stream_set_creates_no_row_at_all(db: None) -> None:
+    """What keeps two concurrent registrations of ONE binding off two windows is not a transaction
+    around the binding — each `register_source` is its own — but the order its streams are
+    registered in. The extension registers them sorted, so both racers contend for the same stream
+    first; whoever loses it is refused before it has created any other, and the binding is left
+    whole on the winner's window rather than split across both.
+
+    That argument holds only for racers submitting the same stream set. A racer whose set is a
+    superset creates the streams the other never asked for before it reaches the contested one, and
+    can still split a binding — the same exposure a differing stream set already carries, and the
+    reason the guarantee is stated as narrowly as it is rather than as "cannot split"."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    owner_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    subject = member_subject(owner_id)
+    ordered = sorted(("messages", "conversations"))
+
+    def binding(days: int) -> list[ConnectorSourceConfig]:
+        return [
+            ConnectorSourceConfig(
+                account="acct",
+                stream=stream,
+                backfill_days=days,
+                backfill_after=datetime(2026, 7, 30, tzinfo=UTC) - timedelta(days=days),
+            )
+            for stream in ordered
+        ]
+
+    with ws(workspace_id):
+        for config in binding(7):
+            await ctx.register_source("outlook", config, subject=subject, owner_member_id=owner_id)
+        loser = binding(30)
+        with pytest.raises(ValueError, match="asking for a different backfill_days"):
+            for config in loser:
+                await ctx.register_source(
+                    "outlook", config, subject=subject, owner_member_id=owner_id
+                )
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.source.c.config).where(
+                    tables.source.c.workspace_id == workspace_id,
+                    tables.source.c.backend == "outlook",
+                )
+            )
+        ).all()
+    # the loser was refused on 'conversations', the first in sorted order, so it never reached
+    # 'messages' — both rows are the winner's and the binding is on one window
+    assert len(rows) == 2
+    assert {row.config["backfill_days"] for row in rows} == {7}
+
+
+async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db: None) -> None:
+    """Widening a row that a sync is already running would otherwise be undone by that run. It
+    completes by writing `cursor=next_cursor` under `claimed_by == its claim`, so it puts the row
+    back on the delta path it was just taken off — and nothing reports that: the stored config and
+    `status` name the wider window, the mail between the old floor and the new one is never
+    fetched, and re-applying the same request matches what is stored and does nothing, so there is
+    no way back through the supported path.
+
+    Breaking the claim with the cursor makes that write match no row. This drives the real
+    completion write's predicate rather than asserting on the column, so it fails if the claim is
+    left in place. `next_sync_at` needs no equivalent — `_rescheduled` already preserves a value
+    set after the claim was taken."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    owner_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    config = ConnectorSourceConfig(
+        account="acct",
+        stream="messages",
+        backfill_days=7,
+        backfill_after=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    claim = "worker-mid-flight"
+    with ws(workspace_id):
+        source_id = await ctx.register_source(
+            "gmail", config, subject=member_subject(owner_id), owner_member_id=owner_id
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    cursor="9001",
+                    claimed_by=claim,
+                    claim_expires_at=datetime.now(UTC) + timedelta(seconds=300),
+                )
+                .where(tables.source.c.id == source_id)
+            )
+        widened = config.model_copy(
+            update={"backfill_days": 365, "backfill_after": datetime(2026, 1, 30, tzinfo=UTC)}
+        )
+        await ctx.rewindow_sources({source_id: widened}, refetch=frozenset({source_id}))
+
+        # the in-flight run now completes, writing its cursor under the claim it still holds
+        async with workspace_tx() as connection:
+            landed = await connection.execute(
+                sa.update(tables.source)
+                .values(cursor="9002", claimed_by=None, claim_expires_at=None)
+                .where(
+                    tables.source.c.id == source_id,
+                    tables.source.c.claimed_by == claim,
+                    tables.source.c.removed_at.is_(None),
+                )
+            )
+            row = (
+                await connection.execute(
+                    sa.select(tables.source.c.cursor, tables.source.c.config).where(
+                        tables.source.c.id == source_id
+                    )
+                )
+            ).one()
+    assert landed.rowcount == 0  # the stale run's write matched nothing
+    assert row.cursor is None  # so the widened backfill still runs
+    assert row.config["backfill_days"] == 365
+
+
+async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: None) -> None:
+    """`rewindow_sources` rewrites a live row's config in place, so the one thing it must not admit
+    is an edit to a field the row id is derived from: the row would keep its id while its config
+    hashed to a different one, and every later registration of that binding would mint a second row
+    rather than settle on it — a corruption nothing downstream could detect. Re-hashing each config
+    against the row it is written to catches that, and the non-identity fields it exists to move
+    still go through. `refetch` clears only the cursor of the rows it names."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    owner_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=owner_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    subject = member_subject(owner_id)
+    config = ConnectorSourceConfig(account="acct", stream="messages", backfill_days=7)
+    with ws(workspace_id):
+        source_id = await ctx.register_source(
+            "gmail", config, subject=subject, owner_member_id=owner_id
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(cursor="9001")
+                .where(tables.source.c.id == source_id)
+            )
+        with pytest.raises(ValueError, match="would move it to"):
+            await ctx.rewindow_sources(
+                {source_id: config.model_copy(update={"stream": "contacts"})}
+            )
+        with pytest.raises(ValueError, match="would move it to"):
+            await ctx.rewindow_sources({source_id: config.model_copy(update={"account": "other"})})
+        async with workspace_tx() as connection:
+            untouched = (
+                await connection.execute(
+                    sa.select(tables.source.c.config, tables.source.c.cursor).where(
+                        tables.source.c.id == source_id
+                    )
+                )
+            ).one()
+        assert untouched.config["stream"] == "messages"
+        assert untouched.cursor == "9001"
+
+        widened = config.model_copy(
+            update={"backfill_days": 90, "backfill_after": datetime(2026, 5, 8, tzinfo=UTC)}
+        )
+        await ctx.rewindow_sources({source_id: widened}, refetch=frozenset({source_id}))
+        async with workspace_tx() as connection:
+            moved = (
+                await connection.execute(
+                    sa.select(tables.source.c.config, tables.source.c.cursor).where(
+                        tables.source.c.id == source_id
+                    )
+                )
+            ).one()
+    assert moved.config["backfill_days"] == 90
+    assert moved.cursor is None
+
+
+async def test_register_source_settles_two_racers_that_asked_for_the_same_window(db: None) -> None:
+    """Two turns asking for the same seven days resolve them against their own `now`, so their pins
+    differ by however long separated the two applies. They asked for one window, so the loser has to
+    settle on the row and read back the pin the winner stored: refusing here would report a window
+    change nobody asked for, over microseconds. What the comparison refuses is a different request,
+    which is the case above."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    winner = ConnectorSourceConfig(
+        account="acct",
+        stream="messages",
+        backfill_days=7,
+        backfill_after=datetime(2026, 7, 30, 3, 50, 40, 118_000, tzinfo=UTC),
+    )
+    loser = ConnectorSourceConfig(
+        account="acct",
+        stream="messages",
+        backfill_days=7,
+        backfill_after=datetime(2026, 7, 30, 3, 50, 40, 402_931, tzinfo=UTC),
+    )
+    with ws(workspace_id):
+        source_id = await ctx.register_source(
+            "gmail", winner, subject=SHARED_SUBJECT, owner_member_id=None
+        )
+        assert (
+            await ctx.register_source("gmail", loser, subject=SHARED_SUBJECT, owner_member_id=None)
+            == source_id
+        )
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.source.c.config).where(tables.source.c.id == source_id)
+            )
+        ).scalar_one()
+    assert stored["backfill_after"] == winner.backfill_after.isoformat().replace("+00:00", "Z")
+
+
+async def test_register_source_settles_on_a_row_that_predates_the_window(db: None) -> None:
+    """A row registered before a config could carry a window holds neither key, and re-registering
+    that binding must settle on it rather than refuse: an absent key and an unset one are the same
+    request. That is what lets an already-registered mail binding keep its row, its cursor, and its
+    pages while it keeps reaching all history."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    legacy = {"account": "acct", "stream": "messages", "base_url": None}
+    source_id = source_row_id(workspace_id, "gmail", legacy)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="gmail",
+                config=legacy,
+                subject=SHARED_SUBJECT,
+                cursor="9001",
+                next_sync_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        assert (
+            await ctx.register_source(
+                "gmail",
+                ConnectorSourceConfig(account="acct", stream="messages"),
+                subject=SHARED_SUBJECT,
+                owner_member_id=None,
+            )
+            == source_id
+        )
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.source.c.config, tables.source.c.cursor).where(
+                    tables.source.c.id == source_id
+                )
+            )
+        ).one()
+    assert row.config == legacy
+    assert row.cursor == "9001"
 
 
 async def test_boot_registered_folder_sources_are_shared(db: None, tmp_path: Path) -> None:

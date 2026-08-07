@@ -10,11 +10,11 @@ index/embed backends, a transaction over the extension's own tables, governed pr
 invoke, without reshaping what handlers already hold."""
 
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -63,7 +63,7 @@ from ufo.sandbox.conversation import ConversationSandbox
 from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, ProposalRef, Usage
-from ufo.sources.sync import PageFeed, source_row_id
+from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
 
@@ -802,17 +802,35 @@ class ExtensionContext:
         page it syncs is stamped with, `owner_member_id` the registering member, and `connection_id`
         the exact member-owned connection generation behind a broker source (None for direct or
         extension-owned feeds). Brokered row identity includes that connection generation; direct
-        row identity is (workspace, backend, config). Re-registering the same authority settles on
-        one row, while changing its owner or disclosure fails loud. `agent_id` — the main agent when
-        unnamed — is granted the source, so a feed a member adds for a second agent grants that
-        agent while still syncing once under one row. The core sync driver polls the row and lands
-        its pages in memory; embedding stays a job."""
+        row identity is (workspace, backend, config) minus the config model's
+        `SourceRowConfig.non_identity_fields` (a backfill window). Re-registering the same authority
+        settles on one row and leaves its stored config alone, while changing its owner, disclosure,
+        or `requested_fields()` fails loud under the same `for update` lock — so a caller is never
+        told a window was applied that the row does not hold. What is compared is the request, not
+        the instant it resolved to, since each caller resolves the same day count against its own
+        `now`; the loser settles on the winner's row and reads the winner's pin back.
+
+        That keeps one binding's streams on one window while the racing callers submit the same
+        stream set — both register in sorted order, so the loser is refused before creating any
+        other. Differing stream sets can still split a binding, as they already could: each
+        `register_source` is its own transaction.
+
+        Reviving a removed row instead takes the re-registering config, its identity keys being the
+        id's own inputs. `agent_id` — the main agent when unnamed — is granted the source, so a feed
+        a member adds for a second agent grants that agent while still syncing once under one row.
+        The core sync driver polls the row and lands its pages in memory; embedding stays a job."""
         payload = config.model_dump(mode="json")
+        non_identity = (
+            type(config).non_identity_fields
+            if isinstance(config, SourceRowConfig)
+            else frozenset[str]()
+        )
         source_id = source_row_id(
             self.store.workspace_id,
             backend,
             payload,
             connection_id=connection_id,
+            non_identity_keys=non_identity,
         )
         registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
@@ -887,6 +905,7 @@ class ExtensionContext:
                     sa.select(
                         tables.source.c.id,
                         tables.source.c.removed_at,
+                        tables.source.c.config,
                         tables.source.c.subject,
                         tables.source.c.owner_member_id,
                         tables.source.c.connection_id,
@@ -910,11 +929,26 @@ class ExtensionContext:
                         "a source with this configuration is already registered under a different "
                         "owner, connection, or disclosure; delete it before changing its authority"
                     )
+                requested = (
+                    type(config).requested_fields()
+                    if isinstance(config, SourceRowConfig)
+                    else frozenset[str]()
+                )
+                differing = sorted(
+                    field for field in requested if present.config.get(field) != payload.get(field)
+                )
+                if differing:
+                    raise ValueError(
+                        "a source with this configuration is already registered asking for a "
+                        f"different {', '.join(differing)}; delete it before changing what it "
+                        "reaches"
+                    )
             else:
                 await connection.execute(
                     sa.update(tables.source)
                     .values(
                         removed_at=None,
+                        config=payload,
                         subject=subject,
                         owner_member_id=owner_member_id,
                         connection_id=connection_id,
@@ -1123,6 +1157,81 @@ class ExtensionContext:
                     tables.page.c.tombstone.is_(False),
                 )
             )
+
+    async def rewindow_sources(
+        self, configs: Mapping[UUID, BaseModel], *, refetch: frozenset[UUID] = frozenset()
+    ) -> None:
+        """Rewrite live rows' non-identity config in one transaction, clearing the cursor of each
+        row in `refetch` so its next run re-walks from the new parameter. A binding's several
+        stream rows settle together, never in torn per-stream commits.
+
+        Every new config is re-hashed against the row it is written to and must still land on it,
+        so this can only move a parameter OF the dataset a row syncs, never which dataset it is —
+        a row whose id stopped deriving from its own config would be unfindable by every later
+        registration. Fails loud on that, and when a passed row is not live in this workspace.
+
+        A refetched row's claim is dropped with its cursor: a sync already in flight completes by
+        writing `cursor=next_cursor` under `claimed_by == its claim`, putting the row straight back
+        on the delta path it was just taken off. Dropping the claim makes that write match no row.
+        Its pages still land, harmlessly — digest-skipped on the re-walk, as after any expired
+        lease. `next_sync_at` needs no equivalent; `_rescheduled` already guards it."""
+        if not configs:
+            return
+        if not refetch <= configs.keys():
+            raise ValueError("every refetched source must be one of the rewindowed rows")
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.source.c.id,
+                        tables.source.c.backend,
+                        tables.source.c.connection_id,
+                    )
+                    .where(
+                        tables.source.c.id.in_(tuple(configs)),
+                        tables.source.c.workspace_id == self.store.workspace_id,
+                        tables.source.c.removed_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            if len(rows) != len(configs):
+                found = {row.id for row in rows}
+                raise ValueError(
+                    f"no live sources {sorted(set(configs) - found)} in this workspace"
+                )
+            for row in rows:
+                config = configs[row.id]
+                payload = config.model_dump(mode="json")
+                non_identity = (
+                    type(config).non_identity_fields
+                    if isinstance(config, SourceRowConfig)
+                    else frozenset[str]()
+                )
+                landed = source_row_id(
+                    self.store.workspace_id,
+                    row.backend,
+                    payload,
+                    connection_id=row.connection_id,
+                    non_identity_keys=non_identity,
+                )
+                if landed != row.id:
+                    raise ValueError(
+                        f"rewindowing source {row.id} would move it to {landed}: only a config "
+                        "field the model declares non-identity may be rewritten in place"
+                    )
+                values: dict[str, Any] = {"config": payload, "updated_at": now}
+                if row.id in refetch:
+                    values |= {
+                        "cursor": None,
+                        "next_sync_at": now,
+                        "claimed_by": None,
+                        "claim_expires_at": None,
+                    }
+                await connection.execute(
+                    sa.update(tables.source).values(**values).where(tables.source.c.id == row.id)
+                )
 
     async def schedule_source_sync(self, source_ids: tuple[UUID, ...]) -> None:
         """Pull live sources' next sync to now, so the sync driver claims them on its next pass —

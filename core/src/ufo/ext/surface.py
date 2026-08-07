@@ -36,7 +36,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from secrets import token_hex
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
@@ -522,19 +522,46 @@ class CredentialSlotView(BaseModel):
     filled: bool
 
 
-def _binding_fields(backend: str, config: dict[str, JsonValue]) -> dict[str, str | None]:
+class _BindingFields(TypedDict):
+    """The projection `_binding_fields` returns, typed so its `**` expansion into `SourceView`
+    is checked field by field rather than collapsed to one union — which is what lets the
+    projection carry a non-string identity field at all."""
+
+    name: str | None
+    stream: str | None
+    account_id: str | None
+    base_url: str | None
+    backfill_days: int | Literal["all"] | None
+
+
+def _binding_fields(backend: str, config: dict[str, JsonValue]) -> _BindingFields:
     """The `source` kind's identity for one row, from the stored connector config — the binding
     name plus the spec fields a panel act echoes back. A row whose config is not a connector's
-    (a config-registered folder, a feed) is not kind-managed and carries None throughout."""
+    (a config-registered folder, a feed) is not kind-managed and carries None throughout.
+
+    Every field the object's own identity is built from has to be here, not just the ones a column
+    displays: a panel act submits `{...row.apply, <the one thing it changes>}`, so a field missing
+    from this projection arrives at the verb as its default and reads as an edit nobody made. That
+    is what refuses the act — a resync whose submitted spec must equal the binding's, a share-flip
+    that reaches the identity check first. `backfill_days` is carried for exactly that reason and
+    for no display purpose; `test_the_portals_binding_projection_carries_every_identity_field`
+    holds the set complete as `SourceSpec` grows."""
     try:
         parsed = ConnectorSourceConfig.model_validate(config)
     except ValidationError:
-        return {"name": None, "stream": None, "account_id": None, "base_url": None}
+        return {
+            "name": None,
+            "stream": None,
+            "account_id": None,
+            "base_url": None,
+            "backfill_days": None,
+        }
     return {
         "name": binding_name(backend, parsed.account, parsed.base_url),
         "stream": parsed.stream,
         "account_id": "" if parsed.account == DIRECT_ACCOUNT else parsed.account,
         "base_url": parsed.base_url or "",
+        "backfill_days": parsed.backfill_days,
     }
 
 
@@ -556,6 +583,7 @@ class SourceView(BaseModel):
     stream: str | None = None
     account_id: str | None = None
     base_url: str | None = None
+    backfill_days: int | Literal["all"] | None = None
 
     @field_validator("next_sync_at")
     @classmethod

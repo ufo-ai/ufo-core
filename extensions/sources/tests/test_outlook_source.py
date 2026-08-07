@@ -1,23 +1,29 @@
 """Outlook connector over a mock transport: the derived `conversations` collapse over `/me/messages`
 with its `updated_at` watermark, the Graph `/delta` path that lands `@removed` items as tombstones
-and captures the `@odata.deltaLink` as the resume cursor, and the `StreamSkipped` a refused mailbox
-raises. Offline — a canned transport, no DB, no token."""
+and captures the `@odata.deltaLink` as the resume cursor, the pinned backfill window flooring both
+mail streams' first walk and no resume of one, and the `StreamSkipped` a refused mailbox raises.
+Offline — a canned transport, no DB, no token."""
 
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.outlook import OutlookConnector
+from ufo_ext_sources.outlook import CONVERSATIONS, MESSAGES, OutlookConnector
 
 from ufo.connectors import Credential
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 DELTA_LINK = "https://graph.microsoft.com/v1.0/me/mailFolders/delta?$deltatoken=abc"
+MESSAGES_DELTA_LINK = (
+    "https://graph.microsoft.com/v1.0/me/mailFolders/f1/messages/delta?$deltatoken=abc"
+)
+PINNED_CUTOFF = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -33,10 +39,15 @@ def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
 
 
 async def _fetch(
-    stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    cursor: str | None = None,
+    backfill_after: datetime | None = None,
 ):
     return await ConnectorBackend(connector=OutlookConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, backfill_after=backfill_after),
+        cursor,
+        _auth(handler),
     )
 
 
@@ -262,6 +273,63 @@ async def test_events_flatten_derives_title_start_and_strips_html_description() 
     assert record["location"] == "Room 1"
     assert "<" not in record["description"]
     assert "sync" in record["description"]
+
+
+async def test_the_pinned_window_floors_the_message_delta_but_not_its_resume() -> None:
+    """Graph's message delta accepts one comparison, `receivedDateTime ge`, and only on the request
+    that opens a folder's walk — a delta link carries its own floor, so a resume sends none."""
+    filters: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1.0/me/mailFolders":
+            return httpx.Response(200, json={"value": [{"id": "f1", "displayName": "Inbox"}]})
+        if path == "/v1.0/me/mailFolders/f1/messages/delta":
+            filters.append(request.url.params.get("$filter"))
+            return httpx.Response(
+                200,
+                json={
+                    "value": [{"id": "m1", "subject": "Roadmap"}],
+                    "@odata.deltaLink": DELTA_LINK,
+                },
+            )
+        return httpx.Response(404, json={"path": path})
+
+    first = await _fetch("messages", handle, backfill_after=PINNED_CUTOFF)
+    await _fetch(
+        "messages",
+        handle,
+        cursor=json.dumps({"f1": MESSAGES_DELTA_LINK}),
+        backfill_after=PINNED_CUTOFF,
+    )
+    await _fetch("messages", handle)
+
+    assert filters == ["receivedDateTime ge 2026-01-15T09:30:00Z", None, None]
+    assert {page.source_ref for page in first.pages} == {"messages/m1"}
+    assert MESSAGES.backfill_window_days == MAIL_BACKFILL_WINDOW_DAYS
+
+
+async def test_the_pinned_window_floors_the_conversations_walk() -> None:
+    filters: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1.0/me/messages":
+            return httpx.Response(404, json={"path": request.url.path})
+        filters.append(request.url.params.get("$filter"))
+        return httpx.Response(200, json={"value": []})
+
+    await _fetch("conversations", handle, backfill_after=PINNED_CUTOFF)
+    await _fetch(
+        "conversations", handle, cursor="2026-03-01T00:00:00Z", backfill_after=PINNED_CUTOFF
+    )
+    await _fetch("conversations", handle)
+
+    assert filters == [
+        "lastModifiedDateTime ge 2026-01-15T09:30:00Z",
+        "lastModifiedDateTime gt 2026-03-01T00:00:00Z",
+        None,
+    ]
+    assert CONVERSATIONS.backfill_window_days == MAIL_BACKFILL_WINDOW_DAYS
 
 
 async def test_stream_skipped_when_mailbox_refused() -> None:

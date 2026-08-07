@@ -18,6 +18,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar
 
@@ -26,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ufo.connectors import Credential
 
 TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
+MAIL_BACKFILL_WINDOW_DAYS = 30
 
 
 class PaginationStrategy(StrEnum):
@@ -90,7 +92,14 @@ class StreamSpec:
     incremental and the adapter only upserts and names explicit removals. `ordering` tells
     `PartitionWalk` how a partitioned stream's `cursor_field` is ordered, so a fan-out over
     repos/channels checkpoints and resumes each partition soundly. `pagination` routes a declared
-    strategy; None means the connector's `paginate` handles the stream directly."""
+    strategy; None means the connector's `paginate` handles the stream directly.
+
+    `backfill_window_days` is how far back this stream's FIRST sync reaches when the member names no
+    window; None declares none, and such a stream takes no override either. It is a declaration and
+    nothing more — read once at registration, where it resolves into the instant the row persists.
+    Every field here is a connector constant, so the run's own floor is not one: it arrives beside
+    the spec as `fetch_page`'s `backfill_after`. Keeping them apart is what stops a connector
+    recomputing `now - N days` per run."""
 
     name: str
     source_object: str
@@ -102,6 +111,7 @@ class StreamSpec:
     canonical: bool = True
     ordering: Ordering = Ordering.none
     pagination: Pagination | None = None
+    backfill_window_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -362,8 +372,14 @@ class Connector(ABC):
         credential: Credential,
         base_url: str,
         self_user_id: str | None,
+        backfill_after: datetime | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Async-yield records from `cursor`, excluding exact `self_user_id` where applicable."""
+        """Async-yield records from `cursor`, excluding exact `self_user_id` where applicable.
+
+        `backfill_after` is this row's pinned floor, resolved at registration and replayed every
+        run. A connector declaring `backfill_window_days` translates it into its provider's own
+        floor (a `q=after:` term, a `$filter`) on the request that opens a walk; a resume carries
+        its own and needs none. None is unbounded."""
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         """One record as `(title, body)` for recall. The default titles from the first present

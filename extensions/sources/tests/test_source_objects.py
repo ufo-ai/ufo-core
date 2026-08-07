@@ -11,12 +11,13 @@ import json
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
+from pydantic import ValidationError
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_KIND
@@ -24,6 +25,7 @@ from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     CONNECTION_OBJECT_KIND,
+    MAX_BACKFILL_DAYS,
     SOURCE_KIND,
     SourceObjects,
     SourceSpec,
@@ -39,6 +41,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue, context_for
 from ufo.ext.loader import turn_tools
 from ufo.ext.manifest import declared_slots
+from ufo.ext.surface import _binding_fields
 from ufo.grants import GrantStore, account_object_name
 from ufo.objects import UnknownObject
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -64,6 +67,8 @@ TOOL_NARRATION = "setting up the connection"
 ASANA = "asana"
 ASANA_HOST = "app.asana.com"
 GREENHOUSE = "greenhouse"
+GMAIL = "gmail"
+OUTLOOK = "outlook"
 GOOGLEDRIVE = "googledrive"
 FRESHDESK = "freshdesk"
 DECLARED_PROVIDERS = frozenset(CONNECTORS)
@@ -238,6 +243,7 @@ def _manifest_text(
     shared: bool = False,
     subscribers: tuple[str, ...] = (),
     resync: bool = False,
+    backfill_days: int | str | None = None,
 ) -> str:
     spec: dict[str, object] = {"provider": provider, "streams": list(streams)}
     if account_id:
@@ -250,6 +256,8 @@ def _manifest_text(
         spec["subscribers"] = list(subscribers)
     if resync:
         spec["resync"] = resync
+    if backfill_days is not None:
+        spec["backfill_days"] = backfill_days
     return yaml.safe_dump({"kind": SOURCE_KIND, "name": name, "spec": spec})
 
 
@@ -275,6 +283,17 @@ async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
     )
     assert result.is_error is False
     return yaml.safe_load(result.content[0].text)
+
+
+def _row_id_before_windows(
+    workspace_id: UUID, provider: str, account: str, stream: str, connection_id: UUID
+) -> UUID:
+    """The `source_row_id` a brokered binding hashed to before a config could carry a backfill
+    window — the golden value a windowed registration must still settle on."""
+    config = json.dumps({"account": account, "base_url": None, "stream": stream}, sort_keys=True)
+    return uuid5(
+        NAMESPACE_URL, f"{workspace_id}/source/{provider}/{config}/connection/{connection_id}"
+    )
 
 
 async def _rows(state: _Workspace, backend: str) -> list[sa.RowMapping]:
@@ -361,8 +380,10 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
         "shared": False,
         "subscribers": [],
         "resync": False,
+        "backfill_days": None,
     }
     assert set(fetched["status"]["streams"]) == {"projects", "workspaces"}
+    assert fetched["status"]["streams"]["projects"]["backfill_after"] is None
     assert datetime.fromisoformat(fetched["created_at"]).replace(tzinfo=UTC) == datetime(
         2026, 7, 3, tzinfo=UTC
     )
@@ -827,6 +848,397 @@ async def test_changing_streams_is_refused_as_an_update(db: None) -> None:
     assert [row["config"]["stream"] for row in rows] == ["workspaces"]
 
 
+async def test_a_mail_binding_pins_a_thirty_day_first_sync_window(db: None) -> None:
+    """A mail stream's declared window resolves at registration into an absolute cutoff the row
+    keeps, and re-applying the same spec leaves that cutoff where it is. The row id is the one this
+    account and stream hashed to before a binding could carry a window at all."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    before = datetime.now(UTC)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name))
+        [registered] = await _rows(state, GMAIL)
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name))
+        fetched = await _get(ctx, name)
+    [row] = await _rows(state, GMAIL)
+    pinned = datetime.fromisoformat(str(row["config"]["backfill_after"]))
+    assert row["config"]["backfill_days"] is None
+    assert before - timedelta(days=30) <= pinned <= datetime.now(UTC) - timedelta(days=30)
+    assert row["config"]["backfill_after"] == registered["config"]["backfill_after"]
+    assert row["id"] == _row_id_before_windows(
+        state.workspace_id, GMAIL, "acct-one", "messages", row["connection_id"]
+    )
+    assert fetched["spec"]["backfill_days"] is None
+    assert fetched["status"]["streams"]["messages"]["backfill_after"] == pinned.isoformat()
+
+
+async def test_a_binding_narrows_its_first_sync_window(db: None) -> None:
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    before = datetime.now(UTC)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=7))
+        fetched = await _get(ctx, name)
+    [row] = await _rows(state, GMAIL)
+    pinned = datetime.fromisoformat(str(row["config"]["backfill_after"]))
+    assert row["config"]["backfill_days"] == 7
+    assert before - timedelta(days=7) <= pinned <= datetime.now(UTC) - timedelta(days=7)
+    assert fetched["spec"]["backfill_days"] == 7
+
+
+async def test_a_binding_asks_for_all_history(db: None) -> None:
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days="all"))
+        fetched = await _get(ctx, name)
+    [row] = await _rows(state, GMAIL)
+    assert row["config"]["backfill_days"] == "all"
+    assert row["config"]["backfill_after"] is None
+    assert fetched["spec"]["backfill_days"] == "all"
+    assert fetched["status"]["streams"]["messages"]["backfill_after"] is None
+
+
+async def test_a_window_pins_only_the_streams_that_take_one(db: None) -> None:
+    """A binding's streams do not all read a window: a mail message stream floors its first walk at
+    the cutoff, while the calendar stream beside it reaches back the fixed distance Graph gives it.
+    So the request is stored on the binding — one window per binding, whichever row is read back —
+    while the cutoff is pinned only where a run honours it, which is what `status` reports per
+    stream. The request here is wider than the stream's own 30 days, the override direction
+    registration is otherwise never asked for."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, OUTLOOK, "acct-one")
+    ctx = _context(state, grants, brokered=(OUTLOOK,))
+    name = binding_name(OUTLOOK, "acct-one", None)
+    before = datetime.now(UTC)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=90))
+        fetched = await _get(ctx, name)
+    rows = {str(row["config"]["stream"]): row["config"] for row in await _rows(state, OUTLOOK)}
+    assert {stream: config["backfill_days"] for stream, config in rows.items()} == {
+        "events": 90,
+        "messages": 90,
+    }
+    assert rows["events"]["backfill_after"] is None
+    pinned = datetime.fromisoformat(str(rows["messages"]["backfill_after"]))
+    assert before - timedelta(days=90) <= pinned <= datetime.now(UTC) - timedelta(days=90)
+    streams = fetched["status"]["streams"]
+    assert streams["events"]["backfill_after"] is None
+    assert datetime.fromisoformat(str(streams["messages"]["backfill_after"])) == pinned
+    assert fetched["spec"]["backfill_days"] == 90
+
+
+async def test_widening_a_mixed_binding_moves_only_the_streams_that_take_a_window(
+    db: None,
+) -> None:
+    """Widening a binding whose streams do not all take a window has to do two different things at
+    once: re-pin and refetch the mail stream, and leave the calendar stream's cursor and (absent)
+    cutoff exactly where they were, since nothing about what it reaches has changed. Both rows still
+    carry the request, so the binding reads back one window whichever row answers — the invariant
+    registration established and a partial widen would break."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, OUTLOOK, "acct-one")
+    ctx = _context(state, grants, brokered=(OUTLOOK,))
+    name = binding_name(OUTLOOK, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=30))
+    async with workspace_tx() as connection:
+        await connection.execute(sa.update(tables.source).values(cursor="delta-link"))
+    was = {
+        str(row["config"]["stream"]): row["config"]["backfill_after"]
+        for row in await _rows(state, OUTLOOK)
+    }
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=365))
+        fetched = await _get(ctx, name)
+    rows = {str(row["config"]["stream"]): row for row in await _rows(state, OUTLOOK)}
+
+    assert {stream: row["config"]["backfill_days"] for stream, row in rows.items()} == {
+        "events": 365,
+        "messages": 365,
+    }
+    assert rows["events"]["config"]["backfill_after"] is None
+    assert rows["events"]["cursor"] == "delta-link"
+    assert datetime.fromisoformat(
+        str(rows["messages"]["config"]["backfill_after"])
+    ) == datetime.fromisoformat(str(was["messages"])) - timedelta(days=335)
+    assert rows["messages"]["cursor"] is None
+    assert fetched["spec"]["backfill_days"] == 365
+
+
+async def test_a_window_is_refused_where_no_selected_stream_takes_one(db: None) -> None:
+    """Accepting the knob on a binding nothing would honour pins, stores, and reports a cutoff that
+    changes what no run does — so the apply refuses instead, and says which streams do take a window
+    (none, for this provider)."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, ASANA, "acct-one")
+    ctx = _context(state, grants, brokered=(ASANA,))
+    name = binding_name(ASANA, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError, match="no selected 'asana' stream takes a backfill window"):
+            await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name, backfill_days=7))
+        with pytest.raises(ValueError, match="backfill window"):
+            await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name, backfill_days="all"))
+    assert await _rows(state, ASANA) == []
+
+
+def test_the_backfill_knob_refuses_a_day_count_outside_its_bounds() -> None:
+    """Both ends of the knob are validation, so a wrong number comes back as a refusal the agent can
+    read and correct: zero or negative would pin a cutoff at or after the instant of registration
+    and select an empty first sync, and a count big enough to overflow the `timedelta` behind the
+    pin would leave the handler contract as an `OverflowError` instead. `"all"` is the unbounded
+    case, so no legitimate request needs a six-digit day count."""
+    for refused in (0, -30, MAX_BACKFILL_DAYS + 1, 1_000_000, 739_000):
+        with pytest.raises(ValidationError):
+            SourceSpec(provider=GMAIL, streams=("messages",), backfill_days=refused)
+    accepted = SourceSpec(provider=GMAIL, streams=("messages",), backfill_days=MAX_BACKFILL_DAYS)
+    assert accepted.backfill_days == MAX_BACKFILL_DAYS
+
+
+async def test_widening_a_live_bindings_window_repins_it_from_the_same_anchor(db: None) -> None:
+    """Raising `backfill_days` re-pins a live binding in place and refetches the wider window,
+    because the floor only ever moves EARLIER: every page the binding already holds stays inside
+    the window, so nothing it synced is orphaned and the refetch lands each record back on its
+    existing page.
+
+    The new floor is resolved against the instant the binding was registered, never against `now`.
+    This binding is backdated to prove it: registered 60 days ago at 7 days, it is pinned 67 days
+    back, and widening to 30 must reach 90 days back — 30 from the anchor. Resolved against `now`
+    instead, 30 days would land 30 days back, which is a month LATER than the floor it replaced and
+    would strand everything between. The assertion is the exact instant, so that recompute fails it
+    rather than passing on a coin flip.
+
+    The cursor is cleared so the next run actually walks the widened floor; a gmail row that kept
+    its `historyId` would stay on the delta path and never revisit the wider window at all."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=7))
+    anchor = datetime.now(UTC) - timedelta(days=60)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source).values(
+                config={
+                    "account": "acct-one",
+                    "stream": "messages",
+                    "base_url": None,
+                    "backfill_days": 7,
+                    "backfill_after": (anchor - timedelta(days=7)).isoformat(),
+                },
+                cursor="9001",
+            )
+        )
+    [before] = await _rows(state, GMAIL)
+    with ws(state.workspace_id), agent(state.agent_id):
+        widened = await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=30))
+    [row] = await _rows(state, GMAIL)
+
+    assert widened["result"] != "created"
+    assert row["id"] == before["id"]
+    assert row["config"]["backfill_days"] == 30
+    assert datetime.fromisoformat(str(row["config"]["backfill_after"])) == anchor - timedelta(
+        days=30
+    )
+    # further back than it was, which is the whole licence for doing this in place
+    assert datetime.fromisoformat(str(row["config"]["backfill_after"])) < datetime.fromisoformat(
+        str(before["config"]["backfill_after"])
+    )
+    assert row["cursor"] is None
+
+
+async def test_dropping_a_request_that_names_the_declared_window_relabels_without_refetching(
+    db: None,
+) -> None:
+    """`backfill_days: 30` and an unset `backfill_days` resolve to the same instant on a stream that
+    declares 30, so a member who reads the spec back and resubmits it without the field is asking
+    for the window the row already holds. That is neither a widening nor a narrowing: it records
+    what was asked for and leaves the pin and the cursor alone. Refusing it as a narrowing — which
+    comparing the pins with `>=` would — would refuse a spec round-trip."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=30))
+    async with workspace_tx() as connection:
+        await connection.execute(sa.update(tables.source).values(cursor="9001"))
+    [before] = await _rows(state, GMAIL)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name))
+    [row] = await _rows(state, GMAIL)
+
+    assert row["config"]["backfill_days"] is None
+    assert row["config"]["backfill_after"] == before["config"]["backfill_after"]
+    assert row["cursor"] == "9001"
+
+
+async def test_the_portals_row_acts_survive_a_binding_that_holds_a_window(db: None) -> None:
+    """The portal reconstructs a binding's spec from `_binding_fields` and submits
+    `{...row.apply, <the one thing the button changes>}`. So every field the binding's identity is
+    built from has to survive that projection, or it arrives as its default and reads as an edit
+    the member never made — and both row acts die on a binding that merely holds a window:
+
+    Resync submits the binding's own spec with `resync` set, and `_resync` refuses anything whose
+    identity differs from the read-back binding's. Share submits `shared: true`, which reaches the
+    window comparison before the share-flip branch. Neither button can supply `backfill_days`, so
+    on any windowed binding both were permanently refused — resync with "a resync changes nothing
+    else", share with a refusal about the backfill window that names nothing the member touched.
+
+    This drives the portal's own payloads, built from the projection rather than hand-written, so
+    it fails again if the field is dropped from either end."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=7))
+    [row] = await _rows(state, GMAIL)
+    projected = _binding_fields(GMAIL, dict(row["config"]))
+    assert projected["backfill_days"] == 7  # the portal can see the window at all
+
+    def portal_act(**changed: object) -> str:
+        spec: dict[str, object] = {
+            "provider": GMAIL,
+            "streams": [str(projected["stream"])],
+            "account_id": projected["account_id"],
+            "base_url": projected["base_url"],
+            "shared": False,
+            "backfill_days": projected["backfill_days"],
+            **changed,
+        }
+        return yaml.safe_dump({"kind": SOURCE_KIND, "name": name, "spec": spec})
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, portal_act(resync=True))
+        await _apply(ctx, portal_act(shared=True))
+
+    [after] = await _rows(state, GMAIL)
+    assert after["config"]["backfill_days"] == 7
+    assert after["config"]["backfill_after"] == row["config"]["backfill_after"]
+    assert after["subject"] == SHARED_SUBJECT
+
+
+async def test_a_submit_editing_the_window_and_the_identity_is_refused_whole(db: None) -> None:
+    """Widening writes to the rows, and the identity refusal comes from the same apply, so the
+    order of the two decides whether a submit that changes both is refused whole or left half
+    applied. Every check runs before either write: this submit widens 7 to 90 AND drops a stream,
+    and has to come back refused with the binding still on 7 days and still syncing both streams —
+    not re-pinned to 90 by an apply the member was told did not happen."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, OUTLOOK, "acct-one")
+    ctx = _context(state, grants, brokered=(OUTLOOK,))
+    name = binding_name(OUTLOOK, "acct-one", None)
+    apply_tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=7))
+        args = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _manifest_text(OUTLOOK, ("messages",), name, backfill_days=90),
+            }
+        )
+        with pytest.raises(VerbNotSupported, match="identity is its config"):
+            await apply_tool.handler(ctx, args)
+    rows = {str(row["config"]["stream"]): row["config"] for row in await _rows(state, OUTLOOK)}
+    assert sorted(rows) == ["events", "messages"]
+    assert {config["backfill_days"] for config in rows.values()} == {7}
+
+
+async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None) -> None:
+    """Lowering `backfill_days` is refused where raising it is not, and the asymmetry is the point:
+    the pages between the old floor and the narrower one would be stranded live — never revisited,
+    never tombstoned, because mail is not `delete_missing`. Only delete-and-recreate tombstones
+    them, so that is the way out the refusal names. A binding already reaching all history refuses
+    every finite window for the same reason."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    delete_tool = _TOOLS["object_delete"]
+    apply_tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=90))
+        args = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _manifest_text(GMAIL, ("messages",), name, backfill_days=7),
+            }
+        )
+        with pytest.raises(VerbNotSupported, match="only ever widens"):
+            await apply_tool.handler(ctx, args)
+        [unchanged] = await _rows(state, GMAIL)
+        assert unchanged["config"]["backfill_days"] == 90
+        # all history is the widest there is, so every finite window narrows it
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days="all"))
+        narrowing = apply_tool.input_model.model_validate(
+            {
+                "user_description": TOOL_NARRATION,
+                "manifest": _manifest_text(GMAIL, ("messages",), name, backfill_days=365),
+            }
+        )
+        with pytest.raises(VerbNotSupported, match="already reaches all history"):
+            await apply_tool.handler(ctx, narrowing)
+        await delete_tool.handler(
+            ctx,
+            delete_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+            ),
+        )
+        recreated = await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=7))
+    assert recreated["result"] == "created"
+    [row] = await _rows(state, GMAIL)
+    assert row["removed_at"] is None
+    assert row["config"]["backfill_days"] == 7
+
+
+async def test_the_window_belongs_to_what_identifies_a_submitted_binding(db: None) -> None:
+    """A submit that differs from the binding's own read-back spec only in the window has to reach
+    the window path rather than the subscribers-only path an identity-equal submit takes, and a
+    resync carrying a changed window is refused whole rather than run while ignoring what it asked
+    for. Both ride on the window's membership in the submitted binding's identity. The narrowing
+    submit is the one that proves it reached the window path at all, since a widening one would
+    have been applied and a submit that never reached it would be a silent no-op."""
+    state = await _workspace()
+    grants = GrantStore()
+    await _grant(state, grants, GMAIL, "acct-one")
+    ctx = _context(state, grants, brokered=(GMAIL,))
+    name = binding_name(GMAIL, "acct-one", None)
+    apply_tool = _TOOLS["object_apply"]
+    narrowed = _manifest_text(GMAIL, ("messages",), name, account_id="acct-one", backfill_days=7)
+    resynced = _manifest_text(
+        GMAIL, ("messages",), name, account_id="acct-one", backfill_days=7, resync=True
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=90))
+        for submitted, refusal in ((narrowed, "only ever widens"), (resynced, "resync changes")):
+            args = apply_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "manifest": submitted}
+            )
+            with pytest.raises(VerbNotSupported, match=refusal):
+                await apply_tool.handler(ctx, args)
+    [row] = await _rows(state, GMAIL)
+    assert row["config"]["backfill_days"] == 90
+
+
 async def test_resync_pulls_the_bindings_next_sync_to_now(db: None) -> None:
     """A resync apply — the binding's current spec with `resync` set — schedules every stream
     row now, changes nothing else, and always reads back false; a resync that also edits the
@@ -1031,7 +1443,13 @@ async def test_direct_provider_requires_its_credential_then_registers(
         registered = await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name))
     assert registered["result"] == "created"
     [row] = await _rows(state, GREENHOUSE)
-    assert row["config"] == {"account": "default", "stream": "jobs", "base_url": None}
+    assert row["config"] == {
+        "account": "default",
+        "stream": "jobs",
+        "base_url": None,
+        "backfill_days": None,
+        "backfill_after": None,
+    }
 
 
 async def test_a_private_brokered_binding_links_to_the_connection_it_uses(db: None) -> None:

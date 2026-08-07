@@ -837,6 +837,40 @@ async def test_a_connector_row_carries_the_binding_the_kind_names(db: None, tmp_
     assert (direct.stream, direct.account_id, direct.base_url) == ("tickets", "", "t.io")
 
 
+async def test_a_windowed_connector_row_projects_its_window(db: None, tmp_path) -> None:
+    """A panel act submits `{...row.apply, <the one thing it changes>}`, so this projection has to
+    carry every field the binding's identity is built from — not just the ones a column displays.
+    `backfill_days` is here for no display purpose at all: it is carried solely so the round-trip
+    is faithful. Omitted, it reaches the verb as its default and reads as an edit nobody made,
+    which refuses the act outright — the extension suite drives both acts that die that way."""
+    workspace_id, _, _ = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                backend="gmail",
+                config={
+                    "account": "acct-7",
+                    "stream": "messages",
+                    "backfill_days": 7,
+                    "backfill_after": "2026-07-30T03:50:40Z",
+                },
+                subject=SHARED_SUBJECT,
+                owner_member_id=None,
+                next_sync_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    [view] = await context.list_sources(uuid4(), admin=True)
+
+    assert view.backfill_days == 7
+    assert (view.stream, view.account_id, view.base_url) == ("messages", "acct-7", "")
+
+
 async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
     workspace_id, agent_id, _ = await _seed()
     async with workspace_tx() as connection:

@@ -35,6 +35,9 @@ from ufo.sources.backend import (
     binding_name as binding_name,
 )
 from ufo.sources.connector import (
+    MAIL_BACKFILL_WINDOW_DAYS as MAIL_BACKFILL_WINDOW_DAYS,
+)
+from ufo.sources.connector import (
     Connector as Connector,
 )
 from ufo.sources.connector import (

@@ -8,6 +8,10 @@ resumes from that delta link and Graph reports only what changed since — items
 land as tombstones alongside the fresh delta link. Messages and contacts fan out per folder, so the
 cursor is a folder→delta-link map encoded as JSON. Conversations are derived: `/me/messages` is
 walked and collapsed to one record per `conversationId`, incremental over `lastModifiedDateTime`.
+Both mail streams floor their first walk at the stream's pinned backfill window — a `$filter` on the
+initial request only, since a delta or watermark resume already carries its own floor. The messages
+delta takes `receivedDateTime ge`, the one comparison Graph accepts there; the derived conversations
+walk filters the property it already orders and resumes by, `lastModifiedDateTime`.
 `render` uses the default titled-JSON — the list/delta reads carry only a `bodyPreview` snippet, not
 a full body. A `401`/`403` on the first Graph call yields `StreamSkipped` so the run records a skip,
 not a failure. The credential is resolved through the auth proxy the runner threads — this connector
@@ -22,12 +26,23 @@ from urllib.parse import quote
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec, get_path
+from ufo.sdk.sources import (
+    MAIL_BACKFILL_WINDOW_DAYS,
+    RestConnector,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    get_path,
+)
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _EVENT_DELTA_LOOKBACK = timedelta(days=365)
 _EVENT_DELTA_LOOKAHEAD = timedelta(days=730)
 _REFUSAL_STATUS = frozenset({401, 403})
+
+
+def _graph_instant(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _strip_html(value: Any) -> str | None:
@@ -75,6 +90,7 @@ MESSAGES = StreamSpec(
     cursor_field="lastModifiedDateTime",
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
+    backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
 )
 CONVERSATIONS = StreamSpec(
     name="conversations",
@@ -83,6 +99,7 @@ CONVERSATIONS = StreamSpec(
     cursor_field="updated_at",
     created_at_field="created_at",
     updated_at_field="updated_at",
+    backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
 )
 EVENTS = StreamSpec(
     name="events",
@@ -107,16 +124,38 @@ class OutlookConnector(RestConnector):
     base_url = "https://graph.microsoft.com/v1.0"
     streams_list = ALL_STREAMS
 
+    def paginate_source(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        """Widen the seam by the row's pinned floor, which only the two mail streams read, and
+        only on the request that opens a walk."""
+        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
+
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "conversations":
-                async for conversation_page in self._conversation_pages(client, cursor=cursor):
+                async for conversation_page in self._conversation_pages(
+                    client, cursor=cursor, after=backfill_after
+                ):
                     yield conversation_page
                 return
             if stream.name == "messages":
-                async for message_page in self._message_delta_pages(client, cursor=cursor):
+                async for message_page in self._message_delta_pages(
+                    client, cursor=cursor, after=backfill_after
+                ):
                     yield message_page
                 return
             if stream.name == "contacts":
@@ -143,11 +182,13 @@ class OutlookConnector(RestConnector):
         raise StreamSkipped(f"outlook stream {stream.name!r} is not implemented")
 
     async def _conversation_pages(
-        self, client: httpx.AsyncClient, *, cursor: str | None
+        self, client: httpx.AsyncClient, *, cursor: str | None, after: datetime | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         params: dict[str, Any] = {"$top": 100, "$orderby": "lastModifiedDateTime asc"}
         if cursor:
             params["$filter"] = f"lastModifiedDateTime gt {cursor}"
+        elif after is not None:
+            params["$filter"] = f"lastModifiedDateTime ge {_graph_instant(after)}"
         conversations: dict[str, dict[str, Any]] = {}
         async for messages in self._get_odata_pages(client, "/me/messages", params=params):
             for message in messages:
@@ -222,16 +263,19 @@ class OutlookConnector(RestConnector):
             return
 
     async def _message_delta_pages(
-        self, client: httpx.AsyncClient, *, cursor: str | None
+        self, client: httpx.AsyncClient, *, cursor: str | None, after: datetime | None
     ) -> AsyncIterator[StreamPage]:
         folder_cursors = _decode_cursor_map(cursor)
         folders = await self._list_mail_folders(client)
         next_cursors = dict(folder_cursors)
+        window = (
+            None if after is None else {"$filter": f"receivedDateTime ge {_graph_instant(after)}"}
+        )
         for folder_id in folders:
             folder_cursor = folder_cursors.get(folder_id)
             path = folder_cursor or f"/me/mailFolders/{quote(folder_id, safe='')}/messages/delta"
             async for page in self._graph_delta_pages(
-                client, initial_path=path, cursor=folder_cursor
+                client, initial_path=path, cursor=folder_cursor, params=window
             ):
                 for record in page.records:
                     record.setdefault("mail_folder_id", folder_id)

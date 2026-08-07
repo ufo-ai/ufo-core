@@ -105,6 +105,7 @@ class SlackConnector(RestConnector):
         *,
         cursor: str | None,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         return self.paginate(
             client,

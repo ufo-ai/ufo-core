@@ -1,12 +1,15 @@
 """Source registration through durable pages and the memory tool, on both auth paths: a broker grant
-resolving through its broker, and a member-added key resolving through the `direct` backend."""
+resolving through its broker, and a member-added key resolving through the `direct` backend — plus
+the pinned backfill window holding across a real `CursorExpired` reset, registration to wire."""
 
 import asyncio
 import base64
 import json
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qs
 from uuid import UUID, uuid4
 
@@ -19,6 +22,7 @@ import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_pipedream.client as pipedream
 import ufo_ext_pipedream.manifest as pipedream_manifest
 import ufo_ext_sources.manifest as sources_manifest
+import ufo_ext_sources.tools as sources_tools
 from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
@@ -378,6 +382,8 @@ def _pipedream_transport(workspace_id: UUID) -> httpx.MockTransport:
         url = httpx.URL(target)
         if url.path == "/gmail/v1/users/me/messages":
             return httpx.Response(200, json={"messages": [{"id": "m1"}]})
+        if url.path == "/gmail/v1/users/me/profile":
+            return httpx.Response(200, json={"emailAddress": "e2e@example.com", "historyId": "1"})
         if url.path == "/gmail/v1/users/me/history":
             return httpx.Response(200, json={"historyId": "9001"})
         if url.path.endswith("/messages/m1"):
@@ -690,3 +696,123 @@ async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_inst
     assert target.startswith("/api/profiles")
     assert headers["authorization"] == f"Klaviyo-API-Key {KLAVIYO_KEY}"
     assert headers["revision"] == KLAVIYO_REVISION
+
+
+async def test_a_pinned_window_survives_a_cursor_reset_through_the_whole_path(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The constraint the design calls the one that matters most, end to end: a member registers a
+    7-day mail window, the row syncs, its `historyId` ages out, and the driver clears the cursor —
+    and the second backfill has to ask the provider for the same instant the registration pinned. A
+    window recomputed per run (`now` minus the declared 30 days, or minus the request's 7) sends a
+    different floor here, and every message between the two floors is then dropped for good: mail is
+    not `delete_missing`, so nothing tombstones or revisits it. The floor is read off the wire, the
+    pin off the row the driver left behind. The one thing handed in is the instant registration
+    reads as `now`, six hours back, because Gmail's floor crosses the wire in whole seconds: a floor
+    recomputed from the member's own 7 days would otherwise be caught only when the two runs fall
+    in different seconds, which is a coin flip over a run this short."""
+    state = await _state()
+    grants = GrantStore()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    owner = pipedream.connection_user_id(state.workspace_id, "e2e")
+    queries: list[str | None] = []
+    aged_out: list[bool] = [False]
+
+    def provider(target: str) -> httpx.Response:
+        url = httpx.URL(target)
+        if url.path == "/gmail/v1/users/me/messages":
+            queries.append(parse_qs(url.query.decode()).get("q", [None])[0])
+            return httpx.Response(200, json={"messages": [{"id": "m1"}]})
+        if url.path == "/gmail/v1/users/me/profile":
+            return httpx.Response(200, json={"emailAddress": "e2e@example.com", "historyId": "1"})
+        if url.path == "/gmail/v1/users/me/history":
+            if aged_out[0]:
+                return httpx.Response(404, json={"error": {"code": 404}})
+            return httpx.Response(200, json={"historyId": "9001"})
+        if url.path.endswith("/messages/m1"):
+            if parse_qs(url.query.decode()).get("format") == ["minimal"]:
+                return httpx.Response(200, json={"id": "m1", "historyId": "9001"})
+            return httpx.Response(200, json=_gmail_message())
+        return httpx.Response(404, json={"target": target})
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        if request.method == "GET" and f"/accounts/{GMAIL_ACCOUNT}" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": GMAIL_ACCOUNT,
+                        "external_id": owner,
+                        "healthy": True,
+                        "app": {"name_slug": "gmail"},
+                    }
+                },
+            )
+        if "/proxy/" in request.url.path:
+            encoded = request.url.path.rsplit("/", 1)[-1]
+            return provider(
+                base64.urlsafe_b64decode((encoded + "=" * (-len(encoded) % 4)).encode()).decode()
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = pipedream.PipedreamClient(
+        client_id=f"cid_{uuid4().hex}",
+        client_secret="secret",
+        project_id="project",
+        transport=httpx.MockTransport(handle),
+    )
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
+    broker_manifest = pipedream_manifest.manifest()
+    connectors = _registry(broker_manifest, "gmail", _selected_fallback(store, broker_manifest))
+    await _register_grant(state, grants, "gmail", GMAIL_ACCOUNT, "gmail.googleapis.com")
+    context = _context(state, grants, connectors)
+    registered_at = datetime.now(UTC) - timedelta(hours=6)
+    monkeypatch.setattr(sources_tools, "datetime", SimpleNamespace(now=lambda _tz: registered_at))
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        await SourceObjects().apply(
+            context,
+            binding_name("gmail", GMAIL_ACCOUNT, None),
+            SourceSpec(provider="gmail", streams=("messages",), backfill_days=7),
+            None,
+            expected_generation=None,
+        )
+        driver = SyncDriver(
+            blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+            postgres=database_url.startswith("postgresql"),
+            backends=_source_backends((sources_manifest.manifest(),)),
+            source_credentials=SourceCredentialResolver(connectors),
+        )
+        await driver.run()
+    backfilled = await _source_row(state)
+    pinned = datetime.fromisoformat(str(backfilled.config["backfill_after"]))
+    assert backfilled.cursor == "9001"
+    assert pinned == registered_at - timedelta(days=7)
+
+    aged_out[0] = True
+    assert await _run_due(state, driver) == 1
+    reset = await _source_row(state)
+    assert reset.cursor is None
+    assert reset.config == backfilled.config
+
+    aged_out[0] = False
+    assert await _run_due(state, driver) == 0
+    assert queries == [f"after:{int(pinned.timestamp())}"] * 2
+
+
+async def _source_row(state: State) -> sa.Row[Any]:
+    """The workspace's one source row, config and cursor, as the driver left it."""
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.source.c.config, tables.source.c.cursor).where(
+                        tables.source.c.workspace_id == state.workspace_id
+                    )
+                )
+            ).one()

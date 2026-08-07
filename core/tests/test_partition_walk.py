@@ -8,6 +8,7 @@ are prepended between slices — the descending window resumes by value, never b
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -288,6 +289,7 @@ class _WalkConnector(Connector):
         credential: Credential,
         base_url: str,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             yield "p"
@@ -403,6 +405,7 @@ class _NonePartitionsConnector(Connector):
         credential: Credential,
         base_url: str,
         self_user_id: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             for key in self.data:

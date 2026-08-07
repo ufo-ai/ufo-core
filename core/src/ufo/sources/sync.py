@@ -55,6 +55,27 @@ SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
 SYNC_PROVIDER_FAULT_MAX_CHARS = 500
 
 
+class SourceRowConfig(BaseModel):
+    """A backend's typed source config holding parameters of the dataset a row syncs alongside the
+    fields that say WHICH dataset it is. A backend with no such parameters needs neither this base
+    nor its declarations; the default is that every field identifies the row.
+
+    `non_identity_fields` are left out of `source_row_id`'s hash, so changing one settles on the row
+    already syncing that dataset. `resolved_fields` is the subset each caller resolves for itself
+    against its own `now`, so `register_source` holds a live row only to the difference: what was
+    asked for must match, what it resolved to is the winner's to set. Each is declared by the model
+    that owns the fields, never by a name core matches across every backend."""
+
+    non_identity_fields: ClassVar[frozenset[str]] = frozenset()
+    resolved_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @classmethod
+    def requested_fields(cls) -> frozenset[str]:
+        """The non-identity fields a re-registration must state identically: those a caller asked
+        for rather than resolved."""
+        return cls.non_identity_fields - cls.resolved_fields
+
+
 def normalize_page_timestamp(value: str) -> str:
     if value.isdigit():
         try:
@@ -231,12 +252,20 @@ def source_row_id(
     config: Mapping[str, object],
     *,
     connection_id: UUID | None = None,
+    non_identity_keys: frozenset[str] = frozenset(),
 ) -> UUID:
-    """The deterministic source row id. Brokered rows include their connection generation."""
+    """The deterministic source row id. Brokered rows include their connection generation.
+
+    `non_identity_keys` — the caller's `SourceRowConfig.non_identity_fields`, empty for a model that
+    declares none — stay out of the hash: a backfill window is a parameter of the dataset a row
+    syncs, not part of which dataset it is, so the same (account, stream) settles on one row however
+    far back it was told to reach. The set is the config model's to declare rather than core's to
+    match by name, so one backend naming a field cannot drop it from another's identity."""
     generation = "" if connection_id is None else f"/connection/{connection_id}"
+    identity = {key: value for key, value in config.items() if key not in non_identity_keys}
     return uuid5(
         NAMESPACE_URL,
-        f"{workspace_id}/source/{backend}/{json.dumps(dict(config), sort_keys=True)}{generation}",
+        f"{workspace_id}/source/{backend}/{json.dumps(identity, sort_keys=True)}{generation}",
     )
 
 

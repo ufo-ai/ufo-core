@@ -4,9 +4,14 @@ A source object is one provider binding — an account (or the workspace's BYOK 
 tenant URL where the provider needs one — carrying the selected streams, each stream a `source`
 row the core sync driver polls. Identity IS the binding, so names derive from it
 (`<provider>-<8-hex digest>`): apply with the wrong name refuses and hands back the exact one,
-changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. A source
-is private to its registering member by default; the model decides `shared` at registration, and
-only the registrar may later flip a private source to shared — the reverse is
+changing streams is delete-and-recreate, and re-applying the identical spec is a no-op. A stream
+that declares its own reach — an email message stream, 30 days — bounds its first sync to that
+window or to whatever `backfill_days` asks for, resolved into an absolute date the row keeps.
+Raising it later re-pins further back from that same date and refetches; lowering it is
+delete-and-recreate. A stream declaring none takes no cutoff and reports none.
+
+A source is private to its registering member by default; the model decides `shared` at
+registration, and only the registrar may later flip a private source to shared — the reverse is
 delete-and-recreate. Delete is registrar-or-admin. Validation refuses with the
 valid provider and stream sets, so discovery is error-driven plus `object_explain`.
 
@@ -23,8 +28,8 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
-from typing import ClassVar
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -62,6 +67,7 @@ from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
 CONNECTION_OBJECT_KIND = "connection"
 SUMMARY_MAX = 120
+MAX_BACKFILL_DAYS = 36500
 SUBSCRIBERS_PREFIX = "subscribers:"
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
@@ -148,6 +154,20 @@ class SourceSpec(BaseModel):
         "not state: it changes nothing else, ignores subscribers, always reads back false, and "
         "is the registering member's or a workspace admin's.",
     )
+    backfill_days: Annotated[int, Field(ge=1, le=MAX_BACKFILL_DAYS)] | Literal["all"] | None = (
+        Field(
+            default=None,
+            description="How many days back the first sync reaches, for the selected streams that "
+            "take a window — email message streams today, 30 days unless this says otherwise. "
+            f'Set a number of days the member named (at most {MAX_BACKFILL_DAYS}), or "all" for '
+            "the whole history; every other stream reaches back the fixed distance its provider "
+            "gives it and a binding of only those refuses this field rather than report a window "
+            "nothing honours. It is pinned to a fixed date when the binding is registered, and "
+            "raising it later re-pins the binding further back from that same date and refetches "
+            "the wider window. Lowering it is refused — recreate the binding to reach back less "
+            "far, which tombstones what it had.",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -158,6 +178,7 @@ class _Stream:
     source_id: UUID
     created_at: datetime
     updated_at: datetime
+    backfill_after: datetime | None
 
 
 @dataclass(frozen=True)
@@ -167,6 +188,7 @@ class _Binding:
     base_url: str | None
     subject: str
     owner_member_id: UUID | None
+    backfill_days: int | Literal["all"] | None
     streams: tuple[_Stream, ...]
 
     @property
@@ -204,6 +226,7 @@ class _Binding:
             base_url=self.base_url or "",
             shared=self.subject == SHARED_SUBJECT,
             subscribers=subscribers,
+            backfill_days=self.backfill_days,
         )
 
     def summary(self) -> str:
@@ -232,6 +255,7 @@ def _require_connectors(ctx: ToolContext) -> ConnectorRegistry:
 async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
     grouped: dict[tuple[str, str, str | None], list[_Stream]] = {}
     disclosure: dict[tuple[str, str, str | None], tuple[str, UUID | None]] = {}
+    windows: dict[tuple[str, str, str | None], int | Literal["all"] | None] = {}
     for record in await ext.sources():
         if record.backend not in CONNECTORS:
             continue
@@ -245,9 +269,11 @@ async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
                 source_id=record.id,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
+                backfill_after=config.backfill_after,
             )
         )
         disclosure.setdefault(key, (record.subject, record.owner_member_id))
+        windows.setdefault(key, config.backfill_days)
     return tuple(
         _Binding(
             provider=provider,
@@ -255,6 +281,7 @@ async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
             base_url=base_url,
             subject=disclosure[(provider, account, base_url)][0],
             owner_member_id=disclosure[(provider, account, base_url)][1],
+            backfill_days=windows[(provider, account, base_url)],
             streams=tuple(sorted(streams, key=lambda stream: stream.name)),
         )
         for (provider, account, base_url), streams in grouped.items()
@@ -285,8 +312,28 @@ async def _store_subscribers(ext: ExtensionContext, name: str, mapping: dict[str
         await ext.store.delete(SUBSCRIBERS_PREFIX + name)
 
 
-def _binding_identity(spec: SourceSpec) -> tuple[str, tuple[str, ...], str, str, bool]:
-    return (spec.provider, tuple(sorted(spec.streams)), spec.account_id, spec.base_url, spec.shared)
+def _effective_days(request: int | Literal["all"] | None, declared: int | None) -> int | None:
+    """How many days back a stream is actually pinned: the member's request where they named one,
+    the stream's own declaration where they did not, and None where the answer is all history —
+    either because they asked for it or because the stream declares no window at all."""
+    if isinstance(request, int):
+        return request
+    if request is None:
+        return declared
+    return None
+
+
+def _binding_identity(
+    spec: SourceSpec,
+) -> tuple[str, tuple[str, ...], str, str, bool, int | Literal["all"] | None]:
+    return (
+        spec.provider,
+        tuple(sorted(spec.streams)),
+        spec.account_id,
+        spec.base_url,
+        spec.shared,
+        spec.backfill_days,
+    )
 
 
 def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -> None:
@@ -453,6 +500,9 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                 stream.name: {
                     "next_sync_at": stream.next_sync_at.isoformat(),
                     "consecutive_errors": stream.consecutive_errors,
+                    "backfill_after": (
+                        None if stream.backfill_after is None else stream.backfill_after.isoformat()
+                    ),
                 }
                 for stream in binding.streams
             },
@@ -483,13 +533,24 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                 f"unknown source provider {spec.provider!r}; providers: "
                 f"{', '.join(sorted(CONNECTORS))}"
             )
-        available = tuple(stream.name for stream in connector_cls().streams())
+        declared = {
+            stream.name: stream.backfill_window_days for stream in connector_cls().streams()
+        }
         streams = tuple(sorted(dict.fromkeys(spec.streams)))
-        unsupported = [stream for stream in streams if stream not in available]
+        unsupported = [stream for stream in streams if stream not in declared]
         if unsupported:
             raise ValueError(
                 f"{spec.provider!r} does not provide {', '.join(map(repr, unsupported))}; "
-                f"streams: {', '.join(available)}"
+                f"streams: {', '.join(declared)}"
+            )
+        windowed = frozenset(
+            stream_name for stream_name, window in declared.items() if window is not None
+        )
+        if spec.backfill_days is not None and not windowed.intersection(streams):
+            takes = f"windowed streams: {', '.join(sorted(windowed))}" if windowed else "none"
+            raise ValueError(
+                f"no selected {spec.provider!r} stream takes a backfill window — each reaches back "
+                f"the fixed distance its provider gives it, so leave backfill_days unset ({takes})"
             )
         base_url = _validated_base_url(spec.provider, spec.base_url or None)
         resolved_account = await self._resolved_account(ctx, spec)
@@ -506,12 +567,19 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             ),
             base_url=base_url or "",
             shared=spec.shared,
+            backfill_days=spec.backfill_days,
         )
         binding = await self._find(ctx.ext, name)
         if binding is not None:
             old_spec = binding.spec()
-            if resolved != old_spec:
-                if resolved.model_copy(update={"shared": old_spec.shared}) != old_spec:
+            # Every refusal is raised before any write: a submit that edits the window AND what
+            # identifies the binding is refused whole, never left with the window applied and the
+            # rest rejected. So the identity comparison holds the window equal — it is decided on
+            # its own terms below — and both writes happen only once nothing can still raise.
+            aligned = old_spec.model_copy(update={"backfill_days": resolved.backfill_days})
+            share_flip = resolved != aligned
+            if share_flip:
+                if resolved.model_copy(update={"shared": aligned.shared}) != aligned:
                     raise VerbNotSupported(
                         "a source's identity is its config — delete the binding and recreate it"
                     )
@@ -520,24 +588,114 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                         "a shared source stays shared — delete the binding and "
                         "recreate it privately"
                     )
+            if resolved.backfill_days != old_spec.backfill_days:
+                await self._widen_window(
+                    ctx,
+                    binding,
+                    declared=declared,
+                    windowed=windowed,
+                    account=resolved_account.account,
+                    base_url=base_url,
+                    request=resolved.backfill_days,
+                )
+            if share_flip:
                 await ext.set_source_subject(
                     tuple(stream.source_id for stream in binding.streams), SHARED_SUBJECT
                 )
             return
         subject = SHARED_SUBJECT if resolved.shared else member_subject(ctx.speaker_member_id)
+        registered_at = datetime.now(UTC)
         for stream in streams:
+            days = (
+                _effective_days(spec.backfill_days, declared[stream])
+                if stream in windowed
+                else None
+            )
             await ext.register_source(
                 spec.provider,
                 ConnectorSourceConfig(
                     account=resolved_account.account,
                     stream=stream,
                     base_url=base_url,
+                    backfill_days=spec.backfill_days,
+                    backfill_after=(None if days is None else registered_at - timedelta(days=days)),
                 ),
                 subject=subject,
                 owner_member_id=ctx.speaker_member_id,
                 connection_id=resolved_account.connection_id,
                 agent_id=ctx.turn.agent_id,
             )
+
+    async def _widen_window(
+        self,
+        ctx: ToolContext,
+        binding: _Binding,
+        *,
+        declared: dict[str, int | None],
+        windowed: frozenset[str],
+        account: str,
+        base_url: str | None,
+        request: int | Literal["all"] | None,
+    ) -> None:
+        """Re-pin a live binding further back, and refuse a request that reaches less far.
+
+        The new floor is resolved against the instant the binding was registered, reconstructed per
+        row as `backfill_after + <the days it was pinned with>`. Against `now` instead, widening an
+        old binding would pin a LATER floor than the one it replaced.
+
+        Only widening is safe: the floor moves earlier, so the refetch re-walks a superset and
+        every synced page stays inside the window. Narrowing would strand the pages between the two
+        floors — never revisited, never tombstoned, since mail is not `delete_missing`.
+
+        Rows whose stream takes no window carry the request but hold no cutoff and are not
+        refetched."""
+        ext = _require_ext(ctx.ext)
+        pins: dict[UUID, datetime | None] = {}
+        for stream in binding.streams:
+            if stream.name not in windowed:
+                pins[stream.source_id] = None
+                continue
+            was = _effective_days(binding.backfill_days, declared[stream.name])
+            now_wants = _effective_days(request, declared[stream.name])
+            if now_wants is None:
+                pins[stream.source_id] = None
+                continue
+            if stream.backfill_after is None or was is None:
+                raise VerbNotSupported(
+                    f"{binding.name} already reaches all history on {stream.name!r} — a binding's "
+                    "backfill window only ever widens in place; delete it and recreate it to "
+                    "reach back less far"
+                )
+            anchor = stream.backfill_after + timedelta(days=was)
+            pin = anchor - timedelta(days=now_wants)
+            # strictly later is the narrowing; landing on the same instant is a request that
+            # resolves to the window the row already holds — dropping an explicit `30` where the
+            # stream declares 30 — and only relabels what was asked for
+            if pin > stream.backfill_after:
+                raise VerbNotSupported(
+                    f"{binding.name} is pinned to {stream.backfill_after.isoformat()} on "
+                    f"{stream.name!r} and this reaches back only to {pin.isoformat()} — a "
+                    "binding's backfill window only ever widens in place; delete it and recreate "
+                    "it to reach back less far"
+                )
+            pins[stream.source_id] = pin
+        await ext.rewindow_sources(
+            {
+                stream.source_id: ConnectorSourceConfig(
+                    account=account,
+                    stream=stream.name,
+                    base_url=base_url,
+                    backfill_days=request,
+                    backfill_after=pins[stream.source_id],
+                )
+                for stream in binding.streams
+            },
+            refetch=frozenset(
+                stream.source_id
+                for stream in binding.streams
+                if pins[stream.source_id] != stream.backfill_after
+            ),
+        )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         ext = _require_ext(ctx.ext)
