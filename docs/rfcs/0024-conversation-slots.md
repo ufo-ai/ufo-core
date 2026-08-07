@@ -48,6 +48,7 @@ class ConversationSlotContext:
     audience: Audience
     messages: tuple[Message, ...]
     compacted: bool
+    projection: ConversationSlotPayload | None = None
 ```
 
 `Manifest.conversation_slots` is empty by default. Core fails boot on a duplicate id, invalid label
@@ -60,6 +61,11 @@ the declaring extension does not gain a transcript-read capability outside that 
 Only then does it invoke `summarize`; `None` means the provider contributes no slot to this
 conversation. Selecting a returned slot invokes `read` lazily. A callback receives no request,
 cookie, bearer, `SurfaceContext`, or authority primitive.
+
+For a core/web-owned source such as live workspace files, the web surface lazily prepares one
+bounded, schema-validated `projection` matching the provider's declared content type. This is data,
+not a sandbox or database capability. Extension-owned providers leave it `None` and read their own
+scoped records through `ext`.
 
 ```text
 GET .../conversations/{conversation}/slots

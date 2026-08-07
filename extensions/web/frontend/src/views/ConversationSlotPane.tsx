@@ -1,9 +1,12 @@
 import { useState } from "react";
 
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { BASE } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
+import { day } from "@/lib/moments";
 import type { Agent } from "@/lib/types";
+import { formatSize } from "@/views/Chat";
 
 export type ConversationSlotSummary = {
   id: string;
@@ -17,10 +20,14 @@ export type ConversationSlotsPayload = { slots: ConversationSlotSummary[] };
 
 type Change = { path: string; patch: string; truncated: boolean };
 type ChangesPayload = { type: "changes"; changes: Change[]; truncated: boolean };
+type ConversationFile = { path: string; size_bytes: number; modified_at: string };
+type FilesPayload = { type: "files"; files: ConversationFile[]; truncated: boolean };
 export type PortalIcon = "artifact" | "diff" | "file" | "link";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
-type SlotPayload = ChangesPayload | SourcesPayload;
+type SlotPayload = ChangesPayload | FilesPayload | SourcesPayload;
+
+const MAX_FILE_PREVIEW_BYTES = 256 * 1024;
 
 function slotPath(
   agentId: string,
@@ -46,6 +53,24 @@ function slotsPath(agentId: string, conversationId: string, rootConversationId?:
     "/conversations/" +
     conversationId +
     "/slots" +
+    (rootConversationId ? "?root=" + rootConversationId : "")
+  );
+}
+
+function filePath(
+  agentId: string,
+  conversationId: string,
+  path: string,
+  rootConversationId?: string,
+) {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  return (
+    "/agents/" +
+    agentId +
+    "/conversations/" +
+    conversationId +
+    "/files/" +
+    encoded +
     (rootConversationId ? "?root=" + rootConversationId : "")
   );
 }
@@ -119,7 +144,14 @@ export function ConversationSlotPane({
             </PanelEmpty>
           )}
         >
-          {(payload) => <SlotContent payload={payload} />}
+          {(payload) => (
+            <SlotContent
+              payload={payload}
+              agentId={agent.id}
+              conversationId={conversationId}
+              rootConversationId={rootConversationId}
+            />
+          )}
         </Panel>
       </div>
     </>
@@ -159,7 +191,17 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
   );
 }
 
-function SlotContent({ payload }: { payload: SlotPayload }) {
+function SlotContent({
+  payload,
+  agentId,
+  conversationId,
+  rootConversationId,
+}: {
+  payload: SlotPayload;
+  agentId: string;
+  conversationId: string;
+  rootConversationId?: string;
+}) {
   if (payload.type === "changes") {
     if (!payload.changes.length && !payload.truncated) return <PanelEmpty>No changes.</PanelEmpty>;
     return (
@@ -171,6 +213,16 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
           <p className="m-0 opacity-(--muted-soft)">Some changes may not be shown.</p>
         ) : null}
       </div>
+    );
+  }
+  if (payload.type === "files") {
+    return (
+      <FilesContent
+        payload={payload}
+        agentId={agentId}
+        conversationId={conversationId}
+        rootConversationId={rootConversationId}
+      />
     );
   }
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
@@ -202,6 +254,80 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
       ))}
       {payload.truncated ? (
         <p className="m-0 opacity-(--muted-soft)">Some sources may not be shown.</p>
+      ) : null}
+    </div>
+  );
+}
+
+function FilesContent({
+  payload,
+  agentId,
+  conversationId,
+  rootConversationId,
+}: {
+  payload: FilesPayload;
+  agentId: string;
+  conversationId: string;
+  rootConversationId?: string;
+}) {
+  const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
+
+  async function view(file: ConversationFile) {
+    setPreview({ path: file.path, text: "Reading…" });
+    const path = filePath(agentId, conversationId, file.path, rootConversationId);
+    try {
+      const response = await fetch(BASE + path, { credentials: "same-origin" });
+      setPreview({
+        path: file.path,
+        text: response.ok ? await response.text() : "Error " + response.status + " — retry.",
+      });
+    } catch {
+      setPreview({ path: file.path, text: "Network error — retry." });
+    }
+  }
+
+  if (!payload.files.length && !payload.truncated) {
+    return <PanelEmpty>No files in this conversation's workspace.</PanelEmpty>;
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-xl">
+      <ul className="m-0 flex list-none flex-col gap-sm p-0">
+        {payload.files.map((file) => {
+          const path = filePath(agentId, conversationId, file.path, rootConversationId);
+          return (
+            <li key={file.path} className="min-w-0 rounded-panel border border-edge p-lg">
+              <div className="flex min-w-0 items-start gap-md">
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    className="max-w-full border-0 bg-transparent p-0 text-left font-mono text-label font-strong text-inherit underline disabled:no-underline"
+                    disabled={file.size_bytes > MAX_FILE_PREVIEW_BYTES}
+                    onClick={() => view(file)}
+                  >
+                    <span className="block break-all">{file.path}</span>
+                  </button>
+                  <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+                    {formatSize(file.size_bytes)} · {day(file.modified_at)}
+                  </p>
+                </div>
+                <a href={BASE + path}>Download</a>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {preview ? (
+        <section className="min-w-0 overflow-hidden rounded-panel border border-edge">
+          <h2 className="m-0 break-all border-b border-edge bg-fill-subtle px-lg py-sm font-mono text-label font-strong">
+            {preview.path}
+          </h2>
+          <pre className="m-0 max-h-[32rem] overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
+            {preview.text}
+          </pre>
+        </section>
+      ) : null}
+      {payload.truncated ? (
+        <p className="m-0 opacity-(--muted-soft)">Some files may not be shown.</p>
       ) : null}
     </div>
   );

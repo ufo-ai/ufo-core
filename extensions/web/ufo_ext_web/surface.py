@@ -64,10 +64,13 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.manifest import (
     CONVERSATION_CHANGES_MAX,
+    CONVERSATION_FILES_MAX,
     ChangesSlotPayload,
     ConversationChange,
+    ConversationFile,
     ConversationSlotContext,
     ConversationSlotProvider,
+    FilesSlotPayload,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -1308,6 +1311,31 @@ async def _slot_context(
     )
 
 
+async def _project_slot_context(
+    ctx: SurfaceContext,
+    slot_context: ConversationSlotContext,
+    content: type[BaseModel],
+) -> ConversationSlotContext:
+    if content is not FilesSlotPayload:
+        return slot_context
+    listed = await ctx.list_workspace_files(slot_context.conversation_id)
+    files = tuple(
+        ConversationFile(
+            path=entry.path,
+            size_bytes=entry.size_bytes,
+            modified_at=entry.modified_at,
+        )
+        for entry in listed[:CONVERSATION_FILES_MAX]
+    )
+    return replace(
+        slot_context,
+        projection=FilesSlotPayload(
+            files=files,
+            truncated=len(listed) > CONVERSATION_FILES_MAX,
+        ),
+    )
+
+
 async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
     """Available typed slots for one authorized conversation."""
     authorized = await _slot_target(ctx, request)
@@ -1323,11 +1351,15 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
     if shared_context is None:
         return Response("no such conversation", status_code=404)
     for bound in ctx.conversation_slots:
-        slot_context = replace(
-            shared_context,
-            ext=replace(bound.ext, audience=shared_context.audience),
-        )
         try:
+            slot_context = await _project_slot_context(
+                ctx,
+                replace(
+                    shared_context,
+                    ext=replace(bound.ext, audience=shared_context.audience),
+                ),
+                bound.provider.content,
+            )
             count = await bound.provider.summarize(slot_context)
         except Exception as error:
             log(
@@ -1364,6 +1396,7 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     slot_context = await _slot_context(ctx, agent_id, conversation_id, bound.ext)
     if slot_context is None:
         return Response("no such conversation", status_code=404)
+    slot_context = await _project_slot_context(ctx, slot_context, bound.provider.content)
     payload = await bound.provider.read(slot_context)
     if type(payload) is not bound.provider.content:
         raise TypeError(
@@ -1393,11 +1426,36 @@ CHANGES_SLOT = ConversationSlotProvider(
 )
 
 
+def _files_projection(ctx: ConversationSlotContext) -> FilesSlotPayload:
+    if not isinstance(ctx.projection, FilesSlotPayload):
+        raise RuntimeError("files slot needs the host file projection")
+    return ctx.projection
+
+
+async def _summarize_files(ctx: ConversationSlotContext) -> int | None:
+    files = _files_projection(ctx).files
+    return len(files) or None
+
+
+async def _read_files(ctx: ConversationSlotContext) -> FilesSlotPayload:
+    return _files_projection(ctx)
+
+
+FILES_SLOT = ConversationSlotProvider(
+    id="files",
+    label="Files",
+    icon="file",
+    content=FilesSlotPayload,
+    summarize=_summarize_files,
+    read=_read_files,
+)
+
+
 async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
     """One workspace file's bytes, streamed from the live sandbox under the same gate that listed
-    it — the path is workspace-scoped in the session, so it escapes neither the workspace nor the
-    container, and a member reads exactly what that conversation's agent wrote."""
-    authorized = await _readable_conversation(ctx, request)
+    it — including a spawned child's root-conversation proof — so the workspace-scoped path escapes
+    neither the workspace nor the container."""
+    authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
     _agent_id, conversation_id = authorized

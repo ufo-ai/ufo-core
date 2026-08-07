@@ -16,10 +16,16 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_CHANGES_MAX as CONVERSATION_CHANGES_MAX,
 )
 from ufo.ext.conversation_slots import (
+    CONVERSATION_FILES_MAX as CONVERSATION_FILES_MAX,
+)
+from ufo.ext.conversation_slots import (
     ChangesSlotPayload as ChangesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
     ConversationChange as ConversationChange,
+)
+from ufo.ext.conversation_slots import (
+    ConversationFile as ConversationFile,
 )
 from ufo.ext.conversation_slots import (
     ConversationSlotContext as ConversationSlotContext,
@@ -29,6 +35,9 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.conversation_slots import (
     ConversationSource as ConversationSource,
+)
+from ufo.ext.conversation_slots import (
+    FilesSlotPayload as FilesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
     SourcesSlotPayload as SourcesSlotPayload,

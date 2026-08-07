@@ -6284,6 +6284,48 @@ async def test_conversation_changes_stay_with_their_execution_conversation(
     }
 
 
+async def test_live_workspace_files_fill_the_typed_conversation_slot(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _config, _hub, _blob, sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "files@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="files",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    with ws(workspace_id):
+        await sandboxes.write(conversation_id, "notes/brief draft.md", b"# Brief\n\nShip it.\n")
+
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    inventory = await client.get(f"{base}/slots", headers=headers)
+    payload = await client.get(f"{base}/slots/files", headers=headers)
+    downloaded = await client.get(
+        f"{base}/files/{quote('notes/brief draft.md', safe='/')}", headers=headers
+    )
+
+    assert inventory.status_code == 200
+    assert inventory.json()["slots"][-1] == {
+        "id": "files",
+        "label": "Files",
+        "icon": "file",
+        "kind": "files",
+        "count": 1,
+    }
+    assert payload.status_code == 200
+    assert payload.json()["type"] == "files"
+    assert payload.json()["truncated"] is False
+    assert payload.json()["files"][0]["path"] == "notes/brief draft.md"
+    assert payload.json()["files"][0]["size_bytes"] == 18
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"# Brief\n\nShip it.\n"
+
+
 async def test_conversation_reads_ride_the_same_gate(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],

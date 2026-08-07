@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
@@ -5,11 +6,14 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.ext.conversation_slots import (
     CONVERSATION_CHANGES_MAX,
+    CONVERSATION_FILES_MAX,
     ChangesSlotPayload,
     ConversationChange,
+    ConversationFile,
     ConversationSlotContext,
     ConversationSlotProvider,
     ConversationSource,
+    FilesSlotPayload,
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
 
@@ -83,6 +87,20 @@ def test_changes_payload_bounds_its_collection() -> None:
     with pytest.raises(ValidationError, match="too_long"):
         ChangesSlotPayload(
             changes=(change,) * (CONVERSATION_CHANGES_MAX + 1),
+            truncated=True,
+        )
+
+
+def test_files_payload_bounds_its_collection() -> None:
+    file = ConversationFile(
+        path="notes/brief.md",
+        size_bytes=42,
+        modified_at=datetime(2026, 8, 6, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValidationError, match="too_long"):
+        FilesSlotPayload(
+            files=(file,) * (CONVERSATION_FILES_MAX + 1),
             truncated=True,
         )
 

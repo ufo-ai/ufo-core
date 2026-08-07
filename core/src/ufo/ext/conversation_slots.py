@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -15,6 +16,7 @@ from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 
 CONVERSATION_CHANGE_PATCH_MAX_CHARS = 25_000
 CONVERSATION_CHANGES_MAX = 100
+CONVERSATION_FILES_MAX = 100
 CONVERSATION_SOURCE_URL_MAX_CHARS = 4_096
 CONVERSATION_SOURCE_TITLE_MAX_CHARS = 500
 CONVERSATION_SOURCE_SNIPPET_MAX_CHARS = 2_000
@@ -37,6 +39,22 @@ class ChangesSlotPayload(BaseModel):
 
     type: Literal["changes"] = "changes"
     changes: tuple[ConversationChange, ...] = Field(max_length=CONVERSATION_CHANGES_MAX)
+    truncated: bool
+
+
+class ConversationFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
+    size_bytes: int = Field(ge=0)
+    modified_at: datetime
+
+
+class FilesSlotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["files"] = "files"
+    files: tuple[ConversationFile, ...] = Field(max_length=CONVERSATION_FILES_MAX)
     truncated: bool
 
 
@@ -70,8 +88,12 @@ class SourcesSlotPayload(BaseModel):
     truncated: bool
 
 
-ConversationSlotPayload = ChangesSlotPayload | SourcesSlotPayload
-SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (ChangesSlotPayload, SourcesSlotPayload)
+ConversationSlotPayload = ChangesSlotPayload | FilesSlotPayload | SourcesSlotPayload
+SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
+    ChangesSlotPayload,
+    FilesSlotPayload,
+    SourcesSlotPayload,
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +104,7 @@ class ConversationSlotContext:
     audience: Audience
     messages: tuple[Message, ...]
     compacted: bool
+    projection: ConversationSlotPayload | None = None
 
 
 ConversationSlotSummary = Callable[[ConversationSlotContext], Awaitable[int | None]]

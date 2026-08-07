@@ -278,6 +278,47 @@ test("multiple slot types coexist and sources render as external links", async (
   expect(screen.getByText("The retrieved result.").closest("strong")).toBeTruthy();
 });
 
+test("files slot previews and downloads a workspace file in place", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/files"]: () =>
+      json({
+        type: "files",
+        files: [
+          {
+            path: "notes/brief draft.md",
+            size_bytes: 18,
+            modified_at: "2026-08-06T12:00:00Z",
+          },
+        ],
+        truncated: false,
+      }),
+    ["/conversations/" + CONVO_ID + "/files/notes/brief%20draft.md"]: () =>
+      new Response("# Brief\n\nShip it.\n"),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [{ id: "files", label: "Files", icon: "file", kind: "files", count: 1 }],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Files 1" }));
+  const file = await screen.findByRole("button", { name: "notes/brief draft.md" });
+  const download = screen.getByRole("link", { name: "Download" });
+  expect(download.getAttribute("href")).toBe(
+    "/surface/web/agents/" +
+      AGENT.id +
+      "/conversations/" +
+      CONVO_ID +
+      "/files/notes/brief%20draft.md",
+  );
+
+  await userEvent.click(file);
+  await waitFor(() =>
+    expect(document.querySelector("aside pre")?.textContent).toBe("# Brief\n\nShip it.\n"),
+  );
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],
