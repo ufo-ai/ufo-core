@@ -414,3 +414,343 @@ resource "datadog_dashboard" "turns" {
     }
   }
 }
+
+# How well the coding agent executes, as distinct from how fast: the turns board answers throughput
+# and latency, this one answers completion, tool-call correctness, and effort spent per result.
+#
+# Every number here is a process proxy. Nothing in `ufo.*` records whether the code the agent wrote
+# was correct — no eval score, test result, or review verdict is emitted — so this board catches an
+# agent that gives up, loops, or misuses a tool, and is blind to one that confidently ships wrong
+# code. That gap is the note's first paragraph because a reader who misses it over-trusts the board.
+
+resource "datadog_dashboard" "coding_quality" {
+  title       = "ufo coding agent quality"
+  layout_type = "ordered"
+
+  template_variable {
+    name     = "env"
+    prefix   = "env"
+    defaults = ["testing"]
+  }
+
+  template_variable {
+    name     = "profile"
+    prefix   = "profile"
+    defaults = ["coding"]
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Nothing on this board says the code was correct. There is no eval score, test result, or
+        review verdict in `ufo.*`, so every number here is a process proxy: it catches an agent that
+        gives up, loops, or misuses a tool, and misses one that ships wrong code confidently.
+
+        Set `$profile` to `coding` or `code_review`. Turns that report no profile are excluded, and
+        the last graph is how large that excluded share is — read it before trusting a rate above.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "turn success rate"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.turn_terminal_total{$env,$profile,status:done}.as_count() / sum:ufo.turn_terminal_total{$env,$profile}.as_count()"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = "<"
+          value      = 90
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = "<"
+          value      = 97
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = ">="
+          value      = 97
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  # `invalid_call` is the model's fault and the rest are the tool's or the environment's, so the two
+  # rates sit apart: one says fix the prompt, the other says fix the tool.
+  widget {
+    query_value_definition {
+      title       = "tool call error rate"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 2
+      request {
+        q          = "100 * sum:ufo.tool_call_total{$env,$profile,!outcome:ok}.as_count() / sum:ufo.tool_call_total{$env,$profile}.as_count()"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = ">"
+          value      = 5
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 2
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 2
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "invalid call rate"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 2
+      request {
+        q          = "100 * sum:ufo.tool_call_total{$env,$profile,outcome:invalid_call}.as_count() / sum:ufo.tool_call_total{$env,$profile}.as_count()"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = ">"
+          value      = 1
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 0.2
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 0.2
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  # Rounds and tokens are per execution, terminals are per turn, so both ratios read high wherever a
+  # turn parked and resumed. They are trend series, not absolute counts.
+  widget {
+    query_value_definition {
+      title     = "rounds per completed turn"
+      autoscale = false
+      precision = 1
+      request {
+        q          = "sum:ufo.turn_rounds_total{$env,$profile,status:done}.as_count() / sum:ufo.turn_terminal_total{$env,$profile,status:done}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "output tokens per completed turn"
+      autoscale = true
+      precision = 0
+      request {
+        q          = "sum:ufo.model_round_tokens_total{$env,$profile,kind:output}.as_count() / sum:ufo.turn_terminal_total{$env,$profile,status:done}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "prompt cache hit ratio"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.model_round_tokens_total{$env,$profile,kind:cache_read}.as_count() / (sum:ufo.model_round_tokens_total{$env,$profile,kind:cache_read}.as_count() + sum:ufo.model_round_tokens_total{$env,$profile,kind:input}.as_count())"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = "<"
+          value      = 80
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = ">="
+          value      = 80
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "turns by terminal status"
+      request {
+        q            = "sum:ufo.turn_terminal_total{$env,$profile} by {status}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "turn success rate over time"
+      request {
+        q            = "100 * sum:ufo.turn_terminal_total{$env,$profile,status:done}.as_count() / sum:ufo.turn_terminal_total{$env,$profile}.as_count()"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "turn failures by error class"
+      request {
+        q            = "sum:ufo.turn_terminal_total{$env,$profile,status:failed,!error_class:n/a} by {error_class}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tool calls by outcome"
+      request {
+        q            = "sum:ufo.tool_call_total{$env,$profile} by {outcome}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # `ok` outruns every failure by three orders of magnitude and flattens them off the axis.
+  widget {
+    timeseries_definition {
+      title = "failed tool calls by outcome"
+      request {
+        q            = "sum:ufo.tool_call_total{$env,$profile,!outcome:ok} by {outcome}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "tool error rate by tool (%)"
+      request {
+        q = "100 * sum:ufo.tool_call_total{$env,$profile,!outcome:ok} by {tool}.as_count() / sum:ufo.tool_call_total{$env,$profile} by {tool}.as_count()"
+        conditional_formats {
+          comparator = ">"
+          value      = 10
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 3
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 3
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "invalid calls by tool"
+      request {
+        q = "sum:ufo.tool_call_total{$env,$profile,outcome:invalid_call} by {tool}.as_count()"
+      }
+    }
+  }
+
+  # Rising against a flat success rate is the earliest read on a prompt or tool regression: the same
+  # result bought with more work.
+  widget {
+    timeseries_definition {
+      title = "rounds per completed turn over time"
+      request {
+        q            = "sum:ufo.turn_rounds_total{$env,$profile,status:done}.as_count() / sum:ufo.turn_terminal_total{$env,$profile,status:done}.as_count()"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "rounds by execution exit"
+      request {
+        q            = "sum:ufo.turn_rounds_total{$env,$profile} by {status}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "tokens by kind"
+      request {
+        q            = "sum:ufo.model_round_tokens_total{$env,$profile} by {kind}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Round budget exhausted is the closest signal to the agent giving up. Both should sit at zero.
+
+        Both counters began carrying `profile` with the deploy that tagged them, so a window opened
+        before it holds emissions this filter cannot match and these two graphs alone read empty
+        while the rest of the board does not.
+      EOT
+      background_color = "gray"
+      font_size        = "13"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "round budget exhausted"
+      request {
+        q            = "sum:ufo.turn_round_budget_exhausted_total{$env,$profile}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "context truncation recovered"
+      request {
+        q            = "sum:ufo.turn_truncation_recovered_total{$env,$profile}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # What share of the fleet the profile filter can see. Every rate above is drawn from the tagged
+  # slice alone, and untagged turns currently outnumber `coding` ones by more than thirty to one.
+  widget {
+    toplist_definition {
+      title = "turns by profile tag"
+      request {
+        q = "sum:ufo.turn_terminal_total{$env} by {profile}.as_count()"
+      }
+    }
+  }
+}
