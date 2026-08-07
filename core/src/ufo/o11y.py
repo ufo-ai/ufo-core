@@ -61,6 +61,7 @@ METRICS = (
     "model_round_tokens_total",
     "tool_call_total",
     "source_sync_failed_total",
+    "repl_run_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"

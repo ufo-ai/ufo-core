@@ -1,6 +1,6 @@
 import json
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -148,6 +148,31 @@ async def test_js_repl_first_call_writes_fresh_and_runs_node(tmp_path: Path) -> 
     assert any(command.startswith("node ") for command in sandbox.commands)
     assert json.loads(result.content[0].text)["stdout"] == "hello"
     assert result.is_error is False
+
+
+async def test_js_repl_meters_the_exit_code_and_folds_an_unlisted_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REPL failing every call and one whose code threw once are the same `handler_error` on
+    `tool_call_total`, which carries no reason for a result that raised nothing. The exit code is
+    what separates a missing interpreter from the agent's own code, and an unlisted one folds so a
+    run cannot mint a series per value."""
+    emitted: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        repl,
+        "emit_metric",
+        lambda name, **dimensions: emitted.append({"metric": name, **dimensions}),
+    )
+    sandbox = FakeSandbox(node_result=ExecResult(stdout="", stderr="not found", exit_code=127))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(ctx, turn=ctx.turn.model_copy(update={"subagent_profile": "coding"}))
+    await repl.js_repl(ctx, JsReplInput(code="console.log(1)", user_description="d"))
+    sandbox.node_result = ExecResult(stdout="", stderr="", exit_code=42)
+    await repl.js_repl(ctx, JsReplInput(code="console.log(2)", user_description="d"))
+    assert emitted == [
+        {"metric": "repl_run_total", "tool": "js_repl", "exit_code": "127", "profile": "coding"},
+        {"metric": "repl_run_total", "tool": "js_repl", "exit_code": "other", "profile": "coding"},
+    ]
 
 
 async def test_js_repl_accumulates_state_across_calls(tmp_path: Path) -> None:

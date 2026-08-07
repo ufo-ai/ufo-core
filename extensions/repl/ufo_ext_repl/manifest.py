@@ -20,6 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.manifest import Manifest, SkillSpec
+from ufo.sdk.o11y import emit_metric, turn_profile
 from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "repl"
@@ -49,6 +50,27 @@ GLOBAL_MODULE_ROOTS = (
     '"$(npm root -g)"',
     '"$NODE_PATH"',
 )
+REPL_EXIT_CODES = frozenset({0, 1, 124, 126, 127, 130, 137, 139})
+OTHER_EXIT_CODE = "other"
+
+
+def _meter_run(ctx: ToolContext, tool: str, exit_code: int) -> None:
+    """One count per interpreter run, carrying the code it exited on.
+
+    `tool_call_total` already reports a non-zero run, as `handler_error` — but the engine sets
+    `error_class` only where an exception was raised, and a REPL that returns a failing result
+    raises nothing. So a REPL failing every call reads there exactly like one whose code threw
+    once, and the two want opposite fixes. The exit code is what separates them: 127 is an
+    interpreter that is not on PATH, 1 is the agent's own code.
+
+    Folded onto a fixed set because a process may exit on any of 256 codes, and an unlisted one
+    would mint a series across every other dimension of the metric for a value nothing reads."""
+    emit_metric(
+        "repl_run_total",
+        tool=tool,
+        exit_code=str(exit_code) if exit_code in REPL_EXIT_CODES else OTHER_EXIT_CODE,
+        profile=turn_profile(ctx.turn.subagent_profile),
+    )
 
 
 def global_modules_link(roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
@@ -211,6 +233,7 @@ async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
     result = await ctx.sandbox.bash(
         f"node {shlex.quote(JS_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
     )
+    _meter_run(ctx, JS_REPL_TOOL, result.exit_code)
     if result.exit_code == 0:
         await ctx.sandbox.write_file(JS_REPL_PATH, candidate.encode())
     return _repl_result(result.stdout, result.stderr, result.exit_code, await _emitted_images(ctx))
@@ -222,6 +245,7 @@ async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
     result = await ctx.sandbox.bash(
         f"python3 {shlex.quote(XLSX_RUN_PATH)}", timeout_s=REPL_TIMEOUT_SECONDS
     )
+    _meter_run(ctx, XLSX_REPL_TOOL, result.exit_code)
     if result.exit_code == 0:
         await ctx.sandbox.write_file(XLSX_REPL_PATH, candidate.encode())
     return _repl_result(result.stdout, result.stderr, result.exit_code)
