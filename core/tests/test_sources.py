@@ -66,6 +66,7 @@ from ufo.sources.sync import (
     PageBatch,
     PageFeed,
     SourceAuth,
+    StreamFault,
     StreamSkipped,
     SyncDriver,
     SyncResult,
@@ -2379,6 +2380,25 @@ async def test_a_provider_fault_reports_its_status_and_url_and_never_its_body_or
             "error_class": "LocalProtocolError",
         },
     ]
+
+
+async def test_a_stream_fault_reports_the_reason_the_backend_authored_for_it(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backend that cannot read what the provider answered knows the request it made and the shape
+    that broke, and nothing else knows either — so `StreamFault` carries that reason onto the event
+    and a sweep reads which read failed instead of the class alone, which is all a bare `ValueError`
+    ever left behind."""
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    reason = "googlesheets: values:batchGet on spreadsheet s1 asked for 2 ranges and returned 1"
+    driver = _connector_driver([StreamFault(reason)], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    failure = _events(caplog, "source_sync.failed")[0]
+    assert (failure.ufo["error_class"], failure.ufo["provider_fault"]) == ("StreamFault", reason)
 
 
 async def test_a_provider_fault_is_bounded_before_it_reaches_the_record(

@@ -8,9 +8,10 @@ carried `files.get` cannot lift, the carried id a member trashes dropping out of
 request volume a corpus below the stored cursor, a one-file-modified corpus and a corpus carrying a
 refusal cost, the parent times each derived record carries, the reported cursor covering a file
 that lands no derived record, the quoted A1 sheet range every values request names its tab by, the
+position each batched `valueRange` lands on its tab by and the count that faults the read, the
 per-tab values read whose per-file guard drops only the refused tab, the cursor forms the checkpoint
-reads and refuses, the `render`
-override that lifts a spreadsheet's tab titles and a tab's grid rows, and the refusal taxonomy —
+reads and refuses, the `render` override that lifts a spreadsheet's tab titles and a tab's grid
+rows, and the refusal taxonomy —
 `StreamSkipped` for a refusal naming the grant or the API, a Drive-metadata fallback for one naming
 a single file, and a raise for a quota refusal or a `404` carrying no Google error object. Offline —
 a canned transport, no DB, no token, no broker."""
@@ -29,14 +30,13 @@ from ufo_ext_sources.googlesheets import (
     VALUES_BATCH_SIZE,
     GoogleSheetsConnector,
     _quoted_sheet_range,
-    _range_title,
 )
 
 from ufo.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
 from ufo.sources import backend as connector_backend
 from ufo.sources.backend import BACKFILL_KEY
-from ufo.sources.sync import SourceAuth, StreamSkipped
+from ufo.sources.sync import SourceAuth, StreamFault, StreamSkipped
 
 ACCOUNT = "acct-1"
 
@@ -399,7 +399,7 @@ async def test_sheet_values_skips_malformed_tabs_and_reads_the_valid_one() -> No
     assert [page.source_ref for page in result.pages] == ["sheet_values/s1:2:values"]
 
 
-async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title() -> None:
+async def test_sheet_values_chunks_tabs_and_lands_each_returned_range_on_its_position() -> None:
     tab_count = VALUES_BATCH_SIZE + 1
     metadata = {
         **SPREADSHEET_META,
@@ -410,14 +410,14 @@ async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title
     }
     value_requests: list[httpx.Request] = []
 
-    def reversed_ranges(request: httpx.Request) -> httpx.Response:
+    def ordered_ranges(request: httpx.Request) -> httpx.Response:
         requested = _requested_tabs(request)
         return httpx.Response(
             200,
             json={
                 "valueRanges": [
-                    {"range": f"{title}!A1", "values": [[f"value for {title}"]]}
-                    for title in reversed(requested)
+                    {"range": f"'{title}'!A1:A1", "values": [[f"value for {title}"]]}
+                    for title in requested
                 ]
             },
         )
@@ -427,7 +427,7 @@ async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title
         _handler(
             value_requests=value_requests,
             spreadsheet_meta=metadata,
-            values_response=reversed_ranges,
+            values_response=ordered_ranges,
         ),
     )
 
@@ -441,24 +441,30 @@ async def test_sheet_values_chunks_tabs_and_matches_each_returned_range_by_title
         assert f"value for Tab {index}" in page.body
 
 
-async def test_sheet_values_matches_a_quoted_returned_range_to_its_tab() -> None:
-    metadata = {
-        **SPREADSHEET_META,
-        "sheets": [{"properties": {"sheetId": 7, "title": "Owner's View"}}],
-    }
+async def test_sheet_values_lands_a_grid_whose_returned_range_names_no_tab() -> None:
+    """The echoed `range` is the A1 bounds the request resolved to, so it need not name the tab
+    back: a batch answering bare cell bounds, or the bounds of the named range a title also
+    carries, is the grid of the tab at that position and lands there rather than failing the
+    stream."""
 
-    def quoted_range(_request: httpx.Request) -> httpx.Response:
+    def unnamed_ranges(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"valueRanges": [{"range": "'Owner''s View'!A1", "values": [["mine"]]}]},
+            json={
+                "valueRanges": [
+                    {"range": "A1:B2", "values": [["summary row"]]},
+                    {"range": "", "values": [["detail row"]]},
+                ]
+            },
         )
 
-    result = await _fetch(
-        "sheet_values", _handler(spreadsheet_meta=metadata, values_response=quoted_range)
-    )
+    result = await _fetch("sheet_values", _handler(values_response=unnamed_ranges))
 
-    assert result.pages[0].source_ref == "sheet_values/s1:7:values"
-    assert "mine" in result.pages[0].body
+    assert [page.source_ref for page in result.pages] == [
+        "sheet_values/s1:0:values",
+        "sheet_values/s1:1:values",
+    ]
+    assert [page.body.splitlines()[-1] for page in result.pages] == ["summary row", "detail row"]
 
 
 AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
@@ -527,71 +533,49 @@ async def test_sheet_values_reads_a_reference_shaped_tab_from_its_own_tab() -> N
     ]
 
 
-@pytest.mark.parametrize("title", (*AMBIGUOUS_TABS, "Summary", "Hot!Stuff", "2026"))
-def test_a_quoted_sheet_range_round_trips_its_title(title: str) -> None:
-    assert _range_title(_quoted_sheet_range(title)) == title
-    assert _range_title(f"{_quoted_sheet_range(title)}!A1:B2") == title
+@pytest.mark.parametrize("title", (*AMBIGUOUS_TABS, "Hot!Stuff", "2026", "Owners'"))
+def test_a_sheet_range_quotes_its_title_and_doubles_every_apostrophe(title: str) -> None:
+    quoted = _quoted_sheet_range(title)
 
-
-def test_unqualified_quoted_range_unescapes_its_title() -> None:
-    assert _range_title("'Owner''s View'") == "Owner's View"
-
-
-@pytest.mark.parametrize("value", (None, "", "'Owner!A1", "'Owner'X!A1"))
-def test_invalid_range_titles_fail_loud(value: object) -> None:
-    with pytest.raises(ValueError, match="invalid value range"):
-        _range_title(value)
-
-
-async def test_sheet_values_rejects_duplicate_returned_ranges() -> None:
-    def duplicate(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "valueRanges": [
-                    {"range": "Summary!A1", "values": []},
-                    {"range": "Summary!A2", "values": []},
-                ]
-            },
-        )
-
-    with pytest.raises(ValueError, match="returned duplicate 'Summary'"):
-        await _fetch("sheet_values", _handler(values_response=duplicate))
+    assert quoted.startswith("'") and quoted.endswith("'")
+    assert quoted[1:-1] == title.replace("'", "''")
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "returned"),
     (
-        {},
-        {"valueRanges": [{"range": "Summary", "values": []}]},
-        {"valueRanges": [{"range": "Summary", "values": []}, None]},
-    ),
-)
-async def test_sheet_values_rejects_missing_short_or_non_object_ranges(
-    payload: dict[str, Any],
-) -> None:
-    def malformed(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
-
-    with pytest.raises(ValueError, match="values:batchGet"):
-        await _fetch("sheet_values", _handler(values_response=malformed))
-
-
-async def test_sheet_values_rejects_an_extra_returned_range() -> None:
-    def extra(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
+        ({}, 0),
+        ({"valueRanges": [{"range": "Summary", "values": []}]}, 1),
+        ({"valueRanges": [{"range": "Summary", "values": []}, None]}, 1),
+        (
+            {
                 "valueRanges": [
                     {"range": "Summary", "values": []},
                     {"range": "Detail", "values": []},
                     {"range": "Extra", "values": []},
                 ]
             },
-        )
+            3,
+        ),
+    ),
+)
+async def test_sheet_values_faults_on_a_range_count_it_did_not_ask_for(
+    payload: dict[str, Any], returned: int
+) -> None:
+    """A batch answering a different number of ranges than the request named leaves no position to
+    read a tab's grid from, and the fault names the spreadsheet and both counts so the failure event
+    carries which read broke rather than the class alone."""
 
-    with pytest.raises(ValueError, match="ranges differ from requested tabs"):
-        await _fetch("sheet_values", _handler(values_response=extra))
+    def malformed(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(StreamFault) as raised:
+        await _fetch("sheet_values", _handler(values_response=malformed))
+
+    assert raised.value.reason == (
+        "googlesheets: values:batchGet on spreadsheet s1 asked for 2 ranges and "
+        f"returned {returned}"
+    )
 
 
 async def _pages(

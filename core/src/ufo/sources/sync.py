@@ -136,6 +136,18 @@ class StreamSkipped(RuntimeError):
         self.reason = reason
 
 
+class StreamFault(RuntimeError):
+    """A `SourceBackend.fetch` raises this when the provider answered with a shape the stream cannot
+    read. The run fails and backs off as any fault does, and `reason` reaches the failure event as
+    its `provider_fault`: the backend authored that text against the request it made, so it names
+    the object and the shape that broke without carrying the provider's payload — the reason a
+    status error's own message never reaches the record."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class SourceAuth:
     """What the sync runner threads into a backend's `fetch` so it can reach its provider without
@@ -729,20 +741,25 @@ class SyncDriver:
         start. The exception's own text stays out of the record — h11 quotes the raw header value it
         rejects, which is the credential a member pasted, and `_raise_for_status` builds a status
         error's message out of the provider's response body — so a provider fault renders as the
-        status and URL of the request that drew it, query dropped, bounded; any other class is named
-        by `error_class` alone. The log goes first and each emission is suppressed on its own: this
-        sits on the failure path, where a telemetry fault would replace the error it exists to
-        report and strand the claim the release is about to free, and where a fault reaching the
-        collector would leave a count with nothing to search."""
+        status and URL of the request that drew it, query dropped, bounded, and a `StreamFault`
+        renders the reason the backend authored for it; any other class is named by `error_class`
+        alone. The log goes first and each emission is suppressed on its own: this sits on the
+        failure path, where a telemetry fault would replace the error it exists to report and strand
+        the claim the release is about to free, and where a fault reaching the collector would leave
+        a count with nothing to search."""
         tags = _stream_tags(source)
         error_class = type(error).__name__
         with suppress(Exception):
-            fault = (
-                f"{error.response.status_code} {error.request.method} "
-                f"{error.request.url.copy_with(query=None)}"
-                if isinstance(error, httpx.HTTPStatusError)
-                else ""
-            )
+            match error:
+                case httpx.HTTPStatusError():
+                    fault = (
+                        f"{error.response.status_code} {error.request.method} "
+                        f"{error.request.url.copy_with(query=None)}"
+                    )
+                case StreamFault():
+                    fault = error.reason
+                case _:
+                    fault = ""
             log_error(
                 "source_sync.failed",
                 source_id=str(source.source_id),

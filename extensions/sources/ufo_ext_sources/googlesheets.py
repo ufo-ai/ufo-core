@@ -9,12 +9,15 @@ server-side at or past the stored value, each record carries that time as a flat
 each page reports as its own cursor the highest `modifiedTime` the run has landed, never below the
 stored one. `sheets` explodes each spreadsheet into one record per tab; `sheet_values` reads tab
 grids in bounded `values:batchGet` calls so a synced sheet recalls as its rows, every range naming
-its tab as a quoted A1 sheet reference with each apostrophe doubled so the returned range matches
-back to the requested tab. A batch refusal naming one file falls back to individual tab reads to
-isolate the refused tab. Both derived streams stamp their parent file's times onto every record,
-and a page reports its cursor even where a file lands no derived record at all. The watermark is the
-file's, so a change Drive does not stamp on `modifiedTime` leaves that file's tabs as they last
-synced.
+its tab as a quoted A1 sheet reference with each apostrophe doubled — an unquoted title reads as a
+cell reference against the first visible sheet, as a named range, or fails to parse. The batch
+answers one `valueRange` per requested range in the order asked, so each grid lands on the tab at
+its position; the echoed `range` is the resolved A1 bounds of what the request named, not the name,
+so it identifies nothing and a count other than the one asked for is the whole fault. A batch
+refusal naming one file falls back to individual tab reads to isolate the refused tab. Both derived
+streams stamp their parent file's times onto every record, and a page reports its cursor even where
+a file lands no derived record at all. The watermark is the file's, so a change Drive does not stamp
+on `modifiedTime` leaves that file's tabs as they last synced.
 
 A file the grant refuses, on its metadata or on one of its tabs, travels beside that watermark
 rather than holding it down: the page reports a `_Checkpoint` — the watermark the listing reached,
@@ -80,6 +83,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.sdk.sources import (
     RestConnector,
+    StreamFault,
     StreamPage,
     StreamSkipped,
     StreamSpec,
@@ -355,29 +359,14 @@ class GoogleSheetsConnector(RestConnector):
                         continue
                     records.append(_sheet_value_record(spreadsheet, title, sheet_id, value_range))
                 continue
-            raw_ranges = data.get("valueRanges")
-            if not isinstance(raw_ranges, list):
-                raise ValueError("googlesheets: values:batchGet returned no valueRanges list")
-            value_ranges: dict[str, dict[str, Any]] = {}
-            for value_range in raw_ranges:
-                if not isinstance(value_range, dict):
-                    raise ValueError("googlesheets: values:batchGet returned a non-object range")
-                parsed_title = _range_title(value_range.get("range"))
-                if parsed_title in value_ranges:
-                    raise ValueError(
-                        f"googlesheets: values:batchGet returned duplicate {parsed_title!r}"
-                    )
-                value_ranges[parsed_title] = value_range
-            expected = {title for title, _ in chunk}
-            if value_ranges.keys() != expected:
-                raise ValueError(
-                    "googlesheets: values:batchGet ranges differ from requested tabs: "
-                    f"expected {sorted(expected)!r}, got {sorted(value_ranges)!r}"
+            returned = list_or_empty(data.get("valueRanges"))
+            if len(returned) != len(chunk):
+                raise StreamFault(
+                    f"googlesheets: values:batchGet on spreadsheet {spreadsheet_id} asked for "
+                    f"{len(chunk)} ranges and returned {len(returned)}"
                 )
-            for title, sheet_id in chunk:
-                records.append(
-                    _sheet_value_record(spreadsheet, title, sheet_id, value_ranges[title])
-                )
+            for (title, sheet_id), value_range in zip(chunk, returned, strict=True):
+                records.append(_sheet_value_record(spreadsheet, title, sheet_id, value_range))
         return records, tab_refused
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
@@ -504,29 +493,6 @@ def _sheet_value_record(
 def _quoted_sheet_range(title: str) -> str:
     escaped = title.replace("'", "''")
     return f"'{escaped}'"
-
-
-def _range_title(value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"googlesheets: invalid value range {value!r}")
-    if not value.startswith("'"):
-        return value.split("!", 1)[0]
-    title: list[str] = []
-    index = 1
-    while index < len(value):
-        character = value[index]
-        if character != "'":
-            title.append(character)
-            index += 1
-            continue
-        if index + 1 < len(value) and value[index + 1] == "'":
-            title.append("'")
-            index += 2
-            continue
-        if index + 1 == len(value) or value[index + 1] == "!":
-            return "".join(title)
-        break
-    raise ValueError(f"googlesheets: invalid value range {value!r}")
 
 
 def _grid_text(values: Any) -> str:

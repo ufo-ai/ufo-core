@@ -12,7 +12,9 @@ in `SyncResult.deletes`, so core tombstones only those and never sweeps pages a 
 mention. A backend raises `CursorExpired` when a stored incremental cursor is rejected, and core
 clears it so the next run refetches fresh. A backend raises `StreamSkipped` when the provider
 refuses the stream for this account (a missing scope, a plan gate), and core records the run
-skipped, not failed — committing no pages, so nothing is tombstoned.
+skipped, not failed — committing no pages, so nothing is tombstoned. A backend raises `StreamFault`
+when the provider answers a shape the stream cannot read, and the failure event carries the reason
+the backend authored rather than an exception message built out of the response.
 
 Rather than implement `SourceBackend` from scratch, a REST provider subclasses `RestConnector` —
 declaring its `StreamSpec`s and a `Pagination` strategy (or overriding `paginate`) — and wraps it in
@@ -100,6 +102,9 @@ from ufo.sources.sync import (
 )
 from ufo.sources.sync import (
     SourceBackend as SourceBackend,
+)
+from ufo.sources.sync import (
+    StreamFault as StreamFault,
 )
 from ufo.sources.sync import (
     StreamSkipped as StreamSkipped,
