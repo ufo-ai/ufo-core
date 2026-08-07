@@ -25,7 +25,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -64,15 +64,19 @@ from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
+    CONVERSATION_SITES_MAX,
     ArtifactsSlotPayload,
     ChangesSlotPayload,
     ConversationArtifact,
     ConversationChange,
     ConversationFile,
     ConversationSlotContext,
+    ConversationSlotItem,
+    ConversationSlotPayload,
     ConversationSlotProvider,
     FilesSlotPayload,
     ImagePreview,
+    SitesSlotPayload,
     raster_image_media_type,
 )
 from ufo.sdk.manifest import (
@@ -1110,7 +1114,7 @@ def _conversation_row(entry: ListedConversation) -> dict[str, object]:
 
 async def _readable_conversation(
     ctx: SurfaceContext, request: Request, conversation_id: UUID | None = None
-) -> tuple[UUID, UUID] | Response:
+) -> tuple[UUID, UUID, "SlotViewer"] | Response:
     """The agent and conversation a content read is authorized for, or the 404 every unreadable
     case answers: an agent outside the audience, a malformed id, another agent's conversation, a
     room's, and another member's private one until an admin records a disclosure against it. One
@@ -1128,7 +1132,7 @@ async def _readable_conversation(
         conversation_id, agent_id, member_id, admin=audience.admin
     ):
         return Response("no such conversation", status_code=404)
-    return agent_id, conversation_id
+    return agent_id, conversation_id, SlotViewer(member_id, audience.admin)
 
 
 def _turn_row(turn: Turn) -> dict[str, object]:
@@ -1156,7 +1160,7 @@ async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id = authorized
+    _agent_id, conversation_id, _viewer = authorized
     turns = await ctx.list_turns(conversation_id)
     spawned = await ctx.conversation_subagent_turns(conversation_id)
     return JSONResponse(
@@ -1173,7 +1177,7 @@ async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id = authorized
+    _agent_id, conversation_id, _viewer = authorized
     listed = await ctx.list_workspace_files(conversation_id)
     return JSONResponse(
         {
@@ -1253,9 +1257,21 @@ def _conversation_changes(
     return tuple(changes), total > len(changes)
 
 
-async def _slot_target(
-    ctx: SurfaceContext, request: Request
-) -> tuple[UUID, UUID, UUID | None] | Response:
+@dataclass(frozen=True)
+class SlotViewer:
+    member_id: UUID
+    admin: bool
+
+
+@dataclass(frozen=True)
+class SlotTarget:
+    agent_id: UUID
+    conversation_id: UUID
+    viewer: SlotViewer
+    root_conversation_id: UUID | None
+
+
+async def _slot_target(ctx: SurfaceContext, request: Request) -> SlotTarget | Response:
     root = request.query_params.get("root")
     if root is None:
         authorized = await _readable_conversation(ctx, request)
@@ -1268,47 +1284,50 @@ async def _slot_target(
             return Response("no such conversation", status_code=404)
         authorized = await _readable_conversation(ctx, request, root_id)
         if not isinstance(authorized, Response):
-            agent_id, _root_id = authorized
+            agent_id, _root_id, viewer = authorized
             spawned = await ctx.conversation_subagent_turns(root_id)
             if not any(
                 turn.agent_id == agent_id and turn.conversation_id == conversation_id
                 for turn in spawned
             ):
                 return Response("no such conversation", status_code=404)
-            authorized = agent_id, conversation_id
+            authorized = agent_id, conversation_id, viewer
     if isinstance(authorized, Response):
         return authorized
-    return *authorized, root_id
+    agent_id, conversation_id, viewer = authorized
+    return SlotTarget(agent_id, conversation_id, viewer, root_id)
 
 
 async def _slot_context(
     ctx: SurfaceContext,
-    agent_id: UUID,
-    conversation_id: UUID,
+    target: SlotTarget,
     ext: ExtensionContext,
 ) -> ConversationSlotContext | None:
-    audience = await ctx.conversation_audience(conversation_id, agent_id)
+    audience = await ctx.conversation_audience(target.conversation_id, target.agent_id)
     if audience is None:
         return None
-    recorded = await ctx.read_transcript(conversation_id)
-    compacted = bool(await ctx.list_compactions(conversation_id))
+    recorded = await ctx.read_transcript(target.conversation_id)
+    compacted = bool(await ctx.list_compactions(target.conversation_id))
     return ConversationSlotContext(
         ext=replace(ext, audience=audience),
-        conversation_id=conversation_id,
-        agent_id=agent_id,
+        conversation_id=target.conversation_id,
+        agent_id=target.agent_id,
         audience=audience,
         messages=() if recorded is None else recorded.messages,
         compacted=compacted,
+        public_base_url=ctx.public_base_url,
     )
 
 
 async def _project_slot_context(
     ctx: SurfaceContext,
     slot_context: ConversationSlotContext,
+    extension: str,
     content: type[BaseModel],
     root_conversation_id: UUID | None,
+    viewer: SlotViewer,
 ) -> ConversationSlotContext:
-    if content is FilesSlotPayload:
+    if extension == "web" and content is FilesSlotPayload:
         listed_files = await ctx.list_workspace_files(slot_context.conversation_id)
         files: list[ConversationFile] = []
         for file_entry in listed_files[:CONVERSATION_FILES_MAX]:
@@ -1349,7 +1368,7 @@ async def _project_slot_context(
                 truncated=len(listed_files) > CONVERSATION_FILES_MAX,
             ),
         )
-    if content is ArtifactsSlotPayload:
+    if extension == "web" and content is ArtifactsSlotPayload:
         listed_artifacts = await ctx.list_conversation_artifacts(
             slot_context.conversation_id, limit=CONVERSATION_ARTIFACTS_MAX + 1
         )
@@ -1384,7 +1403,43 @@ async def _project_slot_context(
             slot_context,
             projection=ArtifactsSlotPayload(artifacts=tuple(artifacts), truncated=truncated),
         )
+    if extension == "sites" and content is SitesSlotPayload:
+        rows = await ctx.list_conversation_member_objects(
+            "site",
+            slot_context.agent_id,
+            slot_context.conversation_id,
+            viewer.member_id,
+            admin=viewer.admin,
+            limit=CONVERSATION_SITES_MAX + 1,
+        )
+        return replace(
+            slot_context,
+            visible_items=tuple(
+                ConversationSlotItem(row.name, row.generation, row.content_visible)
+                for row in rows or ()
+            ),
+        )
     return slot_context
+
+
+def _authorized_slot_payload(
+    payload: ConversationSlotPayload, context: ConversationSlotContext
+) -> ConversationSlotPayload:
+    if isinstance(payload, SitesSlotPayload):
+        return payload.model_copy(
+            update={
+                "sites": tuple(
+                    site
+                    for site in payload.sites
+                    if any(
+                        item.name == site.authorization_name
+                        and item.generation == site.authorization_generation
+                        for item in context.visible_items
+                    )
+                )
+            }
+        )
+    return payload
 
 
 async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
@@ -1392,13 +1447,10 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    agent_id, conversation_id, root_conversation_id = authorized
     slots: list[dict[str, object]] = []
     if not ctx.conversation_slots:
         return JSONResponse({"slots": slots})
-    shared_context = await _slot_context(
-        ctx, agent_id, conversation_id, ctx.conversation_slots[0].ext
-    )
+    shared_context = await _slot_context(ctx, authorized, ctx.conversation_slots[0].ext)
     if shared_context is None:
         return Response("no such conversation", status_code=404)
     for bound in ctx.conversation_slots:
@@ -1409,10 +1461,12 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
                     shared_context,
                     ext=replace(bound.ext, audience=shared_context.audience),
                 ),
+                bound.extension,
                 bound.provider.content,
-                root_conversation_id,
+                authorized.root_conversation_id,
+                authorized.viewer,
             )
-            count = await bound.provider.summarize(slot_context)
+            count = await ctx.summarize_conversation_slot(bound, slot_context)
         except Exception as error:
             log(
                 "web.conversation_slot.summary_failed",
@@ -1440,34 +1494,39 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    agent_id, conversation_id, root_conversation_id = authorized
     slot_id = request.path_params["slot_id"]
     bound = next((entry for entry in ctx.conversation_slots if entry.provider.id == slot_id), None)
     if bound is None:
         return Response("no such conversation slot", status_code=404)
-    slot_context = await _slot_context(ctx, agent_id, conversation_id, bound.ext)
+    slot_context = await _slot_context(ctx, authorized, bound.ext)
     if slot_context is None:
         return Response("no such conversation", status_code=404)
     slot_context = await _project_slot_context(
-        ctx, slot_context, bound.provider.content, root_conversation_id
+        ctx,
+        slot_context,
+        bound.extension,
+        bound.provider.content,
+        authorized.root_conversation_id,
+        authorized.viewer,
     )
-    payload = await bound.provider.read(slot_context)
+    payload = await ctx.read_conversation_slot(bound, slot_context)
     if type(payload) is not bound.provider.content:
         raise TypeError(
             f"conversation slot {slot_id!r} returned {type(payload).__name__}, "
             f"expected {bound.provider.content.__name__}"
         )
+    payload = _authorized_slot_payload(payload, slot_context)
     return JSONResponse(payload.model_dump(mode="json"))
-
-
-async def _summarize_changes(ctx: ConversationSlotContext) -> int | None:
-    changes, _truncated = _conversation_changes(ctx.messages)
-    return len(changes)
 
 
 async def _read_changes(ctx: ConversationSlotContext) -> ChangesSlotPayload:
     changes, truncated = _conversation_changes(ctx.messages)
     return _conversation_changes_payload(changes, truncated or ctx.compacted)
+
+
+async def _summarize_changes(ctx: ConversationSlotContext) -> int | None:
+    changes, _truncated = _conversation_changes(ctx.messages)
+    return len(changes)
 
 
 CHANGES_SLOT = ConversationSlotProvider(
@@ -1486,13 +1545,13 @@ def _files_projection(ctx: ConversationSlotContext) -> FilesSlotPayload:
     return ctx.projection
 
 
-async def _summarize_files(ctx: ConversationSlotContext) -> int | None:
-    files = _files_projection(ctx).files
-    return len(files) or None
-
-
 async def _read_files(ctx: ConversationSlotContext) -> FilesSlotPayload:
     return _files_projection(ctx)
+
+
+async def _summarize_files(ctx: ConversationSlotContext) -> int | None:
+    count = len(_files_projection(ctx).files)
+    return count or None
 
 
 FILES_SLOT = ConversationSlotProvider(
@@ -1511,13 +1570,13 @@ def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload:
     return ctx.projection
 
 
-async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None:
-    artifacts = _artifacts_projection(ctx).artifacts
-    return len(artifacts) or None
-
-
 async def _read_artifacts(ctx: ConversationSlotContext) -> ArtifactsSlotPayload:
     return _artifacts_projection(ctx)
+
+
+async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None:
+    count = len(_artifacts_projection(ctx).artifacts)
+    return count or None
 
 
 ARTIFACTS_SLOT = ConversationSlotProvider(
@@ -1537,7 +1596,7 @@ async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
     authorized = await _slot_target(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id, _root_conversation_id = authorized
+    conversation_id = authorized.conversation_id
     path = request.path_params["path"]
     preview_token = request.query_params.get("preview")
     if preview_token is not None:

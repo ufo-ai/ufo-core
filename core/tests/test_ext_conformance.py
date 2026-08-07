@@ -132,6 +132,7 @@ async def test_sample_conversation_slot_callbacks_are_typed() -> None:
         audience=audience,
         messages=(),
         compacted=False,
+        public_base_url=None,
     )
 
     assert await provider.summarize(slot_context) is None

@@ -30,7 +30,7 @@ from ufo_ext_memory.store import recall_subjects
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import site_object_name
-from ufo_ext_sites.store import HostedSites
+from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
@@ -648,7 +648,13 @@ async def web(
     app.include_router(artifacts_router)
     _mount_shared_surfaces(
         app,
-        (web_manifest(), todos.manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED),
+        (
+            web_manifest(),
+            todos.manifest(),
+            SCHEDULED_TASK_KIND_ONLY,
+            SLOTTED,
+            sites_manifest(),
+        ),
         CredentialStore(fernet=CREDENTIAL_FERNET),
         blob,
         sandboxes,
@@ -3008,6 +3014,7 @@ async def test_admin_view_reads_the_workspace_shape(
         for entry in payload["deploy"]["extensions"]
     ] == [
         ("scheduled_tasks", "0.1.0", False),
+        ("sites", "0.1.0", False),
         ("stub", "0", False),
         ("todos", "0.1.0", False),
         ("web", "0.1.0", False),
@@ -6620,6 +6627,85 @@ async def test_durable_todo_board_fills_the_typed_tasks_slot(
         "completed_count": 1,
         "truncated": False,
     }
+
+
+async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, agent_id = web
+    creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
+    hidden_creator_id, _hidden_token = await _seed_member(workspace_id, "hidden@example.com")
+    _viewer_id, viewer_token = await _seed_member(workspace_id, "viewer@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="sites-slot",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+    )
+    hidden_at = datetime(2026, 8, 1, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(hosted_site),
+            [
+                {
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "name": f"aaa-hidden-{index:03d}",
+                    "port": 10_000 + index,
+                    "visibility": "private",
+                    "creator_member_id": hidden_creator_id,
+                    "created_at": hidden_at,
+                    "updated_at": hidden_at,
+                }
+                for index in range(101)
+            ],
+        )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        for name, port, visibility in (
+            ("private-dashboard", 8000, "private"),
+            ("workspace-dashboard", 8001, "workspace"),
+            ("public-dashboard", 8002, "public"),
+        ):
+            await sites.register(
+                conversation_id,
+                name,
+                port,
+                creator_id,
+                visibility,
+                SHARED_AUDIENCE,
+                True,
+            )
+
+    async def refuse_workspace_scan(_sites: HostedSites) -> tuple[()]:
+        raise AssertionError("sites slot scanned the workspace")
+
+    monkeypatch.setattr(HostedSites, "all", refuse_workspace_scan)
+
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/sites"
+    creator = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"})
+    viewer = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"})
+    admin = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})
+    inventory = await client.get(
+        path.rsplit("/", 1)[0], headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
+    )
+
+    assert creator.status_code == 200
+    assert {site["name"] for site in creator.json()["sites"]} == {
+        "private-dashboard",
+        "public-dashboard",
+        "workspace-dashboard",
+    }
+    assert viewer.status_code == 200
+    assert {site["name"] for site in viewer.json()["sites"]} == {
+        "public-dashboard",
+        "workspace-dashboard",
+    }
+    assert admin.json()["sites"] == viewer.json()["sites"]
+    assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "sites")["count"] == 2
 
 
 async def test_conversation_reads_ride_the_same_gate(

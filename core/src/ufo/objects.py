@@ -605,6 +605,26 @@ class MemberListable(MemberReadable, Protocol):
 
 
 @dataclass(frozen=True)
+class ConversationObjectGrant:
+    name: str
+    generation: UUID
+    content_visible: bool
+
+
+@runtime_checkable
+class ConversationMemberListable(Protocol):
+    async def member_conversation_rows(
+        self,
+        ext: "ExtensionContext | None",
+        conversation_id: UUID,
+        *,
+        member_id: UUID,
+        admin: bool,
+        limit: int,
+    ) -> tuple[ConversationObjectGrant, ...]: ...
+
+
+@dataclass(frozen=True)
 class MemberReadableObjects[SpecT: BaseModel, OwnerT: ObjectOwner](
     MemberOwnedObjects[SpecT, OwnerT]
 ):

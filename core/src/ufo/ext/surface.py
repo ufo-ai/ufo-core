@@ -148,10 +148,20 @@ from ufo.workspace_file_preview_token import (
 
 if TYPE_CHECKING:
     from ufo.ext.context import SourceReader
-    from ufo.ext.conversation_slots import BoundConversationSlot
+    from ufo.ext.conversation_slots import (
+        BoundConversationSlot,
+        ConversationSlotContext,
+        ConversationSlotPayload,
+    )
     from ufo.listings import ListingCursor, ListingPage
     from ufo.memory import MemoryMatch, MemorySearch
-    from ufo.objects import BoundKind, MemberObject, ObjectListQuery, ObjectPage
+    from ufo.objects import (
+        BoundKind,
+        ConversationObjectGrant,
+        MemberObject,
+        ObjectListQuery,
+        ObjectPage,
+    )
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
@@ -816,6 +826,20 @@ class SurfaceContext:
     def conversation_slots(self) -> tuple["BoundConversationSlot", ...]:
         """The deploy's extension-provided conversation slots, fixed and validated at boot."""
         return self._conversation_slots
+
+    async def read_conversation_slot(
+        self, bound: "BoundConversationSlot", context: "ConversationSlotContext"
+    ) -> "ConversationSlotPayload":
+        """Run one slot read in the authorized conversation's agent namespace."""
+        with bind_agent(context.agent_id):
+            return await bound.provider.read(context)
+
+    async def summarize_conversation_slot(
+        self, bound: "BoundConversationSlot", context: "ConversationSlotContext"
+    ) -> int | None:
+        """Run one slot summary in the authorized conversation's agent namespace."""
+        with bind_agent(context.agent_id):
+            return await bound.provider.summarize(context)
 
     @property
     def deploy_extensions(self) -> tuple[DeployExtensionView, ...]:
@@ -1814,6 +1838,30 @@ class SurfaceContext:
         with bind_agent(agent_id):
             return await bound.kind.store.member_detail(
                 bound.context, name, member_id=member_id, admin=admin
+            )
+
+    async def list_conversation_member_objects(
+        self,
+        kind: str,
+        agent_id: UUID,
+        conversation_id: UUID,
+        member_id: UUID,
+        *,
+        admin: bool,
+        limit: int,
+    ) -> tuple["ConversationObjectGrant", ...] | None:
+        from ufo.objects import ConversationMemberListable
+
+        bound = self._objects.get(kind)
+        if bound is None or not isinstance(bound.kind.store, ConversationMemberListable):
+            return None
+        with bind_agent(agent_id):
+            return await bound.kind.store.member_conversation_rows(
+                bound.context,
+                conversation_id,
+                member_id=member_id,
+                admin=admin,
+                limit=limit,
             )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:

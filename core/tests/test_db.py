@@ -201,7 +201,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "skill_create_0002",
         "coding_0002",
         "eval_env_0001",
-        "sites_0001",
+        "sites_0002",
         "web_0001",
     } <= set(heads)
     assert len(heads) == 10

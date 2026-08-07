@@ -17,6 +17,7 @@ parent; its `game/`, `shared/`, and `informational/` subdirectories are ordinary
 from pathlib import Path
 
 from ufo.sdk.manifest import Manifest, PromptSection, SkillSpec
+from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.delegation import DELEGATION_TOOLS
 from ufo_ext_sites.objects import SITE_OBJECT
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
@@ -42,4 +43,5 @@ def manifest() -> Manifest:
         surfaces=(SITES_SURFACE,),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         skills=(SkillSpec(path=SKILLS_ROOT / SKILL_NAME),),
+        conversation_slots=(SITES_SLOT,),
     )

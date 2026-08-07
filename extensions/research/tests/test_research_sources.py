@@ -157,6 +157,7 @@ async def test_retrieved_results_become_one_conversation_sources_slot(db: None) 
             audience=SHARED_AUDIENCE,
             messages=(),
             compacted=False,
+            public_base_url=None,
         )
         assert await SOURCES_SLOT.summarize(slot_context) == 2
         payload = await SOURCES_SLOT.read(slot_context)
@@ -191,6 +192,7 @@ async def test_sources_slot_is_absent_without_retrieved_results(db: None) -> Non
             audience=SHARED_AUDIENCE,
             messages=(),
             compacted=False,
+            public_base_url=None,
         )
         assert await SOURCES_SLOT.summarize(slot_context) is None
 

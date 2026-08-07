@@ -475,6 +475,39 @@ test("tasks slot preserves an empty truncated board's context", async () => {
   expect(screen.getByText("Some tasks may not be shown.")).toBeTruthy();
 });
 
+test("sites slot renders hosted links with visibility and state", async () => {
+  const url = "https://ufo.example/sites/signed";
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/sites"]: () =>
+      json({
+        type: "sites",
+        sites: [
+          {
+            name: "team-dashboard",
+            url,
+            visibility: "workspace",
+            created_at: "2026-08-01T12:00:00Z",
+            updated_at: "2026-08-06T12:00:00Z",
+          },
+        ],
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [{ id: "sites", label: "Sites", icon: "link", kind: "sites", count: 1 }],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Sites 1" }));
+  expect(await screen.findByText("team-dashboard")).toBeTruthy();
+  expect(screen.getByText(/workspace · Created/)).toBeTruthy();
+  const link = screen.getByRole("link", { name: "Open site" });
+  expect(link.getAttribute("href")).toBe(url);
+  expect(link.getAttribute("target")).toBe("_blank");
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],

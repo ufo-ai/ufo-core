@@ -41,6 +41,13 @@ class ConversationSlotProvider:
 
 
 @dataclass(frozen=True)
+class ConversationSlotItem:
+    name: str
+    generation: UUID
+    content_visible: bool
+
+
+@dataclass(frozen=True)
 class ConversationSlotContext:
     ext: ExtensionContext
     conversation_id: UUID
@@ -48,6 +55,8 @@ class ConversationSlotContext:
     audience: Audience
     messages: tuple[Message, ...]
     compacted: bool
+    public_base_url: str | None = None
+    visible_items: tuple[ConversationSlotItem, ...] = ()
     projection: ConversationSlotPayload | None = None
 ```
 
@@ -56,11 +65,19 @@ or icon, unsupported payload type, or missing callback, then binds each callback
 extension's scoped context.
 
 The web surface first applies the existing conversation-read gate, including the spawned-child
-check. It then supplies the current durable messages and whether earlier messages were compacted;
-the declaring extension does not gain a transcript-read capability outside that authorized call.
-Only then does it invoke `summarize`; `None` means the provider contributes no slot to this
-conversation. Selecting a returned slot invokes `read` lazily. A callback receives no request,
-cookie, bearer, `SurfaceContext`, or authority primitive.
+check. It then supplies the deploy's public base URL, the current durable messages, and whether
+earlier messages were compacted; the declaring extension does not gain a transcript-read or
+authorization capability outside that call. For an extension-owned member-readable source, the
+host also asks that extension's `ConversationMemberListable` implementation for a bounded,
+conversation-scoped set of grants. Each grant carries an opaque object name, its durable generation,
+and a required content-visibility bit. It is a separate internal type, not an `ObjectRow`, so proof
+metadata cannot enter object listings. The projection is scoped to the extension that owns the
+payload contract, so a lookalike declaration receives no grants. The host invokes `summarize` or
+`read` in the authorized conversation's agent namespace. Inventory uses the cheap summary callback
+rather than fetching a full payload; `None` omits a slot while zero remains a visible zero-count
+slot. Reads validate the exact payload type and reapply the name, generation, and content filter to
+the returned payload. A callback receives no viewer identity, admin bit, request, cookie, bearer,
+`SurfaceContext`, or authority primitive.
 
 For a core/web-owned source such as live workspace files, the web surface lazily prepares one
 bounded, schema-validated `projection` matching the provider's declared content type. This is data,
@@ -75,7 +92,9 @@ GET .../conversations/{conversation}/slots/{slot}
     -> one bounded, discriminated payload
 ```
 
-Initial payloads are exact models for changes, files, sources, artifacts, and tasks. An item may carry an
+Initial payloads are exact models for changes, files, sources, artifacts, tasks, and sites. Core
+owns this closed set because untrusted extension JSON cannot enter the portal origin: each contract
+is the trust-boundary validation for one host renderer and its access metadata never serializes. An item may carry an
 `ImagePreview` with a same-origin URL and one of `image/png`, `image/jpeg`, `image/gif`, or
 `image/webp`, limited to 20 MiB per image; the portal renders an image only from that typed
 capability and never infers one from a broad media type or filename. The portal owns their
@@ -97,6 +116,7 @@ The first owners are:
 | `artifacts` | core/web | durable artifact records |
 | `sources` | research | new typed conversation-keyed observation records |
 | `tasks` | todos | durable conversation-keyed todo board in the extension-scoped store |
+| `sites` | sites | bounded durable `hosted_site` rows; host projects names through the `site` object gate |
 
 Every preview URL carries a signed capability binding its media type and byte size. The byte route
 accepts only a claim no larger than 20 MiB, reads exactly that many bytes, and validates the claimed
@@ -110,6 +130,12 @@ root-conversation proof for spawned work. A path that cannot form a bounded safe
 keeps its file row without a preview. Downloads and every non-raster file remain octet-streams. The
 portal loads thumbnails lazily, expands images in place, and decodes only non-image files as text
 under its 256 KiB text bound.
+
+The Sites host projection filters the conversation and viewer in SQL before applying the slot
+bound, so other conversations and earlier private rows cannot hide a later visible site. Private
+sites are creator-only here, including for an admin, matching the hosted link. A stored generation
+rotates when visibility changes and on delete/recreate. The provider fetches only granted names
+with `MAX + 1`, verifies every generation, and never serializes creator identity or proof metadata.
 
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it

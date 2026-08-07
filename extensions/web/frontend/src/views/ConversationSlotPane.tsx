@@ -59,7 +59,21 @@ type TasksPayload = {
   completed_count: number;
   truncated: boolean;
 };
-type SlotPayload = ArtifactsPayload | ChangesPayload | FilesPayload | SourcesPayload | TasksPayload;
+type Site = {
+  name: string;
+  url: string;
+  visibility: "private" | "workspace" | "public";
+  created_at: string;
+  updated_at: string;
+};
+type SitesPayload = { type: "sites"; sites: Site[]; truncated: boolean };
+type SlotPayload =
+  | ArtifactsPayload
+  | ChangesPayload
+  | FilesPayload
+  | SitesPayload
+  | SourcesPayload
+  | TasksPayload;
 
 const MAX_FILE_PREVIEW_BYTES = 256 * 1024;
 
@@ -262,6 +276,7 @@ function SlotContent({
   }
   if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
   if (payload.type === "tasks") return <TasksContent payload={payload} />;
+  if (payload.type === "sites") return <SitesContent payload={payload} />;
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
   return (
     <div className="flex flex-col gap-xl">
@@ -329,6 +344,34 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
         <p className="m-0 mt-lg opacity-(--muted-soft)">Some tasks may not be shown.</p>
       ) : null}
     </section>
+  );
+}
+
+function SitesContent({ payload }: { payload: SitesPayload }) {
+  if (!payload.sites.length && !payload.truncated) {
+    return <PanelEmpty>No sites hosted from this conversation.</PanelEmpty>;
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-xl">
+      {payload.sites.map((site) => (
+        <article key={site.name} className="min-w-0 rounded-panel border border-edge p-lg">
+          <div className="flex items-start gap-md">
+            <div className="min-w-0 flex-1">
+              <h2 className="m-0 break-all font-mono text-label font-strong">{site.name}</h2>
+              <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+                {site.visibility} · Created {day(site.created_at)} · Updated {day(site.updated_at)}
+              </p>
+            </div>
+            <a href={site.url} target="_blank" rel="noreferrer">
+              Open site
+            </a>
+          </div>
+        </article>
+      ))}
+      {payload.truncated ? (
+        <p className="m-0 opacity-(--muted-soft)">Some sites may not be shown.</p>
+      ) : null}
+    </div>
   );
 }
 

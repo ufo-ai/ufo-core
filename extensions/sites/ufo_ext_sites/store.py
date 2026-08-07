@@ -18,7 +18,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -52,6 +52,7 @@ hosted_site = sa.Table(
     sa.Column("port", sa.Integer, nullable=False),
     sa.Column("visibility", sa.Text, nullable=False),
     sa.Column("creator_member_id", sa.Uuid, nullable=False),
+    sa.Column("generation", sa.Uuid, nullable=False, default=uuid4),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
@@ -128,6 +129,7 @@ class HostedSite:
     port: int
     visibility: Visibility
     creator_member_id: UUID
+    generation: UUID
     created_at: datetime
     updated_at: datetime
 
@@ -174,6 +176,9 @@ class HostedSites:
             values: dict[str, object] = {"port": port, "updated_at": sa.func.now()}
             if visibility is not None:
                 values["visibility"] = visibility
+                if existing := await self._read(connection, conversation_id, name):
+                    if existing.visibility != visibility:
+                        values["generation"] = uuid4()
             updated = await connection.execute(
                 sa.update(hosted_site)
                 .where(
@@ -192,6 +197,7 @@ class HostedSites:
                         port=port,
                         visibility=visibility or default_visibility(audience),
                         creator_member_id=creator_member_id,
+                        generation=uuid4(),
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -217,6 +223,46 @@ class HostedSites:
             ).all()
         return tuple(_site(row) for row in rows)
 
+    async def conversation(
+        self, conversation_id: UUID, names: tuple[str, ...], limit: int
+    ) -> tuple[HostedSite, ...]:
+        """This conversation's hosted sites, oldest first."""
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    self._columns()
+                    .where(
+                        hosted_site.c.workspace_id == self.workspace_id,
+                        hosted_site.c.conversation_id == conversation_id,
+                        hosted_site.c.name.in_(names),
+                    )
+                    .order_by(hosted_site.c.created_at, hosted_site.c.name)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(_site(row) for row in rows)
+
+    async def visible_conversation(
+        self, conversation_id: UUID, member_id: UUID, limit: int
+    ) -> tuple[HostedSite, ...]:
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    self._columns()
+                    .where(
+                        hosted_site.c.workspace_id == self.workspace_id,
+                        hosted_site.c.conversation_id == conversation_id,
+                        sa.or_(
+                            hosted_site.c.creator_member_id == member_id,
+                            hosted_site.c.visibility != "private",
+                        ),
+                    )
+                    .order_by(hosted_site.c.created_at, hosted_site.c.name)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(_site(row) for row in rows)
+
     async def set_visibility(
         self, conversation_id: UUID, name: str, visibility: Visibility
     ) -> HostedSite | None:
@@ -230,7 +276,7 @@ class HostedSites:
                     hosted_site.c.conversation_id == conversation_id,
                     hosted_site.c.name == name,
                 )
-                .values(visibility=visibility, updated_at=sa.func.now())
+                .values(visibility=visibility, generation=uuid4(), updated_at=sa.func.now())
             )
             return await self._read(connection, conversation_id, name)
 
@@ -336,6 +382,7 @@ class HostedSites:
             hosted_site.c.port,
             hosted_site.c.visibility,
             hosted_site.c.creator_member_id,
+            hosted_site.c.generation,
             hosted_site.c.created_at,
             hosted_site.c.updated_at,
         )
@@ -348,6 +395,7 @@ def _site(row: sa.Row) -> HostedSite:
         port=row.port,
         visibility=visibility_level(row.visibility),
         creator_member_id=row.creator_member_id,
+        generation=row.generation,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

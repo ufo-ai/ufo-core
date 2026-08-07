@@ -29,6 +29,9 @@ CONVERSATION_SOURCE_TITLE_MAX_CHARS = 500
 CONVERSATION_SOURCE_SNIPPET_MAX_CHARS = 2_000
 CONVERSATION_SOURCE_DATE_MAX_CHARS = 40
 CONVERSATION_SOURCES_MAX = 100
+CONVERSATION_SITE_NAME_MAX_CHARS = 48
+CONVERSATION_SITE_URL_MAX_CHARS = 8_192
+CONVERSATION_SITES_MAX = 100
 CONVERSATION_TASK_DESCRIPTION_MAX_CHARS = 2_000
 CONVERSATION_TASK_TITLE_MAX_CHARS = 500
 CONVERSATION_TASKS_MAX = 100
@@ -194,10 +197,44 @@ class TasksSlotPayload(BaseModel):
         return self
 
 
+class ConversationSite(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=CONVERSATION_SITE_NAME_MAX_CHARS)
+    url: str = Field(min_length=1, max_length=CONVERSATION_SITE_URL_MAX_CHARS)
+    visibility: Literal["private", "workspace", "public"]
+    created_at: datetime
+    updated_at: datetime
+    authorization_name: str = Field(min_length=1, max_length=200, exclude=True)
+    authorization_generation: UUID = Field(exclude=True)
+
+    @field_validator("url")
+    @classmethod
+    def http_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("site URL must be HTTP(S) without embedded credentials")
+        return value
+
+
+class SitesSlotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["sites"] = "sites"
+    sites: tuple[ConversationSite, ...] = Field(max_length=CONVERSATION_SITES_MAX)
+    truncated: bool
+
+
 ConversationSlotPayload = (
     ArtifactsSlotPayload
     | ChangesSlotPayload
     | FilesSlotPayload
+    | SitesSlotPayload
     | SourcesSlotPayload
     | TasksSlotPayload
 )
@@ -205,9 +242,17 @@ SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
     ArtifactsSlotPayload,
     ChangesSlotPayload,
     FilesSlotPayload,
+    SitesSlotPayload,
     SourcesSlotPayload,
     TasksSlotPayload,
 )
+
+
+@dataclass(frozen=True)
+class ConversationSlotItem:
+    name: str
+    generation: UUID
+    content_visible: bool
 
 
 @dataclass(frozen=True)
@@ -218,6 +263,8 @@ class ConversationSlotContext:
     audience: Audience
     messages: tuple[Message, ...]
     compacted: bool
+    public_base_url: str | None = None
+    visible_items: tuple[ConversationSlotItem, ...] = ()
     projection: ConversationSlotPayload | None = None
 
 

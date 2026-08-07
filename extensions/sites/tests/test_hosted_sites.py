@@ -23,6 +23,7 @@ import yaml
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import (
@@ -45,13 +46,16 @@ from ufo_ext_sites.tools import (
     DEPLOY_WEBSITE_TOOL,
     PUBLISH_WEBSITE_TOOL,
 )
+from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.loader import turn_tools
+from ufo.ext.context import context_for
+from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
+from ufo.ext.loader import member_object_registry, turn_tools
 from ufo.hub import InProcessHub
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -174,9 +178,10 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
 
     def mounted(ingress_public_url: str | None) -> AsyncClient:
         app = FastAPI()
+        manifests = (web_manifest(), sites_manifest())
         _mount_shared_surfaces(
             app,
-            (sites_manifest(),),
+            manifests,
             None,
             FilesystemBlobStore(root=tmp_path),
             sandboxes,
@@ -189,6 +194,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
             subagents=NO_SUBAGENTS,
+            objects=member_object_registry(manifests),
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 
@@ -1395,3 +1401,129 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
             )
         (row,) = await _stored(workspace)
         assert row.name == "marketing"
+
+
+async def test_deployed_site_reaches_its_authenticated_conversation_slot(
+    deployment: Deployment,
+) -> None:
+    workspace = deployment.workspace
+    owner_id, owner_token = await _seed_member(workspace, OWNER_EMAIL)
+    _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    await _deploy(
+        workspace,
+        conversation_id,
+        SHARED_AUDIENCE,
+        owner_id,
+        site="private-dashboard",
+        visibility="private",
+    )
+
+    path = f"/surface/web/agents/{workspace.agent_id}/conversations/{conversation_id}/slots/sites"
+    owner = await deployment.client.get(path, headers=_cookie(owner_token))
+    other = await deployment.client.get(path, headers=_cookie(other_token))
+
+    assert owner.status_code == 200
+    assert owner.json()["sites"][0]["name"] == "private-dashboard"
+    assert owner.json()["sites"][0]["url"].startswith(PUBLIC_BASE_URL + FRAME_PATH + "/")
+    assert "creator_member_id" not in owner.json()["sites"][0]
+    assert other.status_code == 200
+    assert other.json() == {"type": "sites", "sites": [], "truncated": False}
+
+
+async def test_sites_slot_bounds_its_durable_rows(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    now = datetime(2026, 8, 7, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(hosted_site),
+            [
+                {
+                    "workspace_id": workspace.id,
+                    "conversation_id": conversation_id,
+                    "name": f"site-{index:03d}",
+                    "port": 10_000 + index,
+                    "visibility": "workspace",
+                    "creator_member_id": owner_id,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for index in range(102)
+            ],
+        )
+    ext = context_for("sites", frozenset())
+    with ws(workspace.id):
+        registered = await HostedSites(workspace.id, workspace_tx).conversation(
+            conversation_id,
+            tuple(f"site-{index:03d}" for index in range(102)),
+            102,
+        )
+        payload = await SITES_SLOT.read(
+            ConversationSlotContext(
+                ext=ext,
+                conversation_id=conversation_id,
+                agent_id=workspace.agent_id,
+                audience=SHARED_AUDIENCE,
+                messages=(),
+                compacted=False,
+                public_base_url=PUBLIC_BASE_URL,
+                visible_items=tuple(
+                    ConversationSlotItem(
+                        site_object_name(conversation_id, row.name), row.generation, True
+                    )
+                    for row in registered
+                ),
+            )
+        )
+
+    assert len(payload.sites) == 100
+    assert payload.truncated is True
+
+
+async def test_sites_slot_rejects_stale_visibility_and_recreated_row_grants(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        registered = await sites.register(
+            conversation_id,
+            "dashboard",
+            8000,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+        )
+        context = ConversationSlotContext(
+            ext=context_for("sites", frozenset()),
+            conversation_id=conversation_id,
+            agent_id=workspace.agent_id,
+            audience=SHARED_AUDIENCE,
+            messages=(),
+            compacted=False,
+            public_base_url=PUBLIC_BASE_URL,
+            visible_items=(
+                ConversationSlotItem(
+                    site_object_name(conversation_id, registered.name),
+                    registered.generation,
+                    True,
+                ),
+            ),
+        )
+        await sites.set_visibility(conversation_id, registered.name, "private")
+        assert (await SITES_SLOT.read(context)).sites == ()
+        await sites.unregister(conversation_id, registered.name)
+        recreated = await sites.register(
+            conversation_id,
+            registered.name,
+            8001,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+        )
+        assert recreated.generation != registered.generation
+        assert (await SITES_SLOT.read(context)).sites == ()

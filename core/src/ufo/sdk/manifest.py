@@ -34,6 +34,9 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_FILES_MAX as CONVERSATION_FILES_MAX,
 )
 from ufo.ext.conversation_slots import (
+    CONVERSATION_SITES_MAX as CONVERSATION_SITES_MAX,
+)
+from ufo.ext.conversation_slots import (
     CONVERSATION_TASK_DESCRIPTION_MAX_CHARS as CONVERSATION_TASK_DESCRIPTION_MAX_CHARS,
 )
 from ufo.ext.conversation_slots import (
@@ -58,7 +61,16 @@ from ufo.ext.conversation_slots import (
     ConversationFile as ConversationFile,
 )
 from ufo.ext.conversation_slots import (
+    ConversationSite as ConversationSite,
+)
+from ufo.ext.conversation_slots import (
     ConversationSlotContext as ConversationSlotContext,
+)
+from ufo.ext.conversation_slots import (
+    ConversationSlotItem as ConversationSlotItem,
+)
+from ufo.ext.conversation_slots import (
+    ConversationSlotPayload as ConversationSlotPayload,
 )
 from ufo.ext.conversation_slots import (
     ConversationSlotProvider as ConversationSlotProvider,
@@ -74,6 +86,9 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.conversation_slots import (
     ImagePreview as ImagePreview,
+)
+from ufo.ext.conversation_slots import (
+    SitesSlotPayload as SitesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
     SourcesSlotPayload as SourcesSlotPayload,

@@ -10,7 +10,11 @@ from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
-from ufo_ext_sites.objects import CONVERSATION_DIGEST_HEX, site_object_name
+from ufo_ext_sites.objects import (
+    CONVERSATION_DIGEST_HEX,
+    site_name_from_object,
+    site_object_name,
+)
 from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
@@ -418,6 +422,10 @@ def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:
         "a site's longest name plus its object suffix must stay addressable from chat"
     )
     assert len(site_object_name(uuid4(), site_name("x" * 80))) <= OBJECT_NAME_MAX_LENGTH
+    conversation_id = uuid4()
+    object_name = site_object_name(conversation_id, "dashboard")
+    assert site_name_from_object(conversation_id, object_name) == "dashboard"
+    assert site_name_from_object(uuid4(), object_name) is None
     for nameless in ("---", "   ", "🌱🌱", "!!!"):
         with pytest.raises(InvalidSiteName, match="letters or digits"):
             site_name(nameless)

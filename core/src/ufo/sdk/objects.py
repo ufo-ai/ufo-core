@@ -26,6 +26,12 @@ from ufo.objects import (
     AgentTargetVerb as AgentTargetVerb,
 )
 from ufo.objects import (
+    ConversationMemberListable as ConversationMemberListable,
+)
+from ufo.objects import (
+    ConversationObjectGrant as ConversationObjectGrant,
+)
+from ufo.objects import (
     GeneratedObjectOwner as GeneratedObjectOwner,
 )
 from ufo.objects import (
