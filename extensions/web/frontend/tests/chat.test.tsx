@@ -508,6 +508,53 @@ test("sites slot renders hosted links with visibility and state", async () => {
   expect(link.getAttribute("target")).toBe("_blank");
 });
 
+test("automations slot renders cadence, state, and visible description", async () => {
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/automations"]: () =>
+      json({
+        type: "automations",
+        automations: [
+          {
+            name: "daily-brief",
+            description: "Send the morning brief.",
+            schedule: "0 9 * * *",
+            paused: false,
+            next_run_at: "2026-08-08T09:00:00Z",
+            last_run_at: "2026-08-07T09:00:00Z",
+            latest_status: "done",
+            latest_response: "Brief delivered.",
+            created_at: "2026-08-01T12:00:00Z",
+            updated_at: "2026-08-06T12:00:00Z",
+          },
+        ],
+        truncated: false,
+      }),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          {
+            id: "automations",
+            label: "Automations",
+            icon: "calendar",
+            kind: "automations",
+            count: 1,
+          },
+        ],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Automations 1" }));
+  expect(await screen.findByText("daily-brief")).toBeTruthy();
+  expect(screen.getByText("Send the morning brief.")).toBeTruthy();
+  expect(screen.getByText("Running")).toBeTruthy();
+  expect(screen.getByText("Brief delivered.")).toBeTruthy();
+  expect(screen.getByText(/Last .* · done/)).toBeTruthy();
+  expect(screen.getByText(/0 9 \* \* \* · Next/)).toBeTruthy();
+  expect(document.querySelector('[data-slot-icon="calendar"]')).toBeTruthy();
+});
+
 test.each([
   [200, { type: "changes", changes: [], truncated: false }, "No changes."],
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],

@@ -92,7 +92,8 @@ GET .../conversations/{conversation}/slots/{slot}
     -> one bounded, discriminated payload
 ```
 
-Initial payloads are exact models for changes, files, sources, artifacts, tasks, and sites. Core
+Initial payloads are exact models for changes, files, sources, artifacts, tasks, sites, and
+automations. Core
 owns this closed set because untrusted extension JSON cannot enter the portal origin: each contract
 is the trust-boundary validation for one host renderer and its access metadata never serializes. An item may carry an
 `ImagePreview` with a same-origin URL and one of `image/png`, `image/jpeg`, `image/gif`, or
@@ -117,6 +118,7 @@ The first owners are:
 | `sources` | research | new typed conversation-keyed observation records |
 | `tasks` | todos | durable conversation-keyed todo board in the extension-scoped store |
 | `sites` | sites | bounded durable `hosted_site` rows; host projects names through the `site` object gate |
+| `automations` | scheduled_tasks | bounded durable recurring tasks; host projects names through the `scheduled_task` object gate |
 
 Every preview URL carries a signed capability binding its media type and byte size. The byte route
 accepts only a claim no larger than 20 MiB, reads exactly that many bytes, and validates the claimed
@@ -136,6 +138,17 @@ bound, so other conversations and earlier private rows cannot hide a later visib
 sites are creator-only here, including for an admin, matching the hosted link. A stored generation
 rotates when visibility changes and on delete/recreate. The provider fetches only granted names
 with `MAX + 1`, verifies every generation, and never serializes creator identity or proof metadata.
+
+The Automations provider filters the agent-scoped `ScheduleStore` to the conversation and host-
+authorized names and durable task ids in one bounded query, then batch-joins their latest runs. A
+creator receives name, bounded description, cadence, pause state, next and last run, latest terminal
+status and bounded response, and row timestamps. An admin
+receives the same management metadata with another member's private description and response
+omitted. Ownerless rows retain the object kind's existing admin-only visibility and full-content
+semantics. Every displayed row is fenced to its durable task id, so delete/recreate cannot replay a
+grant. Oversized display fields are truncated before validation and mark the payload truncated.
+Other members receive no row. The payload never carries the task prompt, owner identity, or proof
+metadata.
 
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it

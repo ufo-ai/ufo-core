@@ -27,6 +27,7 @@ from starlette.responses import JSONResponse
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
+from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import site_object_name
@@ -95,7 +96,7 @@ from ufo.objects import OBJECT_LIST_PAGE
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox, WorkspaceFile
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.scheduling import ScheduleStore
+from ufo.scheduling import ScheduledTask, ScheduleStore, TaskInspection
 from ufo.schema import tables
 from ufo.schema.records import (
     SUBAGENT_SURFACE,
@@ -132,6 +133,7 @@ SCHEDULED_TASK_KIND_ONLY = Manifest(
     name="scheduled_tasks",
     version="0.1.0",
     objects=(SCHEDULED_TASK_OBJECT,),
+    conversation_slots=(AUTOMATIONS_SLOT,),
 )
 SLOTTED = Manifest(
     name="stub",
@@ -6706,6 +6708,174 @@ async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversa
     }
     assert admin.json()["sites"] == viewer.json()["sites"]
     assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "sites")["count"] == 2
+
+
+async def test_automations_slot_uses_the_scheduled_task_member_gate(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, agent_id = web
+    creator_id, creator_token = await _seed_member(workspace_id, "task-owner@example.com")
+    _viewer_id, viewer_token = await _seed_member(workspace_id, "task-viewer@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "task-admin@example.com", admin=True)
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="automations-slot",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+    )
+    long_description = "d" * 2_001
+    long_schedule = ",".join(str(minute) for minute in range(60)) + " 9 * * *"
+    long_response = "r" * 401
+    with ws(workspace_id), bind_agent(agent_id):
+        task = await ScheduleStore().create(
+            conversation_id=conversation_id,
+            name="daily-brief",
+            schedule="0 9 * * *",
+            prompt="Read private sources and send the brief.",
+            description="Send the morning brief.",
+            next_run_at=datetime(2026, 8, 8, 9, tzinfo=UTC),
+            created_by_member_id=creator_id,
+        )
+        ownerless = await ScheduleStore().create(
+            conversation_id=conversation_id,
+            name="system-cleanup",
+            schedule="0 3 * * 0",
+            prompt="Remove expired system records.",
+            description="Clean expired system records.",
+            next_run_at=datetime(2026, 8, 9, 3, tzinfo=UTC),
+            created_by_member_id=None,
+        )
+        bounded = await ScheduleStore().create(
+            conversation_id=conversation_id,
+            name="bounded-output",
+            schedule=long_schedule,
+            prompt="Produce a large result.",
+            description=long_description,
+            next_run_at=datetime(2026, 8, 10, 9, tzinfo=UTC),
+            created_by_member_id=creator_id,
+        )
+    last_turn_id = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound="Run the daily brief.",
+    )
+    bounded_turn_id = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="Run the bounded output.",
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.scheduled_task)
+            .where(tables.scheduled_task.c.id.in_((task.id, ownerless.id)))
+            .values(
+                last_run_at=datetime(2026, 8, 7, 9, tzinfo=UTC),
+                last_turn_id=last_turn_id,
+            )
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == bounded_turn_id)
+            .values(
+                terminal=TerminalFrame(status="done", text=long_response).model_dump(mode="json")
+            )
+        )
+        await connection.execute(
+            sa.update(tables.scheduled_task)
+            .where(tables.scheduled_task.c.id == bounded.id)
+            .values(
+                last_run_at=datetime(2026, 8, 7, 10, tzinfo=UTC),
+                last_turn_id=bounded_turn_id,
+            )
+        )
+
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots"
+
+    async def refuse_single_inspection(_store: ScheduleStore, _task: ScheduledTask) -> None:
+        raise AssertionError("automations slot performed a per-task inspection")
+
+    real_inspect_many = ScheduleStore.inspect_many
+    batch_calls = 0
+
+    async def count_batch(
+        store: ScheduleStore, tasks: tuple[ScheduledTask, ...]
+    ) -> dict[UUID, TaskInspection]:
+        nonlocal batch_calls
+        batch_calls += 1
+        return await real_inspect_many(store, tasks)
+
+    monkeypatch.setattr(ScheduleStore, "inspect", refuse_single_inspection)
+    monkeypatch.setattr(ScheduleStore, "inspect_many", count_batch)
+    creator_inventory = await client.get(
+        base, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"}
+    )
+    assert (
+        next(slot for slot in creator_inventory.json()["slots"] if slot["id"] == "automations")[
+            "count"
+        ]
+        == 2
+    )
+    assert batch_calls == 0
+    creator = await client.get(
+        f"{base}/automations",
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
+    )
+    viewer = await client.get(
+        f"{base}/automations", headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
+    )
+    viewer_inventory = await client.get(
+        base, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
+    )
+    admin = await client.get(
+        f"{base}/automations", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    assert batch_calls == 2
+
+    assert creator.status_code == 200
+    creator_tasks = {task["name"]: task for task in creator.json()["automations"]}
+    assert set(creator_tasks) == {"bounded-output", "daily-brief"}
+    creator_task = creator_tasks["daily-brief"]
+    assert creator_task["description"] == "Send the morning brief."
+    assert creator_task["schedule"] == "0 9 * * *"
+    assert creator_task["paused"] is False
+    assert creator_task["next_run_at"].startswith("2026-08-08T09:00:00")
+    assert creator_task["last_run_at"].startswith("2026-08-07T09:00:00")
+    assert creator_task["latest_status"] == "done"
+    assert creator_task["latest_response"] == "ok"
+    assert "prompt" not in creator_task
+    bounded_task = creator_tasks["bounded-output"]
+    assert bounded_task["description"] == long_description[:2_000]
+    assert bounded_task["schedule"] == long_schedule[:100]
+    assert bounded_task["latest_response"] == long_response[:400]
+    assert creator.json()["truncated"] is True
+    assert viewer.status_code == 200
+    assert viewer.json() == {"type": "automations", "automations": [], "truncated": False}
+    assert all(slot["id"] != "automations" for slot in viewer_inventory.json()["slots"])
+    assert admin.status_code == 200
+    admin_tasks = {task["name"]: task for task in admin.json()["automations"]}
+    assert set(admin_tasks) == {"bounded-output", "daily-brief", "system-cleanup"}
+    admin_task = admin_tasks["daily-brief"]
+    assert admin_task["name"] == "daily-brief"
+    assert admin_task["description"] is None
+    assert admin_task["schedule"] == "0 9 * * *"
+    assert admin_task["paused"] is False
+    assert admin_task["latest_status"] == "done"
+    assert admin_task["latest_response"] is None
+    assert "prompt" not in admin_task
+    ownerless_task = admin_tasks["system-cleanup"]
+    assert ownerless_task["description"] == "Clean expired system records."
+    assert ownerless_task["latest_response"] == "ok"
+    assert "prompt" not in ownerless_task
+    admin_bounded = admin_tasks["bounded-output"]
+    assert admin_bounded["description"] is None
+    assert admin_bounded["latest_response"] is None
+    assert admin_bounded["schedule"] == long_schedule[:100]
 
 
 async def test_conversation_reads_ride_the_same_gate(

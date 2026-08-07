@@ -32,11 +32,15 @@ CONVERSATION_SOURCES_MAX = 100
 CONVERSATION_SITE_NAME_MAX_CHARS = 48
 CONVERSATION_SITE_URL_MAX_CHARS = 8_192
 CONVERSATION_SITES_MAX = 100
+CONVERSATION_AUTOMATION_NAME_MAX_CHARS = 128
+CONVERSATION_AUTOMATION_DESCRIPTION_MAX_CHARS = 2_000
+CONVERSATION_AUTOMATION_SCHEDULE_MAX_CHARS = 100
+CONVERSATION_AUTOMATIONS_MAX = 100
 CONVERSATION_TASK_DESCRIPTION_MAX_CHARS = 2_000
 CONVERSATION_TASK_TITLE_MAX_CHARS = 500
 CONVERSATION_TASKS_MAX = 100
-PortalIcon = Literal["artifact", "diff", "file", "link", "task"]
-PORTAL_ICONS = frozenset(("artifact", "diff", "file", "link", "task"))
+PortalIcon = Literal["artifact", "calendar", "diff", "file", "link", "task"]
+PORTAL_ICONS = frozenset(("artifact", "calendar", "diff", "file", "link", "task"))
 
 
 class ImagePreview(BaseModel):
@@ -230,8 +234,35 @@ class SitesSlotPayload(BaseModel):
     truncated: bool
 
 
+class ConversationAutomation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=CONVERSATION_AUTOMATION_NAME_MAX_CHARS)
+    description: str | None = Field(
+        default=None, max_length=CONVERSATION_AUTOMATION_DESCRIPTION_MAX_CHARS
+    )
+    schedule: str = Field(min_length=1, max_length=CONVERSATION_AUTOMATION_SCHEDULE_MAX_CHARS)
+    paused: bool
+    next_run_at: datetime
+    last_run_at: datetime | None
+    latest_status: str | None = Field(default=None, max_length=40)
+    latest_response: str | None = Field(default=None, max_length=400)
+    created_at: datetime
+    updated_at: datetime
+    authorization_generation: UUID = Field(exclude=True)
+
+
+class AutomationsSlotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["automations"] = "automations"
+    automations: tuple[ConversationAutomation, ...] = Field(max_length=CONVERSATION_AUTOMATIONS_MAX)
+    truncated: bool
+
+
 ConversationSlotPayload = (
-    ArtifactsSlotPayload
+    AutomationsSlotPayload
+    | ArtifactsSlotPayload
     | ChangesSlotPayload
     | FilesSlotPayload
     | SitesSlotPayload
@@ -239,6 +270,7 @@ ConversationSlotPayload = (
     | TasksSlotPayload
 )
 SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
+    AutomationsSlotPayload,
     ArtifactsSlotPayload,
     ChangesSlotPayload,
     FilesSlotPayload,

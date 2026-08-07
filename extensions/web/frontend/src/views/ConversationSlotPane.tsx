@@ -46,7 +46,7 @@ type ImagePreview = {
   media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp";
   url: string;
 };
-export type PortalIcon = "artifact" | "diff" | "file" | "link" | "task";
+export type PortalIcon = "artifact" | "calendar" | "diff" | "file" | "link" | "task";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
 type TaskStatus = "pending" | "in_progress" | "completed";
@@ -67,8 +67,26 @@ type Site = {
   updated_at: string;
 };
 type SitesPayload = { type: "sites"; sites: Site[]; truncated: boolean };
+type Automation = {
+  name: string;
+  description: string | null;
+  schedule: string;
+  paused: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+  latest_status: string | null;
+  latest_response: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type AutomationsPayload = {
+  type: "automations";
+  automations: Automation[];
+  truncated: boolean;
+};
 type SlotPayload =
   | ArtifactsPayload
+  | AutomationsPayload
   | ChangesPayload
   | FilesPayload
   | SitesPayload
@@ -220,6 +238,7 @@ export function ConversationSlotPane({
 export function SlotIcon({ icon }: { icon: PortalIcon }) {
   const path = {
     artifact: "M4 7 12 3l8 4-8 4-8-4Zm0 5 8 4 8-4M4 17l8 4 8-4",
+    calendar: "M6 3v4M18 3v4M4 9h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z",
     diff: "M8 5v6M5 8h6M14 8h5M5 17h6M14 17h5",
     file: "M6 2h8l4 4v16H6V2Zm8 0v5h5",
     link: "M9 15l6-6M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0",
@@ -276,6 +295,7 @@ function SlotContent({
   }
   if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
   if (payload.type === "tasks") return <TasksContent payload={payload} />;
+  if (payload.type === "automations") return <AutomationsContent payload={payload} />;
   if (payload.type === "sites") return <SitesContent payload={payload} />;
   if (!payload.sources.length && !payload.truncated) return <PanelEmpty>No sources.</PanelEmpty>;
   return (
@@ -344,6 +364,49 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
         <p className="m-0 mt-lg opacity-(--muted-soft)">Some tasks may not be shown.</p>
       ) : null}
     </section>
+  );
+}
+
+function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
+  if (!payload.automations.length && !payload.truncated) {
+    return <PanelEmpty>No automations report to this conversation.</PanelEmpty>;
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-xl">
+      {payload.automations.map((automation) => (
+        <article key={automation.name} className="min-w-0 rounded-panel border border-edge p-lg">
+          <div className="flex items-start gap-md">
+            <div className="min-w-0 flex-1">
+              <h2 className="m-0 break-all font-mono text-label font-strong">
+                {automation.name}
+              </h2>
+              {automation.description ? (
+                <p className="m-0 mt-sm break-words">{automation.description}</p>
+              ) : null}
+            </div>
+            <span className="font-mono text-mono opacity-(--muted-strong)">
+              {automation.paused ? "Paused" : "Running"}
+            </span>
+          </div>
+          <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+            {automation.schedule} · Next {day(automation.next_run_at)} · Updated{" "}
+            {day(automation.updated_at)}
+          </p>
+          {automation.last_run_at ? (
+            <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+              Last {day(automation.last_run_at)}
+              {automation.latest_status ? " · " + automation.latest_status : ""}
+            </p>
+          ) : null}
+          {automation.latest_response ? (
+            <p className="m-0 mt-sm break-words">{automation.latest_response}</p>
+          ) : null}
+        </article>
+      ))}
+      {payload.truncated ? (
+        <p className="m-0 opacity-(--muted-soft)">Some automations may not be shown.</p>
+      ) : null}
+    </div>
   );
 }
 

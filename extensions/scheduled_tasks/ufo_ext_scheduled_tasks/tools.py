@@ -20,17 +20,23 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
     AdminRequired,
+    ConversationObjectGrant,
     GeneratedObjectOwner,
     MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
+    ObjectListQuery,
+    ObjectPage,
     ObjectRef,
+    ObjectRow,
     OwnedRow,
+    object_page,
 )
 from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
+from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
@@ -115,10 +121,6 @@ def _summary(task: ScheduledTask) -> str:
     return f"{task.schedule} — {task.description or task.prompt}"[:SUMMARY_MAX]
 
 
-def _content_visible(task: ScheduledTask, member_id: UUID | None) -> bool:
-    return task.created_by_member_id is None or task.created_by_member_id == member_id
-
-
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
     """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
@@ -141,15 +143,70 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         creator's."""
         return not {"prompt", "description"}.intersection(spec.model_fields_set)
 
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        conversation = query.filters.get("conversation")
+        if not isinstance(conversation, str):
+            return await super().member_page(ext, member_id=member_id, admin=admin, query=query)
+        try:
+            conversation_id = UUID(conversation)
+        except ValueError:
+            return object_page((), query)
+        rows = tuple(
+            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
+            for row in await self._rows(ext, member_id=member_id, conversation_id=conversation_id)
+            if self._visible(row.owner, member_id, admin)
+        )
+        return object_page(rows, query)
+
+    async def member_conversation_rows(
+        self,
+        ext: ExtensionContext | None,
+        conversation_id: UUID,
+        *,
+        member_id: UUID,
+        admin: bool,
+        limit: int,
+    ) -> tuple[ConversationObjectGrant, ...]:
+        tasks = await _require_scheduler(ext).list(
+            conversation_id=conversation_id,
+            visible_to_member_id=member_id,
+            include_all_owners=admin,
+            limit=limit,
+        )
+        return tuple(
+            ConversationObjectGrant(
+                name=task.name,
+                generation=task.id,
+                content_visible=task_content_visible(task, member_id),
+            )
+            for task in tasks
+        )
+
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        return await self._rows(ext, member_id=member_id)
+
+    async def _rows(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID | None,
+        conversation_id: UUID | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
                 name=task.name,
                 summary=(
                     _summary(task)
-                    if _content_visible(task, member_id)
+                    if task_content_visible(task, member_id)
                     else f"{task.schedule} — private member task"
                 ),
                 owner=GeneratedObjectOwner(
@@ -158,11 +215,12 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     generation=task.id,
                 ),
                 fields={
+                    "conversation": str(task.conversation_id),
                     "next_run_at": task.next_run_at.isoformat(),
                     "paused": task.paused,
                 },
             )
-            for task in await _require_scheduler(ext).list()
+            for task in await _require_scheduler(ext).list(conversation_id=conversation_id)
         )
 
     async def _member_object(
@@ -192,7 +250,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
                 ),
             ),
-            spec_visible=_content_visible(task, member_id),
+            spec_visible=task_content_visible(task, member_id),
         )
 
     async def _status(
@@ -210,7 +268,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if _content_visible(task, ctx.acting_member_id):
+            if task_content_visible(task, ctx.acting_member_id):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -325,7 +383,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
-    list_fields=frozenset({"next_run_at", "paused"}),
+    list_fields=frozenset({"conversation", "next_run_at", "paused"}),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )
 

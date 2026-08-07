@@ -531,24 +531,34 @@ class ScheduleStore:
         if deleted.rowcount == 0:
             raise ValueError(f"scheduled task {expected.name!r} changed while cancelling")
 
-    async def list(self) -> tuple[ScheduledTask, ...]:
+    async def list(
+        self,
+        *,
+        conversation_id: UUID | None = None,
+        names: tuple[str, ...] | None = None,
+        visible_to_member_id: UUID | None = None,
+        include_all_owners: bool = True,
+        limit: int | None = None,
+    ) -> tuple[ScheduledTask, ...]:
         agent_id = object_agent_id()
-        async with workspace_tx() as connection:
-            rows = (
-                (
-                    await connection.execute(
-                        sa.select(*_COLUMNS)
-                        .where(
-                            tables.scheduled_task.c.workspace_id == self.workspace_id,
-                            tables.scheduled_task.c.agent_id == agent_id,
-                            tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
-                        )
-                        .order_by(tables.scheduled_task.c.name)
-                    )
-                )
-                .mappings()
-                .all()
+        query = sa.select(*_COLUMNS).where(
+            tables.scheduled_task.c.workspace_id == self.workspace_id,
+            tables.scheduled_task.c.agent_id == agent_id,
+            tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
+        )
+        if conversation_id is not None:
+            query = query.where(tables.scheduled_task.c.conversation_id == conversation_id)
+        if names is not None:
+            query = query.where(tables.scheduled_task.c.name.in_(names))
+        if not include_all_owners:
+            query = query.where(
+                tables.scheduled_task.c.created_by_member_id == visible_to_member_id
             )
+        query = query.order_by(tables.scheduled_task.c.name)
+        if limit is not None:
+            query = query.limit(limit)
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).mappings().all()
         return tuple(_task(row) for row in rows)
 
     async def claim_due(
@@ -664,9 +674,18 @@ class ScheduleStore:
         """One task's live picture beyond its definition: its timing marks and the latest fire's
         turn with its terminal outcome — the read the `scheduled_task` object kind renders as
         status."""
+        return (await self.inspect_many((expected,))).get(expected.id)
+
+    async def inspect_many(self, expected: tuple[ScheduledTask, ...]) -> dict[UUID, TaskInspection]:
+        if not expected:
+            return {}
         agent_id = object_agent_id()
+        by_id = {task.id: task for task in expected}
         query = (
             sa.select(
+                tables.scheduled_task.c.id,
+                tables.scheduled_task.c.name,
+                tables.scheduled_task.c.conversation_id,
                 tables.scheduled_task.c.next_run_at,
                 tables.scheduled_task.c.last_run_at,
                 tables.scheduled_task.c.expires_at,
@@ -681,22 +700,25 @@ class ScheduleStore:
             )
             .where(
                 tables.scheduled_task.c.workspace_id == self.workspace_id,
-                tables.scheduled_task.c.id == expected.id,
+                tables.scheduled_task.c.id.in_(by_id),
                 tables.scheduled_task.c.agent_id == agent_id,
-                tables.scheduled_task.c.name == expected.name,
                 tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
             )
         )
         async with workspace_tx() as connection:
-            row = (await connection.execute(query)).mappings().one_or_none()
-        if row is None:
-            return None
-        terminal = row["terminal"]
-        return TaskInspection(
-            next_run_at=_utc(row["next_run_at"]),
-            last_run_at=_utc_opt(row["last_run_at"]),
-            expires_at=_utc_opt(row["expires_at"]),
-            last_turn_id=row["last_turn_id"],
-            last_turn_status=row["turn_status"],
-            last_response=(terminal or {}).get("text") if terminal else None,
-        )
+            rows = (await connection.execute(query)).mappings().all()
+        inspections: dict[UUID, TaskInspection] = {}
+        for row in rows:
+            task = by_id[row["id"]]
+            if row["name"] != task.name or row["conversation_id"] != task.conversation_id:
+                continue
+            terminal = row["terminal"]
+            inspections[task.id] = TaskInspection(
+                next_run_at=_utc(row["next_run_at"]),
+                last_run_at=_utc_opt(row["last_run_at"]),
+                expires_at=_utc_opt(row["expires_at"]),
+                last_turn_id=row["last_turn_id"],
+                last_turn_status=row["turn_status"],
+                last_response=(terminal or {}).get("text") if terminal else None,
+            )
+        return inspections

@@ -62,10 +62,12 @@ from ufo.sdk.hub import (
 from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
+    CONVERSATION_AUTOMATIONS_MAX,
     CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
     CONVERSATION_SITES_MAX,
     ArtifactsSlotPayload,
+    AutomationsSlotPayload,
     ChangesSlotPayload,
     ConversationArtifact,
     ConversationChange,
@@ -1419,6 +1421,22 @@ async def _project_slot_context(
                 for row in rows or ()
             ),
         )
+    if extension == "scheduled_tasks" and content is AutomationsSlotPayload:
+        rows = await ctx.list_conversation_member_objects(
+            "scheduled_task",
+            slot_context.agent_id,
+            slot_context.conversation_id,
+            viewer.member_id,
+            admin=viewer.admin,
+            limit=CONVERSATION_AUTOMATIONS_MAX + 1,
+        )
+        return replace(
+            slot_context,
+            visible_items=tuple(
+                ConversationSlotItem(row.name, row.generation, row.content_visible)
+                for row in rows or ()
+            ),
+        )
     return slot_context
 
 
@@ -1436,6 +1454,33 @@ def _authorized_slot_payload(
                         and item.generation == site.authorization_generation
                         for item in context.visible_items
                     )
+                )
+            }
+        )
+    if isinstance(payload, AutomationsSlotPayload):
+        visible = tuple(
+            automation
+            for automation in payload.automations
+            if any(
+                item.name == automation.name
+                and item.generation == automation.authorization_generation
+                for item in context.visible_items
+            )
+        )
+        return payload.model_copy(
+            update={
+                "automations": tuple(
+                    automation
+                    if any(
+                        item.name == automation.name
+                        and item.generation == automation.authorization_generation
+                        and item.content_visible
+                        for item in context.visible_items
+                    )
+                    else automation.model_copy(
+                        update={"description": None, "latest_response": None}
+                    )
+                    for automation in visible
                 )
             }
         )

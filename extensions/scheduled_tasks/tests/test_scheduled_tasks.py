@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
@@ -39,11 +40,12 @@ from ufo.agent_scope import AgentUnbound, agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
 from ufo.loop.engine import _claim_turn
 from ufo.loop.queue import _load_turn
-from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
+from ufo.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
@@ -301,6 +303,55 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
     assert [row["name"] for row in soonest_first["objects"]] == sorted(
         ("daily", "weekly"), key=lambda name: tasks[name].next_run_at
     )
+
+
+async def test_malformed_conversation_filter_still_validates_the_list_query() -> None:
+    query = ObjectListQuery(
+        filters={"conversation": "not-a-uuid", "unexpected": True},
+        supported_fields=frozenset({"conversation", "next_run_at", "paused"}),
+    )
+
+    with pytest.raises(ValueError, match=r"unknown object list filters.*unexpected"):
+        await ScheduledTaskObjects().member_page(
+            None,
+            member_id=uuid4(),
+            admin=False,
+            query=query,
+        )
+
+
+async def test_automations_slot_rejects_a_recreated_task_generation(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        store = ScheduleStore()
+        original = await store.create(
+            conversation_id,
+            "daily",
+            DAILY_9AM,
+            "send it",
+            "daily send",
+            datetime(2026, 8, 8, 9, tzinfo=UTC),
+        )
+        context = ConversationSlotContext(
+            ext=context_for(NAME, frozenset()),
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            audience=conversation_audience(None),
+            messages=(),
+            compacted=False,
+            visible_items=(ConversationSlotItem(original.name, original.id, True),),
+        )
+        await store.cancel(original)
+        recreated = await store.create(
+            conversation_id,
+            original.name,
+            original.schedule,
+            original.prompt,
+            original.description,
+            original.next_run_at,
+        )
+        assert recreated.id != original.id
+        assert (await AUTOMATIONS_SLOT.read(context)).automations == ()
 
 
 async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> None:
@@ -2182,6 +2233,7 @@ def test_manifest_exposes_pause_as_a_side_effecting_tool() -> None:
     tool = next(tool for tool in manifest().tools if tool.name == "pause_and_wait")
     assert tool.handler is pause_and_wait
     assert tool.side_effecting is True
+    assert manifest().conversation_slots == (AUTOMATIONS_SLOT,)
 
 
 async def test_manifest_job_fires_through_job_runner(db: None) -> None:

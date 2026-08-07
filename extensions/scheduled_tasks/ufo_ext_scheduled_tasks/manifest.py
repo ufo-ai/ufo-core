@@ -14,6 +14,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.scheduling import due_task_workspaces
+from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.runner import ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import PAUSE_AND_WAIT_TOOL, SCHEDULED_TASK_OBJECT
 
@@ -45,4 +46,5 @@ def manifest() -> Manifest:
         ),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         requires=("memory_search",),
+        conversation_slots=(AUTOMATIONS_SLOT,),
     )

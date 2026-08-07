@@ -25,6 +25,15 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_ARTIFACTS_MAX as CONVERSATION_ARTIFACTS_MAX,
 )
 from ufo.ext.conversation_slots import (
+    CONVERSATION_AUTOMATION_DESCRIPTION_MAX_CHARS as CONVERSATION_AUTOMATION_DESCRIPTION_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_AUTOMATION_SCHEDULE_MAX_CHARS as CONVERSATION_AUTOMATION_SCHEDULE_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_AUTOMATIONS_MAX as CONVERSATION_AUTOMATIONS_MAX,
+)
+from ufo.ext.conversation_slots import (
     CONVERSATION_CHANGE_PATCH_MAX_CHARS as CONVERSATION_CHANGE_PATCH_MAX_CHARS,
 )
 from ufo.ext.conversation_slots import (
@@ -49,10 +58,16 @@ from ufo.ext.conversation_slots import (
     ArtifactsSlotPayload as ArtifactsSlotPayload,
 )
 from ufo.ext.conversation_slots import (
+    AutomationsSlotPayload as AutomationsSlotPayload,
+)
+from ufo.ext.conversation_slots import (
     ChangesSlotPayload as ChangesSlotPayload,
 )
 from ufo.ext.conversation_slots import (
     ConversationArtifact as ConversationArtifact,
+)
+from ufo.ext.conversation_slots import (
+    ConversationAutomation as ConversationAutomation,
 )
 from ufo.ext.conversation_slots import (
     ConversationChange as ConversationChange,
