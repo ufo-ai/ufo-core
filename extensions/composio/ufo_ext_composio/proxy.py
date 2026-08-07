@@ -47,9 +47,12 @@ _SKIP_REQUEST_HEADERS = frozenset(
 @dataclass(frozen=True)
 class ComposioProxyTransport(httpx.AsyncBaseTransport):
     """Rewrites each provider request to Composio's proxy-execute so Composio injects the account's
-    credential server-side — the source never holds the token. The request's method, path, query,
-    headers, and body ride in the proxy payload alongside the `connected_account_id`; the provider's
-    status/body/headers are reconstructed from the response so header-driven pagination works. The
+    credential server-side — the source never holds the token. The request's method, URL with its
+    query, headers, and body ride in the proxy payload alongside the `connected_account_id`; the
+    provider's status/body/headers are reconstructed from the response so header-driven pagination
+    works. The query stays on the `endpoint` URL rather than riding as `parameters` items, because
+    that list is keyed by name and a name repeated there reaches the provider once — which turns a
+    Sheets `values:batchGet` naming one `ranges` per tab into a read of a single range. The
     incoming request's timeout extension is carried onto the proxy-execute request — the transport
     is driven directly (not via an httpx client that would inject a default), so without this the
     outbound call would be unbounded and a hung broker could wedge the caller."""
@@ -64,13 +67,10 @@ class ComposioProxyTransport(httpx.AsyncBaseTransport):
         content = await request.aread()
         payload: dict[str, Any] = {
             "connected_account_id": self.connected_account_id,
-            "endpoint": str(request.url.copy_with(query=None)),
+            "endpoint": str(request.url),
             "method": request.method,
         }
-        parameters: list[dict[str, str]] = [
-            {"name": key, "value": value, "type": "query"}
-            for key, value in request.url.params.multi_items()
-        ]
+        parameters: list[dict[str, str]] = []
         for raw_key, raw_value in request.headers.raw:
             key = raw_key.decode("latin-1")
             if key.lower() in _SKIP_REQUEST_HEADERS:
