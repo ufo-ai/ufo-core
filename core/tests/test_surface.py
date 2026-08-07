@@ -989,6 +989,27 @@ async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> 
     assert await context.link_member("UNOBODY", "nobody@example.com") is None
 
 
+async def test_link_member_answers_the_oldest_of_two_cased_rows(db: None, tmp_path) -> None:
+    """Member uniqueness compares bytes, so two rows can carry one address in different casings:
+    the lookup answers the oldest of them rather than raising on the ambiguity, so requests for that
+    address serve under one member."""
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    later = datetime.now(UTC) + timedelta(days=1)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="BEE@example.com",
+                created_at=later,
+                updated_at=later,
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.link_member("UBEE", "bee@example.com") == member_id
+    assert await context.linked_member("UBEE") == member_id
+
+
 async def test_write_workspace_file_streams_into_the_conversation_workspace(
     db: None, tmp_path
 ) -> None:

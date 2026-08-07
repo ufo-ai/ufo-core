@@ -390,9 +390,14 @@ async def create_member(
 
     The address crosses `email_domain` here, so the shape rule holds for every caller rather than
     for the two that match a domain: a value no sign-in normalizes to and no verified join equals
-    cannot become a seated row the `member` kind refuses to delete."""
+    cannot become a seated row the `member` kind refuses to delete.
+
+    It is lowercased here for the same reason: (workspace_id, email) uniqueness compares bytes, so a
+    caller passing the address as typed would mint a second row for one person, and every read that
+    resolves a member by lowercased address would then find two."""
     if not email_domain(email):
         raise ValueError(f"{email!r} is not one local@domain address")
+    email = email.lower()
     await connection.execute(
         sa.select(tables.workspace.c.id)
         .where(tables.workspace.c.id == workspace_id)

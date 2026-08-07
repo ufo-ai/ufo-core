@@ -450,6 +450,30 @@ async def test_create_member_collapses_a_lost_race_onto_the_surviving_row(db: No
     assert await _seated_at(first) is not None
 
 
+async def test_create_member_lowercases_the_address_it_writes(db: None) -> None:
+    """Member uniqueness compares bytes, so the address as typed and the address a sign-in resolves
+    have to be one row: the second creation collapses onto the first instead of adding a twin no
+    lookup can tell apart."""
+    workspace_id = await _workspace(limit=2)
+    async with workspace_tx() as connection:
+        first = await create_member(connection, workspace_id, "Owner@Example.COM")
+        second = await create_member(connection, workspace_id, ADMIN_EMAIL)
+    assert second == first
+    async with workspace_tx() as connection:
+        emails = (
+            (
+                await connection.execute(
+                    sa.select(tables.member.c.email).where(
+                        tables.member.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert emails == [ADMIN_EMAIL]
+
+
 async def _set_included(workspace_id: UUID, included: int) -> None:
     async with workspace_tx() as connection:
         await connection.execute(

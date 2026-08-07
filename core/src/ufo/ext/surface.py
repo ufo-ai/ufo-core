@@ -1040,16 +1040,23 @@ class SurfaceContext:
     async def link_member(self, external_id: str, email: str) -> UUID | None:
         """Link this surface's external id to the workspace member whose email matches, the first
         time they speak. No matching member leaves the external id unlinked (a shared conversation
-        with no memory subject); a lost race collapses on the identity's primary key."""
+        with no memory subject); a lost race collapses on the identity's primary key.
+
+        Member uniqueness compares bytes, so one address can carry two rows differing only in
+        casing. This answers the oldest of them rather than raising on the ambiguity, so every
+        request for that address serves under one member."""
         async with workspace_tx() as connection:
             member = (
                 await connection.execute(
-                    sa.select(tables.member.c.id).where(
+                    sa.select(tables.member.c.id)
+                    .where(
                         tables.member.c.workspace_id == self.workspace_id,
                         sa.func.lower(tables.member.c.email) == email.lower(),
                     )
+                    .order_by(tables.member.c.created_at, tables.member.c.id)
+                    .limit(1)
                 )
-            ).one_or_none()
+            ).first()
         if member is None:
             return None
         try:
