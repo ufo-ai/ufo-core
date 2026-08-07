@@ -132,6 +132,7 @@ from ufo.workspace import ws, ws_current
 
 if TYPE_CHECKING:
     from ufo.ext.context import SourceReader
+    from ufo.ext.conversation_slots import BoundConversationSlot
     from ufo.listings import ListingCursor, ListingPage
     from ufo.memory import MemoryMatch, MemorySearch
     from ufo.objects import BoundKind, MemberObject, ObjectListQuery, ObjectPage
@@ -750,6 +751,12 @@ class SurfaceContext:
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _memory: "MemorySearch | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
+    _conversation_slots: tuple["BoundConversationSlot", ...] = ()
+
+    @property
+    def conversation_slots(self) -> tuple["BoundConversationSlot", ...]:
+        """The deploy's extension-provided conversation slots, fixed and validated at boot."""
+        return self._conversation_slots
 
     @property
     def deploy_extensions(self) -> tuple[DeployExtensionView, ...]:
@@ -2021,6 +2028,18 @@ class SurfaceContext:
                 )
             ).first()
         return disclosed is not None
+
+    async def conversation_audience(self, conversation_id: UUID, agent_id: UUID) -> Audience | None:
+        """The audience bound to one conversation on this workspace and agent, or None."""
+        async with workspace_tx() as connection:
+            value = await connection.scalar(
+                sa.select(tables.conversation.c.audience).where(
+                    tables.conversation.c.workspace_id == self.workspace_id,
+                    tables.conversation.c.id == conversation_id,
+                    tables.conversation.c.agent_id == agent_id,
+                )
+            )
+        return None if value is None else parse_audience(value)
 
     async def list_subagent_conversations(
         self, profile: str, member_id: UUID, agent_ids: frozenset[UUID], *, admin: bool, limit: int

@@ -141,7 +141,7 @@ test("the conversations tab lists this subagent's runs and opens one as a turn t
   expect(await screen.findByText("Find the filing deadline")).toBeTruthy();
   expect(screen.getByText("March 31")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Changes" }).getAttribute("href")).toBe(
-    "#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/changes",
+    "#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/slots/changes",
   );
 });
 

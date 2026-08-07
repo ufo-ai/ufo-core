@@ -35,11 +35,12 @@ export type WorkspacePlace = {
 
 export type Route =
   | { kind: "home" }
-  | { kind: "chat"; conversationId: string }
+  | { kind: "chat"; conversationId: string; slot?: string }
   | {
-      kind: "changes";
+      kind: "conversation-slot";
       agentId: string;
       conversationId: string;
+      slot: string;
       rootConversationId?: string;
     }
   | { kind: "new-chat"; agentId: string }
@@ -49,9 +50,9 @@ export type Route =
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "admin" };
 
-const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})$/;
-const CHANGES_HASH =
-  /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/changes(?:\?root=([0-9a-f-]{36}))?$/;
+const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})(?:\?(.*))?$/;
+const CONVERSATION_SLOT_HASH =
+  /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
@@ -97,14 +98,22 @@ export function parseHash(hash: string): Route {
   if (hash === "#/admin") return { kind: "admin" };
   if (hash === "#/agents") return { kind: "agents" };
   const chat = hash.match(CHAT_HASH);
-  if (chat) return { kind: "chat", conversationId: chat[1] };
-  const changes = hash.match(CHANGES_HASH);
-  if (changes)
+  if (chat) {
+    const slot = new URLSearchParams(chat[2]).get("slot");
     return {
-      kind: "changes",
-      agentId: changes[1],
-      conversationId: changes[2],
-      ...(changes[3] ? { rootConversationId: changes[3] } : {}),
+      kind: "chat",
+      conversationId: chat[1],
+      ...(slot && /^[a-z][a-z0-9_-]{0,63}$/.test(slot) ? { slot } : {}),
+    };
+  }
+  const conversationSlot = hash.match(CONVERSATION_SLOT_HASH);
+  if (conversationSlot)
+    return {
+      kind: "conversation-slot",
+      agentId: conversationSlot[1],
+      conversationId: conversationSlot[2],
+      slot: conversationSlot[3],
+      ...(conversationSlot[4] ? { rootConversationId: conversationSlot[4] } : {}),
     };
   const fresh = hash.match(NEW_CHAT_HASH);
   if (fresh) return { kind: "new-chat", agentId: fresh[1] };
@@ -131,17 +140,26 @@ export function parseHash(hash: string): Route {
   return { kind: "home" };
 }
 
-export function chatHash(conversationId: string): string {
-  return "#/c/" + conversationId;
+export function chatHash(conversationId: string, slot?: string): string {
+  return "#/c/" + conversationId + (slot ? "?slot=" + encodeURIComponent(slot) : "");
 }
 
-export function changesHash(
+export function conversationSlotHash(
   agentId: string,
   conversationId: string,
+  slot: string,
   rootConversationId?: string,
 ): string {
   const root = rootConversationId ? "?root=" + rootConversationId : "";
-  return "#/agents/" + agentId + "/conversations/" + conversationId + "/changes" + root;
+  return (
+    "#/agents/" +
+    agentId +
+    "/conversations/" +
+    conversationId +
+    "/slots/" +
+    slot +
+    root
+  );
 }
 
 export function newChatHash(agentId: string): string {

@@ -47,7 +47,10 @@ from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.listings import ListingCursor, ListingPage
 from ufo.sdk.manifest import (
     CdpProviderSpec,
+    ChangesSlotPayload,
     ConnectorProvider,
+    ConversationSlotContext,
+    ConversationSlotProvider,
     CredentialSlot,
     Deny,
     EmbedBackendSpec,
@@ -204,6 +207,7 @@ SAMPLE_MEMORY_KIND = "fact"
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
+CONVERSATION_SLOT = "sample_changes"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 WIDGET_KIND = "sample_widget"
 WIDGET_KEY_PREFIX = "object:widget:"
@@ -1104,6 +1108,14 @@ async def resolve_surface_workspace(request: Request, _auth: SurfaceAuth) -> UUI
     return resolve_workspace(request)
 
 
+async def _conversation_slot_summary(_ctx: ConversationSlotContext) -> None:
+    return None
+
+
+async def _conversation_slot_read(_ctx: ConversationSlotContext) -> ChangesSlotPayload:
+    return ChangesSlotPayload(changes=(), truncated=False)
+
+
 def manifest() -> Manifest:
     broker: ConnectorBroker = _SampleBroker()
     return Manifest(
@@ -1263,5 +1275,15 @@ def manifest() -> Manifest:
         ),
         memory_search=(
             MemorySearchProviderSpec(name=MEMORY_SEARCH_PROVIDER, build=SampleMemorySearch),
+        ),
+        conversation_slots=(
+            ConversationSlotProvider(
+                id=CONVERSATION_SLOT,
+                label="Sample changes",
+                icon="diff",
+                content=ChangesSlotPayload,
+                summarize=_conversation_slot_summary,
+                read=_conversation_slot_read,
+            ),
         ),
     )

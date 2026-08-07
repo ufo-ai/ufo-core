@@ -25,17 +25,18 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
-from ufo.sdk.context import ScopedStore, SourceReader
+from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
 from ufo.sdk.http import (
     FormData,
     FormParserError,
@@ -58,8 +59,19 @@ from ufo.sdk.hub import (
     tool_activity,
 )
 from ufo.sdk.listings import ListingCursor, MalformedCursor
+from ufo.sdk.manifest import (
+    CONVERSATION_CHANGE_PATCH_MAX_CHARS as SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS,
+)
+from ufo.sdk.manifest import (
+    CONVERSATION_CHANGES_MAX,
+    ChangesSlotPayload,
+    ConversationChange,
+    ConversationSlotContext,
+    ConversationSlotProvider,
+)
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectListQuery
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
@@ -78,7 +90,7 @@ from ufo.sdk.surfaces import (
     TurnContext,
     member_message_text,
 )
-from ufo.sdk.tools import FILE_CHANGE_PATH_MAX_CHARS, FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
+from ufo.sdk.tools import FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import ApplyIntent, agent_overview, reasoning_levels, submit_intent
 
@@ -102,8 +114,7 @@ MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
 CONVERSATION_LIST_LIMIT = 100
-CONVERSATION_CHANGE_LIMIT = 100
-CONVERSATION_CHANGE_PATCH_MAX_CHARS = 25_000
+CONVERSATION_CHANGE_PATCH_MAX_CHARS = SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS
 CONVERSATION_CHANGES_RESPONSE_MAX_BYTES = 256_000
 CHAT_STORE_PREFIX = "chat/"
 NEW_CONVERSATION = "new"
@@ -1187,21 +1198,10 @@ async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-class ConversationChange(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
-    patch: str = Field(max_length=CONVERSATION_CHANGE_PATCH_MAX_CHARS)
-    truncated: bool
-
-
 def _conversation_changes_payload(
     changes: tuple[ConversationChange, ...], truncated: bool
-) -> dict[str, object]:
-    return {
-        "changes": [change.model_dump(mode="json") for change in changes],
-        "truncated": truncated,
-    }
+) -> ChangesSlotPayload:
+    return ChangesSlotPayload(changes=changes, truncated=truncated)
 
 
 def _conversation_changes(
@@ -1212,7 +1212,7 @@ def _conversation_changes(
     accepting = True
     encoded_bytes = len(
         json.dumps(
-            _conversation_changes_payload((), False),
+            _conversation_changes_payload((), False).model_dump(mode="json"),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode()
@@ -1242,7 +1242,7 @@ def _conversation_changes(
                 continue
             if not accepting:
                 continue
-            if len(changes) == CONVERSATION_CHANGE_LIMIT:
+            if len(changes) == CONVERSATION_CHANGES_MAX:
                 accepting = False
                 continue
             encoded_change = json.dumps(
@@ -1262,8 +1262,7 @@ def _conversation_changes(
     return tuple(changes), total > len(changes)
 
 
-async def conversation_changes(ctx: SurfaceContext, request: Request) -> Response:
-    """Successful file changes in the conversation's durable execution."""
+async def _slot_target(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response:
     root = request.query_params.get("root")
     if root is None:
         authorized = await _readable_conversation(ctx, request)
@@ -1285,11 +1284,113 @@ async def conversation_changes(ctx: SurfaceContext, request: Request) -> Respons
             authorized = agent_id, conversation_id
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id = authorized
+    return authorized
+
+
+async def _slot_context(
+    ctx: SurfaceContext,
+    agent_id: UUID,
+    conversation_id: UUID,
+    ext: ExtensionContext,
+) -> ConversationSlotContext | None:
+    audience = await ctx.conversation_audience(conversation_id, agent_id)
+    if audience is None:
+        return None
     recorded = await ctx.read_transcript(conversation_id)
-    changes, truncated = _conversation_changes(() if recorded is None else recorded.messages)
     compacted = bool(await ctx.list_compactions(conversation_id))
-    return JSONResponse(_conversation_changes_payload(changes, truncated or compacted))
+    return ConversationSlotContext(
+        ext=replace(ext, audience=audience),
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        audience=audience,
+        messages=() if recorded is None else recorded.messages,
+        compacted=compacted,
+    )
+
+
+async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
+    """Available typed slots for one authorized conversation."""
+    authorized = await _slot_target(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    agent_id, conversation_id = authorized
+    slots: list[dict[str, object]] = []
+    if not ctx.conversation_slots:
+        return JSONResponse({"slots": slots})
+    shared_context = await _slot_context(
+        ctx, agent_id, conversation_id, ctx.conversation_slots[0].ext
+    )
+    if shared_context is None:
+        return Response("no such conversation", status_code=404)
+    for bound in ctx.conversation_slots:
+        slot_context = replace(
+            shared_context,
+            ext=replace(bound.ext, audience=shared_context.audience),
+        )
+        try:
+            count = await bound.provider.summarize(slot_context)
+        except Exception as error:
+            log(
+                "web.conversation_slot.summary_failed",
+                extension=bound.extension,
+                slot=bound.provider.id,
+                error=str(error),
+            )
+            continue
+        if count is None:
+            continue
+        slots.append(
+            {
+                "id": bound.provider.id,
+                "label": bound.provider.label,
+                "icon": bound.provider.icon,
+                "kind": bound.provider.content.model_fields["type"].default,
+                "count": count,
+            }
+        )
+    return JSONResponse({"slots": slots})
+
+
+async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
+    """One typed slot payload for an authorized conversation."""
+    authorized = await _slot_target(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    agent_id, conversation_id = authorized
+    slot_id = request.path_params["slot_id"]
+    bound = next((entry for entry in ctx.conversation_slots if entry.provider.id == slot_id), None)
+    if bound is None:
+        return Response("no such conversation slot", status_code=404)
+    slot_context = await _slot_context(ctx, agent_id, conversation_id, bound.ext)
+    if slot_context is None:
+        return Response("no such conversation", status_code=404)
+    payload = await bound.provider.read(slot_context)
+    if type(payload) is not bound.provider.content:
+        raise TypeError(
+            f"conversation slot {slot_id!r} returned {type(payload).__name__}, "
+            f"expected {bound.provider.content.__name__}"
+        )
+    return JSONResponse(payload.model_dump(mode="json"))
+
+
+async def _summarize_changes(ctx: ConversationSlotContext) -> int | None:
+    changes, _truncated = _conversation_changes(ctx.messages)
+    return len(changes)
+
+
+async def _read_changes(ctx: ConversationSlotContext) -> ChangesSlotPayload:
+    changes, truncated = _conversation_changes(ctx.messages)
+    return _conversation_changes_payload(changes, truncated or ctx.compacted)
+
+
+CHANGES_SLOT = ConversationSlotProvider(
+    id="changes",
+    label="Changes",
+    icon="diff",
+    content=ChangesSlotPayload,
+    summarize=_summarize_changes,
+    read=_read_changes,
+)
 
 
 async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
@@ -1963,8 +2064,13 @@ ROUTES = (
     ),
     SurfaceRoute(
         method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/changes",
-        handler=conversation_changes,
+        path="agents/{agent_id}/conversations/{conversation_id}/slots",
+        handler=conversation_slots,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/slots/{slot_id}",
+        handler=conversation_slot,
     ),
     SurfaceRoute(
         method="GET",

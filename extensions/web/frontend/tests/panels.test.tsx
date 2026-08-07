@@ -362,10 +362,10 @@ test("conversations open a turn tree that nests a subagent under the turn that s
       AGENT_ID +
       "/conversations/" +
       rootConversation +
-      "/changes",
+      "/slots/changes",
     "#/agents/" +
       AGENT_ID +
-      "/conversations/22222222-2222-4222-8222-222222222222/changes?root=" +
+      "/conversations/22222222-2222-4222-8222-222222222222/slots/changes?root=" +
       rootConversation,
   ]);
   expect(await screen.findByText("No files in this conversation's workspace.")).toBeTruthy();

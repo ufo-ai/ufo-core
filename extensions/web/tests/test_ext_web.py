@@ -5851,7 +5851,9 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
 
     blocked = await client.get(turns, headers=admin_cookie)
     assert blocked.status_code == 404
-    child_changes = f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/changes"
+    child_changes = (
+        f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/slots/changes"
+    )
     assert (await client.get(child_changes, headers=admin_cookie)).status_code == 404
 
     refused = await _acknowledge(client, agent_id, theirs, token_n)
@@ -6108,11 +6110,13 @@ def test_conversation_changes_skips_unprojectable_results() -> None:
 def test_conversation_changes_bounds_the_encoded_response() -> None:
     changes, truncated = web_surface._conversation_changes(_change_messages(20, _max_change_patch))
     encoded = json.dumps(
-        web_surface._conversation_changes_payload(changes, truncated),
+        web_surface._conversation_changes_payload(changes, truncated).model_dump(mode="json"),
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
-    response = JSONResponse(web_surface._conversation_changes_payload(changes, truncated))
+    response = JSONResponse(
+        web_surface._conversation_changes_payload(changes, truncated).model_dump(mode="json")
+    )
 
     assert response.body == encoded
     assert len(encoded) <= web_surface.CONVERSATION_CHANGES_RESPONSE_MAX_BYTES
@@ -6122,11 +6126,11 @@ def test_conversation_changes_bounds_the_encoded_response() -> None:
     ]
     assert truncated is True
 
-    small_count = web_surface.CONVERSATION_CHANGE_LIMIT + 1
+    small_count = web_surface.CONVERSATION_CHANGES_MAX + 1
     small, count_truncated = web_surface._conversation_changes(
         _change_messages(small_count, lambda _index: "patch")
     )
-    assert len(small) == web_surface.CONVERSATION_CHANGE_LIMIT
+    assert len(small) == web_surface.CONVERSATION_CHANGES_MAX
     assert count_truncated is True
 
 
@@ -6137,7 +6141,7 @@ def test_conversation_changes_accounts_for_exact_encoded_bytes(
     expected, _truncated = web_surface._conversation_changes(messages)
     exact = len(
         json.dumps(
-            web_surface._conversation_changes_payload(expected, False),
+            web_surface._conversation_changes_payload(expected, False).model_dump(mode="json"),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode()
@@ -6256,18 +6260,19 @@ async def test_conversation_changes_stay_with_their_execution_conversation(
     )
 
     parent_response = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     worker_response = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{worker_conversation_id}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{worker_conversation_id}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
     assert parent_response.status_code == 200
-    assert parent_response.json() == {"changes": [], "truncated": False}
+    assert parent_response.json() == {"type": "changes", "changes": [], "truncated": False}
     assert worker_response.status_code == 200
     assert worker_response.json() == {
+        "type": "changes",
         "changes": [
             {
                 "path": "/workspace/repo/app.py",
@@ -6331,41 +6336,62 @@ async def test_conversation_reads_ride_the_same_gate(
     assert listed.status_code == 200
     assert listed.json() == {"files": []}
     changes = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert changes.status_code == 200
     change_payload = json.loads(result)
     assert changes.json() == {
+        "type": "changes",
         "changes": [{**change_payload["change"], "path": change_payload["path"]}],
         "truncated": True,
     }
     no_transcript = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{empty}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert no_transcript.status_code == 200
-    assert no_transcript.json() == {"changes": [], "truncated": False}
+    assert no_transcript.json() == {"type": "changes", "changes": [], "truncated": False}
+    slots = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert slots.status_code == 200
+    assert slots.json() == {
+        "slots": [
+            {
+                "id": "changes",
+                "label": "Changes",
+                "icon": "diff",
+                "kind": "changes",
+                "count": 0,
+            }
+        ]
+    }
     await Transcript(blob=blob, conversation_id=mine).write(
         Conversation(seq=2, messages=(Message(role="user", content="continued"),))
     )
     compacted_without_changes = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert compacted_without_changes.status_code == 200
-    assert compacted_without_changes.json() == {"changes": [], "truncated": True}
+    assert compacted_without_changes.json() == {
+        "type": "changes",
+        "changes": [],
+        "truncated": True,
+    }
     for half, payload in (("before", window), ("after", window), ("summary", summary)):
         await blob.put(
             compaction_key(empty, 1, half),
             lz4.frame.compress(payload.model_dump_json().encode()),
         )
     compacting = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{empty}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert compacting.status_code == 200
-    assert compacting.json() == {"changes": [], "truncated": True}
+    assert compacting.json() == {"type": "changes", "changes": [], "truncated": True}
     await Transcript(blob=blob, conversation_id=mine).write(
         Conversation(
             seq=3,
@@ -6376,11 +6402,11 @@ async def test_conversation_reads_ride_the_same_gate(
         )
     )
     invalid = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert invalid.status_code == 200
-    assert invalid.json() == {"changes": [], "truncated": True}
+    assert invalid.json() == {"type": "changes", "changes": [], "truncated": True}
     invalid_envelopes = (
         json.dumps({"type": "ufo.file_change", "path": "repo/app.py"}),
         json.dumps({"type": "ufo.file_change", "path": "repo/app.py", "change": "oops"}),
@@ -6406,11 +6432,11 @@ async def test_conversation_reads_ride_the_same_gate(
             )
         )
         malformed = await client.get(
-            f"/surface/web/agents/{agent_id}/conversations/{mine}/changes",
+            f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
             headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
         )
         assert malformed.status_code == 200
-        assert malformed.json() == {"changes": [], "truncated": True}
+        assert malformed.json() == {"type": "changes", "changes": [], "truncated": True}
     absent = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files/brief.md",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
@@ -6423,7 +6449,7 @@ async def test_conversation_reads_ride_the_same_gate(
     assert escaping.status_code == 404
 
     for token in (token_m, token_admin):
-        for route in ("files", "changes", "files/brief.md"):
+        for route in ("files", "slots/changes", "files/brief.md"):
             denied = await client.get(
                 f"/surface/web/agents/{agent_id}/conversations/{theirs}/{route}",
                 headers={"cookie": f"{SESSION_COOKIE}={token}"},
@@ -6446,7 +6472,7 @@ async def test_conversation_reads_ride_the_same_gate(
     elsewhere = await _seed_agent_conversation(
         workspace_id, second_agent, queue_key="elsewhere", audience="shared", member_id=None
     )
-    for route in ("files", "changes", "files/brief.md"):
+    for route in ("files", "slots/changes", "files/brief.md"):
         crossed = await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/{route}",
             headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},

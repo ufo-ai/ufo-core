@@ -26,6 +26,12 @@ beforeEach(() => {
 const transcript = (payload: unknown = { messages: [] }) => ({
   "/api/chats": () => json({ chats: [CHAT_ROW] }),
   "/transcript": () => json(payload),
+  "/slots": () =>
+    json({
+      slots: [
+        { id: "changes", label: "Changes", icon: "diff", kind: "changes", count: 0 },
+      ],
+    }),
 });
 
 function open() {
@@ -191,9 +197,9 @@ test("a reloaded conversation links its subagent conversation", async () => {
 
 test("a conversation opens its file changes and returns to chat", async () => {
   wire({
-    ...transcript(),
-    ["/conversations/" + CONVO_ID + "/changes"]: () =>
+    ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
       json({
+        type: "changes",
         changes: [
           {
             path: "/workspace/demo.py",
@@ -208,14 +214,17 @@ test("a conversation opens its file changes and returns to chat", async () => {
         ],
         truncated: true,
       }),
+    ...transcript(),
   });
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
-  expect(location.hash).toBe(
-    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes",
-  );
+  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
+  const log = screen.getByTestId("log");
+  expect(log.parentElement?.children).toHaveLength(2);
+  expect(log.parentElement?.parentElement?.children).toHaveLength(2);
+  expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention/25");
   expect(screen.getByText("+new").className).toContain("bg-link/10");
   expect(
@@ -224,34 +233,37 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
 
-  await userEvent.click(within(screen.getByRole("main")).getByRole("button", { name: AGENT.name }));
-  expect(location.hash).toBe("#/agents/" + AGENT.id);
+  await userEvent.click(within(screen.getByRole("main")).getByRole("button", { name: "Close slot" }));
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
 test.each([
-  [200, { changes: [], truncated: false }, "No changes."],
-  [200, { changes: [], truncated: true }, "Some changes may not be shown."],
+  [200, { type: "changes", changes: [], truncated: false }, "No changes."],
+  [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],
   [404, null, "This conversation is not shared with you."],
 ])("changes renders status %s", async (status, payload, message) => {
-  location.hash = "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes";
+  location.hash =
+    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes";
   wire({
-    ...transcript(),
-    ["/conversations/" + CONVO_ID + "/changes"]: () =>
+    ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
       payload === null ? new Response("no", { status }) : json(payload),
+    ...transcript(),
   });
   open();
 
   expect(await screen.findByText(message)).toBeTruthy();
+  expect(screen.getByText("Changes")).toBeTruthy();
 });
 
 test("changes refresh after another file result lands", async () => {
-  location.hash = "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/changes";
+  location.hash =
+    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes";
   let loads = 0;
   wire({
-    ...transcript(),
-    ["/conversations/" + CONVO_ID + "/changes"]: () => {
+    ["/conversations/" + CONVO_ID + "/slots/changes"]: () => {
       loads += 1;
       return json({
+        type: "changes",
         changes:
           loads === 1
             ? []
@@ -259,6 +271,7 @@ test("changes refresh after another file result lands", async () => {
         truncated: false,
       });
     },
+    ...transcript(),
   });
   open();
 
@@ -268,14 +281,52 @@ test("changes refresh after another file result lands", async () => {
   expect(loads).toBe(2);
 });
 
-test("a changes URL opens a conversation absent from the chat rail", async () => {
+test("slot counts refresh when a turn settles", async () => {
+  let slotLoads = 0;
+  wire({
+    ...transcript(),
+    "/slots": () => {
+      slotLoads += 1;
+      return json({
+        slots: [
+          {
+            id: "changes",
+            label: "Changes",
+            icon: "diff",
+            kind: "changes",
+            count: slotLoads === 1 ? 0 : 1,
+          },
+        ],
+      });
+    },
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "edit" }),
+  });
+  open();
+
+  await screen.findByRole("button", { name: "Changes" });
+  await userEvent.type(screen.getByLabelText("Message the agent"), "edit it");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 1,
+    cost_micro_usd: 0,
+  });
+
+  expect(await screen.findByRole("button", { name: "Changes 1" })).toBeTruthy();
+  expect(slotLoads).toBe(2);
+});
+
+test("a slot URL opens a conversation absent from the chat rail", async () => {
   const child = "66666666-6666-4666-8666-666666666666";
   const root = "77777777-7777-4777-8777-777777777777";
   location.hash =
-    "#/agents/" + AGENT.id + "/conversations/" + child + "/changes?root=" + root;
+    "#/agents/" + AGENT.id + "/conversations/" + child + "/slots/changes?root=" + root;
   wire({
-    ["/conversations/" + child + "/changes?root=" + root]: () =>
+    ["/conversations/" + child + "/slots/changes?root=" + root]: () =>
       json({
+        type: "changes",
         changes: [{ path: "/workspace/repo/child.py", patch: "+child\n", truncated: false }],
         truncated: false,
       }),

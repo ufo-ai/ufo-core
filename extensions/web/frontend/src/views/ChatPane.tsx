@@ -1,8 +1,18 @@
+import { useCallback, useState } from "react";
+
 import { Chat, type ChatProps } from "@/views/Chat";
+import { usePanelRead } from "@/kernel/panel";
+import { cn } from "@/lib/cn";
+import {
+  ConversationSlotPane,
+  SlotIcon,
+  type ConversationSlotsPayload,
+} from "@/views/ConversationSlotPane";
 
 export type ChatPaneProps = ChatProps & {
   onOpenAgent: (agentId: string) => void;
-  onOpenChanges?: (agentId: string, conversationId: string) => void;
+  slot?: string;
+  onSelectSlot?: (slot: string | null) => void;
 };
 
 export function ChatPane({
@@ -12,8 +22,19 @@ export function ChatPane({
   onCreated,
   onActivity,
   onOpenAgent,
-  onOpenChanges,
+  slot,
+  onSelectSlot,
 }: ChatPaneProps) {
+  const [slotReloads, setSlotReloads] = useState(0);
+  const slots = usePanelRead<ConversationSlotsPayload>(
+    conversationId
+      ? "/agents/" + agent.id + "/conversations/" + conversationId + "/slots"
+      : null,
+    slotReloads,
+  );
+  const selected =
+    slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
+  const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex items-baseline gap-md border-b border-edge px-2xl py-lg">
@@ -25,23 +46,54 @@ export function ChatPane({
           {agent.name}
         </button>
         <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
-        {conversationId && onOpenChanges ? (
-          <button
-            type="button"
-            className="ml-auto"
-            onClick={() => onOpenChanges(agent.id, conversationId)}
-          >
-            Changes
-          </button>
+        {slots.phase === "ready" && slots.payload.slots.length ? (
+          <div className="ml-auto flex items-center gap-sm" aria-label="Conversation slots">
+            {slots.payload.slots.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                aria-pressed={slot === entry.id}
+                onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
+              >
+                <span className="inline-flex items-center gap-xs">
+                  <SlotIcon icon={entry.icon} />
+                  <span>
+                    {entry.label}
+                    {entry.count ? " " + entry.count : ""}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
         ) : null}
       </div>
-      <Chat
-        agent={agent}
-        member={member}
-        conversationId={conversationId}
-        onCreated={onCreated}
-        onActivity={onActivity}
-      />
+      <div
+        className={cn(
+          "relative grid min-h-0 flex-1 grid-cols-1",
+          slot && "grid-cols-[minmax(0,1fr)_minmax(20rem,40%)] max-narrow:grid-cols-1",
+        )}
+      >
+        <div className="flex min-h-0 min-w-0 flex-col">
+          <Chat
+            agent={agent}
+            member={member}
+            conversationId={conversationId}
+            onCreated={onCreated}
+            onActivity={onActivity}
+            onSettled={settled}
+          />
+        </div>
+        {conversationId && slot ? (
+          <ConversationSlotPane
+            agent={agent}
+            conversationId={conversationId}
+            slot={slot}
+            summary={selected}
+            embedded
+            onClose={() => onSelectSlot?.(null)}
+          />
+        ) : null}
+      </div>
     </main>
   );
 }

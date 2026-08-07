@@ -9,6 +9,24 @@ from ufo.credentials import (
 from ufo.credentials import (
     HostChoice as HostChoice,
 )
+from ufo.ext.conversation_slots import (
+    CONVERSATION_CHANGE_PATCH_MAX_CHARS as CONVERSATION_CHANGE_PATCH_MAX_CHARS,
+)
+from ufo.ext.conversation_slots import (
+    CONVERSATION_CHANGES_MAX as CONVERSATION_CHANGES_MAX,
+)
+from ufo.ext.conversation_slots import (
+    ChangesSlotPayload as ChangesSlotPayload,
+)
+from ufo.ext.conversation_slots import (
+    ConversationChange as ConversationChange,
+)
+from ufo.ext.conversation_slots import (
+    ConversationSlotContext as ConversationSlotContext,
+)
+from ufo.ext.conversation_slots import (
+    ConversationSlotProvider as ConversationSlotProvider,
+)
 from ufo.ext.manifest import (
     CdpProviderSpec as CdpProviderSpec,
 )

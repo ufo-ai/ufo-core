@@ -40,7 +40,9 @@ from ufo.db import (
     init_owner_db,
     verify_db_reachable,
 )
-from ufo.ext.context import CredentialAccess, context_for
+from ufo.ext.context import CredentialAccess
+from ufo.ext.context import context_for as extension_context_for
+from ufo.ext.conversation_slots import BoundConversationSlot
 from ufo.ext.loader import (
     CORE_OBJECT_KINDS,
     NotRegisteredError,
@@ -64,6 +66,7 @@ from ufo.ext.manifest import (
     CdpProviderSpec,
     Manifest,
     SearchProviderSpec,
+    conversation_slot_declarations,
     declared_slots,
     open_connector_namespace,
 )
@@ -708,7 +711,7 @@ def _mount_ext_routes(
                 f"extension {manifest.name!r} serves routes but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed)
+        context = extension_context_for(manifest.name, declared, index, embed)
         for spec in manifest.routes:
 
             async def endpoint(
@@ -803,6 +806,23 @@ def _mount_shared_surfaces(
         for manifest in sorted(manifests, key=lambda manifest: manifest.name)
     )
     slots = declared_slots(manifests)
+    conversation_slots = tuple(
+        BoundConversationSlot(
+            extension=manifest.name,
+            provider=provider,
+            ext=extension_context_for(
+                manifest.name,
+                frozenset(slot.name for slot in manifest.credentials),
+                credential_sources=tuple(
+                    (slot.name, slot.source)
+                    for slot in manifest.credentials
+                    if slot.source is not None
+                ),
+                credential_store=credentials,
+            ),
+        )
+        for manifest, provider in conversation_slot_declarations(manifests)
+    )
     subagent_roster = tuple(
         SubagentDetail(
             name=profile.name,
@@ -845,6 +865,7 @@ def _mount_shared_surfaces(
             _object_schemas=kind_schemas,
             _memory=memory,
             _objects=objects or {},
+            _conversation_slots=conversation_slots,
         )
 
     for manifest in manifests:

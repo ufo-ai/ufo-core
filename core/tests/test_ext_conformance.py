@@ -52,6 +52,7 @@ from ufo.ext.context import (
     UndeclaredCredentialSlot,
     context_for,
 )
+from ufo.ext.conversation_slots import ConversationSlotContext
 from ufo.ext.loader import (
     discovered_packs,
     embed_backend,
@@ -119,6 +120,26 @@ def _sample_manifest() -> Manifest:
 
 def _credential_store() -> CredentialStore:
     return CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+
+async def test_sample_conversation_slot_callbacks_are_typed() -> None:
+    provider = _sample_manifest().conversation_slots[0]
+    audience = conversation_audience(None)
+    slot_context = ConversationSlotContext(
+        ext=context_for(sample.NAME, frozenset(), audience=audience),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        audience=audience,
+        messages=(),
+        compacted=False,
+    )
+
+    assert await provider.summarize(slot_context) is None
+    assert (await provider.read(slot_context)).model_dump(mode="json") == {
+        "type": "changes",
+        "changes": [],
+        "truncated": False,
+    }
 
 
 TOKEN_SECRET = "conformance-token-secret"

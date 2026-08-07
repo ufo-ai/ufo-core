@@ -5,7 +5,7 @@ import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
 import { SubagentPane } from "@/views/SubagentPane";
 import { ChatPane } from "@/views/ChatPane";
-import { ChangesPane } from "@/views/ChangesPane";
+import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail } from "@/views/Conversations";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -26,7 +26,6 @@ import {
   SUBAGENT_TABS,
   agentHash,
   chatHash,
-  changesHash,
   newChatHash,
   parseHash,
   subagentHash,
@@ -99,9 +98,13 @@ export function App({ agents, subagents, member }: AppProps) {
     [go],
   );
 
-  const openChanges = useCallback(
-    (agentId: string, conversationId: string) =>
-      go(changesHash(agentId, conversationId), { kind: "changes", agentId, conversationId }),
+  const openSlot = useCallback(
+    (conversationId: string, slot: string | null) =>
+      go(chatHash(conversationId, slot ?? undefined), {
+        kind: "chat",
+        conversationId,
+        ...(slot ? { slot } : {}),
+      }),
     [go],
   );
 
@@ -244,7 +247,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onCreated={created}
           onActivity={activity}
           onOpenAgent={openAgent}
-          onOpenChanges={openChanges}
+          onOpenSlot={openSlot}
           onOpenSubagent={openSubagent}
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
@@ -266,7 +269,7 @@ function Pane({
   onCreated,
   onActivity,
   onOpenAgent,
-  onOpenChanges,
+  onOpenSlot,
   onOpenSubagent,
   onNewChat,
   onPlaceWorkspace,
@@ -282,7 +285,7 @@ function Pane({
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
-  onOpenChanges: (agentId: string, conversationId: string) => void;
+  onOpenSlot: (conversationId: string, slot: string | null) => void;
   onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
@@ -330,13 +333,14 @@ function Pane({
       />
     );
   }
-  if (route.kind === "changes") {
+  if (route.kind === "conversation-slot") {
     const agent = agents.find((entry) => entry.id === route.agentId);
     if (!agent) return <PaneNote>No such agent.</PaneNote>;
     return (
-      <ChangesPane
+      <ConversationSlotPane
         agent={agent}
         conversationId={route.conversationId}
+        slot={route.slot}
         rootConversationId={route.rootConversationId}
         onOpenAgent={onOpenAgent}
       />
@@ -375,7 +379,8 @@ function Pane({
         conversationId={row.conversation_id}
         onActivity={onActivity}
         onOpenAgent={onOpenAgent}
-        onOpenChanges={onOpenChanges}
+        slot={route.slot}
+        onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
       />
     );
   }
@@ -500,7 +505,7 @@ function RailList({
               <li key={row.conversation_id}>
                 <SidebarButton
                   current={
-                    (route.kind === "chat" || route.kind === "changes") &&
+                    (route.kind === "chat" || route.kind === "conversation-slot") &&
                     route.conversationId === row.conversation_id
                   }
                   onClick={() => onOpen(row.conversation_id)}

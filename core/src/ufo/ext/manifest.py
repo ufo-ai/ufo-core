@@ -8,6 +8,7 @@ policy filter over the tools grants already admit. A pack's entry point returns 
 installed extensions it bundles plus any pack-level skills and onboarding steps of its own — so
 activating one named pack brings a coherent product config up together."""
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
@@ -24,6 +25,11 @@ from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
 from ufo.credentials import CredentialSource, DeclaredSlot, HostChoice
 from ufo.ext.context import CredentialAccess, ExtensionContext
+from ufo.ext.conversation_slots import (
+    PORTAL_ICONS,
+    SUPPORTED_CONVERSATION_SLOT_PAYLOADS,
+    ConversationSlotProvider,
+)
 from ufo.ext.surface import SurfaceSpec
 from ufo.grants import OAuthProvider, OAuthProviderResolver
 from ufo.hub import Hub
@@ -579,8 +585,44 @@ class Manifest:
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
+    conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
+
+
+CONVERSATION_SLOT_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def conversation_slot_declarations(
+    manifests: tuple[Manifest, ...],
+) -> tuple[tuple[Manifest, ConversationSlotProvider], ...]:
+    """The deploy's typed conversation-slot providers, validated as one global namespace."""
+    declarations: list[tuple[Manifest, ConversationSlotProvider]] = []
+    owners: dict[str, str] = {}
+    for manifest in manifests:
+        for provider in manifest.conversation_slots:
+            if CONVERSATION_SLOT_ID.fullmatch(provider.id) is None:
+                raise RuntimeError(f"invalid conversation slot id {provider.id!r}")
+            if not provider.label.strip() or len(provider.label) > 40:
+                raise RuntimeError(f"conversation slot {provider.id!r} has an invalid label")
+            if provider.icon not in PORTAL_ICONS:
+                raise RuntimeError(f"conversation slot {provider.id!r} has an invalid icon")
+            if not callable(provider.summarize) or not callable(provider.read):
+                raise RuntimeError(f"conversation slot {provider.id!r} needs read callbacks")
+            if provider.content not in SUPPORTED_CONVERSATION_SLOT_PAYLOADS:
+                raise RuntimeError(
+                    f"conversation slot {provider.id!r} registers unsupported payload "
+                    f"{provider.content.__name__!r}"
+                )
+            prior = owners.get(provider.id)
+            if prior is not None:
+                raise RuntimeError(
+                    f"two extensions register conversation slot {provider.id!r}: "
+                    f"{prior!r} and {manifest.name!r}"
+                )
+            owners[provider.id] = manifest.name
+            declarations.append((manifest, provider))
+    return tuple(declarations)
 
 
 def open_connector_namespace(manifests: tuple[Manifest, ...]) -> OpenConnectorNamespace | None:

@@ -4,7 +4,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import {
-  changesHash,
+  chatHash,
+  conversationSlotHash,
   parseHash,
   subagentConversationHash,
   subagentHash,
@@ -95,17 +96,24 @@ test("the workspace hash carries its place and parses back to it", () => {
   });
 });
 
-test("the changes hash names its conversation", () => {
-  expect(parseHash(changesHash(AGENT.id, CONVO_ID))).toEqual({
-    kind: "changes",
+test("conversation slots parse in chat and standalone URLs", () => {
+  expect(parseHash(chatHash(CONVO_ID, "changes"))).toEqual({
+    kind: "chat",
+    conversationId: CONVO_ID,
+    slot: "changes",
+  });
+  expect(parseHash(conversationSlotHash(AGENT.id, CONVO_ID, "changes"))).toEqual({
+    kind: "conversation-slot",
     agentId: AGENT.id,
     conversationId: CONVO_ID,
+    slot: "changes",
   });
   const root = "99999999-9999-4999-8999-999999999999";
-  expect(parseHash(changesHash(AGENT.id, CONVO_ID, root))).toEqual({
-    kind: "changes",
+  expect(parseHash(conversationSlotHash(AGENT.id, CONVO_ID, "changes", root))).toEqual({
+    kind: "conversation-slot",
     agentId: AGENT.id,
     conversationId: CONVO_ID,
+    slot: "changes",
     rootConversationId: root,
   });
 });

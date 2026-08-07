@@ -51,7 +51,7 @@ from ufo.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from ufo.ext.manifest import Manifest
+from ufo.ext.manifest import Manifest, conversation_slot_declarations
 from ufo.hub import InProcessHub
 from ufo.jobs import bindings_from
 from ufo.loop.prompts.render import render_system_prompt
@@ -327,6 +327,11 @@ def _check_prompt_sections(manifest: Manifest) -> None:
         assert section.body in rendered.content
 
 
+def _check_conversation_slots(manifest: Manifest) -> None:
+    declared = conversation_slot_declarations((manifest,))
+    assert [provider for _owner, provider in declared] == list(manifest.conversation_slots)
+
+
 def test_dev_mode_activates_every_discovered_extension() -> None:
     """With no lockfile the active set is exactly the discovered set — the loader path `serve` runs,
     proving discovery and manifest load for every installed extension without a hardcoded roster."""
@@ -359,6 +364,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_credentials(manifest, store)
     _check_onboarding(manifest, store)
     _check_prompt_sections(manifest)
+    _check_conversation_slots(manifest)
 
 
 def test_every_registered_tool_takes_a_required_user_description() -> None:

@@ -8,7 +8,7 @@ import { formatSize } from "@/views/Chat";
 import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { changesHash } from "@/lib/route";
+import { conversationSlotHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
@@ -280,7 +280,16 @@ export function TurnLine({
             (day(turn.created_at) || "")}
         </span>
         {showChanges ? (
-          <a href={changesHash(turn.agent_id, turn.conversation_id, rootConversationId)}>Changes</a>
+          <a
+            href={conversationSlotHash(
+              turn.agent_id,
+              turn.conversation_id,
+              "changes",
+              rootConversationId,
+            )}
+          >
+            Changes
+          </a>
         ) : null}
       </div>
       <div className="max-w-bubble self-end whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill px-lg py-sm">

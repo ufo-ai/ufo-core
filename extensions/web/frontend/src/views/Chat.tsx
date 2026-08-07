@@ -40,14 +40,23 @@ export type ChatProps = {
   conversationId: string | null;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
+  onSettled?: () => void;
 };
 
-export function Chat({ agent, member, conversationId, onCreated, onActivity }: ChatProps) {
+export function Chat({
+  agent,
+  member,
+  conversationId,
+  onCreated,
+  onActivity,
+  onSettled,
+}: ChatProps) {
   const chatKey = conversationId ?? "new:" + agent.id;
   const state = useChat(chatKey);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const composer = useRef<HTMLInputElement>(null);
+  const wasBusy = useRef(state.busy);
   const target: ChatTarget = {
     key: chatKey,
     agentId: agent.id,
@@ -83,6 +92,11 @@ export function Chat({ agent, member, conversationId, onCreated, onActivity }: C
       document.removeEventListener("visibilitychange", sync);
     };
   }, [chatKey]);
+
+  useEffect(() => {
+    if (wasBusy.current && !state.busy) onSettled?.();
+    wasBusy.current = state.busy;
+  }, [onSettled, state.busy]);
 
   useEffect(() => {
     const pane = log.current;
