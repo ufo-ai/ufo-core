@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -13,6 +13,7 @@ import {
   CONVO_ID,
   MEMBER,
   NO_SITES,
+  NO_SITE_OBJECTS,
   NO_TASKS,
   SECOND,
   SECOND_ID,
@@ -20,6 +21,7 @@ import {
   TASK_KIND,
   json,
   objectIndex,
+  refusedNotice,
   useStreamFake,
   wire,
 } from "./harness";
@@ -76,10 +78,19 @@ beforeEach(() => {
   useStreamFake();
 });
 
-function mount(kind: string) {
+function cells(name: string): string[] {
+  const row = screen.getByRole("button", { name }).closest("tr");
+  return [...(row?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
+}
+
+function headings(): string[] {
+  return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
+}
+
+function mount(kind: string, label = "Tasks") {
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <ObjectPane agentId={AGENT_ID} kind={kind} />
+      <ObjectPane agentId={AGENT_ID} kind={kind} label={label} />
     </MainAgentProvider>,
   );
 }
@@ -92,29 +103,29 @@ test("a moment reads as elapsed behind now and as remaining ahead of it", () => 
   expect(relativeMoment("not a moment", NOW)).toBe("not a moment");
 });
 
-test("an index row reads as a thing: a label line and a meta line of its declared fields", async () => {
+test("an index is a table: one column per field the kind declares, headed by a member's word", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount("scheduled_task");
 
-  const row = (await screen.findByRole("button", { name: "daily-brief" })).closest("li");
-  expect(row?.querySelector('[data-part="primary"]')?.textContent).toBe("daily-brief");
-  const meta = row?.querySelector('[data-part="meta"]')?.textContent ?? "";
-  expect(meta).toContain("0 9 * * * — daily brief");
-  expect(meta).toContain("next_run_at in ");
-  expect(meta).not.toContain("paused");
+  await screen.findByRole("button", { name: "daily-brief" });
+  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  const said = cells("daily-brief");
+  expect(said[0]).toBe("daily-brief");
+  expect(said[1]).toBe("0 9 * * * — daily brief");
+  expect(said[2]).toContain("in ");
+  expect(said[3]).toBe("No");
 });
 
-test("a true boolean names the state it puts the row in; a null field is omitted", async () => {
+test("a boolean cell answers its column, and a field the record lacks takes a dash", async () => {
   wire({
     "/objects/scheduled_task": () =>
       objectIndex(TASK_KIND, [{ ...TASK_ROW, paused: true, next_run_at: null }]),
   });
   mount("scheduled_task");
 
-  const row = (await screen.findByRole("button", { name: "daily-brief" })).closest("li");
-  const meta = row?.querySelector('[data-part="meta"]')?.textContent ?? "";
-  expect(meta).toContain("paused");
-  expect(meta).not.toContain("next_run_at");
+  await screen.findByRole("button", { name: "daily-brief" });
+  expect(cells("daily-brief")[2]).toBe("—");
+  expect(cells("daily-brief")[3]).toBe("Yes");
 });
 
 test("a value the kind's spec declares as an enum reads as its own chip", async () => {
@@ -132,19 +143,20 @@ test("a value the kind's spec declares as an enum reads as its own chip", async 
   });
   mount("site");
 
-  const row = (await screen.findByRole("button", { name: "docs-abc" })).closest("li");
-  const meta = row?.querySelector('[data-part="meta"]')?.textContent ?? "";
-  expect(meta).toContain("workspace");
-  expect(meta).toContain("created_at ");
-  expect(meta).toContain(CONVO_ID);
+  await screen.findByRole("button", { name: "docs-abc" });
+  expect(headings()).toEqual(["Name", "Summary", "Conversation", "Created At", "Visibility"]);
+  const said = cells("docs-abc");
+  expect(said[2]).toBe(CONVO_ID);
+  expect(said[3]).toContain("ago");
+  expect(said[4]).toBe("workspace");
 });
 
 test("an empty index states that the kind has no objects here", async () => {
   wire({ "/objects/site": () => objectIndex(SITE_KIND, []) });
   mount("site");
 
-  expect(await screen.findByText(NO_SITES)).toBeTruthy();
-  expect(screen.queryByRole("listitem")).toBeNull();
+  expect(await screen.findByText(NO_SITE_OBJECTS)).toBeTruthy();
+  expect(screen.queryByRole("table")).toBeNull();
 });
 
 test("the sites tab of a deploy without the extension states that, not an error", async () => {
@@ -173,7 +185,7 @@ test("a read that breaks still states the error, never an empty kind", async () 
   mount("site");
 
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
-  expect(screen.queryByText(NO_SITES)).toBeNull();
+  expect(screen.queryByText(NO_SITE_OBJECTS)).toBeNull();
 });
 
 test("ordering and a boolean filter ride the read, so the kind applies them", async () => {
@@ -189,13 +201,14 @@ test("ordering and a boolean filter ride the read, so the kind applies them", as
   await screen.findByRole("button", { name: "daily-brief" });
   expect(reads[0]).toContain("order_by=name");
 
-  await userEvent.selectOptions(screen.getByLabelText("Order by"), "next_run_at");
+  await userEvent.click(screen.getByRole("button", { name: "Next Run At" }));
   await waitFor(() => expect(reads.at(-1)).toContain("order_by=next_run_at"));
+  expect(reads.at(-1)).not.toContain("order=desc");
 
-  await userEvent.click(screen.getByRole("button", { name: "Descending" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next Run At" }));
   await waitFor(() => expect(reads.at(-1)).toContain("order=desc"));
 
-  await userEvent.click(screen.getByRole("button", { name: "paused" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Paused" }));
   await waitFor(() => expect(reads.at(-1)).toContain("paused=true"));
 });
 
@@ -207,14 +220,14 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
   mount("scheduled_task");
 
   await screen.findByRole("button", { name: "daily-brief" });
-  await userEvent.click(screen.getByRole("button", { name: "paused" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Paused" }));
 
-  expect(await screen.findByText("No scheduled_task objects match.")).toBeTruthy();
+  expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  const cleared = screen.getByRole("button", { name: "paused" });
-  expect(cleared.getAttribute("aria-pressed")).toBe("true");
+  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
 
-  await userEvent.click(cleared);
+  await userEvent.click(screen.getByRole("tab", { name: "All" }));
   expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
 });
 
@@ -229,29 +242,36 @@ test("what a member types rides the read as the kind's own search", async () => 
   mount("scheduled_task");
 
   await screen.findByText(NO_TASKS);
-  await userEvent.type(screen.getByLabelText("Search"), "brief{enter}");
+  await userEvent.type(screen.getByLabelText("Search scheduled task"), "brief{enter}");
 
   expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
   expect(reads.at(-1)).toContain("q=brief");
 
-  await userEvent.clear(screen.getByLabelText("Search"));
-  await userEvent.type(screen.getByLabelText("Search"), "nothing{enter}");
+  await userEvent.clear(screen.getByLabelText("Search scheduled task"));
+  await userEvent.type(screen.getByLabelText("Search scheduled task"), "nothing{enter}");
 
-  expect(await screen.findByText("No scheduled_task objects match.")).toBeTruthy();
+  expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
 });
 
-test("an index offers only the order fields the kind declared", async () => {
+test("the order sits on the head of the column it orders, and only there", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount("scheduled_task");
 
-  const options = (await screen.findByLabelText("Order by")) as HTMLSelectElement;
-  expect([...options.options].map((option) => option.value)).toEqual([
-    "name",
-    "summary",
-    "next_run_at",
-    "paused",
+  await screen.findByRole("button", { name: "daily-brief" });
+  const heads = screen.getAllByRole("columnheader");
+  expect(heads.map((head) => head.querySelector("button")?.textContent ?? null)).toEqual([
+    "Name",
+    "Summary",
+    "Next Run At",
+    "Paused",
+    null,
   ]);
+  expect(heads[0].getAttribute("aria-sort")).toBe("ascending");
+  expect(heads[2].getAttribute("aria-sort")).toBe("none");
+
+  await userEvent.click(screen.getByRole("button", { name: "Name" }));
+  expect(screen.getAllByRole("columnheader")[0].getAttribute("aria-sort")).toBe("descending");
 });
 
 test("a page with more behind it walks on the cursor the kind returned", async () => {
@@ -288,9 +308,10 @@ test("a detail renders spec, then status, then links, then when the row was made
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
 
   const sections = [...document.querySelectorAll("h2")].map((heading) => heading.textContent);
-  expect(sections.slice(0, 3)).toEqual(["Spec", "Status", "Links"]);
+  expect(sections).toEqual(["daily-brief", "Spec", "Status", "Links"]);
+  expect(document.querySelectorAll("h1").length).toBe(0);
   expect(await screen.findByText("write the daily brief")).toBeTruthy();
-  expect(screen.getByText(/^created /)).toBeTruthy();
+  expect(screen.getByText(/^Created /)).toBeTruthy();
 });
 
 test("a task detail's reports_to link lands on that conversation's detail page", async () => {
@@ -331,6 +352,7 @@ test("an outcome stays on the row it happened to, not the next one opened", asyn
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
 
   await userEvent.click(screen.getByText("reports_to conversation " + CONVO_ID));
@@ -371,12 +393,14 @@ test("a deleted row lands back on the index; a refused delete states the refusal
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
 
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "daily-brief" })).toBeTruthy();
 
   deleted = true;
   await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
 
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "daily-brief" })).toBeNull();
@@ -438,4 +462,113 @@ test("the workspace sites tab is the site index on the main agent", async () => 
   expect(await screen.findByText(NO_SITES)).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
   expect(screen.queryByText(NO_TASKS)).toBeNull();
+});
+
+test("the act that writes an object opens over the index, and a refusal keeps it open", async () => {
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
+  });
+  mount("scheduled_task");
+
+  expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
+  expect(screen.queryByLabelText("Name")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "New scheduled task" }));
+  await userEvent.type(await screen.findByLabelText("Name"), "digest");
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+  expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("digest");
+});
+
+test("an object the lane accepts closes the act it was written through", async () => {
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/intents": () => json({ applied: true }),
+  });
+  mount("scheduled_task");
+
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+  await userEvent.type(await screen.findByLabelText("Name"), "digest");
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+  await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
+});
+
+const EXPIRING_KIND = {
+  ...TASK_KIND,
+  spec_schema: {
+    properties: {
+      ...TASK_KIND.spec_schema.properties,
+      expires_at: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] },
+    },
+  },
+};
+
+const LOCAL_EXPIRY = "2026-09-01T09:00";
+
+test("a moment typed on the clock in front of the member is submitted as an instant", async () => {
+  const posted: { spec: Record<string, string> }[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(EXPIRING_KIND, [TASK_ROW]),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true });
+    },
+  });
+  mount("scheduled_task");
+
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+  await userEvent.type(await screen.findByLabelText("Name"), "digest");
+  fireEvent.change(screen.getByLabelText("expires_at"), { target: { value: LOCAL_EXPIRY } });
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0].spec.expires_at).toBe(new Date(LOCAL_EXPIRY).toISOString());
+  expect(posted[0].spec.expires_at.endsWith("Z")).toBe(true);
+});
+
+test("an instant off the wire is shown on the clock in front of the member", async () => {
+  const instant = new Date(LOCAL_EXPIRY).toISOString();
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK_DETAIL, ...EXPIRING_KIND, spec: { ...TASK_DETAIL.spec, expires_at: instant } }),
+    "/objects/scheduled_task": () => objectIndex(EXPIRING_KIND, [TASK_ROW]),
+  });
+  mount("scheduled_task");
+
+  await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+
+  expect((await screen.findByLabelText("expires_at")).getAttribute("value")).toBe(LOCAL_EXPIRY);
+});
+
+test("a record is deleted from the row it stands on, and a refusal says so above the table", async () => {
+  const posted: unknown[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: false, message: "The workspace refuses it." });
+    },
+  });
+  mount("scheduled_task");
+
+  await screen.findByRole("button", { name: "daily-brief" });
+  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  expect(posted.length).toBe(0);
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toMatchObject({ verb: "delete", kind: "scheduled_task", name: "daily-brief" });
+  await refusedNotice("The workspace refuses it.");
+});
+
+test("a kind the member cannot write offers no act on its rows", async () => {
+  wire({ "/objects/site": () => objectIndex(SITE_KIND, [{ name: "docs-abc", summary: "docs" }]) });
+  mount("site");
+
+  await screen.findByRole("button", { name: "docs-abc" });
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 });

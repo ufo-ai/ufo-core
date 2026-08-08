@@ -40,6 +40,7 @@ from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
+SCHEDULE_MAX = 100
 RESPONSE_EXCERPT_MAX = 400
 SCHEDULE_GATE = (
     "only the task's creator may change its content; an admin may change cadence or expiry"
@@ -61,16 +62,24 @@ class ScheduledTaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schedule: str | None = Field(
         default=None,
+        title="Schedule",
+        max_length=SCHEDULE_MAX,
+        examples=["0 9 * * 1-5"],
         description=(
             "A 5-field UTC cron schedule. Required on create; omitted on update preserves it."
         ),
     )
     prompt: str | None = Field(
         default=None,
+        title="Prompt",
+        examples=["Summarize what merged yesterday and post the list."],
         description="The prompt delivered on each fire. Required on create; omitted preserves it.",
     )
     description: str | None = Field(
         default=None,
+        title="Description",
+        max_length=SUMMARY_MAX,
+        examples=["Weekday morning engineering digest"],
         description="One listing line. Omitted on update preserves it; an empty string clears it.",
     )
     expires_at: datetime | None = Field(
@@ -79,6 +88,7 @@ class ScheduledTaskSpec(BaseModel):
     )
     paused: bool | None = Field(
         default=None,
+        title="Paused",
         description=(
             "True stops the schedule from firing without losing the task; false resumes it from "
             "the next cron fire. Omitted on update preserves it; a new task defaults to running."

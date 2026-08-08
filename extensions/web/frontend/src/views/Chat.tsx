@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { chatState, clearChat, updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
@@ -250,7 +251,7 @@ function Meta({ children }: { children: ReactNode }) {
 function Working({ children }: { children: ReactNode }) {
   return (
     <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
-      <span aria-hidden className="h-xs w-xs animate-working rounded-full bg-ink motion-reduce:animate-none" />
+      <span aria-hidden className="size-xs animate-working rounded-full bg-ink motion-reduce:animate-none" />
       {children}
     </div>
   );
@@ -440,11 +441,11 @@ function Composer({
     <form onSubmit={submit} className="flex gap-sm border-t border-edge px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]">
       <label
         title="Attach files"
-        className="flex cursor-pointer items-center rounded-panel border border-edge-control px-lg font-strong"
+        className={cn(buttonVariants(), "flex cursor-pointer items-center py-0 font-strong")}
       >
         <input ref={files} type="file" multiple hidden />+
       </label>
-      <input
+      <Input
         ref={input}
         value={text}
         onChange={(event) => {
@@ -454,7 +455,7 @@ function Composer({
         autoComplete="off"
         placeholder="Message the agent…"
         aria-label="Message the agent"
-        className="flex-1 rounded-panel border border-edge-control bg-field px-lg py-md text-field-ink"
+        className="max-w-none flex-1"
       />
       <Button type="submit" variant="send" disabled={disabled}>
         Send

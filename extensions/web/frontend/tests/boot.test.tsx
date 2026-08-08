@@ -8,7 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { Portal } from "@/Portal";
 
-import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { refusedNotice, ADMIN_AGENT, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const builtPage = () => readFileSync(join(STATIC, "index.html"), "utf8");
@@ -99,7 +99,7 @@ test("an admin is offered administration, which reads the admin projection", asy
   wire({
     "/api/admin": () =>
       json({
-        agents: [AGENT],
+        agents: [ADMIN_AGENT],
         members: [{ id: "m1", email: "member@example.com", admin: true, seated: true }],
         seats: { limit: 5, included: 3 },
         caps: [],
@@ -112,15 +112,40 @@ test("an admin is offered administration, which reads the admin projection", asy
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
-  expect(await screen.findByText("Members · 5 seat limit · 3 included")).toBeTruthy();
-  expect(screen.getByText("every member")).toBeTruthy();
+  expect(await screen.findByText("5 seats, 3 included in the plan.")).toBeTruthy();
+  expect(screen.getByText("Every member")).toBeTruthy();
   expect(screen.getByText("No spend caps are set.")).toBeTruthy();
   expect(location.hash).toBe("#/admin");
 });
 
+test("every control the create-agent form asks for carries its own name", async () => {
+  wire({
+    "/api/admin": () =>
+      json({
+        agents: [ADMIN_AGENT],
+        members: [],
+        seats: { limit: null, included: null },
+        caps: [],
+        models: ["opus"],
+        reasoning_levels: ["high"],
+        deploy: { sandbox_internet: true, extensions: [] },
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+  expect(await screen.findByLabelText("Name")).toBeTruthy();
+  expect(screen.getByLabelText("Model")).toBeTruthy();
+  expect(screen.getByLabelText("Reasoning")).toBeTruthy();
+  expect(screen.getByLabelText("Public internet")).toBeTruthy();
+  expect(screen.getByLabelText("System prompt")).toBeTruthy();
+  expect(document.querySelectorAll("h1").length).toBe(1);
+});
+
 test("the admin agent row grants and revokes web access by email", async () => {
   const posted: unknown[] = [];
-  const second = { ...AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };
+  const second = { ...ADMIN_AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };
   wire({
     "/api/admin": () =>
       json({
@@ -146,7 +171,7 @@ test("the admin agent row grants and revokes web access by email", async () => {
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "grant_web_access", email: "new@work.com" });
-  expect(screen.getByText("Members · seats ungated")).toBeTruthy();
+  expect(screen.getByText("Seats are not limited on this plan.")).toBeTruthy();
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {
@@ -190,12 +215,12 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
   location.hash = "#/admin";
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
 
-  const loading = await screen.findByText("Loading…");
+  const loading = await screen.findByTestId("admin-loading");
   expect(loading.closest("main")).not.toBeNull();
 });
 
 test("a refused audience change tones the administration notice", async () => {
-  const second = { ...AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };
+  const second = { ...ADMIN_AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };
   wire({
     "/api/admin": () =>
       json({

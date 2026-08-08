@@ -1,6 +1,7 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import type { ReactNode } from "react";
 
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
 export type SheetProps = {
@@ -16,6 +17,7 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
     <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Content
+          aria-describedby={undefined}
           onInteractOutside={(event) => event.preventDefault()}
           className={cn(
             "fixed inset-y-0 right-0 left-auto z-10 w-drawer overflow-y-auto",
@@ -28,12 +30,7 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
               {title}
             </DialogPrimitive.Title>
             <DialogPrimitive.Close asChild>
-              <button
-                type="button"
-                className="border border-edge-control rounded-panel bg-transparent px-lg py-xs"
-              >
-                Close
-              </button>
+              <Button>Close</Button>
             </DialogPrimitive.Close>
           </header>
           {children}

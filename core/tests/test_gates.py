@@ -399,6 +399,53 @@ def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -
     ]
 
 
+def test_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles() -> None:
+    """A bracket utility naming a raw measurement re-decides a token inline, which is how the
+    design system erodes under Tailwind. The var-resolving and structural forms stay allowed —
+    the rule is about the raw value, not the bracket."""
+    source = gates.ROOT / gates.PORTAL_SOURCE
+    smuggled = source / "views" / "smuggled.tsx"
+    smuggled.write_text(
+        'export const x = "max-w-[20ch] bg-[#fff] max-h-[var(--media-tall)]'
+        ' [overflow-wrap:anywhere] grid-cols-[auto_1fr]";\n'
+    )
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        smuggled.unlink()
+    assert failures == [
+        "extensions/web/frontend/src/views/smuggled.tsx: [20ch] names a raw value — "
+        "resolve it through a theme token",
+        "extensions/web/frontend/src/views/smuggled.tsx: [#fff] names a raw value — "
+        "resolve it through a theme token",
+    ]
+
+
+def test_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short_one() -> None:
+    """Each refused shape has a shorter spelling that already means the same thing, so the long
+    form is drift, not intent. The short forms beside them stay allowed."""
+    source = gates.ROOT / gates.PORTAL_SOURCE
+    smuggled = source / "views" / "smuggled.tsx"
+    smuggled.write_text(
+        'export const x = "space-y-md dark:bg-ink '
+        "overflow-hidden text-ellipsis whitespace-nowrap w-lg h-lg "
+        'gap-md truncate size-lg w-lg h-md";\n'
+        "export const y = <div className={`x ${z}`} />;\n"
+    )
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        smuggled.unlink()
+    rel = "extensions/web/frontend/src/views/smuggled.tsx"
+    assert failures == [
+        f"{rel}: 'space-y-' — stack with flex and a gap",
+        f"{rel}: 'dark:' — color-scheme carries the scheme",
+        f"{rel}: 'overflow-hidden text-ellipsis whitespace-nowrap' — truncate says this",
+        f"{rel}: 'w-lg h-lg' — one size- utility says it once",
+        f"{rel}: 'className={{`' — compose classes with cn()",
+    ]
+
+
 def test_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed() -> None:
     """The rule issue #1112 is about: a site that builds a host path from agent, model, connector or
     provider input and then opens it. Validating the name is not validating the path — the open is

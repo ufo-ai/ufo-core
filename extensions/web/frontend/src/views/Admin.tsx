@@ -1,17 +1,51 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/field";
-import { Table, Td, Th } from "@/components/ui/table";
-import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
+import { Button, ConfirmButton } from "@/components/ui/button";
+import { Facts } from "@/components/ui/facts";
+import { Checkbox, Field, FieldGroup, Hint, Input, Label, Textarea } from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Td } from "@/components/ui/table";
+import {
+  type NoticeState,
+  OutcomeNotice,
+  Panel,
+  PanelEmpty,
+  PanelSkeleton,
+  QUIET,
+  Section,
+  outcomeNotice,
+  usePanelRead,
+} from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { getJson, postIntent } from "@/lib/api";
 import { money } from "@/lib/money";
-import type { Agent, AdminPayload, Member } from "@/lib/types";
+import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
+
+const FRAME = "flex flex-col overflow-y-auto p-2xl";
+
+function allowance(allowed: boolean): string {
+  return allowed ? "Allowed" : "Blocked";
+}
+
+/** What the plan grants, stated as a line rather than as more words on the section's own heading —
+ *  a heading that grew a clause per plan field stops naming the records under it. */
+function seatLine(seats: AdminPayload["seats"]): string {
+  if (seats.limit === null && seats.included === null) return "Seats are not limited on this plan.";
+  const limit = seats.limit === null ? null : seats.limit + " seats";
+  const included = seats.included === null ? null : seats.included + " included in the plan";
+  return [limit, included].filter(Boolean).join(", ") + ".";
+}
 
 export function Admin() {
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const [copying, setCopying] = useState<Agent | null>(null);
+  const [copying, setCopying] = useState<AdminAgent | null>(null);
   const state = usePanelRead<AdminPayload>("/api/admin", reloads);
 
   async function intent(agentId: string, envelope: unknown, prefix?: string) {
@@ -28,50 +62,47 @@ export function Admin() {
     <Panel
       state={state}
       loading={() => (
-        <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
-          <PanelEmpty>Loading…</PanelEmpty>
+        <main data-testid="admin-loading" className={FRAME}>
+          <PanelSkeleton shape="table" />
         </main>
       )}
       failed={(message) => (
-        <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
+        <main className={FRAME}>
           <PanelEmpty>{message}</PanelEmpty>
         </main>
       )}
     >
       {(payload) => {
         const mainAgent = payload.agents.find((agent) => agent.main);
-        const seats = payload.seats;
-        const gated = seats.limit !== null || seats.included !== null;
+        const gated = payload.seats.limit !== null || payload.seats.included !== null;
 
         return (
-          <main className="flex flex-col gap-3xl overflow-y-auto p-2xl" data-testid="admin">
+          <main className={FRAME} data-testid="admin">
+            <h1 className="m-0 mb-2xl text-title font-strong">Administration</h1>
             <OutcomeNotice state={notice} />
 
-            <h2 className="m-0 text-ui">Agents</h2>
-            <Table>
-              <thead>
-                <tr>
-                  {["agent", "model", "public internet", "surfaces", "web audience", ""].map(
-                    (column, index) => (
-                      <Th key={index}>{column}</Th>
-                    ),
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {payload.agents.map((agent) => (
+            <Section title="Agents">
+              <DataTable
+                columns={["Agent", "Model", "Public Internet", "Surfaces", "Web Audience", ""]}
+                rows={payload.agents}
+                rowKey={(agent) => agent.id}
+                empty="This workspace has no agents."
+              >
+                {(agent) => (
                   <AgentRow
-                    key={agent.id}
                     agent={agent}
                     onCopy={() => {
                       setCopying(agent);
-                      setNotice({ text: "Copying " + agent.name + " — configuration only.", refused: false });
+                      setNotice({
+                        text: "Copying " + agent.name + " — configuration only.",
+                        refused: false,
+                      });
                     }}
                     onAudience={(verb, email) => intent(agent.id, { verb, email })}
                   />
-                ))}
-              </tbody>
-            </Table>
+                )}
+              </DataTable>
+            </Section>
 
             {mainAgent ? (
               <CreateAgent
@@ -87,26 +118,16 @@ export function Admin() {
               />
             ) : null}
 
-            <h2 className="m-0 text-ui">
-              {"Members" +
-                (gated ? "" : " · seats ungated") +
-                (seats.limit !== null ? " · " + seats.limit + " seat limit" : "") +
-                (seats.included !== null ? " · " + seats.included + " included" : "")}
-            </h2>
-            <Table>
-              <thead>
-                <tr>
-                  {(gated ? ["member", "role", "seat", ""] : ["member", "role", ""]).map(
-                    (column, index) => (
-                      <Th key={index}>{column}</Th>
-                    ),
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {payload.members.map((member) => (
+            <Section title="Members">
+              <Hint className="m-0">{seatLine(payload.seats)}</Hint>
+              <DataTable
+                columns={gated ? ["Member", "Role", "Seat", ""] : ["Member", "Role", ""]}
+                rows={payload.members}
+                rowKey={(member) => member.email}
+                empty="This workspace has no members yet."
+              >
+                {(member) => (
                   <MemberRow
-                    key={member.email}
                     member={member}
                     gated={gated}
                     onApply={(spec) =>
@@ -120,59 +141,56 @@ export function Admin() {
                         : undefined
                     }
                   />
-                ))}
-              </tbody>
-            </Table>
+                )}
+              </DataTable>
+            </Section>
 
-            <h2 className="m-0 text-ui">Billing</h2>
-            {payload.caps.length ? (
-              <Table>
-                <thead>
-                  <tr>
-                    {["cap", "subject", "window", "limit", "on breach"].map((column) => (
-                      <Th key={column}>{column}</Th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {payload.caps.map((cap, index) => (
-                    <tr key={index}>
-                      <Td>{cap.scope}</Td>
-                      <Td>{cap.subject || "—"}</Td>
-                      <Td>{cap.window_seconds / 3600 + "h"}</Td>
-                      <Td>{money(cap.limit_micro_usd)}</Td>
-                      <Td>{cap.on_breach}</Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            ) : (
-              <div>No spend caps are set.</div>
-            )}
-            <div>The plan, invoices, and payment methods are managed with the agent in chat.</div>
+            <Section title="Billing">
+              <DataTable
+                columns={["Cap", "Subject", "Window", "Limit", "On Breach"]}
+                rows={payload.caps}
+                rowKey={(cap) => cap.scope + "/" + cap.subject + "/" + cap.window_seconds}
+                empty="No spend caps are set."
+              >
+                {(cap) => (
+                  <>
+                    <Td>{cap.scope}</Td>
+                    <Td>{cap.subject || "—"}</Td>
+                    <Td>{cap.window_seconds / 3600 + "h"}</Td>
+                    <Td>{money(cap.limit_micro_usd)}</Td>
+                    <Td>{cap.on_breach}</Td>
+                  </>
+                )}
+              </DataTable>
+              <Hint className="m-0">
+                The plan, invoices, and payment methods are managed with the agent in chat.
+              </Hint>
+            </Section>
 
-            <h2 className="m-0 text-ui">Deploy</h2>
-            <div>
-              Sandbox public internet: {payload.deploy.sandbox_internet ? "allowed" : "blocked"}
-            </div>
-            <Table>
-              <thead>
-                <tr>
-                  {["extension", "version", "public internet"].map((column) => (
-                    <Th key={column}>{column}</Th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {payload.deploy.extensions.map((extension) => (
-                  <tr key={extension.name}>
+            <Section title="Deploy">
+              <Facts
+                rows={[
+                  {
+                    label: "Sandbox public internet",
+                    value: allowance(payload.deploy.sandbox_internet),
+                  },
+                ]}
+              />
+              <DataTable
+                columns={["Extension", "Version", "Public Internet"]}
+                rows={payload.deploy.extensions}
+                rowKey={(extension) => extension.name}
+                empty="This deploy installs no extensions."
+              >
+                {(extension) => (
+                  <>
                     <Td>{extension.name}</Td>
                     <Td>{extension.version}</Td>
-                    <Td>{extension.sandbox_internet ? "allowed" : "blocked"}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+                    <Td>{allowance(extension.sandbox_internet)}</Td>
+                  </>
+                )}
+              </DataTable>
+            </Section>
           </main>
         );
       }}
@@ -185,30 +203,37 @@ function AgentRow({
   onCopy,
   onAudience,
 }: {
-  agent: Agent;
+  agent: AdminAgent;
   onCopy: () => void;
   onAudience: (verb: string, email: string) => void;
 }) {
   const [email, setEmail] = useState("");
   return (
-    <tr>
-      <Td>{agent.name + (agent.main ? " ·" : "")}</Td>
-      <Td>{agent.model}</Td>
-      <Td>{agent.internet_access_allowed ? "allowed" : "blocked"}</Td>
-      <Td>{agent.installations.join(", ") || "—"}</Td>
-      <Td>{agent.main ? "every member" : agent.web_audience.concat("admins").join(", ")}</Td>
+    <>
       <Td>
-        <div className="flex flex-wrap items-baseline gap-xs">
+        {agent.name}
+        {agent.main ? (
+          <span className="ml-xs text-small opacity-(--muted-strong)">Main</span>
+        ) : null}
+      </Td>
+      <Td>{agent.model}</Td>
+      <Td>{allowance(agent.internet_access_allowed)}</Td>
+      <Td>{agent.installations.join(", ") || "—"}</Td>
+      <Td>{agent.main ? "Every member" : agent.web_audience.concat("admins").join(", ")}</Td>
+      <Td>
+        <div className="flex flex-wrap items-stretch gap-xs">
           <Button variant="row" onClick={onCopy}>
             Copy
           </Button>
           {agent.main ? null : (
             <>
               <Input
+                type="email"
+                aria-label={"Web access address for " + agent.name}
                 placeholder="email@work.com"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                className="max-w-[20ch] px-xs py-hair"
+                className="max-w-control-row"
               />
               <Button
                 variant="row"
@@ -226,7 +251,7 @@ function AgentRow({
           )}
         </div>
       </Td>
-    </tr>
+    </>
   );
 }
 
@@ -240,27 +265,40 @@ function MemberRow({
   onApply: (spec: { admin: boolean; seated: boolean }) => void;
 }) {
   return (
-    <tr>
+    <>
       <Td>{member.email}</Td>
-      <Td>{member.admin ? "admin" : "member"}</Td>
-      {gated ? <Td>{member.seated ? "seated" : "—"}</Td> : null}
+      <Td>{member.admin ? "Admin" : "Member"}</Td>
+      {gated ? <Td>{member.seated ? "Seated" : "—"}</Td> : null}
       <Td>
         <div className="flex flex-wrap gap-xs">
-          <Button
-            variant="row"
-            onClick={() => onApply({ admin: !member.admin, seated: Boolean(member.seated) })}
-          >
-            {member.admin ? "Remove admin" : "Make admin"}
-          </Button>
-          <Button
-            variant="row"
-            onClick={() => onApply({ admin: member.admin, seated: !member.seated })}
-          >
-            {member.seated ? "Unseat" : "Seat"}
-          </Button>
+          {member.admin ? (
+            <ConfirmButton
+              verb="Remove admin"
+              variant="row"
+              onClick={() => onApply({ admin: false, seated: Boolean(member.seated) })}
+            />
+          ) : (
+            <Button
+              variant="row"
+              onClick={() => onApply({ admin: true, seated: Boolean(member.seated) })}
+            >
+              Make admin
+            </Button>
+          )}
+          {member.seated ? (
+            <ConfirmButton
+              verb="Unseat"
+              variant="row"
+              onClick={() => onApply({ admin: member.admin, seated: false })}
+            />
+          ) : (
+            <Button variant="row" onClick={() => onApply({ admin: member.admin, seated: true })}>
+              Seat
+            </Button>
+          )}
         </div>
       </Td>
-    </tr>
+    </>
   );
 }
 
@@ -270,7 +308,7 @@ function CreateAgent({
   onCreated,
 }: {
   payload: AdminPayload;
-  copying: Agent | null;
+  copying: AdminAgent | null;
   onCreated: (name: string, spec: Record<string, unknown>) => void;
 }) {
   const [name, setName] = useState("");
@@ -298,7 +336,6 @@ function CreateAgent({
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!name.trim() || !prompt.trim()) return;
     onCreated(name.trim(), {
       model,
       internet_access_allowed: internet,
@@ -308,45 +345,69 @@ function CreateAgent({
   }
 
   return (
-    <div>
-      <h2 className="m-0 text-ui">Create agent</h2>
-      <form onSubmit={submit} className="flex max-w-form flex-col gap-sm">
-        <Input
-          placeholder="agent name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <Select value={model} onChange={(event) => setModel(event.target.value)}>
-          {payload.models.map((id) => (
-            <option key={id} value={id}>
-              {id}
-            </option>
-          ))}
-        </Select>
-        <Select value={reasoning} onChange={(event) => setReasoning(event.target.value)}>
-          {payload.reasoning_levels.map((level) => (
-            <option key={level} value={level}>
-              {level}
-            </option>
-          ))}
-        </Select>
-        <label>
+    <Section title="Create agent">
+      <FieldGroup
+        onSubmit={submit}
+        submit={
+          <Button type="submit" variant="send">
+            Create
+          </Button>
+        }
+      >
+        <Field label="Name" htmlFor="new-agent-name">
+          <Input
+            id="new-agent-name"
+            required
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </Field>
+        <Field label="Model" htmlFor="new-agent-model">
+          <Select value={model} onValueChange={setModel}>
+            <SelectTrigger id="new-agent-model">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {payload.models.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Reasoning" htmlFor="new-agent-reasoning">
+          <Select value={reasoning} onValueChange={setReasoning}>
+            <SelectTrigger id="new-agent-reasoning">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {payload.reasoning_levels.map((level) => (
+                <SelectItem key={level} value={level}>
+                  {level}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Label htmlFor="new-agent-internet" className="flex items-center gap-sm font-inherit">
           <Checkbox
+            id="new-agent-internet"
             checked={internet}
             onChange={(event) => setInternet(event.target.checked)}
-          />{" "}
-          public internet
-        </label>
-        <Textarea
-          placeholder="System prompt"
-          rows={4}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-        />
-        <Button type="submit" variant="send" className="self-start">
-          Create
-        </Button>
-      </form>
-    </div>
+          />
+          Public internet
+        </Label>
+        <Field label="System prompt" htmlFor="new-agent-prompt">
+          <Textarea
+            id="new-agent-prompt"
+            required
+            rows={4}
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+        </Field>
+      </FieldGroup>
+    </Section>
   );
 }

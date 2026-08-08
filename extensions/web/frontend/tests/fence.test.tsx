@@ -124,12 +124,11 @@ test("a slow read for a filter the member left never paints over the filter they
   );
   await screen.findByText("No memories yet.");
 
-  await userEvent.click(screen.getByRole("button", { name: "fact" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Fact" }));
   await waitFor(() => expect(pending.size).toBe(2));
   const slow = [...pending.keys()].find((url) => url.includes("kind=fact"))!;
 
-  await userEvent.type(screen.getByPlaceholderText("Search memory…"), "dark");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await userEvent.type(screen.getByPlaceholderText("Search"), "dark{Enter}");
   await waitFor(() => expect(pending.size).toBe(3));
   const chosen = [...pending.keys()].find((url) => url.includes("q=dark"))!;
 

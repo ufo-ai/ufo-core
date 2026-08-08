@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
 import { BASE } from "@/lib/api";
 import type { CredentialPrompt } from "@/lib/types";
 
@@ -10,7 +11,11 @@ export type CredentialPromptFormProps = {
   onStored: (slot: string) => void;
 };
 
-export function CredentialPromptForm({ sealed, prompt, onStored }: CredentialPromptFormProps) {
+export function CredentialPromptForm({
+  sealed,
+  prompt,
+  onStored,
+}: CredentialPromptFormProps) {
   const [label, setLabel] = useState(prompt.prompt);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -18,7 +23,7 @@ export function CredentialPromptForm({ sealed, prompt, onStored }: CredentialPro
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!value.trim()) return;
+    if (busy || !value.trim()) return;
     setBusy(true);
     const body = new URLSearchParams({ sealed, slot: prompt.slot, value });
     let res: Response;
@@ -40,23 +45,26 @@ export function CredentialPromptForm({ sealed, prompt, onStored }: CredentialPro
     }
     setLabel("Stored " + prompt.slot + ".");
     setStored(true);
+    setBusy(false);
     onStored(prompt.slot);
   }
 
   return (
     <div>
-      <div>{label}</div>
+      <div role="status" className="mb-hair text-ui opacity-(--muted-soft)">
+        {label}
+      </div>
       {stored ? null : (
-        <form onSubmit={submit} className="flex gap-xs">
-          <input
+        <form onSubmit={submit} className="flex items-stretch gap-xs">
+          <Input
             type="password"
             autoComplete="off"
             placeholder={prompt.slot}
             value={value}
             onChange={(event) => setValue(event.target.value)}
-            className="flex-1 rounded-panel border border-edge-control bg-field px-md py-xs text-field-ink"
+            className="max-w-none flex-1"
           />
-          <Button type="submit" variant="send" disabled={busy}>
+          <Button type="submit" variant="send" busy={busy}>
             Store
           </Button>
         </form>

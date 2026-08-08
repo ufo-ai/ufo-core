@@ -27,6 +27,14 @@ const SLOT = {
   filled: true,
 };
 
+const EMPTY_SLOT = {
+  name: "datadog",
+  slot: "DATADOG_API_KEY",
+  extension: "coding",
+  description: "paste the key from `api.datadoghq.com`",
+  filled: false,
+};
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -39,8 +47,9 @@ test("a connect intent opens the stream for the turn it reports and shows the co
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Add connection" }));
   await userEvent.type(
-    await screen.findByPlaceholderText("Provider (github, notion, …)"),
+    await screen.findByLabelText("Provider"),
     "github",
   );
   await userEvent.click(screen.getByRole("button", { name: "Connect" }));
@@ -82,8 +91,8 @@ test("a credential intent that answers with a request renders the prompt carryin
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
   expect(await screen.findByText("models authenticates with this value.")).toBeTruthy();
 
-  await userEvent.type(await screen.findByPlaceholderText("OPENAI_API_KEY"), "sk-live");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
   expect(JSON.parse(intents[0])).toEqual({
@@ -95,6 +104,28 @@ test("a credential intent that answers with a request renders the prompt carryin
   expect(sent.get("sealed")).toBe("seal-token");
   expect(sent.get("slot")).toBe("OPENAI_API_KEY");
   expect(sent.get("value")).toBe("sk-live");
+});
+
+test("credentials group, sort, and render slot state and literals", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  expect(await screen.findByText("Filled", { selector: '[data-part="status"]' })).toBeTruthy();
+  expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
+  expect(await screen.findByRole("tab", { name: "Not set" })).toBeTruthy();
+  const code = screen.getByText("api.datadoghq.com");
+  expect(code.tagName).toBe("CODE");
+  expect(code.textContent).not.toContain("`");
+  const cards = screen
+    .getAllByRole("listitem")
+    .filter((card) => card.querySelector("[data-part=primary]"));
+  expect(cards.map((card) => card.querySelector("[data-part=primary]")?.textContent)).toEqual([
+    "DATADOG_API_KEY",
+    "OPENAI_API_KEY",
+  ]);
 });
 
 test("a stored credential states the slot it stored and re-reads the listing", async () => {
@@ -121,11 +152,58 @@ test("a stored credential states the slot it stored and re-reads the listing", a
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
-  await userEvent.type(await screen.findByPlaceholderText("OPENAI_API_KEY"), "sk-live");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
   expect(await screen.findByText("Stored OPENAI_API_KEY.")).toBeTruthy();
   await waitFor(() => expect(reads).toBe(2));
+});
+
+test("a request whose second slot is refused keeps the first stored and asks only for the second", async () => {
+  location.hash = "#/workspace/credentials";
+  const posts: string[] = [];
+  let writable = false;
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/intents": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: {
+          reason: "models authenticates with these values.",
+          sealed: "seal-token",
+          prompts: [
+            { slot: "OPENAI_API_KEY", prompt: "the key" },
+            { slot: "OPENAI_ORG_ID", prompt: "the organization" },
+          ],
+        },
+      }),
+    "/credentials": (_url, init) => {
+      const body = String(init?.body);
+      posts.push(body);
+      return body.includes("OPENAI_ORG_ID") && !writable
+        ? new Response("that slot is not writable", { status: 400 })
+        : json({ stored: true });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
+  await userEvent.type(screen.getByLabelText("the organization"), "org-1");
+  await userEvent.click(screen.getByRole("button", { name: "Set credentials" }));
+
+  expect(await screen.findByText("that slot is not writable")).toBeTruthy();
+  expect(posts.length).toBe(2);
+  expect(screen.queryByLabelText("the key")).toBeNull();
+  expect(screen.getByRole("button", { name: "Set credential" })).toBeTruthy();
+
+  writable = true;
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
+
+  expect(await screen.findByText("2 credentials stored.")).toBeTruthy();
+  expect(posts.length).toBe(3);
 });
 
 test("a cleared credential states the outcome and re-reads the listing", async () => {
@@ -141,9 +219,35 @@ test("a cleared credential states the outcome and re-reads the listing", async (
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
 
   expect(await screen.findByText("Cleared OPENAI_API_KEY.")).toBeTruthy();
   await waitFor(() => expect(reads).toBe(2));
+});
+
+test("a destructive act posts nothing until a second click confirms it, and leaving it disarms", async () => {
+  location.hash = "#/workspace/credentials";
+  const intents: string[] = [];
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/intents": (_url, init) => {
+      intents.push(String(init?.body));
+      return json({ applied: false, message: "Only an admin may clear it." });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
+  expect(intents.length).toBe(0);
+
+  await userEvent.click(screen.getByRole("button", { name: "Replace" }));
+  expect(screen.queryByRole("button", { name: "Confirm clear" })).toBe(null);
+  await waitFor(() => expect(intents.length).toBe(1));
+
+  await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm clear" }));
+  await waitFor(() => expect(intents.length).toBe(2));
+  expect(JSON.parse(intents[1]).verb).toBe("delete");
 });
 
 test("two acts in a row each re-read, even though the server answers one constant message", async () => {
@@ -160,11 +264,13 @@ test("two acts in a row each re-read, even though the server answers one constan
 
   const clears = await screen.findAllByRole("button", { name: "Clear" });
   await userEvent.click(clears[0]);
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
   expect(await screen.findByText("Saved.")).toBeTruthy();
   await waitFor(() => expect(reads).toBe(2));
 
   const again = await screen.findAllByRole("button", { name: "Clear" });
   await userEvent.click(again[1]);
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
   await waitFor(() => expect(reads).toBe(3));
 });
 
@@ -215,11 +321,11 @@ test("the secret field hides what a member types and refuses whitespace", async 
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
-  const field = await screen.findByPlaceholderText("OPENAI_API_KEY");
+  const field = await screen.findByLabelText("the key");
   expect(field.getAttribute("type")).toBe("password");
 
   await userEvent.type(field, "   ");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
   expect(posts.length).toBe(0);
 });
 
@@ -233,11 +339,11 @@ test("a refused store states the reason the server gave and keeps the field", as
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
-  await userEvent.type(await screen.findByPlaceholderText("OPENAI_API_KEY"), "sk-live");
-  await userEvent.click(screen.getByRole("button", { name: "Store" }));
+  await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
+  await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
-  expect(await screen.findByText("the key — that seal has expired.")).toBeTruthy();
-  expect(screen.getByPlaceholderText("OPENAI_API_KEY")).toBeTruthy();
+  expect(await screen.findByText("that seal has expired")).toBeTruthy();
+  expect(screen.getByLabelText("the key")).toBeTruthy();
 });
 
 test("the tasks, overview, and skills refusals tone their notices", async () => {
@@ -267,7 +373,8 @@ test("the tasks, overview, and skills refusals tone their notices", async () => 
     "/intents": refuse,
   });
   const first = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.type(await screen.findByPlaceholderText("object-name"), "digest");
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+  await userEvent.type(await screen.findByLabelText("Name"), "digest");
   await userEvent.click(screen.getByRole("button", { name: "Create" }));
   await refusedNotice("The workspace refuses it.");
   first.unmount();
@@ -282,8 +389,10 @@ test("the tasks, overview, and skills refusals tone their notices", async () => 
   location.hash = "#/agents/" + AGENT.id + "/skills";
   wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }), "/intents": refuse });
   const third = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.type(await screen.findByPlaceholderText("skill-name"), "triage");
-  await userEvent.type(screen.getByPlaceholderText(/name: skill-name/), "steps");
+  await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
+  await userEvent.type(await screen.findByLabelText("Name"), "triage");
+  await userEvent.type(screen.getByLabelText("Description"), "Load when triaging.");
+  await userEvent.type(screen.getByLabelText("Instructions"), "steps");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await refusedNotice("The workspace refuses it.");
   third.unmount();

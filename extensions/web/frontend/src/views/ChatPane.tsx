@@ -70,7 +70,7 @@ export function ChatPane({
       <div
         className={cn(
           "relative grid min-h-0 flex-1 grid-cols-1",
-          slot && "grid-cols-[minmax(0,1fr)_minmax(20rem,40%)] max-narrow:grid-cols-1",
+          slot && "grid-cols-(--grid-slot) max-narrow:grid-cols-1",
         )}
       >
         <div className="flex min-h-0 min-w-0 flex-col">

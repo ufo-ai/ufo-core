@@ -1,8 +1,14 @@
+/** An agent as the boot read names it — the set a member may open and message. */
 export type Agent = {
   id: string;
   name: string;
   model: string;
   main: boolean;
+};
+
+/** The same agent as the administration read names it, carrying the deploy facts only an admin
+ *  sees. The boot payload does not send these, so a member-facing view cannot reach for them. */
+export type AdminAgent = Agent & {
   internet_access_allowed: boolean;
   installations: string[];
   web_audience: string[];
@@ -38,7 +44,7 @@ export type SpendCap = {
 export type DeployExtension = { name: string; version: string; sandbox_internet: boolean };
 
 export type AdminPayload = {
-  agents: Agent[];
+  agents: AdminAgent[];
   members: Member[];
   seats: SeatSummary;
   caps: SpendCap[];
@@ -102,7 +108,9 @@ export type Transcript = {
 export type SchemaProperty = {
   type?: string;
   title?: string;
-  description?: string;
+  format?: string;
+  maxLength?: number;
+  examples?: string[];
   enum?: string[];
-  anyOf?: { type?: string; enum?: string[] }[];
+  anyOf?: { type?: string; format?: string; maxLength?: number; enum?: string[] }[];
 };

@@ -13,7 +13,7 @@ import {
   workspaceHash,
 } from "@/lib/route";
 
-import { AGENT, CHAT_ROW, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
+import { AGENT, CHAT_ROW, CONVO_ID, MEMBER, json, useStreamFake, viewCard, wire } from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -186,12 +186,12 @@ test("paging writes the cursor to the hash and Back steps to the previous page",
 
   await userEvent.click(await screen.findByRole("button", { name: "Older" }));
 
-  expect(await screen.findByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(await viewCard("notes.txt")).toBeTruthy();
   expect(location.hash).toContain("after=c-older");
 
   history.back();
   await waitFor(() => expect(location.hash).toBe("#/workspace/artifacts"));
-  expect(await screen.findByRole("button", { name: "report.txt" })).toBeTruthy();
+  expect(await viewCard("report.txt")).toBeTruthy();
 });
 
 test("opening an artifact names it in the hash and closing clears it", async () => {
@@ -199,7 +199,7 @@ test("opening an artifact names it in the hash and closing clears it", async () 
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(location.hash).toContain("open=");
 
@@ -215,7 +215,7 @@ test("search and chip ride the hash by replacement, never as history entries", a
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Shared" }));
   await userEvent.type(screen.getByRole("searchbox"), "rss");
 
   await waitFor(() => expect(location.hash).toContain("q=rss"));
@@ -233,7 +233,7 @@ test("a reloaded filter lands filtered", async () => {
   expect(await screen.findByText("rss")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeNull();
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("rss");
-  expect(screen.getByRole("button", { name: /Shared/ }).getAttribute("aria-pressed")).toBe(
+  expect(screen.getByRole("tab", { name: "Shared" }).getAttribute("aria-selected")).toBe(
     "true",
   );
 });
@@ -260,7 +260,7 @@ test("closing the viewer unwinds the entry opening it pushed", async () => {
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "report.txt" }));
+  await userEvent.click(await viewCard("report.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(location.hash).toContain("open=");
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
@@ -286,7 +286,7 @@ test("a cursor the surface refuses leaves a way back to the first page", async (
 
   await userEvent.click(await screen.findByRole("button", { name: "First page" }));
 
-  expect(await screen.findByRole("button", { name: "report.txt" })).toBeTruthy();
+  expect(await viewCard("report.txt")).toBeTruthy();
   expect(location.hash).toBe("#/workspace/artifacts");
 });
 
@@ -296,9 +296,9 @@ test("a second row opened behind the sheet still closes to the listing", async (
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(location.hash).not.toContain("open="));
@@ -314,11 +314,11 @@ test("paging away from an open row carries no dead open key", async () => {
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "report.txt" }));
+  await userEvent.click(await viewCard("report.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Older" }));
 
-  expect(await screen.findByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(await viewCard("notes.txt")).toBeTruthy();
   expect(location.hash).not.toContain("open=");
   expect(screen.queryByText("That item is not on this page.")).toBeNull();
 });
@@ -455,12 +455,11 @@ test("a memory search and kind filter ride the hash and survive reload", async (
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "fact" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Fact" }));
   expect(location.hash).toBe("#/workspace/memory?kind=fact");
   await waitFor(() => expect(calls.some((url) => url.includes("kind=fact"))).toBe(true));
 
-  await userEvent.type(screen.getByPlaceholderText("Search memory…"), "roadmap");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await userEvent.type(screen.getByPlaceholderText("Search"), "roadmap{Enter}");
   expect(location.hash).toBe("#/workspace/memory?kind=fact&q=roadmap");
   await waitFor(() => expect(calls.some((url) => url.includes("q=roadmap"))).toBe(true));
 });
@@ -470,9 +469,9 @@ test("a reloaded kind filter lands on that kind and reads it", async () => {
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  const chip = await screen.findByRole("button", { name: "fact" });
-  expect(chip.getAttribute("aria-current")).toBe("true");
-  expect(screen.getByRole("button", { name: "all" }).getAttribute("aria-current")).toBe("false");
+  const tab = await screen.findByRole("tab", { name: "Fact" });
+  expect(tab.getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("false");
   expect(calls.some((url) => url.includes("/workspace/memory?kind=fact"))).toBe(true);
 });
 
@@ -481,13 +480,13 @@ test("a search cleared from a kind returns to that kind rather than page one", a
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  const box = (await screen.findByPlaceholderText("Search memory…")) as HTMLInputElement;
+  const box = (await screen.findByPlaceholderText("Search")) as HTMLInputElement;
   expect(box.value).toBe("roadmap");
   await userEvent.clear(box);
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await userEvent.type(box, "{Enter}");
 
   await waitFor(() => expect(location.hash).toBe("#/workspace/memory?kind=fact"));
-  expect(screen.getByRole("button", { name: "fact" }).getAttribute("aria-current")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Fact" }).getAttribute("aria-selected")).toBe("true");
 });
 
 test("a deep link naming a row that is not on this page says so", async () => {
@@ -497,7 +496,7 @@ test("a deep link naming a row that is not on this page says so", async () => {
 
   expect(await screen.findByText("That item is not on this page.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-  expect(await screen.findByRole("button", { name: "report.txt" })).toBeTruthy();
+  expect(await viewCard("report.txt")).toBeTruthy();
 });
 
 test("opening and closing the viewer issues no second listing read", async () => {
@@ -505,11 +504,11 @@ test("opening and closing the viewer issues no second listing read", async () =>
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await screen.findByRole("button", { name: "report.txt" });
+  await viewCard("report.txt");
   const reads = () => calls.filter((url) => url.includes("/workspace/artifacts")).length;
   const before = reads();
 
-  await userEvent.click(screen.getByRole("button", { name: "report.txt" }));
+  await userEvent.click(await viewCard("report.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());

@@ -1,4 +1,6 @@
+import { buttonVariants } from "@/components/ui/button";
 import type { SessionFault } from "@/lib/api";
+import { cn } from "@/lib/cn";
 
 const FAULTS: Record<SessionFault, { title: string; cause: string; action: string }> = {
   expired: {
@@ -17,12 +19,12 @@ const FAULTS: Record<SessionFault, { title: string; cause: string; action: strin
 export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {
   const stated = FAULTS[fault];
   return (
-    <section className="m-auto w-card rounded-bubble border border-edge p-4xl">
+    <section className="m-auto w-card rounded-card border border-edge p-4xl">
       <h1 className="m-0 mb-2xs text-title">{stated.title}</h1>
       <div className="mb-xl text-label opacity-(--muted-faint)">{stated.cause}</div>
       <a
         href="/login"
-        className="inline-block rounded-panel border-0 bg-ink px-3xl py-md font-strong text-surface no-underline"
+        className={cn(buttonVariants({ variant: "send" }), "inline-block no-underline")}
       >
         {stated.action}
       </a>

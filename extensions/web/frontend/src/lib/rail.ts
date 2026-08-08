@@ -41,17 +41,6 @@ export function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
   }));
 }
 
-export function relativeTime(raw: string, now: Date): string {
-  const at = new Date(raw);
-  if (Number.isNaN(at.getTime())) return "";
-  const elapsed = now.getTime() - at.getTime();
-  if (elapsed < 60_000) return "now";
-  if (elapsed < 3_600_000) return Math.floor(elapsed / 60_000) + "m";
-  if (elapsed < DAY_MS) return Math.floor(elapsed / 3_600_000) + "h";
-  if (elapsed < 30 * DAY_MS) return Math.floor(elapsed / DAY_MS) + "d";
-  return at.toLocaleDateString();
-}
-
 export function stampIso(at: Date): string {
   return at.toISOString();
 }

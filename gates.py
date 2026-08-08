@@ -31,6 +31,20 @@ PORTAL_ENTRY = PORTAL_SOURCE / "main.tsx"
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
+BRACKET_SEGMENT = re.compile(r"\[([^\][\n]*)\]")
+PORTAL_CLASS_REFUSALS = (
+    (re.compile(r"(?<![\w-])space-[xy]-"), "stack with flex and a gap"),
+    (re.compile(r"(?<![\w-])dark:"), "color-scheme carries the scheme"),
+    (re.compile(r"overflow-hidden text-ellipsis whitespace-nowrap"), "truncate says this"),
+    (
+        re.compile(r"(?<![\w-])([wh])-(\S+) (?!\1)[wh]-\2(?![\w-])"),
+        "one size- utility says it once",
+    ),
+    (re.compile(r"className=\{`"), "compose classes with cn()"),
+)
+RAW_CSS_VALUE = re.compile(
+    r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
+)
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
@@ -1100,7 +1114,10 @@ def _portal_style_failures() -> list[str]:
     stylesheet or emits a `<style>` tag can restyle a sibling it never named, which is how a rule
     written for one panel silently reshaped another. An inline `style` object is a computed value,
     not a selector, and stays allowed. The portal's own markup entry is checked too: a `<style>`
-    there is the same escape by a different door."""
+    there is the same escape by a different door. A bracket value in a class that names a raw
+    measurement or colour re-decides a token inline — it must resolve through the theme
+    (`var(--…)`) or stay structural. The refused class shapes are the ones with a shorter spelling
+    that already means the same thing, so the long form is drift rather than intent."""
     source = ROOT / PORTAL_SOURCE
     if not source.is_dir():
         return [f"{PORTAL_SOURCE}: the portal source is missing"]
@@ -1116,6 +1133,16 @@ def _portal_style_failures() -> list[str]:
             failures.append(f"{rel}: a view may not emit a <style> tag")
         if STYLESHEET_IMPORT.search(text) and rel != PORTAL_ENTRY:
             failures.append(f"{rel}: only the entry module imports the theme")
+        failures.extend(
+            f"{rel}: {segment.group(0)} names a raw value — resolve it through a theme token"
+            for segment in BRACKET_SEGMENT.finditer(text)
+            if RAW_CSS_VALUE.search(segment.group(1))
+        )
+        failures.extend(
+            f"{rel}: {found.group(0)!r} — {refusal}"
+            for pattern, refusal in PORTAL_CLASS_REFUSALS
+            for found in pattern.finditer(text)
+        )
     markup = ROOT / PORTAL_SOURCE.parent / "index.html"
     if not markup.is_file():
         return [*failures, f"{markup.relative_to(ROOT)}: the portal entry markup is missing"]

@@ -22,7 +22,9 @@ from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
 from ufo_ext_scheduled_tasks.tools import (
+    SCHEDULE_MAX,
     SCHEDULED_TASK_KIND,
+    SUMMARY_MAX,
     PauseAndWaitInput,
     ScheduledTaskObjects,
     ScheduledTaskSpec,
@@ -3682,3 +3684,25 @@ async def test_parallel_main_targets_keep_their_agent_namespaces_isolated(db: No
     assert "first child" in first_payload["objects"][0]["summary"]
     assert second_payload["agent"] == names[second_agent]
     assert "second child" in second_payload["objects"][0]["summary"]
+
+
+def _facet(prop: dict, key: str) -> object:
+    if key in prop:
+        return prop[key]
+    return next((entry[key] for entry in prop.get("anyOf", ()) if key in entry), None)
+
+
+def test_spec_schema_states_the_shape_a_form_needs() -> None:
+    properties = ScheduledTaskSpec.model_json_schema()["properties"]
+
+    assert properties["schedule"]["examples"] == ["0 9 * * 1-5"]
+    assert _facet(properties["schedule"], "maxLength") == SCHEDULE_MAX
+    assert _facet(properties["description"], "maxLength") == SUMMARY_MAX
+    assert _facet(properties["prompt"], "maxLength") is None
+    assert properties["expires_at"]["title"] == "Expires At"
+    assert _facet(properties["expires_at"], "format") == "date-time"
+
+
+def test_a_bound_field_refuses_a_value_past_its_bound() -> None:
+    with pytest.raises(ValueError):
+        ScheduledTaskSpec(schedule="* " * SCHEDULE_MAX)

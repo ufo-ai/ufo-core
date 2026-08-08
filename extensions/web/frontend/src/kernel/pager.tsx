@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import type { WorkspacePlace } from "@/lib/route";
 
 export type Placement = WorkspacePlace & { notice?: string };
@@ -14,19 +15,16 @@ export function Pager({
     ["Older", payload.older],
   ];
   return (
-    <div className="mb-lg flex gap-xs">
+    <div className="flex gap-xs">
       {steps.map(([label, cursor]) =>
         cursor ? (
-          <button
+          <Button
             key={label}
-            type="button"
-            onClick={() =>
-              onPlace({ after: cursor, open: undefined })
-            }
-            className="border border-edge-control rounded-control bg-transparent px-sm py-hair text-inherit"
+            variant="row"
+            onClick={() => onPlace({ after: cursor, open: undefined })}
           >
             {label}
-          </button>
+          </Button>
         ) : null,
       )}
     </div>

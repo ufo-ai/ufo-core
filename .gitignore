@@ -22,9 +22,12 @@ eval-reports/
 ufo.db-*
 .coverage
 .claude/*
+!.claude/rules/
 !.claude/skills/
 .claude/skills/*
+.scratch/
 .worktrees/
 .superpowers/
 docs/superpowers/
 e2e-evidence.md
+workspaces/

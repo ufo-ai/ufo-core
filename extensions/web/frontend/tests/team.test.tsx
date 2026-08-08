@@ -4,7 +4,12 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { pick, refusedNotice, AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+
+async function openAdd() {
+  await userEvent.click(await screen.findByRole("button", { name: "Add member" }));
+  return screen.getByRole("button", { name: "Add members" });
+}
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -34,31 +39,6 @@ test("the roster names each member, who administers, and who holds a seat", asyn
   expect(plain.closest("tr")?.textContent).toContain("No seat");
 });
 
-test("the roster is summed above the table: members, admins, seated", async () => {
-  wire({
-    "/workspace/team": () =>
-      json({
-        ...ROSTER,
-        members: ROSTER.members.concat({
-          email: "third@example.com",
-          admin: false,
-          seated: true,
-        }),
-      }),
-  });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
-
-  await screen.findByText("lead@example.com");
-  expect(screen.getByText("members").previousElementSibling?.textContent).toBe("3");
-  expect(screen.getByText("admins").previousElementSibling?.textContent).toBe("1");
-  expect(screen.getByText("seated").previousElementSibling?.textContent).toBe("2");
-  const table = screen.getByRole("table");
-  expect(
-    screen.getByText("members").compareDocumentPosition(table) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-});
-
 test("an admin adds a member by email, optionally as an admin, through the intent lane", async () => {
   const bodies: string[] = [];
   wire({
@@ -70,9 +50,10 @@ test("an admin adds a member by email, optionally as an admin, through the inten
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
-  await userEvent.click(screen.getByRole("checkbox"));
-  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  const submit = await openAdd();
+  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await pick("Role", "Admin");
+  await userEvent.click(submit);
 
   await waitFor(() => expect(bodies.length).toBe(1));
   expect(JSON.parse(bodies[0])).toEqual({
@@ -83,6 +64,115 @@ test("an admin adds a member by email, optionally as an admin, through the inten
   expect(await screen.findByText("Added new@example.com.")).toBeTruthy();
 });
 
+test("the address and its role stretch to one height, so the chevron sits on the row's line", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await openAdd();
+  const row = screen.getByLabelText("Email").parentElement;
+  expect(row).toBe(screen.getByLabelText("Role").parentElement);
+  expect(row?.className).toContain("items-stretch");
+});
+
+test("the act stays shut until every row carries an address", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  const submit = await openAdd();
+  expect(submit.hasAttribute("disabled")).toBe(true);
+
+  await userEvent.type(screen.getByLabelText("Email"), "new@example.com");
+  expect(submit.hasAttribute("disabled")).toBe(false);
+
+  await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+  expect(submit.hasAttribute("disabled")).toBe(true);
+});
+
+test("a search narrows the roster to the members whose address matches", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await userEvent.type(await screen.findByLabelText("Search members"), "LEAD");
+
+  expect(screen.getByText("lead@example.com")).toBeTruthy();
+  expect(screen.queryByText("member@example.com")).toBeNull();
+});
+
+test("a search that matches nobody says so in a row, and the table holds", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await userEvent.type(await screen.findByLabelText("Search members"), "nobody");
+
+  expect(screen.getByText("No member matches that search.")).toBeTruthy();
+  expect(screen.getByRole("table")).toBeTruthy();
+  expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
+    "Member",
+    "Role",
+    "Seat",
+  ]);
+});
+
+test("added rows each send their own intent, and the roster reports the count", async () => {
+  const bodies: string[] = [];
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": (_url, init) => {
+      bodies.push(String(init?.body));
+      return json({ applied: true, message: "Added someone." });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  const submit = await openAdd();
+  await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+  await userEvent.type(screen.getByLabelText("Email 1"), "one@example.com");
+  await userEvent.type(screen.getByLabelText("Email 2"), "two@example.com");
+  await pick("Role 2", "Admin");
+  await userEvent.click(submit);
+
+  await waitFor(() => expect(bodies.length).toBe(2));
+  expect(JSON.parse(bodies[0])).toEqual({
+    verb: "add_member",
+    email: "one@example.com",
+    admin: false,
+  });
+  expect(JSON.parse(bodies[1])).toEqual({
+    verb: "add_member",
+    email: "two@example.com",
+    admin: true,
+  });
+  expect(await screen.findByText("2 members added.")).toBeTruthy();
+});
+
+test("only the refused rows stay behind, so a second press cannot re-add what landed", async () => {
+  const bodies: string[] = [];
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": (_url, init) => {
+      const body = String(init?.body);
+      bodies.push(body);
+      return body.includes("bad@example.com")
+        ? json({ applied: false, message: "bad@example.com is not at example.com." })
+        : json({ applied: true, message: "Added good@example.com." });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  const submit = await openAdd();
+  await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+  await userEvent.type(screen.getByLabelText("Email 1"), "good@example.com");
+  await userEvent.type(screen.getByLabelText("Email 2"), "bad@example.com");
+  await userEvent.click(submit);
+
+  await refusedNotice("bad@example.com is not at example.com.");
+  expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("bad@example.com");
+
+  await userEvent.click(submit);
+  await waitFor(() => expect(bodies.length).toBe(3));
+  expect(bodies.filter((body) => body.includes("good@example.com")).length).toBe(1);
+});
+
 test("a refused add states the refusal and leaves the form to correct", async () => {
   wire({
     "/workspace/team": () => json(ROSTER),
@@ -90,11 +180,54 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "x@example.com");
-  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  const submit = await openAdd();
+  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "x@example.com");
+  await userEvent.click(submit);
 
   await refusedNotice("Only an admin adds a member.");
-  expect(screen.getByRole("button", { name: "Add member" })).toBeTruthy();
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  expect((screen.getByPlaceholderText("email@example.com") as HTMLInputElement).value).toBe(
+    "x@example.com",
+  );
+});
+
+test("the roster and the form each carry a heading naming what they are", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  expect(await screen.findByRole("heading", { name: "Members" })).toBeTruthy();
+  await openAdd();
+  expect(screen.getByRole("dialog", { name: "Add Members" })).toBeTruthy();
+});
+
+test("the address and role are named for a member who cannot see the placeholder", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  await openAdd();
+  expect(screen.getByLabelText("Email").getAttribute("type")).toBe("email");
+  expect(screen.getByRole("combobox", { name: "Role" }).textContent).toBe("Member");
+});
+
+test("an add already in flight is not sent twice", async () => {
+  let sends = 0;
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": () => {
+      sends += 1;
+      return new Promise(() => undefined) as unknown as Response;
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+
+  const submit = await openAdd();
+  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.click(submit);
+  await waitFor(() => expect(submit.getAttribute("aria-disabled")).toBe("true"));
+  await userEvent.click(submit);
+
+  expect(sends).toBe(1);
+  expect(document.activeElement).toBe(submit);
 });
 
 test("a member who may not add reads the roster with no form", async () => {
@@ -109,7 +242,8 @@ test("the placeholder names the workspace domain an address must match", async (
   wire({ "/workspace/team": () => json({ ...ROSTER, domain: null }) });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  expect(await screen.findByPlaceholderText("email@work.com")).toBeTruthy();
+  await openAdd();
+  expect(screen.getByPlaceholderText("email@work.com")).toBeTruthy();
 });
 
 test("a roster that fails to read states the error and offers no form", async () => {
@@ -161,8 +295,9 @@ test("an outcome notice does not follow the member to another view", async () =>
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
-  await userEvent.type(await screen.findByPlaceholderText("email@example.com"), "new@example.com");
-  await userEvent.click(screen.getByRole("button", { name: "Add member" }));
+  const submit = await openAdd();
+  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.click(submit);
   expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "Credentials" }));

@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
+import { AGENT, MEMBER, fact, json, useStreamFake, viewCard, wire } from "./harness";
 
 const RESEARCH = { name: "deep_research", model: "claude-opus-4-8" };
 const GENERAL = { name: "general_purpose", model: null };
@@ -36,13 +36,13 @@ test("a subagent row opens its page, naming the model, round limit, and untruste
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  await userEvent.click(screen.getByRole("button", { name: "deep_research · subagent" }));
+  await userEvent.click(await viewCard("deep_research"));
 
   expect(location.hash).toBe("#/subagents/deep_research");
   const panel = within(await screen.findByTestId("panel"));
-  expect(panel.getByText(/model: claude-opus-4-8/)).toBeTruthy();
-  expect(panel.getByText(/round limit: 40/)).toBeTruthy();
-  expect(panel.getByText(/walled as untrusted content/)).toBeTruthy();
+  expect(fact("Model")).toBe("claude-opus-4-8");
+  expect(fact("Round limit")).toBe("40");
+  expect(fact("Answer to parent")).toBe("Walled as untrusted content");
   expect(panel.getByText("Research the question and cite every source.")).toBeTruthy();
 });
 
@@ -62,11 +62,11 @@ test("a subagent inheriting its parent's model says so rather than naming one", 
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  await userEvent.click(screen.getByRole("button", { name: "general_purpose · subagent" }));
+  await userEvent.click(await viewCard("general_purpose"));
 
-  const panel = within(await screen.findByTestId("panel"));
-  expect(panel.getByText(/model: inherits the agent that spawns it/)).toBeTruthy();
-  expect(panel.getByText(/reaches a parent as trusted/)).toBeTruthy();
+  await screen.findByTestId("panel");
+  expect(fact("Model")).toBe("Inherits the agent that spawns it");
+  expect(fact("Answer to parent")).toBe("Trusted content");
 });
 
 const RUN_DETAIL = {
@@ -132,17 +132,45 @@ test("the conversations tab lists this subagent's runs and opens one as a turn t
   expect(await panel.findByText("member@example.com")).toBeTruthy();
   const rows = panel.getAllByRole("row").slice(1);
   expect(rows.map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent))).toEqual([
-    ["assistant", "member@example.com", "1", "2026-08-02 09:05", "Open"],
-    ["ops", "Channel or room · 88888888", "3", "2026-08-01 09:30", "not shared with you"],
+    ["assistant", "member@example.com", "1", "Aug 2 2026", "Open"],
+    ["ops", "Channel or room · 88888888", "3", "Aug 1 2026", "not shared with you"],
   ]);
 
   await userEvent.click(panel.getByRole("link", { name: "Open" }));
   expect(location.hash).toBe("#/subagents/deep_research/conversations/" + RUN_ID);
   expect(await screen.findByText("Find the filing deadline")).toBeTruthy();
   expect(screen.getByText("March 31")).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Changes" }).getAttribute("href")).toBe(
-    "#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/slots/changes",
-  );
+  expect(
+    screen.getByRole("link", { name: "Changes from subagent deep_research" }).getAttribute("href"),
+  ).toBe("#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/slots/changes");
+});
+
+test("a search over the runs holds the table and states that nothing matched", async () => {
+  wire({
+    "/subagents/deep_research/conversations": () =>
+      json({
+        conversations: [
+          {
+            id: RUN_ID,
+            agent_name: "assistant",
+            member_email: "member@example.com",
+            turn_count: 1,
+            last_turn_at: "2026-08-02T09:05:00Z",
+            readable: true,
+          },
+        ],
+      }),
+    "/subagents/deep_research/overview": () => json(OVERVIEW),
+  });
+  location.hash = "#/subagents/deep_research/conversations";
+  portal({});
+
+  const panel = within(await screen.findByTestId("panel"));
+  await userEvent.type(await panel.findByLabelText("Search"), "ops");
+
+  expect(panel.getByText("No run matches this search.")).toBeTruthy();
+  expect(panel.getByRole("table")).toBeTruthy();
+  expect(panel.queryByText("member@example.com")).toBeNull();
 });
 
 test("a run permalink opened cold titles the page without reading the listing", async () => {

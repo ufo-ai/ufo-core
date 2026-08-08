@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
@@ -16,7 +17,6 @@ import {
   bumpChat,
   groupChats,
   mergeChats,
-  relativeTime,
   stampIso,
   type ChatRow,
   type ChatsPayload,
@@ -44,6 +44,8 @@ import type { Agent, Member, Subagent } from "@/lib/types";
 export type AppProps = { agents: Agent[]; subagents: Subagent[]; member: Member };
 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
+
+const PICKER_ID = "new-conversation-agents";
 
 type Sought =
   | { kind: "answered" }
@@ -246,7 +248,7 @@ export function App({ agents, subagents, member }: AppProps) {
               <button
                 type="button"
                 onClick={openAdmin}
-                className="border-0 bg-transparent p-0 text-left text-inherit underline"
+                className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
               >
                 Administration
               </button>
@@ -346,7 +348,6 @@ function Pane({
         tab={route.tab}
         tabs={AGENT_TABS}
         onTab={(tab) => onOpenAgent(agent.id, tab)}
-        onNewChat={onNewChat}
       />
     );
   }
@@ -482,30 +483,49 @@ function NewChat({
   onNewChat: (agentId: string) => void;
 }) {
   const [picking, setPicking] = useState(false);
+  const held = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!picking) return;
+    const dismiss = (event: Event) => {
+      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
+      if (event instanceof MouseEvent && held.current?.contains(event.target as Node)) return;
+      setPicking(false);
+    };
+    document.addEventListener("keydown", dismiss);
+    document.addEventListener("pointerdown", dismiss);
+    return () => {
+      document.removeEventListener("keydown", dismiss);
+      document.removeEventListener("pointerdown", dismiss);
+    };
+  }, [picking]);
+
   if (!mainAgent) return null;
   if (agents.length === 1) {
     return (
-      <button
-        type="button"
+      <Button
         onClick={() => onNewChat(mainAgent.id)}
-        className="w-full rounded-control border border-edge-control bg-transparent px-lg py-xs text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap"
+        className="w-full text-left max-narrow:w-auto max-narrow:whitespace-nowrap"
       >
         New conversation
-      </button>
+      </Button>
     );
   }
   return (
-    <div className="flex flex-col gap-2xs max-narrow:flex-row max-narrow:items-center">
-      <button
-        type="button"
+    <div
+      ref={held}
+      className="flex flex-col gap-2xs max-narrow:flex-row max-narrow:items-center"
+    >
+      <Button
         aria-expanded={picking}
+        aria-controls={PICKER_ID}
         onClick={() => setPicking((open) => !open)}
-        className="w-full rounded-control border border-edge-control bg-transparent px-lg py-xs text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap"
+        className="w-full text-left max-narrow:w-auto max-narrow:whitespace-nowrap"
       >
         New conversation
-      </button>
+      </Button>
       {picking ? (
-        <ul className="m-0 flex list-none flex-col p-0 max-narrow:flex-row">
+        <ul id={PICKER_ID} className="m-0 flex list-none flex-col p-0 max-narrow:flex-row">
           {agents.map((agent) => (
             <li key={agent.id}>
               <button
@@ -551,7 +571,7 @@ function RailList({
           <button
             type="button"
             onClick={onRetry}
-            className="border-0 bg-transparent p-0 text-left text-inherit underline"
+            className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
           >
             Retry
           </button>
@@ -559,7 +579,7 @@ function RailList({
       ) : null}
       {groupChats(rail.rows, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 px-2xl pb-2xs pt-md text-small font-strong opacity-(--muted) max-narrow:hidden">
+          <h2 className="m-0 px-2xl pb-2xs pt-lg text-small opacity-(--muted-strong) max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 list-none p-0 max-narrow:flex">
@@ -572,13 +592,12 @@ function RailList({
                   }
                   onClick={() => onOpen(row.conversation_id)}
                 >
-                  <span className="block overflow-hidden text-ellipsis whitespace-nowrap">
-                    {row.title}
-                  </span>
-                  <span className="block font-mono text-mono opacity-(--muted-strong) max-narrow:hidden">
-                    {mainAgent && row.agent_id !== mainAgent.id ? row.agent_name + " · " : ""}
-                    {relativeTime(row.last_at, now)}
-                  </span>
+                  <span className="block truncate">{row.title}</span>
+                  {mainAgent && row.agent_id !== mainAgent.id ? (
+                    <span className="block truncate text-small opacity-(--muted-strong) max-narrow:hidden">
+                      {row.agent_name}
+                    </span>
+                  ) : null}
                 </SidebarButton>
               </li>
             ))}

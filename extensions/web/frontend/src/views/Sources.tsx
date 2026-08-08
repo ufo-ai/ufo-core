@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button, ConfirmButton } from "@/components/ui/button";
 import type { ListingSpec } from "@/kernel/listing";
 import { day } from "@/lib/moments";
 
@@ -63,7 +63,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       backend: first.backend,
       streams: names.join(", "),
       owner: first.owner_email || "—",
-      access: first.shared ? "shared" : "private",
+      access: first.shared ? "Shared" : "Private",
       errors: String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
       next_sync: day(streams.map((entry) => entry.next_sync_at).sort()[0]),
       shared: first.shared,
@@ -85,7 +85,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       backend: entry.backend,
       streams: "—",
       owner: entry.owner_email || "—",
-      access: entry.shared ? "shared" : "private",
+      access: entry.shared ? "Shared" : "Private",
       errors: String(entry.consecutive_errors),
       next_sync: day(entry.next_sync_at),
       shared: entry.shared,
@@ -104,16 +104,16 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     { label: "Shared", has: (row) => row.shared },
   ],
   columns: [
-    { field: "backend", label: "source" },
-    { field: "streams", label: "streams" },
-    { field: "owner", label: "owner" },
-    { field: "access", label: "access" },
-    { field: "errors", label: "errors" },
-    { field: "next_sync", label: "next sync" },
+    { field: "backend", label: "Source" },
+    { field: "streams", label: "Streams" },
+    { field: "owner", label: "Owner" },
+    { field: "access", label: "Access" },
+    { field: "errors", label: "Errors" },
+    { field: "next_sync", label: "Next Sync" },
   ],
   empty:
-    "No sources are registered. Register one in chat — the agent connects the account or " +
-    "credential it needs as part of the request.",
+    "Register a source in chat. The agent connects the account or credential it needs as part " +
+    "of the request.",
   actions: (row, { act, busy }) =>
     row.apply === null || row.name === null ? null : (
       <div className="flex flex-wrap gap-xs">
@@ -147,13 +147,12 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
             Share
           </Button>
         )}
-        <Button
+        <ConfirmButton
+          verb="Remove"
           variant="row"
           disabled={busy}
           onClick={() => act({ verb: "delete", kind: "source", name: row.name })}
-        >
-          Remove
-        </Button>
+        />
       </div>
     ),
 };

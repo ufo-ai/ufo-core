@@ -14,23 +14,36 @@
 
   --color-link: LinkText;
 
+  --color-ink-hover: color-mix(in srgb, CanvasText 88%, transparent);
+
   --color-fill-subtle: color-mix(in srgb, CanvasText 6%, transparent);
   --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
   --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
+  --color-scrim: color-mix(in srgb, CanvasText 40%, transparent);
 
   --color-attention: Mark;
   --color-attention-ink: MarkText;
-  --color-link: LinkText;
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, CanvasText 10%, transparent),
     0 22px 55px color-mix(in srgb, CanvasText 16%, transparent);
+
+  --ease-control: cubic-bezier(0.2, 0, 0, 1);
 
   --animate-appear: appear 0.3s ease-out;
 
   @keyframes appear {
     from {
       opacity: 0;
+    }
+  }
+
+  --animate-raise: raise 0.14s var(--ease-control);
+
+  @keyframes raise {
+    from {
+      opacity: 0;
+      scale: 0.97;
     }
   }
 
@@ -57,6 +70,7 @@
   --radius-control: 6px;
   --radius-panel: 8px;
   --radius-bubble: 12px;
+  --radius-card: 28px;
 
   --font-sans: system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -79,15 +93,28 @@
   --container-sidebar: 240px;
   --container-drawer: min(520px, 100vw);
   --container-card: min(440px, calc(100vw - 32px));
+  --container-dialog: min(560px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 76ch;
   --container-hint: 64ch;
   --container-form: 52ch;
   --container-empty: 44ch;
   --container-control: 40ch;
+  --container-control-row: 20ch;
 
   --media-tall: 60vh;
-  --size-thumb: 96px;
+  --media-card: 20rem;
+  --media-frame: 40rem;
+  --media-preview: 36rem;
+  --media-text: 32rem;
+  --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
+  --size-band: 128px;
+  --size-fact: 16ch;
+  --size-icon: 1em;
+  --size-reveal: 280px;
+  --size-textarea: 12em;
+  --size-notice: 1em;
+  --size-thumb: 64px;
   --marker-width: 2px;
 }
 
@@ -97,6 +124,15 @@
   @keyframes working {
     50% {
       opacity: 0.35;
+    }
+  }
+
+  --animate-skeleton: hold 0.35s ease-out, working 1.4s ease-in-out 0.35s infinite;
+
+  @keyframes hold {
+    0%,
+    55% {
+      opacity: 0;
     }
   }
 }
@@ -114,6 +150,14 @@
     background: var(--color-surface);
     color: var(--color-ink);
     font: var(--text-ui) / var(--leading-chrome) var(--font-sans);
+    text-wrap: pretty;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -121,6 +165,7 @@
     *::before,
     *::after {
       animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
     }
   }
 

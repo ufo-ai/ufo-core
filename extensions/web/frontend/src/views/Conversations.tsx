@@ -1,11 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Table, Td, Th } from "@/components/ui/table";
-import { Heading } from "@/views/Usage";
+import { Input } from "@/components/ui/field";
+import { Td } from "@/components/ui/table";
 import { day } from "@/lib/moments";
 import { formatSize } from "@/views/Chat";
-import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
+import {
+  type NoticeState,
+  OutcomeNotice,
+  Panel,
+  PanelBlank,
+  PanelEmpty,
+  QUIET,
+  Section,
+  outcomeNotice,
+  usePanelRead,
+} from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { conversationSlotHash } from "@/lib/route";
@@ -54,6 +65,17 @@ export function turnTree(
   return rows;
 }
 
+/** The one way back out of a conversation, and the only thing above the section that names it. */
+function Back({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="mb-lg">
+      <Button variant="row" onClick={onBack}>
+        All conversations
+      </Button>
+    </div>
+  );
+}
+
 export function Disclose({
   agent,
   conversation,
@@ -94,24 +116,21 @@ export function Disclose({
   }
 
   return (
-    <div className="flex flex-col gap-md">
-      <Button variant="row" onClick={onBack}>
-        All conversations
-      </Button>
-      <h2 className="text-label m-0 opacity-(--muted-soft)">
-        {conversation.surface} · {who(conversation)}
-      </h2>
-      <p className="max-w-hint">
-        This conversation is private to {owner} and may contain private information. Opening it
-        records your email, theirs, and the time.
-      </p>
-      <div>
-        <Button variant="row" disabled={busy} onClick={acknowledge}>
-          Open transcript
-        </Button>
-      </div>
-      <OutcomeNotice state={outcome} />
-    </div>
+    <>
+      <Back onBack={onBack} />
+      <Section title={title(conversation)}>
+        <p className="m-0 max-w-hint">
+          This conversation is private to {owner} and may contain private information. Opening it
+          records your email, theirs, and the time.
+        </p>
+        <div>
+          <Button variant="send" busy={busy} onClick={acknowledge}>
+            Open transcript
+          </Button>
+        </div>
+        <OutcomeNotice state={outcome} />
+      </Section>
+    </>
   );
 }
 
@@ -125,11 +144,24 @@ export function who(entry: { member_email: string | null; readable: boolean; id:
   return kind + " · " + entry.id.slice(0, 8);
 }
 
+/** One conversation names itself the same way on every screen that opens it — the surface it came
+ *  in on, then whose it is. */
+function title(conversation: Conversation): string {
+  return conversation.surface + " · " + who(conversation);
+}
+
+function matches(entry: Conversation, query: string): boolean {
+  return (who(entry) + " " + entry.surface).toLowerCase().includes(query.toLowerCase());
+}
+
 export function Conversations({ agent }: { agent: Agent }) {
   const [opened, setOpened] = useState<Conversation | null>(null);
   const [disclosing, setDisclosing] = useState<Conversation | null>(null);
+  const [query, setQuery] = useState("");
+  const [reloads, setReloads] = useState(0);
   const state = usePanelRead<{ conversations: Conversation[] }>(
     "/agents/" + agent.id + "/conversations",
+    reloads,
   );
 
   if (opened) {
@@ -151,46 +183,54 @@ export function Conversations({ agent }: { agent: Agent }) {
   }
   return (
     <Panel state={state}>
-      {(payload) => {
-        const entries = payload.conversations;
-        if (!entries.length)
-          return <PanelEmpty>No conversations with {agent.name} yet.</PanelEmpty>;
-
-        return (
-          <Table>
-            <thead>
-              <tr>
-                {["member", "surface", "turns", "last activity", ""].map((column, index) => (
-                  <Th key={index}>{column}</Th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.id}>
-                  <Td>{who(entry)}</Td>
-                  <Td>{entry.surface}</Td>
-                  <Td>{String(entry.turn_count)}</Td>
-                  <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
-                  <Td>
-                    {entry.readable ? (
-                      <Button variant="row" onClick={() => setOpened(entry)}>
-                        Open
-                      </Button>
-                    ) : entry.disclosable ? (
-                      <Button variant="row" onClick={() => setDisclosing(entry)}>
-                        Open as admin
-                      </Button>
-                    ) : (
-                      <span className="font-mono text-mono">not shared with you</span>
-                    )}
-                  </Td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        );
-      }}
+      {(payload) => (
+        <Section
+          title="Conversations"
+          bar={
+            <>
+              <Input
+                type="search"
+                aria-label="Search"
+                placeholder="Search"
+                className="max-w-control-row"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
+            </>
+          }
+        >
+          <DataTable
+            columns={["Member", "Surface", "Turns", "Last Activity", ""]}
+            rows={payload.conversations.filter((entry) => matches(entry, query))}
+            rowKey={(entry) => entry.id}
+            empty={"No conversations with " + agent.name + " yet."}
+            note={query ? "No conversation matches this search." : undefined}
+          >
+            {(entry) => (
+              <>
+                <Td>{who(entry)}</Td>
+                <Td>{entry.surface}</Td>
+                <Td>{String(entry.turn_count)}</Td>
+                <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
+                <Td>
+                  {entry.readable ? (
+                    <Button variant="row" onClick={() => setOpened(entry)}>
+                      Open
+                    </Button>
+                  ) : entry.disclosable ? (
+                    <Button variant="row" onClick={() => setDisclosing(entry)}>
+                      Open as admin
+                    </Button>
+                  ) : (
+                    <span className="opacity-(--muted-soft)">not shared with you</span>
+                  )}
+                </Td>
+              </>
+            )}
+          </DataTable>
+        </Section>
+      )}
     </Panel>
   );
 }
@@ -209,46 +249,48 @@ export function ConversationDetail({
 
   return (
     <>
-      <Button variant="row" onClick={onBack}>
-        All conversations
-      </Button>
-      <Heading>
-        {conversation.surface} · {who(conversation)}
-      </Heading>
-      <Panel
-        state={state}
-        failed={(message) => (
-          <PanelEmpty>
-            {message.startsWith("Error 404")
-              ? "This conversation is not shared with you."
-              : message}
-          </PanelEmpty>
-        )}
-        empty={(payload) =>
-          payload.turns.length || payload.subagent_turns.length
-            ? null
-            : "No turns in this conversation yet."
-        }
-      >
-        {(payload) => (
-          <div className="my-lg flex flex-col gap-lg">
-            {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-              <TurnLine
-                key={entry.turn.id}
-                turn={entry.turn}
-                depth={entry.depth}
-                showChanges={entry.first}
-                rootConversationId={
-                  entry.turn.conversation_id === conversation.id ? undefined : conversation.id
-                }
-              />
-            ))}
-          </div>
-        )}
-      </Panel>
+      <Back onBack={onBack} />
+      <Section title={title(conversation)}>
+        <Panel
+          state={state}
+          failed={(message) => (
+            <PanelEmpty>
+              {message.startsWith("Error 404")
+                ? "This conversation is not shared with you."
+                : message}
+            </PanelEmpty>
+          )}
+        >
+          {(payload) =>
+            payload.turns.length || payload.subagent_turns.length ? (
+              <div className="flex flex-col gap-lg">
+                {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
+                  <TurnLine
+                    key={entry.turn.id}
+                    turn={entry.turn}
+                    depth={entry.depth}
+                    showChanges={entry.first}
+                    rootConversationId={
+                      entry.turn.conversation_id === conversation.id ? undefined : conversation.id
+                    }
+                  />
+                ))}
+              </div>
+            ) : (
+              <PanelBlank body="No turns in this conversation yet." />
+            )
+          }
+        </Panel>
+      </Section>
       <ConversationFiles base={path} />
     </>
   );
+}
+
+/** What a turn is called on the line that states it and on the link that leaves it. A detail can
+ *  merge several subagent conversations, so "Changes" alone names none of them. */
+function named(turn: Turn): string {
+  return turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq;
 }
 
 export function TurnLine({
@@ -269,16 +311,10 @@ export function TurnLine({
         "flex flex-col items-start gap-2xs",
         depth && "border-l-(length:--marker-width) border-edge-strong pl-md",
       )}
-      style={{ marginLeft: depth * 16 + "px" }}
+      style={{ marginLeft: "calc(var(--spacing-2xl) * " + depth + ")" }}
     >
       <div className="flex gap-md font-mono text-mono">
-        <span>
-          {(turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq) +
-            " · " +
-            turn.status +
-            " · " +
-            (day(turn.created_at) || "")}
-        </span>
+        <span>{named(turn) + " · " + turn.status + " · " + (day(turn.created_at) || "")}</span>
         {showChanges ? (
           <a
             href={conversationSlotHash(
@@ -287,6 +323,7 @@ export function TurnLine({
               "changes",
               rootConversationId,
             )}
+            aria-label={"Changes from " + named(turn)}
           >
             Changes
           </a>
@@ -323,48 +360,37 @@ function ConversationFiles({ base }: { base: string }) {
   return (
     <Panel state={state}>
       {(payload) => (
-        <>
-          <Heading>Workspace files</Heading>
-          {!payload.files.length ? (
-            <PanelEmpty>No files in this conversation's workspace.</PanelEmpty>
-          ) : (
-            <>
-              <Table>
-                <thead>
-                  <tr>
-                    {["file", "size", "modified", ""].map((column, index) => (
-                      <Th key={index}>{column}</Th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {payload.files.map((entry) => (
-                    <tr key={entry.path}>
-                      <Td>{entry.path}</Td>
-                      <Td>{formatSize(entry.size_bytes)}</Td>
-                      <Td>{day(entry.modified_at)}</Td>
-                      <Td>
-                        <div className="flex flex-wrap items-baseline gap-xs">
-                          {entry.size_bytes <= MAX_PREVIEW_BYTES ? (
-                            <Button variant="row" onClick={() => view(entry)}>
-                              View
-                            </Button>
-                          ) : null}
-                          <a href={BASE + base + "/files/" + entry.path}>Download</a>
-                        </div>
-                      </Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-              {preview === null ? null : (
-                <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
-                  {preview}
-                </pre>
-              )}
-            </>
+        <Section title="Workspace files">
+          <DataTable
+            columns={["File", "Size", "Modified", ""]}
+            rows={payload.files}
+            rowKey={(entry) => entry.path}
+            empty="No files in this conversation's workspace."
+          >
+            {(entry) => (
+              <>
+                <Td>{entry.path}</Td>
+                <Td>{formatSize(entry.size_bytes)}</Td>
+                <Td>{day(entry.modified_at)}</Td>
+                <Td>
+                  <div className="flex flex-wrap items-baseline gap-xs">
+                    {entry.size_bytes <= MAX_PREVIEW_BYTES ? (
+                      <Button variant="row" onClick={() => view(entry)}>
+                        View
+                      </Button>
+                    ) : null}
+                    <a href={BASE + base + "/files/" + entry.path}>Download</a>
+                  </div>
+                </Td>
+              </>
+            )}
+          </DataTable>
+          {preview === null ? null : (
+            <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
+              {preview}
+            </pre>
           )}
-        </>
+        </Section>
       )}
     </Panel>
   );

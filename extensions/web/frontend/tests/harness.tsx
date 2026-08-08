@@ -1,4 +1,5 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, vi } from "vitest";
 
@@ -103,6 +104,10 @@ export const AGENT = {
   name: "assistant",
   model: "opus",
   main: true,
+};
+
+export const ADMIN_AGENT = {
+  ...AGENT,
   internet_access_allowed: true,
   installations: [],
   web_audience: [],
@@ -127,8 +132,9 @@ export const CHAT_ROW = {
 
 export const json = (payload: unknown) => Response.json(payload);
 
-export const NO_TASKS = "No scheduled_task objects.";
-export const NO_SITES = "No site objects.";
+export const NO_TASKS = "No scheduled task has been created yet.";
+export const NO_SITE_OBJECTS = "No site has been created yet.";
+export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",
@@ -156,8 +162,33 @@ export function objectIndex(kind: unknown, objects: unknown[], next: string | nu
   return json({ ...(kind as object), objects, next_cursor: next });
 }
 
+export async function opened(name: string): Promise<HTMLElement[]> {
+  await userEvent.click(await screen.findByRole("combobox", { name }));
+  return screen.getAllByRole("option");
+}
+
+export async function pick(name: string, option: string): Promise<void> {
+  await userEvent.click(await screen.findByRole("combobox", { name }));
+  await userEvent.click(await screen.findByRole("option", { name: option }));
+}
+
 export async function refusedNotice(text: string): Promise<void> {
   const notice = await screen.findByText(text);
   expect(notice.className).toContain("bg-attention");
   expect(notice.className).toContain("[color:var(--color-attention-ink)]");
+}
+
+export function fact(label: string): string {
+  const term = screen.getByText(label, { selector: "dt" });
+  const said = term.nextElementSibling;
+  if (!said) throw new Error("no value beside the fact " + label);
+  return String(said.textContent);
+}
+
+export async function viewCard(name: string): Promise<HTMLElement> {
+  const card = (await screen.findAllByText(name))
+    .map((node) => node.closest("li"))
+    .find((entry) => entry);
+  if (!card) throw new Error("no card named " + name);
+  return within(card).getByRole("button", { name: "View" });
 }

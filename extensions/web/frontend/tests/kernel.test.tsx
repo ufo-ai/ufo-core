@@ -6,11 +6,12 @@ import { expect, test, vi } from "vitest";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { Pager } from "@/kernel/pager";
 import { getJson } from "@/lib/api";
-import { Notice, Panel, usePanelRead } from "@/kernel/panel";
+import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
-import { Td } from "@/components/ui/table";
+import { Table, Td, Th } from "@/components/ui/table";
+import type { SchemaProperty } from "@/lib/types";
 
-import { json } from "./harness";
+import { json, opened } from "./harness";
 
 type Row = { name: string };
 
@@ -171,29 +172,94 @@ test("a schema field with an enum becomes a select over exactly its choices", as
       schema={{ properties: { reasoning: { type: "string", enum: ["low", "high"] } } }}
     />,
   );
-  const control = screen.getByLabelText("reasoning");
-  expect(control.tagName).toBe("SELECT");
-  expect([...(control as HTMLSelectElement).options].map((option) => option.value)).toEqual([
+  expect((await opened("reasoning")).map((option) => option.textContent)).toEqual([
     "low",
     "high",
   ]);
 });
 
-test("a schema field states its name and nothing the schema wrote for the agent", () => {
+test("a schema field is labelled by its title and states nothing the schema wrote for the agent", () => {
+  const wire = {
+    type: "string",
+    title: "Expires At",
+    description: "UTC expiry. Omit on update to preserve it; null clears it.",
+  } as SchemaProperty;
+  render(<Form schema={{ properties: { expires_at: wire } }} />);
+  expect(screen.getByLabelText("Expires At")).toBeTruthy();
+  expect(screen.queryByText("expires_at")).toBeNull();
+  expect(screen.queryByText(/Omit on update/)).toBeNull();
+});
+
+test("a schema field's example is the placeholder, so the shape is shown, not described", () => {
   render(
     <Form
       schema={{
         properties: {
-          expires_at: {
-            type: "string",
-            description: "UTC expiry. Omit on update to preserve it; null clears it.",
+          schedule: {
+            title: "Schedule",
+            examples: ["0 9 * * 1-5"],
+            anyOf: [{ type: "string", maxLength: 100 }, { type: "null" }],
           },
         },
       }}
     />,
   );
+  const box = screen.getByLabelText("Schedule") as HTMLInputElement;
+  expect(box.placeholder).toBe("0 9 * * 1-5");
+  expect(box.maxLength).toBe(100);
+});
+
+test("a moment the schema declares takes the browser's own date control", () => {
+  render(
+    <Form
+      schema={{
+        properties: {
+          expires_at: {
+            title: "Expires At",
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+          },
+        },
+      }}
+    />,
+  );
+  expect(screen.getByLabelText("Expires At").getAttribute("type")).toBe("datetime-local");
+});
+
+test("a string the schema declines to bound is prose and takes the taller box", () => {
+  render(
+    <Form
+      schema={{
+        properties: {
+          prompt: {
+            title: "Prompt",
+            examples: ["Summarize what merged."],
+            anyOf: [{ type: "string" }, { type: "null" }],
+          },
+          description: {
+            title: "Description",
+            anyOf: [{ type: "string", maxLength: 120 }, { type: "null" }],
+          },
+        },
+      }}
+    />,
+  );
+  expect(screen.getByLabelText("Prompt").tagName).toBe("TEXTAREA");
+  expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).placeholder).toBe(
+    "Summarize what merged.",
+  );
+  expect(screen.getByLabelText("Description").tagName).toBe("INPUT");
+});
+
+test("a schema field with no title falls back to the key the spec names it by", () => {
+  render(<Form schema={{ properties: { expires_at: { type: "string" } } }} />);
   expect(screen.getByLabelText("expires_at")).toBeTruthy();
-  expect(screen.queryByText(/Omit on update/)).toBeNull();
+});
+
+test("a boolean field carries its label beside the box, not stacked over it", () => {
+  render(<Form schema={{ properties: { paused: { type: "boolean", title: "Paused" } } }} />);
+  const box = screen.getByLabelText("Paused");
+  expect(box.getAttribute("type")).toBe("checkbox");
+  expect(box.parentElement?.className).toContain("items-center");
 });
 
 test("a nullable boolean field becomes a checkbox, not a text box", () => {
@@ -247,11 +313,11 @@ test("a read whose body fails mid-stream reports the failure instead of rejectin
   });
 });
 
-test("a loading panel says so instead of rendering nothing", () => {
-  render(
-    <Panel state={{ phase: "loading" }}>{() => <div>never</div>}</Panel>,
+test("a loading panel draws the shape it is about to fill, not the payload", () => {
+  const { container } = render(
+    <Panel state={{ phase: "loading" }} shape="cards">{() => <div>never</div>}</Panel>,
   );
-  expect(screen.getByText("Loading…")).toBeTruthy();
+  expect(container.querySelectorAll('[data-part="skeleton"]').length).toBeGreaterThan(0);
   expect(screen.queryByText("never")).toBeNull();
 });
 
@@ -265,6 +331,85 @@ test("an attention notice is highlighted and a quiet one is not", () => {
   const [attention, quiet] = Array.from(container.querySelectorAll("div > div > div"));
   expect(attention.className).toContain("bg-attention");
   expect(attention.className).toContain("[color:var(--color-attention-ink)]");
-  expect(attention.className).toContain("text-mono");
+  expect(attention.className).toContain("text-ui");
+  expect(attention.getAttribute("role")).toBe("status");
   expect(quiet.className).not.toContain("bg-attention");
+  expect(quiet.getAttribute("role")).toBe("status");
+});
+
+test("a quiet outcome takes no room until there is an outcome to state", () => {
+  const { container, rerender } = render(<OutcomeNotice state={QUIET} />);
+  expect(container.firstChild).toBeNull();
+
+  rerender(<OutcomeNotice state={{ text: "Applied.", refused: false }} />);
+  expect(screen.getByRole("status").textContent).toBe("Applied.");
+});
+
+test("a schema field the model requires says so, and an optional one beside it does not", () => {
+  render(
+    <Form
+      schema={{
+        properties: { prompt: { type: "string" }, expires_at: { type: "string" } },
+        required: ["prompt"],
+      }}
+    />,
+  );
+  expect((screen.getByLabelText("prompt") as HTMLInputElement).required).toBe(true);
+  expect((screen.getByLabelText("expires_at") as HTMLInputElement).required).toBe(false);
+});
+
+test("a section stacks heading, action bar, then records, and the bar runs from the left", () => {
+  render(
+    <Section
+      title="Members"
+      bar={
+        <>
+          <input aria-label="Search members" />
+          <button type="button">Add member</button>
+        </>
+      }
+    >
+      roster
+    </Section>,
+  );
+  const heading = screen.getByRole("heading", { name: "Members" });
+  const search = screen.getByLabelText("Search members");
+  const action = screen.getByRole("button", { name: "Add member" });
+  expect(search.parentElement).toBe(action.parentElement);
+  expect(search.parentElement?.className).not.toContain("justify-between");
+  expect(heading.nextElementSibling).toBe(search.parentElement);
+});
+
+test("a table is a bordered card, and its last row meets the card edge alone", () => {
+  render(
+    <Table>
+      <thead>
+        <tr>
+          <Th>Member</Th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <Td>lead@example.com</Td>
+        </tr>
+      </tbody>
+    </Table>,
+  );
+  const card = screen.getByRole("table").parentElement;
+  expect(card?.className).toContain("bg-surface");
+  expect(card?.className).toContain("border-edge");
+  expect(card?.className).toContain("rounded-panel");
+  const cell = screen.getByRole("cell", { name: "lead@example.com" });
+  expect(cell.className).toContain("border-t");
+  expect(cell.className).not.toContain("border-b");
+});
+
+test("a section with nothing to act on draws no action bar", () => {
+  render(<Section title="Members">roster</Section>);
+  expect(screen.getByRole("heading", { name: "Members" }).nextElementSibling).toBeNull();
+});
+
+test("a section with no action draws no action slot", () => {
+  render(<Section title="Members">roster</Section>);
+  expect(screen.queryByRole("button")).toBeNull();
 });

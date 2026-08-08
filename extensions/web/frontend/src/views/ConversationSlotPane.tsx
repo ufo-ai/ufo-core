@@ -249,7 +249,7 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
       aria-hidden
       data-slot-icon={icon}
       viewBox="0 0 24 24"
-      className="h-[1em] w-[1em] shrink-0 fill-none stroke-current"
+      className="size-(--size-icon) shrink-0 fill-none stroke-current"
       strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
@@ -454,7 +454,7 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
               loading="lazy"
               alt=""
               src={artifact.preview.url}
-              className="mb-md max-h-[20rem] max-w-full rounded-sm border border-edge object-contain"
+              className="mb-md max-h-(--media-card) max-w-full rounded-sm border border-edge object-contain"
             />
           ) : null}
           <h2 className="m-0 break-all font-mono text-label font-strong">
@@ -531,7 +531,7 @@ function FilesContent({
                     loading="lazy"
                     alt={"Thumbnail of " + file.path}
                     src={file.preview.url}
-                    className="h-16 w-16 shrink-0 rounded-sm border border-edge object-cover"
+                    className="size-(--size-thumb) shrink-0 rounded-sm border border-edge object-cover"
                   />
                 ) : null}
                 <div className="min-w-0 flex-1">
@@ -561,16 +561,16 @@ function FilesContent({
             {preview.path}
           </h2>
           {preview.type === "image" ? (
-            <div className="flex max-h-[40rem] justify-center overflow-auto p-lg">
+            <div className="flex max-h-(--media-frame) justify-center overflow-auto p-lg">
               <img
                 loading="lazy"
                 alt={"Preview of " + preview.path}
                 src={preview.image.url}
-                className="max-h-[36rem] max-w-full object-contain"
+                className="max-h-(--media-preview) max-w-full object-contain"
               />
             </div>
           ) : (
-            <pre className="m-0 max-h-[32rem] overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
+            <pre className="m-0 max-h-(--media-text) overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
               {preview.text}
             </pre>
           )}

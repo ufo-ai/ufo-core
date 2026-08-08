@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -171,6 +171,31 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--color-attention:Mark");
 });
 
+test("text is smoothed and wrapped, and headings balance", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("-webkit-font-smoothing:antialiased");
+  expect(css).toContain("text-wrap:pretty");
+  expect(css).toContain("text-wrap:balance");
+});
+
+test("a control answers the pointer, and reduced motion cuts the answer short", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("active\\:scale-\\[0\\.96\\]:active{scale:.96}");
+  expect(css).toContain("--color-ink-hover:color-mix(insrgb,CanvasText88%,transparent)");
+  expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*transition-duration:\.01ms!important/.test(css)).toBe(
+    true,
+  );
+});
+
+test("the field surface is drawn by the field primitives and by nothing else", () => {
+  const src = join(import.meta.dirname, "..", "src");
+  const drawn = readdirSync(src, { recursive: true, encoding: "utf8" })
+    .filter((name) => name.endsWith(".tsx") && !name.startsWith("components/ui/"))
+    .filter((name) => readFileSync(join(src, name), "utf8").includes("bg-field"));
+
+  expect(drawn).toEqual([]);
+});
+
 test("replies read as a document and member bubbles stay bubbles", async () => {
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
@@ -204,7 +229,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   });
 });
 
-test("both notice tones keep the meta type size", () => {
+test("both notice tones keep the chrome type size", () => {
   const { container } = render(
     <div>
       <Notice tone="attention">refused</Notice>
@@ -212,7 +237,7 @@ test("both notice tones keep the meta type size", () => {
     </div>,
   );
   for (const notice of Array.from(container.querySelectorAll("div > div > div"))) {
-    expect(notice.className).toContain("text-mono");
+    expect(notice.className).toContain("text-ui");
   }
 });
 
@@ -223,4 +248,18 @@ test("the wordmark reads as one word in the sidebar", async () => {
   const brand = await screen.findByText("ufo");
   expect(brand.textContent).toBe("ufo");
   expect(brand.className).not.toContain("tracking");
+});
+
+test("a field shows the member that it is disabled, or that they left it invalid", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("disabled\\:cursor-not-allowed:disabled{cursor:not-allowed}");
+  expect(css).toContain("user-invalid\\:border-ink:user-invalid{border-color:var(--color-ink)}");
+  expect(css).toContain("user-invalid\\:border-dashed:user-invalid{");
+  expect(css).not.toContain("user-invalid\\:border-attention");
+});
+
+test("a placeholder is muted rather than mistaken for a value", () => {
+  expect(builtStyles().replace(/\s+/g, "")).toContain(
+    ".placeholder\\:opacity-\\(--muted\\)::placeholder{opacity:var(--muted)}",
+  );
 });

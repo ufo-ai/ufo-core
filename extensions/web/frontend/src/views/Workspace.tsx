@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Placement } from "@/kernel/pager";
 import type { PlaceStep } from "@/lib/route";
 import { WORKSPACE_TABS, type WorkspacePlace, type WorkspaceTab } from "@/lib/route";
-import { cn } from "@/lib/cn";
+import { TabPanel, TabStrip } from "@/kernel/tabs";
 import { WORKSPACE_VIEWS } from "@/views/registry";
 
 type Outcome = { view: WorkspaceTab; notice: string | undefined; acts: number };
@@ -77,30 +77,21 @@ export function Workspace({
       <div className="flex items-baseline gap-md px-2xl pt-lg">
         <h1 className="m-0 text-title font-strong">Workspace</h1>
       </div>
-      <div role="tablist" className="flex flex-wrap gap-2xs border-b border-edge px-lg pt-xs">
-        {WORKSPACE_TABS.map((name) => (
-          <button
-            key={name}
-            type="button"
-            role="tab"
-            aria-selected={name === view}
-            onClick={() => onPlace(name, {}, "push")}
-            className={cn(
-              "border-0 border-b-(length:--marker-width) border-b-transparent bg-transparent",
-              "px-md py-xs text-inherit opacity-(--muted-soft)",
-              name === view && "border-b-ink font-strong opacity-100",
-            )}
-          >
-            {WORKSPACE_VIEWS[name].label}
-          </button>
-        ))}
-      </div>
-      <div
-        className="flex flex-1 flex-col gap-3xl overflow-y-auto p-2xl"
+      <TabStrip
+        group="workspace"
+        tabs={WORKSPACE_TABS}
+        current={view}
+        label={(name) => WORKSPACE_VIEWS[name].label}
+        onPick={(name) => onPlace(name, {}, "push")}
+      />
+      <TabPanel
+        group="workspace"
+        current={view}
+        className="flex flex-1 flex-col overflow-y-auto p-2xl"
         data-testid="workspace"
       >
         <Registered key={key} view={view} place={merged} onPlace={record} />
-      </div>
+      </TabPanel>
     </main>
   );
 }

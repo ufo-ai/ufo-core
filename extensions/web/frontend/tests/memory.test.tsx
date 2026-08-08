@@ -44,11 +44,11 @@ test("the listing filters by kind, and the filter rides the read", async () => {
   open();
 
   expect(await screen.findByText("the deploy runs on EKS")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "preference" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Preference" }));
 
   await waitFor(() => expect(calls.some((url) => url.includes("kind=preference"))).toBe(true));
-  expect(await screen.findByText("No preference memories on this page.")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "preference" }).getAttribute("aria-current")).toBe(
+  expect(await screen.findByText("No memories of this kind on this page.")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Preference" }).getAttribute("aria-selected")).toBe(
     "true",
   );
 });
@@ -67,15 +67,14 @@ test("searching asks with the query and drops the filter and the pager", async (
   open();
 
   await screen.findByText("No memories yet.");
-  expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Older" })).toBeNull();
 
-  await userEvent.type(screen.getByPlaceholderText("Search memory…"), "eks");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  await userEvent.type(screen.getByPlaceholderText("Search"), "eks{Enter}");
 
   await waitFor(() => expect(calls.some((url) => url.includes("q=eks"))).toBe(true));
   expect(await screen.findByText("the deploy runs on EKS")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Older" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "fact" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Fact" })).toBeNull();
 });
 
 test("the pager walks by the cursor the read returned", async () => {
@@ -147,7 +146,7 @@ test("a memory carrying no memory ref offers no correction", async () => {
   });
   open();
 
-  expect(await screen.findByText("source/page-7")).toBeTruthy();
+  expect(await screen.findByText("the deploy runs on EKS")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Correct" })).toBeNull();
 });
 
@@ -164,16 +163,16 @@ test("narrowing by kind keeps what the member has typed in the search box", asyn
   });
   open();
 
-  const box = await screen.findByPlaceholderText("Search memory…");
+  const box = await screen.findByPlaceholderText("Search");
   await userEvent.type(box, "half-written");
-  await userEvent.click(await screen.findByRole("button", { name: "preference" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Preference" }));
 
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "preference" }).getAttribute("aria-current")).toBe(
+    expect(screen.getByRole("tab", { name: "Preference" }).getAttribute("aria-selected")).toBe(
       "true",
     ),
   );
-  expect((screen.getByPlaceholderText("Search memory…") as HTMLInputElement).value).toBe(
+  expect((screen.getByPlaceholderText("Search") as HTMLInputElement).value).toBe(
     "half-written",
   );
 });
@@ -189,4 +188,24 @@ test("a refused correction tones its notice in place", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "Correct" }));
   await userEvent.click(screen.getByRole("button", { name: "Record correction" }));
   await refusedNotice("Only the owner corrects it.");
+});
+
+test("each memory is a row carrying its class and date, never its raw ref", async () => {
+  wire({
+    "/workspace/memory": () =>
+      json({ available: true, kinds: ["fact"], matches: [MATCH], older: null, newer: null }),
+  });
+  open();
+
+  const heads = (await screen.findAllByRole("columnheader")).map((cell) => cell.textContent);
+  expect(heads.slice(0, 3)).toEqual(["Memory", "Class", "Added"]);
+
+  const row = screen.getByText("the deploy runs on EKS").closest("tr") as HTMLTableRowElement;
+  const cells = [...row.cells].map((cell) => cell.textContent);
+  expect(cells.slice(0, 3)).toEqual([
+    "the deploy runs on EKS",
+    "Fact",
+    "Jul 20 2026",
+  ]);
+  expect(row.textContent).not.toContain("memory/m1");
 });

@@ -1,23 +1,83 @@
 import { cva, type VariantProps } from "class-variance-authority";
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
-const button = cva("rounded-panel disabled:cursor-default", {
-  variants: {
-    variant: {
-      send: "bg-ink text-surface font-strong px-3xl py-md border-0 disabled:opacity-(--disabled)",
-      outline: "border border-edge-control bg-transparent text-inherit px-lg py-xs",
-      row: "border border-edge-control bg-transparent text-inherit rounded-control px-sm py-hair mr-xs",
-      option:
-        "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs disabled:opacity-(--disabled)",
+export const buttonVariants = cva(
+  cn(
+    "rounded-panel transition-[background-color,border-color,opacity,scale]",
+    "duration-100 ease-control active:scale-[0.96]",
+    "disabled:pointer-events-none disabled:opacity-(--disabled)",
+  ),
+  {
+    variants: {
+      variant: {
+        send: "bg-ink text-surface font-strong px-3xl py-md border border-transparent hover:bg-ink-hover",
+        outline:
+          "border border-edge-control bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
+        row: "border border-edge-control bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill-hover",
+        option:
+          "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
+      },
     },
+    defaultVariants: { variant: "outline" },
   },
-  defaultVariants: { variant: "outline" },
-});
+);
 
-export type ButtonProps = ComponentProps<"button"> & VariantProps<typeof button>;
+export type ButtonProps = ComponentProps<"button"> &
+  VariantProps<typeof buttonVariants> & { busy?: boolean };
 
-export function Button({ className, variant, type = "button", ...props }: ButtonProps) {
-  return <button type={type} className={cn(button({ variant }), className)} {...props} />;
+/** `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
+ *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation
+ *  instead, so a second click cannot commit the act twice or submit the form it sits in. */
+export function Button({
+  className,
+  variant,
+  type = "button",
+  busy,
+  onClick,
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      type={type}
+      aria-disabled={busy}
+      onClick={(event) => {
+        if (busy) {
+          event.preventDefault();
+          return;
+        }
+        onClick?.(event);
+      }}
+      className={cn(
+        buttonVariants({ variant }),
+        busy && "opacity-(--muted) animate-working motion-reduce:animate-none",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** A destructive act: the first click arms the button and names the act it will commit, the
+ *  second click commits it. Leaving the button disarms it. */
+export function ConfirmButton({ verb, onClick, className, ...props }: ButtonProps & { verb: string }) {
+  const [armed, setArmed] = useState(false);
+  return (
+    <Button
+      {...props}
+      className={cn(armed && "font-strong", className)}
+      onBlur={() => setArmed(false)}
+      onClick={(event) => {
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        setArmed(false);
+        onClick?.(event);
+      }}
+    >
+      {armed ? "Confirm " + verb.toLowerCase() : verb}
+    </Button>
+  );
 }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
+import { Button, buttonVariants } from "@/components/ui/button";
 import type { ListingSpec } from "@/kernel/listing";
+import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
 import { formatSize } from "@/views/Chat";
 import { Sheet } from "@/components/ui/sheet";
@@ -35,47 +37,22 @@ export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
   paged: true,
   rows: (payload) => payload.artifacts,
   rowKey: (entry) => entry.created_at + "|" + entry.filename,
-  list: {
-    primary: {
-      field: "filename",
-      render: (filename, entry, { open }) =>
-        entry.url ? (
-          <button
-            type="button"
-            onClick={() => open(entry)}
-            className="border-0 bg-transparent p-0 text-left text-inherit underline"
-          >
-            {isImage(entry) ? <Thumb entry={entry} /> : null}
-            <span>{filename}</span>
-          </button>
-        ) : (
-          filename
-        ),
-    },
-    meta: [
-      { field: "subject" },
-      { field: "media_type" },
-      { field: "size_bytes", render: (bytes) => formatSize(bytes) },
-    ],
-    when: { field: "created_at", render: (stamp) => day(stamp) },
+  search: (entry) => [entry.filename, entry.subject ?? "", entry.media_type].join(" "),
+  cards: {
+    mark: { shape: "band", image: (entry) => (isImage(entry) ? entry.url : null) },
+    primary: { field: "filename" },
+    status: { field: "created_at", render: (stamp) => day(stamp) },
+    body: { field: "subject" },
   },
-  empty: "No shared files yet.",
+  empty: "A file an agent shares from a conversation is listed here.",
+  actions: (entry, { open }) =>
+    entry.url ? (
+      <Button variant="row" onClick={() => open(entry)}>
+        View
+      </Button>
+    ) : null,
   detail: (entry, close) => <Viewer entry={entry} onClose={close} />,
 };
-
-function Thumb({ entry }: { entry: Artifact }) {
-  const [failed, setFailed] = useState(false);
-  if (failed || !entry.url) return null;
-  return (
-    <img
-      loading="lazy"
-      alt=""
-      src={entry.url}
-      onError={() => setFailed(true)}
-      className="mb-2xs block max-h-thumb max-w-thumb rounded-sm border border-edge object-contain"
-    />
-  );
-}
 
 function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
   const meta = [entry.subject, entry.media_type, formatSize(entry.size_bytes), day(entry.created_at)]
@@ -89,7 +66,11 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       title={entry.filename}
       footer={
         entry.url ? (
-          <a href={entry.url} download={entry.filename}>
+          <a
+            href={entry.url}
+            download={entry.filename}
+            className={cn(buttonVariants({ variant: "send" }), "inline-block no-underline")}
+          >
             Download
           </a>
         ) : null
@@ -120,7 +101,7 @@ function FullImage({ entry }: { entry: Artifact }) {
   }
   return (
     <img
-      alt=""
+      alt={entry.subject || entry.filename}
       src={entry.url ?? ""}
       onError={() => setFailed(true)}
       className="max-h-[var(--media-tall)] max-w-full object-contain"

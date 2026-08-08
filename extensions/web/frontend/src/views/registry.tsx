@@ -8,7 +8,7 @@ import { Memory } from "@/views/Memory";
 import { Sites } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
-import { WorkspaceCredentials } from "@/views/WorkspaceCredentials";
+import { CREDENTIALS } from "@/views/WorkspaceCredentials";
 import { WorkspaceUsage } from "@/views/Usage";
 
 export type WorkspaceView = {
@@ -25,7 +25,9 @@ function declared<Payload, Row>(
   return {
     label,
     remountOnPlace: true,
-    render: (place, onPlace) => <Listing spec={spec} place={place} onPlace={onPlace} />,
+    render: (place, onPlace) => (
+      <Listing title={label} spec={spec} place={place} onPlace={onPlace} />
+    ),
   };
 }
 
@@ -36,11 +38,7 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, WorkspaceView> = {
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
   },
   sources: declared("Sources", SOURCES),
-  credentials: {
-    label: "Credentials",
-    remountOnPlace: true,
-    render: (place, onPlace) => <WorkspaceCredentials place={place} onPlace={onPlace} />,
-  },
+  credentials: declared("Credentials", CREDENTIALS),
   memory: {
     label: "Memory",
     remountOnPlace: false,
@@ -48,5 +46,9 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, WorkspaceView> = {
   },
   artifacts: declared("Artifacts", ARTIFACTS),
   sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
-  usage: { label: "Usage", remountOnPlace: false, render: () => <WorkspaceUsage /> },
+  usage: {
+    label: "Usage",
+    remountOnPlace: false,
+    render: () => <WorkspaceUsage />,
+  },
 };

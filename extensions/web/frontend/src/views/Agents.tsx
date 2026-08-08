@@ -1,4 +1,6 @@
 import { Button } from "@/components/ui/button";
+import { CardGrid } from "@/kernel/cards";
+import { PanelBlank, Section } from "@/kernel/panel";
 import type { Agent, Subagent } from "@/lib/types";
 
 export type AgentsProps = {
@@ -9,43 +11,55 @@ export type AgentsProps = {
   onNewChat: (agentId: string) => void;
 };
 
-const ROW = "flex items-baseline gap-md border-b border-edge-soft py-md last:border-b-0";
 const MODEL = "font-mono text-mono opacity-(--muted-strong)";
+const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
+const INHERITS = "Spawned by an agent for one task, on that agent's model.";
 
 export function Agents({ agents, subagents, onOpen, onOpenSubagent, onNewChat }: AgentsProps) {
   return (
-    <main className="flex flex-col gap-3xl overflow-y-auto p-2xl">
-      <h1 className="m-0 text-title font-strong">Agents</h1>
-      <ul className="m-0 flex max-w-section list-none flex-col p-0">
-        {agents.map((agent) => (
-          <li key={agent.id} className={ROW}>
-            <button
-              type="button"
-              onClick={() => onOpen(agent.id)}
-              className="border-0 bg-transparent p-0 text-left text-body text-inherit"
-            >
-              {agent.name}
-              {agent.main ? " · main agent" : ""}
-            </button>
-            <span className={MODEL}>{agent.model}</span>
-            <span className="ml-auto">
-              <Button onClick={() => onNewChat(agent.id)}>New conversation</Button>
-            </span>
-          </li>
-        ))}
-        {subagents.map((subagent) => (
-          <li key={subagent.name} className={ROW}>
-            <button
-              type="button"
-              onClick={() => onOpenSubagent(subagent.name)}
-              className="border-0 bg-transparent p-0 text-left text-body text-inherit"
-            >
-              {subagent.name} · subagent
-            </button>
-            <span className={MODEL}>{subagent.model ?? ""}</span>
-          </li>
-        ))}
-      </ul>
+    <main className="flex flex-col overflow-y-auto p-2xl">
+      <h1 className="m-0 mb-2xl text-title font-strong">Agents</h1>
+      <Section title="Workspace agents">
+        <CardGrid
+          rows={agents}
+          rowKey={(agent) => agent.id}
+          mark={{ shape: "square" }}
+          primary={(agent) => agent.name}
+          status={(agent) => <span className={MODEL}>{agent.model}</span>}
+          body={(agent) => (agent.main ? "The agent this workspace answers with by default." : null)}
+          action={(agent) => (
+            <div className="flex flex-wrap gap-xs">
+              <Button variant="send" onClick={() => onNewChat(agent.id)}>
+                New conversation
+              </Button>
+              <Button variant="row" onClick={() => onOpen(agent.id)}>
+                View
+              </Button>
+            </div>
+          )}
+        />
+      </Section>
+      <Section title="Subagents">
+        {subagents.length ? (
+          <CardGrid
+            rows={subagents}
+            rowKey={(subagent) => subagent.name}
+            mark={{ shape: "square" }}
+            primary={(subagent) => subagent.name}
+            status={(subagent) =>
+              subagent.model ? <span className={MODEL}>{subagent.model}</span> : null
+            }
+            body={(subagent) => (subagent.model ? SPAWNED : INHERITS)}
+            action={(subagent) => (
+              <Button variant="row" onClick={() => onOpenSubagent(subagent.name)}>
+                View
+              </Button>
+            )}
+          />
+        ) : (
+          <PanelBlank body="This deploy declares no subagents." />
+        )}
+      </Section>
     </main>
   );
 }

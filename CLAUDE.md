@@ -6,6 +6,8 @@
 workspace model, and non-goals. Read it before proposing structural changes. `docs/salvage.md` maps
 what ports from the previous repo (`~/src/metalcraft`) and what was deliberately left behind —
 consult it before writing something the old repo already proved. `docs/plan.md` is the build order.
+`DESIGN.md` is the member portal's visual and structural system — tokens, navigation, settings
+anatomy; it loads with frontend work through `.claude/rules/design.md`.
 
 **Core doctrine is the first review question:** if a capability can be an extension, it is not
 core. Every addition to `core/` must name why extensions cannot express it.
@@ -191,7 +193,8 @@ as a portfolio, not a single bet:
   migration adds only the columns its unit wires; later units bring their own migrations.
 - Prove the chain end-to-end: realistic input → durable state → a user or agent can use it.
 - Failed experiments are reverted in the same session, with the revert committed.
-- Docs (spec.md, README.md) update in the same commit as the architectural change they describe.
+- Docs (spec.md, README.md, DESIGN.md) update in the same commit as the architectural change they
+  describe.
 
 ## Commits
 

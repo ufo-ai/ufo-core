@@ -31,5 +31,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
+    // A half-hour offset with no daylight rule: a run under it proves a wall clock is converted
+    // to an instant rather than passed along, which a run under UTC cannot tell apart.
+    env: { TZ: "Asia/Kolkata" },
   },
 });

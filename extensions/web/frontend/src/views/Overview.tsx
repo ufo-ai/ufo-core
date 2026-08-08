@@ -1,11 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Hint } from "@/components/ui/field";
+import { Facts } from "@/components/ui/facts";
+import { FieldGroup, Hint } from "@/components/ui/field";
+import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { day } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
+
+const MONO = "font-mono text-mono";
 
 type OverviewPayload = {
   agent: {
@@ -46,14 +52,13 @@ export function Overview({ agent }: { agent: Agent }) {
   }, [payload]);
 
   return (
-    <Panel
-      state={state}
-    >
+    <Panel state={state} shape="form">
       {(ready) => {
         const properties = ready.spec_schema.properties ?? {};
 
         async function save(event: FormEvent) {
           event.preventDefault();
+          if (busy) return;
           setBusy(true);
           const outcome = await postIntent(agent.id, {
             verb: "apply",
@@ -68,19 +73,47 @@ export function Overview({ agent }: { agent: Agent }) {
 
         return (
           <>
+            <OutcomeNotice state={notice} />
             <Section title="Agent">
-              <div className="font-mono text-mono">
-                {[
-                  ready.agent.main ? "main agent" : "agent",
-                  "installations: " +
-                    (ready.agent.surfaces.length ? ready.agent.surfaces.join(", ") : "none"),
-                  "updated " + ready.agent.updated_at.slice(0, 16).replace("T", " "),
-                ].join(" · ")}
-              </div>
+              <Facts
+                rows={[
+                  { label: "Role", value: ready.agent.main ? "Main agent" : "Agent" },
+                  {
+                    label: "Installations",
+                    value: ready.agent.surfaces.length ? ready.agent.surfaces.join(", ") : "None",
+                  },
+                  { label: "Updated", value: day(ready.agent.updated_at) },
+                  {
+                    label: "Prompt digest",
+                    value: (
+                      <span className={cn("wrap-anywhere", MONO)}>{ready.agent.prompt_digest}</span>
+                    ),
+                  },
+                  ...(ready.audience
+                    ? [
+                        {
+                          label: "Web audience",
+                          value: ready.agent.main
+                            ? "Every member"
+                            : ready.audience.length
+                              ? ready.audience.join(", ")
+                              : "No member grants — admins only",
+                        },
+                      ]
+                    : []),
+                ]}
+              />
             </Section>
 
             <Section title="Settings">
-              <form onSubmit={save}>
+              <FieldGroup
+                onSubmit={save}
+                submit={
+                  <Button type="submit" variant="send" busy={busy}>
+                    Save
+                  </Button>
+                }
+              >
                 <FormFromSchema
                   schema={ready.spec_schema}
                   values={Object.fromEntries(
@@ -93,39 +126,24 @@ export function Overview({ agent }: { agent: Agent }) {
                   onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
                 />
                 {ready.deploy.sandbox_internet ? null : (
-                  <Hint>
-                    This deploy grants no sandbox public internet — the agent setting narrows a capability
-                    that is currently off.
+                  <Hint className="m-0">
+                    This deploy grants no sandbox public internet — the agent setting narrows a
+                    capability that is currently off.
                   </Hint>
                 )}
-                <Button type="submit" variant="send" disabled={busy}>
-                  Save
-                </Button>
-                <OutcomeNotice state={notice} />
-              </form>
+              </FieldGroup>
             </Section>
 
             <Section title="Prompt">
-              <Hint className="font-mono">
-                digest {ready.agent.prompt_digest} — prompt changes go through the governed proposal path
-                in chat
+              <Hint className="m-0">
+                Prompt changes go through the governed proposal path in chat.
               </Hint>
-              <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
-                {ready.agent.prompt}
-              </pre>
+              <Reveal>
+                <pre className={cn("m-0 whitespace-pre-wrap wrap-anywhere", MONO)}>
+                  {ready.agent.prompt}
+                </pre>
+              </Reveal>
             </Section>
-
-            {ready.audience ? (
-              <Section title="Web audience">
-                <div className="font-mono text-mono">
-                  {ready.agent.main
-                    ? "every member"
-                    : ready.audience.length
-                      ? ready.audience.join(", ")
-                      : "no member grants — admins only"}
-                </div>
-              </Section>
-            ) : null}
           </>
         );
       }}

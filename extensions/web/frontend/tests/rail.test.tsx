@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { bumpChat, groupChats, mergeChats, relativeTime, type ChatRow } from "@/lib/rail";
+import { bumpChat, groupChats, mergeChats, type ChatRow } from "@/lib/rail";
 
 import {
   AGENT,
@@ -69,16 +69,6 @@ test("chats group by recency in rail order and empty groups are absent", () => {
     ["e"],
   ]);
   expect(groupChats([row("a", hoursAgo(4))], NOW)).toHaveLength(1);
-});
-
-test("relative time names minutes, hours, days, and dates", () => {
-  expect(relativeTime(hoursAgo(1 / 180), NOW)).toBe("now");
-  expect(relativeTime(hoursAgo(0.75), NOW)).toBe("45m");
-  expect(relativeTime(hoursAgo(9), NOW)).toBe("9h");
-  expect(relativeTime(hoursAgo(3 * 24), NOW)).toBe("3d");
-  expect(relativeTime(hoursAgo(90 * 24), NOW)).toBe(
-    new Date(NOW.getTime() - 90 * 24 * 3_600_000).toLocaleDateString(),
-  );
 });
 
 test("bumping a conversation moves it to the top", () => {
@@ -222,7 +212,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
-  expect(railRow.textContent).toContain("second · ");
+  expect(railRow.textContent).toContain("second");
 });
 
 test("a conversation no read of this account's answers is named unshared, not missing", async () => {
@@ -331,22 +321,22 @@ test("the new-conversation control targets the main agent, or picks among severa
   expect(await screen.findByText("Message second to start.")).toBeTruthy();
 });
 
-test("the agent page and the agents index both offer a new conversation", async () => {
+test("the agents index opens a conversation; the agent's own page states settings only", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/skills";
   wire({ "/skills": () => json({ skills: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(
-    within(await screen.findByRole("main")).getByRole("button", { name: "New conversation" }),
-  );
-  expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
+  await screen.findByRole("main");
+  expect(
+    within(screen.getByRole("main")).queryByRole("button", { name: "New conversation" }),
+  ).toBeNull();
 
   location.hash = "#/agents";
-  await screen.findByRole("button", { name: "assistant · main agent" });
+  await screen.findByText("The agent this workspace answers with by default.");
   await userEvent.click(
     within(screen.getByRole("main")).getByRole("button", { name: "New conversation" }),
   );
   expect(location.hash).toBe("#/new/" + AGENT_ID);
+  expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
 });
 
 test("the chat header names the agent and opens its page", async () => {
@@ -456,8 +446,9 @@ test("the sidebar marks the section the member is in and leaves the others off",
   );
   const index = within(await screen.findByRole("main"));
   expect(index.getAllByText("opus").length).toBe(2);
-  expect(index.getByRole("button", { name: "assistant · main agent" })).toBeTruthy();
-  expect(index.getByRole("button", { name: "second" })).toBeTruthy();
+  expect(index.getByText("assistant")).toBeTruthy();
+  expect(index.getByText("second")).toBeTruthy();
+  expect(index.getAllByRole("button", { name: "View" }).length).toBe(2);
 });
 
 test("a failed rail read states it and retries on demand", async () => {

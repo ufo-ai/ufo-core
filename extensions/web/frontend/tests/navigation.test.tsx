@@ -12,6 +12,7 @@ import {
   json,
   objectIndex,
   useStreamFake,
+  viewCard,
 } from "./harness";
 
 const ARTIFACT = {
@@ -49,7 +50,7 @@ test("the artifact viewer is torn down when the member navigates to another view
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
@@ -65,7 +66,7 @@ test("the artifact viewer is torn down when the member returns to a conversation
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));

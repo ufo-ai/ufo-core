@@ -1,3 +1,5 @@
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 const ISO_MOMENT = /^\d{4}-\d{2}-\d{2}T/;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -7,9 +9,13 @@ export function isMoment(value: string): boolean {
   return ISO_MOMENT.test(value);
 }
 
-/** One timestamp as a table cell reads it: the calendar minute it names, in UTC as it was sent. */
+/** The one way a date reads in this portal: `Aug 7 2026`, the calendar day it names, in UTC as it
+ *  was sent. Read off the ISO string rather than through `Date`, so no reader's zone shifts a
+ *  stamp across midnight and no locale reorders the parts. */
 export function day(iso: string | null): string | null {
-  return iso == null ? null : iso.slice(0, 16).replace("T", " ");
+  if (iso == null) return null;
+  const [year, month, date] = iso.slice(0, 10).split("-");
+  return MONTHS[Number(month) - 1] + " " + Number(date) + " " + year;
 }
 
 /** One timestamp as a line of prose reads it: how long ago it happened, or how long until it will. */

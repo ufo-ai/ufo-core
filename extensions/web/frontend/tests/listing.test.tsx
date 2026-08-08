@@ -10,13 +10,24 @@ import { ARTIFACTS } from "@/views/Artifacts";
 import { SOURCES } from "@/views/Sources";
 import { App } from "@/App";
 
-import { AGENT, MEMBER, PlacedWorkspace, json, refusedNotice, wire } from "./harness";
+import {
+  AGENT,
+  MEMBER,
+  PlacedWorkspace,
+  json,
+  refusedNotice,
+  wire,
+} from "./harness";
 type Row = { name: string; count: number; note: string | null };
 
-beforeEach(() => {
-});
+beforeEach(() => {});
 
-type Payload = { rows: Row[]; available?: boolean; newer?: string | null; older?: string | null };
+type Payload = {
+  rows: Row[];
+  available?: boolean;
+  newer?: string | null;
+  older?: string | null;
+};
 
 const ROWS: Row[] = [
   { name: "alpha", count: 2, note: null },
@@ -25,7 +36,9 @@ const ROWS: Row[] = [
 
 type TableSpec = Extract<ListingSpec<Payload, Row>, { columns: unknown }>;
 
-function spec(over: Partial<Omit<TableSpec, "list">> = {}): ListingSpec<Payload, Row> {
+function spec(
+  over: Partial<Omit<TableSpec, "list">> = {},
+): ListingSpec<Payload, Row> {
   return {
     read: "/workspace/probe",
     rows: (payload) => payload.rows,
@@ -47,6 +60,7 @@ function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
     return (
       <MainAgentProvider agents={[AGENT]}>
         <Listing
+          title="Probe"
           spec={declaration}
           place={current}
           onPlace={(patch) => {
@@ -62,7 +76,9 @@ function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
 }
 
 function headers(): string[] {
-  return screen.getAllByRole("columnheader").map((cell) => cell.textContent ?? "");
+  return screen
+    .getAllByRole("columnheader")
+    .map((cell) => cell.textContent ?? "");
 }
 
 function disabled(name: string): boolean {
@@ -77,12 +93,12 @@ function cellsOf(name: string): string[] {
 
 test("the declaration alone proves nothing — it is the renderer that must be pinned", () => {
   expect(SOURCES.columns?.map((column) => column.label)).toEqual([
-    "source",
-    "streams",
-    "owner",
-    "access",
-    "errors",
-    "next sync",
+    "Source",
+    "Streams",
+    "Owner",
+    "Access",
+    "Errors",
+    "Next Sync",
   ]);
   expect(ARTIFACTS.paged).toBe(true);
 });
@@ -116,17 +132,85 @@ test("a column's render receives the field's value, its row, and the row context
   expect(screen.getByText("×5 of beta")).toBeTruthy();
 });
 
-test("a listing with no rows states its empty copy and lists no header", async () => {
+test("a listing with no rows states a titled blank, and lists no header or filter bar", async () => {
   wire({ "/workspace/probe": () => json({ rows: [] }) });
-  mount(spec());
+  mount(spec({ search: (row: Row) => row.name }));
 
   expect(await screen.findByText("Nothing listed yet.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Probe" })).toBeTruthy();
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
+  expect(screen.queryByRole("searchbox")).toBeNull();
+});
+
+test("a listing search matches the section control row width", async () => {
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount(spec({ search: (row: Row) => row.name }));
+
+  expect((await screen.findByRole("searchbox")).className).toContain(
+    "max-w-control-row",
+  );
+});
+
+test("a card listing renders each face and its row action", async () => {
+  const sentence = "This is a deliberately long sentence that should remain visible.";
+  wire({ "/workspace/probe": () => json({ rows: ROWS }) });
+  mount({
+    read: "/workspace/probe",
+    rows: (payload) => payload.rows,
+    rowKey: (row) => row.name,
+    cards: {
+      mark: { shape: "square" },
+      primary: { field: "name" },
+      status: { field: "count", render: (count) => String(count) },
+      body: { field: "name", render: () => sentence },
+    },
+    empty: "Nothing listed yet.",
+    actions: (row) => <button type="button">Act {row.name}</button>,
+  });
+
+  const grid = await screen.findByRole("list");
+  expect(grid.className).toContain("grid-cols-2");
+  const items = screen.getAllByRole("listitem");
+  expect(items).toHaveLength(2);
+  for (const item of items) {
+    const mark = item.querySelector("[data-part=mark]");
+    expect(mark?.getAttribute("aria-hidden")).toBe("true");
+    expect(mark?.textContent).toBe("");
+  }
+  expect(screen.getByText("alpha")).toBeTruthy();
+  expect(screen.getByText("2")).toBeTruthy();
+  const body = screen.getAllByText(sentence)[0];
+  expect(body.getAttribute("data-part")).toBe("body");
+  expect(body.className).not.toContain("truncate");
+  expect(screen.getAllByRole("button", { name: /Act/ })).toHaveLength(2);
+});
+
+test("the blank state carries the one refresh, and it re-reads", async () => {
+  let served = 0;
+  wire({
+    "/workspace/probe": () => {
+      served += 1;
+      return json({ rows: served === 1 ? [] : ROWS });
+    },
+  });
+  mount(spec());
+
+  const refresh = await screen.findByRole("button", { name: "Refresh" });
+  expect(screen.getAllByRole("button", { name: "Refresh" }).length).toBe(1);
+  expect(refresh.className).toContain("border-edge-control");
+  expect(refresh.className).not.toContain("bg-ink");
+
+  await userEvent.click(refresh);
+  expect(await screen.findByText("alpha")).toBeTruthy();
 });
 
 test("an unavailable payload says so instead of showing the empty listing", async () => {
   wire({ "/workspace/probe": () => json({ rows: [], available: false }) });
-  mount(spec({ unavailable: (payload) => (payload.available ? null : "Not installed.") }));
+  mount(
+    spec({
+      unavailable: (payload) => (payload.available ? null : "Not installed."),
+    }),
+  );
 
   expect(await screen.findByText("Not installed.")).toBeTruthy();
   expect(screen.queryByText("Nothing listed yet.")).toBeNull();
@@ -150,8 +234,12 @@ test("a paged listing carries the cursor into its read and steps to the next pag
   expect(calls[0].endsWith("/workspace/probe")).toBe(true);
 
   await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  await waitFor(() => expect(placed).toEqual([{ kind: undefined, after: "next" }]));
-  await waitFor(() => expect(calls.some((url) => url.includes("after=next"))).toBe(true));
+  await waitFor(() =>
+    expect(placed).toEqual([{ kind: undefined, after: "next" }]),
+  );
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("after=next"))).toBe(true),
+  );
   expect(await screen.findByText("gamma")).toBeTruthy();
 });
 
@@ -181,14 +269,20 @@ test("a declared action posts one intent on the main agent's lane and states a r
   const placed = mount(
     spec({
       actions: (row, { act, busy }) => (
-        <button type="button" disabled={busy} onClick={() => act({ verb: "poke", name: row.name })}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act({ verb: "poke", name: row.name })}
+        >
           Poke {row.name}
         </button>
       ),
     }),
   );
 
-  await waitFor(() => expect(headers()).toEqual(["who", "how many", "note", ""]));
+  await waitFor(() =>
+    expect(headers()).toEqual(["who", "how many", "note", ""]),
+  );
   await userEvent.click(screen.getByRole("button", { name: "Poke beta" }));
   await waitFor(() => expect(posted).toEqual([{ verb: "poke", name: "beta" }]));
   await refusedNotice("Refused.");
@@ -203,7 +297,10 @@ test("an applied action hands its outcome to the placement so the reloaded listi
   const placed = mount(
     spec({
       actions: (row, { act }) => (
-        <button type="button" onClick={() => act({ verb: "poke", name: row.name })}>
+        <button
+          type="button"
+          onClick={() => act({ verb: "poke", name: row.name })}
+        >
           Poke {row.name}
         </button>
       ),
@@ -213,6 +310,110 @@ test("an applied action hands its outcome to the placement so the reloaded listi
   await waitFor(() => expect(screen.getByText("beta")).toBeTruthy());
   await userEvent.click(screen.getByRole("button", { name: "Poke beta" }));
   await waitFor(() => expect(placed).toEqual([{ notice: "Done." }]));
+});
+
+test("a credential seam stores one slot and can reopen after closing", async () => {
+  wire({
+    "/workspace/probe": () => json({ rows: ROWS }),
+    "/intents": () =>
+      json({
+        applied: false,
+        message: "Credentials required.",
+        credentials: {
+          sealed: "sealed",
+          reason: "Enter the workspace credential.",
+          prompts: [{ slot: "token", prompt: "Token" }],
+        },
+      }),
+  });
+  const placed = mount(
+    spec({
+      actions: (row, { act }) => (
+        <button
+          type="button"
+          onClick={() => act({ verb: "request", name: row.name })}
+        >
+          Request {row.name}
+        </button>
+      ),
+      credentials: (request, onStored, close) => (
+        <div>
+          <div>{request.reason}</div>
+          <button type="button" onClick={() => onStored(["token"])}>
+            Store token
+          </button>
+          <button type="button" onClick={close}>
+            Close
+          </button>
+        </div>
+      ),
+    }),
+  );
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Request beta" }),
+  );
+  expect(
+    await screen.findByText("Enter the workspace credential."),
+  ).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Store token" }));
+  await waitFor(() => expect(placed).toEqual([{ notice: "Stored token." }]));
+
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByText("Enter the workspace credential.")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Request beta" }));
+  expect(
+    await screen.findByText("Enter the workspace credential."),
+  ).toBeTruthy();
+});
+
+test("a credential renderer counts two stored slots", async () => {
+  wire({
+    "/workspace/probe": () => json({ rows: ROWS }),
+    "/intents": () =>
+      json({
+        applied: false,
+        message: "Credentials required.",
+        credentials: {
+          sealed: "sealed",
+          reason: "Enter both workspace credentials.",
+          prompts: [
+            { slot: "client", prompt: "Client" },
+            { slot: "secret", prompt: "Secret" },
+          ],
+        },
+      }),
+  });
+  const placed = mount(
+    spec({
+      actions: (row, { act }) => (
+        <button
+          type="button"
+          onClick={() => act({ verb: "request", name: row.name })}
+        >
+          Request {row.name}
+        </button>
+      ),
+      credentials: (request, onStored) => (
+        <div>
+          <div>{request.reason}</div>
+          <button type="button" onClick={() => onStored(["client", "secret"])}>
+            Store credentials
+          </button>
+        </div>
+      ),
+    }),
+  );
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Request beta" }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Store credentials" }),
+  );
+  await waitFor(() =>
+    expect(placed).toEqual([{ notice: "2 credentials stored." }]),
+  );
 });
 
 test("an action in flight disables its controls, so one click cannot post twice", async () => {
@@ -230,7 +431,11 @@ test("an action in flight disables its controls, so one click cannot post twice"
   mount(
     spec({
       actions: (row, { act, busy }) => (
-        <button type="button" disabled={busy} onClick={() => act({ verb: "poke", name: row.name })}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => act({ verb: "poke", name: row.name })}
+        >
           Poke {row.name}
         </button>
       ),
@@ -339,12 +544,12 @@ test("the sources declaration projects a binding and a bare stream into one unif
 
   await waitFor(() =>
     expect(headers()).toEqual([
-      "source",
-      "streams",
-      "owner",
-      "access",
-      "errors",
-      "next sync",
+      "Source",
+      "Streams",
+      "Owner",
+      "Access",
+      "Errors",
+      "Next Sync",
       "",
     ]),
   );
@@ -352,12 +557,20 @@ test("the sources declaration projects a binding and a bare stream into one unif
     "notion",
     "databases, pages",
     "member@example.com",
-    "private",
+    "Private",
     "3",
-    "2026-08-01 06:00",
+    "Aug 1 2026",
     "ResyncShareRemove",
   ]);
-  expect(cellsOf("rss")).toEqual(["rss", "—", "—", "shared", "0", "2026-08-02 09:30", ""]);
+  expect(cellsOf("rss")).toEqual([
+    "rss",
+    "—",
+    "—",
+    "Shared",
+    "0",
+    "Aug 2 2026",
+    "",
+  ]);
 });
 
 test("a shared binding is offered no Share control", async () => {
@@ -525,6 +738,9 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
 
   await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Confirm remove" }),
+  );
   await waitFor(() => expect(bodies.length).toBe(2));
   expect(JSON.parse(bodies[1])).toEqual({
     verb: "delete",
@@ -558,11 +774,15 @@ test("the artifacts declaration binds its parts to the artifact payload", async 
   const item = (await screen.findAllByRole("listitem")).find((entry) =>
     entry.textContent?.includes("report.txt"),
   );
-  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("report.txt");
-  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe(
-    "member@example.com · text/plain · 2 kB",
+  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe(
+    "report.txt",
   );
-  expect(item?.querySelector('[data-part="when"]')?.textContent).toBe("2026-08-01 06:00");
+  expect(item?.querySelector('[data-part="body"]')?.textContent).toBe(
+    "member@example.com",
+  );
+  expect(item?.querySelector('[data-part="status"]')?.textContent).toBe(
+    "Aug 1 2026",
+  );
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
@@ -660,7 +880,9 @@ test("refresh re-reads the listing in place", async () => {
   wire({
     "/workspace/probe": () => {
       served += 1;
-      return json({ rows: served > 1 ? [{ name: "gamma", count: 1, note: null }] : ROWS });
+      return json({
+        rows: served > 1 ? [{ name: "gamma", count: 1, note: null }] : ROWS,
+      });
     },
   });
   mount(spec());
@@ -696,22 +918,26 @@ test("search narrows rows to matches and states when nothing matches", async () 
   expect(screen.getByRole("searchbox")).toBeTruthy();
 });
 
-test("chips count the loaded rows live, filter on press, and toggle back off", async () => {
+test("tabs filter rows, restore all, and move with arrow keys", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount(spec({ chips: [{ label: "Noted", has: (row) => row.note !== null }] }));
 
-  await userEvent.click(await screen.findByRole("button", { name: "Noted 1" }));
+  const tablist = await screen.findByRole("tablist", { name: "Filter" });
+  expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.click(screen.getByRole("tab", { name: "Noted" }));
   expect(screen.queryByText("alpha")).toBeNull();
   expect(screen.getByText("beta")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Noted 1" }).getAttribute("aria-pressed")).toBe(
-    "true",
-  );
+  expect(screen.getByRole("tab", { name: "Noted" }).getAttribute("aria-selected")).toBe("true");
 
-  await userEvent.click(screen.getByRole("button", { name: "Noted 1" }));
+  await userEvent.click(screen.getByRole("tab", { name: "All" }));
   expect(await screen.findByText("alpha")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: "Noted" }).getAttribute("aria-selected")).toBe("true");
+  expect(tablist).toBeTruthy();
 });
 
-test("a pressed chip and a search term compose", async () => {
+test("a tab and a search term compose", async () => {
   wire({
     "/workspace/probe": () =>
       json({ rows: ROWS.concat({ name: "gamma", count: 7, note: "seen" }) }),
@@ -724,16 +950,16 @@ test("a pressed chip and a search term compose", async () => {
   );
 
   await screen.findByText("alpha");
-  await userEvent.click(screen.getByRole("button", { name: "Noted 2" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Noted" }));
   await userEvent.type(screen.getByRole("searchbox"), "gam");
 
   expect(screen.queryByText("beta")).toBeNull();
   expect(screen.queryByText("alpha")).toBeNull();
   expect(screen.getByText("gamma")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Noted 1" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Noted" })).toBeTruthy();
 });
 
-test("a chip's count reads the searched set, so its number equals what pressing it shows", async () => {
+test("a tab remains available when its searched set is empty", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount(
     spec({
@@ -744,9 +970,9 @@ test("a chip's count reads the searched set, so its number equals what pressing 
 
   await screen.findByText("alpha");
   await userEvent.type(screen.getByRole("searchbox"), "alpha");
-  expect(screen.getByRole("button", { name: "Noted 0" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Noted" })).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Noted 0" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Noted" }));
   expect(await screen.findByText("Nothing matches.")).toBeTruthy();
 });
 
@@ -755,7 +981,9 @@ test("refresh hides while loading and on an unavailable payload, and recovers a 
   wire({
     "/workspace/probe": () => {
       served += 1;
-      return served === 1 ? new Response("no", { status: 500 }) : json({ rows: ROWS });
+      return served === 1
+        ? new Response("no", { status: 500 })
+        : json({ rows: ROWS });
     },
   });
   mount(spec());
@@ -768,13 +996,17 @@ test("refresh hides while loading and on an unavailable payload, and recovers a 
 
 test("an unavailable listing offers no refresh, where re-reading cannot change the answer", async () => {
   wire({ "/workspace/probe": () => json({ rows: [], available: false }) });
-  mount(spec({ unavailable: (payload) => (payload.available ? null : "Not installed.") }));
+  mount(
+    spec({
+      unavailable: (payload) => (payload.available ? null : "Not installed."),
+    }),
+  );
 
   expect(await screen.findByText("Not installed.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
 });
 
-test("an applied intent keeps the pressed chip and the typed search term", async () => {
+test("an applied intent keeps the selected tab and the typed search term", async () => {
   wire({
     "/workspace/sources": () =>
       json({
@@ -800,15 +1032,21 @@ test("an applied intent keeps the pressed chip and the typed search term", async
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Private 1" }));
+  await userEvent.click(
+    await screen.findByRole("tab", { name: "Private" }),
+  );
   await userEvent.type(screen.getByRole("searchbox"), "notion");
   await userEvent.click(screen.getByRole("button", { name: "Resync" }));
 
   expect(await screen.findByText("Resync queued.")).toBeTruthy();
-  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("notion");
-  expect(screen.getByRole("button", { name: "Private 1" }).getAttribute("aria-pressed")).toBe(
-    "true",
+  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe(
+    "notion",
   );
+  expect(
+    screen
+      .getByRole("tab", { name: "Private" })
+      .getAttribute("aria-selected"),
+  ).toBe("true");
 });
 
 test("a row listing renders primary and separator-joined meta, skipping empty parts — no table", async () => {
@@ -818,7 +1056,10 @@ test("a row listing renders primary and separator-joined meta, skipping empty pa
     rows: (payload: Payload) => payload.rows,
     rowKey: (row: Row) => row.name,
     empty: "Nothing listed yet.",
-    list: { primary: { field: "name" }, meta: [{ field: "note" }, { field: "count" }] },
+    list: {
+      primary: { field: "name" },
+      meta: [{ field: "note" }, { field: "count" }],
+    },
   });
 
   const items = await screen.findAllByRole("listitem");
@@ -849,7 +1090,10 @@ test("a row listing reads each part through its own render and keeps actions and
       when: { field: "count", render: (count) => "×" + String(count) },
     },
     actions: (row, { act }) => (
-      <button type="button" onClick={() => act({ verb: "poke", name: row.name })}>
+      <button
+        type="button"
+        onClick={() => act({ verb: "poke", name: row.name })}
+      >
         Poke {row.name}
       </button>
     ),
@@ -905,16 +1149,18 @@ test("the sources declaration searches and filters by access with live counts", 
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Shared 1" }));
+  await userEvent.click(
+    await screen.findByRole("tab", { name: "Shared" }),
+  );
   expect(screen.queryByText("notion")).toBeNull();
   expect(screen.getByText("rss")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Shared 1" }));
+  await userEvent.click(screen.getByRole("tab", { name: "All" }));
   await userEvent.type(screen.getByRole("searchbox"), "notion");
   expect(await screen.findByText("notion")).toBeTruthy();
   expect(screen.queryByText("rss")).toBeNull();
-  expect(screen.getByRole("button", { name: "Private 1" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Shared 0" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Private" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Shared" })).toBeTruthy();
 });
 
 test("a refresh keeps the controls row and the caretted search box while the re-read is in flight", async () => {
@@ -943,7 +1189,7 @@ test("a refresh keeps the controls row and the caretted search box while the re-
   expect(await screen.findByText("alpha")).toBeTruthy();
 });
 
-test("a chip alone survives an applied intent, with no search term typed", async () => {
+test("a tab alone survives an applied intent, with no search term typed", async () => {
   wire({
     "/workspace/sources": () =>
       json({
@@ -969,13 +1215,17 @@ test("a chip alone survives an applied intent, with no search term typed", async
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Private 1" }));
+  await userEvent.click(
+    await screen.findByRole("tab", { name: "Private" }),
+  );
   await userEvent.click(screen.getByRole("button", { name: "Resync" }));
 
   expect(await screen.findByText("Resync queued.")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Private 1" }).getAttribute("aria-pressed")).toBe(
-    "true",
-  );
+  expect(
+    screen
+      .getByRole("tab", { name: "Private" })
+      .getAttribute("aria-selected"),
+  ).toBe("true");
 });
 
 test("leaving the workspace entirely also releases held controls", async () => {
@@ -1019,7 +1269,9 @@ test("leaving the workspace entirely also releases held controls", async () => {
   location.hash = "#/workspace/sources";
 
   expect(await screen.findByText("notion")).toBeTruthy();
-  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+  expect(
+    ((await screen.findByRole("searchbox")) as HTMLInputElement).value,
+  ).toBe("");
 
   await userEvent.type(screen.getByRole("searchbox"), "rss");
   location.hash = "#/admin";
@@ -1027,6 +1279,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
   location.hash = "#/workspace/sources";
 
   expect(await screen.findByText("notion")).toBeTruthy();
-  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
+  expect(
+    ((await screen.findByRole("searchbox")) as HTMLInputElement).value,
+  ).toBe("");
 });
-

@@ -1,36 +1,47 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
-import { Checkbox, Input } from "@/components/ui/field";
-import { Table, Td, Th } from "@/components/ui/table";
-import { type NoticeState, OutcomeNotice, Panel, outcomeNotice, usePanelRead } from "@/kernel/panel";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Td } from "@/components/ui/table";
+import { Toast } from "@/components/ui/toast";
+import {
+  type NoticeState,
+  OutcomeNotice,
+  Panel,
+  QUIET,
+  Section,
+  usePanelRead,
+} from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 
 type Member = { email: string; admin: boolean; seated: boolean };
 
 type Roster = { members: Member[]; can_add: boolean; domain: string | null };
 
-function Strip({ figures }: { figures: { value: number; label: string }[] }) {
-  return (
-    <div className="mb-lg flex w-fit flex-wrap items-baseline">
-      {figures.map((figure, index) => (
-        <div
-          key={figure.label}
-          className={cn(
-            "flex items-baseline gap-xs px-2xl",
-            index === 0 && "pl-0",
-            index > 0 && "border-l border-edge-soft",
-          )}
-        >
-          <span className="font-strong tabular-nums">{figure.value}</span>
-          <span className="text-small opacity-(--muted)">{figure.label}</span>
-        </div>
-      ))}
-    </div>
-  );
+type Draft = { email: string; admin: boolean };
+
+const BLANK: Draft = { email: "", admin: false };
+
+function counted(landed: string[]) {
+  return landed.length === 1 ? landed[0] : landed.length + " members added.";
 }
 
 export function Team({
@@ -41,85 +52,170 @@ export function Team({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
-  const [notice, setNotice] = useState<NoticeState>({ text: place.notice ?? "", refused: false });
-  const [email, setEmail] = useState("");
-  const [admin, setAdmin] = useState(false);
+  const [toast, setToast] = useState(place.notice ?? "");
+  const [query, setQuery] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [drafts, setDrafts] = useState<Draft[]>([BLANK]);
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
-  const state = usePanelRead<Roster>("/workspace/team");
+  const landed = useRef<string[]>([]);
+  const [reloads, setReloads] = useState(0);
+  const state = usePanelRead<Roster>("/workspace/team", reloads);
+  const ready = drafts.every((row) => row.email.trim());
+
+  function open() {
+    setDrafts([BLANK]);
+    setNotice(QUIET);
+    landed.current = [];
+    setAdding(true);
+  }
+
+  function close() {
+    setAdding(false);
+    if (!landed.current.length) return;
+    onPlace({ notice: counted(landed.current) });
+  }
+
+  function edit(index: number, patch: Partial<Draft>) {
+    setDrafts((rows) => rows.map((row, at) => (at === index ? { ...row, ...patch } : row)));
+  }
 
   async function add(event: FormEvent) {
     event.preventDefault();
-    const address = email.trim();
-    if (!address || !mainAgent) return;
+    if (busy || !ready || !mainAgent) return;
+    const wanted = drafts.map((row) => ({ ...row, email: row.email.trim() }));
     setBusy(true);
-    const outcome = await postIntent(mainAgent.id, {
-      verb: "add_member",
-      email: address,
-      admin,
-    });
+    const outcomes: { applied: boolean; message: string }[] = [];
+    for (const row of wanted) {
+      outcomes.push(
+        await postIntent(mainAgent.id, { verb: "add_member", email: row.email, admin: row.admin }),
+      );
+    }
     setBusy(false);
-    if (outcome.applied) {
-      onPlace({ notice: outcome.message });
+    landed.current.push(
+      ...outcomes.filter((outcome) => outcome.applied).map((outcome) => outcome.message),
+    );
+    const refused = wanted.filter((_, at) => !outcomes[at].applied);
+    if (!refused.length) {
+      close();
       return;
     }
-    setNotice(outcomeNotice(outcome));
+    setDrafts(refused);
+    setNotice({
+      text: outcomes
+        .filter((outcome) => !outcome.applied)
+        .map((outcome) => outcome.message)
+        .join(" "),
+      refused: true,
+    });
   }
 
   return (
     <Panel state={state}>
-      {({ members, can_add, domain }) => (
-        <>
-          <Strip
-            figures={[
-              { value: members.length, label: "members" },
-              { value: members.filter((entry) => entry.admin).length, label: "admins" },
-              { value: members.filter((entry) => entry.seated).length, label: "seated" },
-            ]}
-          />
-          <Table>
-            <thead>
-              <tr>
-                {["member", "role", "seat"].map((column) => (
-                  <Th key={column}>{column}</Th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((entry) => (
-                <tr key={entry.email}>
-                  <Td>{entry.email}</Td>
-                  <Td>{entry.admin ? "Admin" : "Member"}</Td>
-                  <Td>{entry.seated ? "Seated" : "No seat"}</Td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-          {can_add && mainAgent ? (
-            <form onSubmit={add} className="mb-lg flex items-center gap-sm">
-              <Input
-                type="email"
-                required
-                name="email"
-                placeholder={domain ? "email@" + domain : "email@work.com"}
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-              />
-              <label className="flex items-center gap-hair">
-                <Checkbox
-                  name="admin"
-                  checked={admin}
-                  onChange={(event) => setAdmin(event.target.checked)}
-                />
-                Admin
-              </label>
-              <Button type="submit" variant="send" disabled={busy}>
-                Add member
-              </Button>
-            </form>
-          ) : null}
-          <OutcomeNotice state={notice} />
-        </>
-      )}
+      {({ members, can_add, domain }) => {
+        const found = members.filter((entry) =>
+          entry.email.toLowerCase().includes(query.trim().toLowerCase()),
+        );
+        return (
+          <>
+            <Section
+              title="Members"
+              bar={
+                <>
+                  <Input
+                    type="search"
+                    aria-label="Search members"
+                    placeholder="Search"
+                    className="max-w-control-row"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                  {can_add && mainAgent ? (
+                    <Button variant="send" onClick={open}>
+                      Add member
+                    </Button>
+                  ) : null}
+                  <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
+                </>
+              }
+            >
+              <DataTable
+                columns={["Member", "Role", "Seat"]}
+                rows={found}
+                rowKey={(entry) => entry.email}
+                empty="This workspace has no members yet."
+                note={query ? "No member matches that search." : undefined}
+              >
+                {(entry) => (
+                  <>
+                    <Td>{entry.email}</Td>
+                    <Td>{entry.admin ? "Admin" : "Member"}</Td>
+                    <Td>{entry.seated ? "Seated" : "No seat"}</Td>
+                  </>
+                )}
+              </DataTable>
+            </Section>
+            <Dialog open={adding} onOpenChange={(next) => (next ? open() : close())}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add Members</DialogTitle>
+                  <DialogDescription>
+                    {domain
+                      ? "Each address must be at " + domain + "."
+                      : "Each address is added to this workspace."}
+                  </DialogDescription>
+                </DialogHeader>
+                <OutcomeNotice state={notice} />
+                <form id="add-member" onSubmit={add} className="flex flex-col items-start gap-sm">
+                  {drafts.map((row, index) => (
+                    <div key={index} className="flex w-full items-stretch gap-sm">
+                      <Input
+                        type="email"
+                        required
+                        aria-label={drafts.length > 1 ? "Email " + (index + 1) : "Email"}
+                        placeholder={domain ? "email@" + domain : "email@work.com"}
+                        className="max-w-none flex-1"
+                        value={row.email}
+                        onChange={(event) => edit(index, { email: event.target.value })}
+                      />
+                      <Select
+                        value={row.admin ? "admin" : "member"}
+                        onValueChange={(value) => edit(index, { admin: value === "admin" })}
+                      >
+                        <SelectTrigger
+                          aria-label={drafts.length > 1 ? "Role " + (index + 1) : "Role"}
+                          className="max-w-control-row"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="member">Member</SelectItem>
+                          <SelectItem value="admin">Admin</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ))}
+                  <Button type="button" onClick={() => setDrafts((rows) => [...rows, BLANK])}>
+                    Add more
+                  </Button>
+                </form>
+                <DialogFooter>
+                  <Button
+                    type="submit"
+                    form="add-member"
+                    variant="send"
+                    busy={busy}
+                    disabled={!ready}
+                  >
+                    Add members
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <Toast message={toast} onDone={() => setToast("")} />
+          </>
+        );
+      }}
     </Panel>
   );
 }

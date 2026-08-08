@@ -4,7 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { PlacedWorkspace, AGENT, json, useStreamFake } from "./harness";
+import { PlacedWorkspace, AGENT, json, useStreamFake, viewCard } from "./harness";
 
 const TEXT_URL = "/dl/notes.txt";
 
@@ -52,13 +52,13 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
-  expect(screen.getByText("notes · text/plain · 12 B · 2026-07-31 09:00")).toBeTruthy();
+  expect(screen.getByText("notes · text/plain · 12 B · Jul 31 2026")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByText("hello from the file")).toBeNull());
-  expect(screen.getByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(await viewCard("notes.txt")).toBeTruthy();
 });
 
 test("the listing stays reachable behind an open viewer", async () => {
@@ -75,10 +75,10 @@ test("the listing stays reachable behind an open viewer", async () => {
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
 
-  expect(screen.getByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(await viewCard("notes.txt")).toBeTruthy();
 });
 
 test("leaving the view takes the viewer with it", async () => {
@@ -97,7 +97,7 @@ test("leaving the view takes the viewer with it", async () => {
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
 
   view.rerender(
@@ -128,7 +128,7 @@ test("the viewer bounds a long read by bytes, not characters, and cancels the re
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("First 64 kB shown.")).toBeTruthy();
   const shown = document.querySelector("pre")!.textContent ?? "";
   expect(new TextEncoder().encode(shown).length).toBeLessThanOrEqual(64 * 1024);
@@ -153,7 +153,7 @@ test("a body of exactly the bound renders whole and claims nothing about truncat
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   await waitFor(() => expect(document.querySelector("pre")).not.toBeNull());
   expect(document.querySelector("pre")!.textContent!.length).toBe(64 * 1024);
   expect(screen.queryByText("First 64 kB shown.")).toBeNull();
@@ -179,7 +179,7 @@ test("a read that fails mid-body states the fault instead of staying on Loading"
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
   expect(screen.queryByText("Loading…")).toBeNull();
 });
@@ -198,7 +198,7 @@ test("a read whose request never lands states the fault instead of staying on Lo
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
   expect(screen.queryByText("Loading…")).toBeNull();
 });
@@ -214,7 +214,7 @@ test("an image whose link expired states it rather than showing an empty panel",
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "shot.png" }));
+  await userEvent.click(await viewCard("shot.png"));
   const full = document.querySelector("aside img, [role='dialog'] img") as HTMLImageElement;
   expect(full).not.toBeNull();
   full.dispatchEvent(new Event("error"));
@@ -239,7 +239,7 @@ test("a type with no preview says to download it, and the viewer offers that dow
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "bundle.zip" }));
+  await userEvent.click(await viewCard("bundle.zip"));
   expect(
     await screen.findByText("No preview for this file type. Download it to open it."),
   ).toBeTruthy();
@@ -256,7 +256,7 @@ test("an artifact with no link stays plain text and opens nothing", async () => 
   );
 
   expect(await screen.findByText("notes.txt")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "notes.txt" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "View" })).toBeNull();
 });
 
 test("Escape dismisses the viewer", async () => {
@@ -273,7 +273,7 @@ test("Escape dismisses the viewer", async () => {
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("body")).toBeTruthy();
 
   await userEvent.keyboard("{Escape}");
@@ -304,7 +304,7 @@ test("closing the viewer discards a body still in flight", async () => {
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+  await userEvent.click(await viewCard("notes.txt"));
   await waitFor(() => expect(releaseFirst).not.toBeNull());
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
@@ -312,10 +312,10 @@ test("closing the viewer discards a body still in flight", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("the first body")).toBeNull();
-  expect(screen.getByRole("button", { name: "notes.txt" })).toBeTruthy();
+  expect(await viewCard("notes.txt")).toBeTruthy();
 });
 
-test("the artifacts listing renders as rows — name, meta, date — with no table", async () => {
+test("the artifacts listing renders as cards, each led by its own band", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -333,7 +333,35 @@ test("the artifacts listing renders as rows — name, meta, date — with no tab
     entry.textContent?.includes("notes.txt"),
   );
   expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("notes.txt");
-  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("notes · text/plain · 12 B");
-  expect(item?.querySelector('[data-part="when"]')?.textContent).toBe("2026-07-31 09:00");
+  expect(item?.querySelector('[data-part="body"]')?.textContent).toBe("notes");
+  expect(item?.querySelector('[data-part="status"]')?.textContent).toBe("Jul 31 2026");
+  const band = item?.querySelector('[data-part="mark"]');
+  expect(band?.className).toContain("h-(--size-band)");
+  expect(band?.querySelector("img")).toBeNull();
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
+});
+
+test("an image artifact fills its band, and a dead link leaves the placeholder", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      json({ artifacts: [artifact({ media_type: "image/png", filename: "shot.png" })] }),
+    ),
+  );
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedWorkspace view="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("shot.png"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  const image = band.querySelector("img") as HTMLImageElement;
+  expect(image.getAttribute("src")).toBe(TEXT_URL);
+  expect(image.getAttribute("alt")).toBe("");
+
+  image.dispatchEvent(new Event("error"));
+  await waitFor(() => expect(band.querySelector("img")).toBeNull());
 });

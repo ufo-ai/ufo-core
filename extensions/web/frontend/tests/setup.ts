@@ -17,6 +17,20 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem" | "
   };
 }
 
+function installPointerCaptureAndResizeObserverJsdomLacks() {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.setPointerCapture = () => {};
+  Element.prototype.releasePointerCapture = () => {};
+  Element.prototype.scrollIntoView = () => {};
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
+if (typeof document !== "undefined") installPointerCaptureAndResizeObserverJsdomLacks();
+
 beforeEach(() => {
   keyFaults = [];
   vi.stubGlobal("localStorage", memoryStorage());

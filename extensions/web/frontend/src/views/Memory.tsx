@@ -1,12 +1,30 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { Pager, type Placement } from "@/kernel/pager";
-import { day } from "@/lib/moments";
 import { Button } from "@/components/ui/button";
-import { Table, Td, Th } from "@/components/ui/table";
-import { type NoticeState, OutcomeNotice, Panel, PanelEmpty, QUIET, usePanelRead } from "@/kernel/panel";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/field";
+import { Filter } from "@/components/ui/filter";
+import { Table, TableNote, Td, Th } from "@/components/ui/table";
+import { Pager, type Placement } from "@/kernel/pager";
+import {
+  OutcomeNotice,
+  Panel,
+  PanelBlank,
+  PanelEmpty,
+  QUIET,
+  Section,
+  usePanelRead,
+  type NoticeState,
+} from "@/kernel/panel";
+import { day } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 
 type Match = {
@@ -24,6 +42,14 @@ type MemoryPayload = {
   older?: string | null;
 };
 
+function kindLabel(kind: string) {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
+function correctable(match: Match) {
+  return typeof match.ref === "string" && match.ref.startsWith("memory/");
+}
+
 export function Memory({
   place,
   onPlace,
@@ -34,7 +60,6 @@ export function Memory({
   const [query, setQuery] = useState(place.q ?? "");
   const submitted = place.q ?? "";
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [correcting, setCorrecting] = useState<Match | null>(null);
 
   const params = new URLSearchParams();
@@ -57,145 +82,149 @@ export function Memory({
     setCorrecting(null);
   }
 
+  const refresh = () => setReloads((count) => count + 1);
+  const kinds = state.phase === "ready" ? state.payload.kinds : [];
+  const columns = ["Memory", "Class", "Added"];
+
   return (
     <>
-      <form onSubmit={submit} className="mb-lg flex gap-sm">
-        <input
-          placeholder="Search memory…"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          className="flex-1 rounded-panel border border-edge-control bg-field px-md py-sm text-field-ink"
-        />
-        <Button type="submit" variant="send">
-          Search
-        </Button>
-      </form>
-      <Panel
-        state={state}
-        empty={(payload) => (payload.available ? null : "This deploy has no memory extension.")}
-        failed={
-          place.after
-            ? (message) => (
-                <>
-                  <PanelEmpty>{message}</PanelEmpty>
-                  <div className="mb-lg flex gap-xs">
-                    <Button variant="row" onClick={() => onPlace({ after: undefined })}>
-                      First page
-                    </Button>
-                  </div>
-                </>
-              )
-            : undefined
+      <Section
+        title="Memory"
+        bar={
+          <>
+            <form onSubmit={submit} className="flex items-stretch">
+              <Input
+                type="search"
+                aria-label="Search"
+                placeholder="Search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="max-w-control-row"
+              />
+            </form>
+            {!submitted && kinds.length ? (
+              <Filter
+                options={kinds.map((kind) => ({
+                  label: kindLabel(kind),
+                  value: kind,
+                }))}
+                value={place.kind ?? ""}
+                onChange={(kind) =>
+                  onPlace({ kind: kind || undefined, after: undefined })
+                }
+              />
+            ) : null}
+            <Button variant="row" onClick={refresh}>
+              Refresh
+            </Button>
+          </>
         }
       >
-        {(payload) => (
-          <>
-            {!submitted && place.kind && !payload.kinds.includes(place.kind) ? (
-              <PanelEmpty>That memory class is not available.</PanelEmpty>
-            ) : null}
-            {submitted ? null : (
-              <div className="mb-lg flex gap-xs">
-                {["all", ...payload.kinds].map((kind) => {
-                  const chosen = kind === "all" ? !place.kind : place.kind === kind;
-                  return (
-                    <button
-                      key={kind}
-                      type="button"
-                      aria-current={chosen}
-                      onClick={() =>
-                        onPlace({ kind: kind === "all" ? undefined : kind, after: undefined })
-                      }
-                      className={cn(
-                        "border border-edge-control rounded-control bg-transparent px-sm py-hair text-inherit",
-                        chosen && "font-strong underline",
-                      )}
-                    >
-                      {kind}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            {!payload.matches.length ? (
-              <>
-                <PanelEmpty>
-                  {submitted
-                    ? "No matches."
-                    : place.kind
-                      ? "No " + place.kind + " memories on this page."
-                      : "No memories yet."}
-                </PanelEmpty>
-                {submitted ? null : (
-                  <Pager payload={payload} onPlace={onPlace} />
-                )}
-              </>
-            ) : (
+        <Panel
+          state={state}
+          empty={(payload) => (payload.available ? null : "This deploy has no memory extension.")}
+          failed={
+            place.after
+              ? (message) => (
+                  <>
+                    <PanelEmpty>{message}</PanelEmpty>
+                    <div className="mb-lg flex gap-xs">
+                      <Button variant="row" onClick={() => onPlace({ after: undefined })}>
+                        First page
+                      </Button>
+                    </div>
+                  </>
+                )
+              : undefined
+          }
+        >
+          {(payload) => {
+            const narrowed =
+              Boolean(submitted) || (Boolean(place.kind) && !payload.matches.length);
+            if (!payload.matches.length && !narrowed)
+              return (
+                <PanelBlank
+                  body="No memories yet."
+                  action={
+                    <Button variant="outline" onClick={refresh}>
+                      Refresh
+                    </Button>
+                  }
+                />
+              );
+            const corrections = payload.matches.some(correctable);
+            return (
               <>
                 <Table>
                   <thead>
                     <tr>
-                      {["memory", "kind", "ref", "date", ""].map((column, index) => (
-                        <Th key={index}>{column}</Th>
+                      {columns.map((column) => (
+                        <Th key={column}>{column}</Th>
                       ))}
+                      {corrections ? <Th>{""}</Th> : null}
                     </tr>
                   </thead>
                   <tbody>
-                    {payload.matches.map((match, index) => (
-                      <tr key={index}>
-                        <Td>{match.text}</Td>
-                        <Td>{match.kind}</Td>
-                        <Td>{match.ref ?? "—"}</Td>
-                        <Td>{day(match.created_at) ?? "—"}</Td>
-                        <Td>
-                          {typeof match.ref === "string" && match.ref.startsWith("memory/") ? (
-                            <Button variant="row" onClick={() => setCorrecting(match)}>
-                              Correct
-                            </Button>
-                          ) : (
-                            "—"
-                          )}
-                        </Td>
-                      </tr>
-                    ))}
+                    {payload.matches.length ? (
+                      payload.matches.map((match, index) => (
+                        <tr key={index}>
+                          <Td className="w-full">{match.text}</Td>
+                          <Td className="whitespace-nowrap">{kindLabel(match.kind)}</Td>
+                          <Td className="whitespace-nowrap opacity-(--muted)">
+                            {day(match.created_at) ?? "—"}
+                          </Td>
+                          {corrections ? (
+                            <Td>
+                              {correctable(match) ? (
+                                <Button variant="row" onClick={() => setCorrecting(match)}>
+                                  Correct
+                                </Button>
+                              ) : null}
+                            </Td>
+                          ) : null}
+                        </tr>
+                      ))
+                    ) : (
+                      <TableNote span={columns.length}>
+                        {submitted
+                          ? "No matches."
+                          : place.kind && !payload.kinds.includes(place.kind)
+                            ? "That memory class is not available."
+                            : "No memories of this kind on this page."}
+                      </TableNote>
+                    )}
                   </tbody>
                 </Table>
-                {submitted ? null : (
-                  <Pager payload={payload} onPlace={onPlace} />
-                )}
+                {submitted ? null : <Pager payload={payload} onPlace={onPlace} />}
               </>
-            )}
-          </>
-        )}
-      </Panel>
-      {correcting ? (
-        <CorrectionForm
-          match={correcting}
-          onDone={(message) => {
-            setCorrecting(null);
-            if (message === null) setReloads((count) => count + 1);
-            else setNotice({ text: message, refused: true });
+            );
           }}
-        />
-      ) : null}
-      <OutcomeNotice state={notice} />
+        </Panel>
+      </Section>
+      <Dialog open={correcting !== null} onOpenChange={(next) => !next && setCorrecting(null)}>
+        {correcting ? (
+          <CorrectionDialog
+            match={correcting}
+            onSuccess={() => {
+              setCorrecting(null);
+              setReloads((count) => count + 1);
+            }}
+          />
+        ) : null}
+      </Dialog>
     </>
   );
 }
 
-function CorrectionForm({
-  match,
-  onDone,
-}: {
-  match: Match;
-  onDone: (message: string | null) => void;
-}) {
+function CorrectionDialog({ match, onSuccess }: { match: Match; onSuccess: () => void }) {
   const mainAgent = useMainAgent();
   const [body, setBody] = useState(match.text);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!body.trim() || !mainAgent || !match.ref) return;
+    if (busy || !body.trim() || !mainAgent || !match.ref) return;
     setBusy(true);
     const outcome = await postIntent(mainAgent.id, {
       verb: "record",
@@ -204,20 +233,37 @@ function CorrectionForm({
       body: body.trim(),
     });
     setBusy(false);
-    onDone(outcome.applied ? null : outcome.message);
+    if (outcome.applied) onSuccess();
+    else setNotice({ text: outcome.message, refused: true });
   }
 
   return (
-    <form onSubmit={submit} className="my-lg flex gap-sm">
-      <input
-        autoFocus
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        className="flex-1 rounded-panel border border-edge-control bg-field px-md py-sm text-field-ink"
-      />
-      <Button type="submit" variant="send" disabled={busy}>
-        Record correction
-      </Button>
-    </form>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Correct Memory</DialogTitle>
+        <DialogDescription>The correction replaces this memory.</DialogDescription>
+      </DialogHeader>
+      <OutcomeNotice state={notice} />
+      <form id="correct-memory" onSubmit={submit} className="flex flex-col items-start gap-sm">
+        <Input
+          autoFocus
+          aria-label="Memory"
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          className="max-w-none w-full"
+        />
+      </form>
+      <DialogFooter>
+        <Button
+          type="submit"
+          form="correct-memory"
+          variant="send"
+          busy={busy}
+          disabled={!body.trim()}
+        >
+          Record correction
+        </Button>
+      </DialogFooter>
+    </DialogContent>
   );
 }
