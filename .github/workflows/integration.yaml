@@ -78,6 +78,4 @@ jobs:
       # a single owner of their shared resource. `integration` tests needing an absent key (a live
       # model) skip with a clear reason; Docker, Postgres, Chrome, and the DevTools ports are
       # required and fail loudly when unavailable so the gate proves its declared coverage.
-      - run: uv run pytest -rs -m "serial or integration or docker"
-        env:
-          UFO_INTEGRATION_REQUIRED: "1"
+      - run: make test-integration

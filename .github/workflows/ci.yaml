@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      - run: uv run pre-commit run --all-files --hook-stage pre-push
+      - run: make check
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -133,7 +133,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      - run: uv run --project control pytest control/tests --ignore=control/tests/test_rls.py -q
+      - run: make test-control
 
   integration:
     uses: ./.github/workflows/integration.yaml
