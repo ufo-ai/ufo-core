@@ -88,6 +88,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.sdk.context import ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
@@ -113,7 +114,14 @@ from ufo.sdk.surfaces import (
     inbox_name,
     mint_marker,
 )
+from ufo_ext_slack.attribution import addressing_mention
 
+SLACK_EXTENSION = "slack"
+"""This extension's own name, which the manifest takes from here. It is the key space of the
+`ScopedStore` both halves of the connector-send footer reach through — the mirror this surface
+writes below and the read the send hook makes — so naming it once makes that join true by
+construction instead of by two matching literals."""
+SELF_USER_ID_STORE_KEY = "self_user_id"
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
@@ -267,7 +275,32 @@ async def _identity(ctx: SurfaceContext) -> SlackIdentity | None:
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     except CredentialSlotUnset:
         return None
-    return await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+    identity = await read_identity(ctx.blob, ctx.workspace_id, bot_token)
+    if identity is not None:
+        await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
+    return identity
+
+
+_SELF_USER_ID_MIRRORED: dict[UUID, str] = {}
+
+
+async def _mirror_self_user_id(workspace_id: UUID, bot_user_id: str) -> None:
+    """Copy the proved bot-user id into this extension's own scoped store, the one place a turn-time
+    hook can read it from: the identity record itself is a blob, and a hook's context carries a
+    `ScopedStore` and no `BlobStore`. The ambient workspace is the one the surface route bound,
+    which is `workspace_id`.
+
+    Best effort, with a per-process cache so the write stays off the inbound hot path while a
+    reinstall under a different bot user re-stamps on its next event — a store hiccup must not fail
+    the request Slack needs answered, and a footer is not worth an unanswered event."""
+    if _SELF_USER_ID_MIRRORED.get(workspace_id) == bot_user_id:
+        return
+    try:
+        await ScopedStore(SLACK_EXTENSION).put(SELF_USER_ID_STORE_KEY, bot_user_id)
+    except Exception:
+        _LOG.warning("slack self_user_id mirror write failed", exc_info=True)
+        return
+    _SELF_USER_ID_MIRRORED[workspace_id] = bot_user_id
 
 
 @dataclass(frozen=True)
@@ -892,12 +925,19 @@ def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str:
 
 def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm: bool) -> bool:
     """Whether the message addresses the agent directly — always in a DM, in a channel only by
-    @-mention. Direct address always admits; an un-addressed channel message is admitted only as a
-    reply in a thread the agent already converses in (`_participating_conversation`), never as
-    passing top-level traffic."""
-    if event.get("type") == "app_mention" or is_dm:
+    @-mention outside our own attribution footer. Direct address always admits; an un-addressed
+    channel message is admitted only as a reply in a thread the agent already converses in
+    (`_participating_conversation`), never as passing top-level traffic.
+
+    Slack delivers `app_mention` for a footer's mention too, so the event type alone decides only
+    when the text carries no mention this module can read — a mention spelled some other way still
+    admits, a footered one does not."""
+    if is_dm:
         return True
-    return f"<@{bot_user_id}>" in str(event.get("text") or "")
+    text = str(event.get("text") or "")
+    if addressing_mention(text, bot_user_id):
+        return True
+    return event.get("type") == "app_mention" and f"<@{bot_user_id}>" not in text
 
 
 def slack_reply_body(
@@ -1136,6 +1176,7 @@ async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:
         state, SLACK_BOT_TOKEN_SLOT, install.bot_token, member_id=claims.member_id
     )
     await ctx.blob.put(identity_blob_key(ctx.workspace_id), identity.model_dump_json().encode())
+    await _mirror_self_user_id(ctx.workspace_id, identity.bot_user_id)
     return _install_page("ufo is installed — return to chat and talk to it.", 200)
 
 
@@ -1514,9 +1555,11 @@ async def _ambient_context(
 
 def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: str) -> str:
     """Fetched Slack messages rendered as bounded context lines: member messages only, the bot's
-    own replies and any bot-mentioning message dropped — every mention was gated in as its own turn,
-    so it already lives in the transcript. Over the digest cap, the oldest line (the thread root,
-    the "summarize this" anchor) and the newest lines that fit survive, with the omission marked.
+    own replies and any message mentioning the bot outside our own attribution footer dropped —
+    every mention was gated in as its own turn, so it already lives in the transcript, while a
+    footered message was never a turn and stays readable here. Over the digest cap, the oldest line
+    (the thread root, the "summarize this" anchor) and the newest lines that fit survive, with the
+    omission marked.
 
     Each message is another principal's words, so any tag-shaped delimiter in it is escaped before
     it is interpolated. The digest carries messages the agent was not addressed by, and in a Slack
@@ -1541,7 +1584,7 @@ def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: 
         text = str(item.get("text") or "").strip()
         if not isinstance(user, str) or not user or user == bot_user_id:
             continue
-        if not isinstance(ts, str) or not text or f"<@{bot_user_id}>" in text:
+        if not isinstance(ts, str) or not text or addressing_mention(text, bot_user_id):
             continue
         try:
             stamp = float(ts)

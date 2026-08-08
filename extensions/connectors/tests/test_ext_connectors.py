@@ -370,6 +370,24 @@ def test_slack_attributed_never_stacks_the_line() -> None:
     )
 
 
+def test_the_never_stack_guard_reads_a_whole_line_and_never_a_prefix() -> None:
+    """Either footer form suppresses the append, the mentioning line the Slack extension writes
+    included — it names the app instead of spelling it, so there is no plain literal to test for. A
+    body that merely opens the way a footer does is a body, still owed a footer of its own."""
+    mentioning = connector_tools.UFO_ATTRIBUTION_MENTION.format(bot_user_id="U0BOT")
+    for footered in (
+        f"the plan is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
+        f"the plan is posted\n\n{mentioning}",
+    ):
+        assert connector_tools.slack_attributed(
+            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": footered}
+        ) == {"text": footered}
+    for body in ("Sent using an iPhone", "Sent using ufo to draft this", "a Sent using ufo joke"):
+        assert connector_tools.slack_attributed(
+            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": body}
+        ) == {"text": f"{body}\n\n{connector_tools.UFO_ATTRIBUTION}"}
+
+
 async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution() -> None:
     """The mark rides the arguments core dispatches, read back off the broker's echo — the same
     seam the send would reach on a live broker."""

@@ -74,6 +74,19 @@ AVAILABLE_TOOLS_OMITTED_NOTE = (
 )
 
 UFO_ATTRIBUTION = "Sent using ufo"
+UFO_ATTRIBUTION_MENTION = "Sent using <@{bot_user_id}>"
+"""The same footer with the deploy's own Slack bot user mentioned rather than named in plain text,
+which the Slack extension writes when its own install has proved that id. This tool holds no Slack
+identity, so it writes the plain form, and the mentioning form is the one a reader can reach the
+agent from."""
+_MENTION_ATTRIBUTION_ARM = UFO_ATTRIBUTION_MENTION.format(bot_user_id=r"[^\s>]+")
+ATTRIBUTION_LINE = re.compile(
+    rf"(?:\A|\n)[ \t]*(?:{re.escape(UFO_ATTRIBUTION)}|{_MENTION_ATTRIBUTION_ARM})[ \t]*(?=\n|\Z)"
+)
+"""Either footer form as a whole line of its own. It is the never-stack guard here and, in the Slack
+extension, the line stripped before a mention is read as an address — one shape, composed from the
+two forms above rather than restated. Matching a whole line and never a prefix is what keeps a body
+that merely opens the same way ("Sent using an iPhone") a body, still owed a footer of its own."""
 SLACK_PROVIDER = "slack"
 SLACK_MESSAGE_NOUN = "message"
 SLACK_SEND_VERBS = ("send", "post", "reply", "schedule")
@@ -268,7 +281,9 @@ def slack_attributed(
     connector call that publishes a message this deploy wrote, and the only place it can be marked:
     the Slack surface's own reply carries its footer, a message posted through a connector passes
     through no renderer of ours. A read, an edit, and a listing are untouched, as is a text already
-    carrying the line, so a resend or an edit of a marked message never stacks it."""
+    carrying either footer form as a line of its own, so a resend or an edit of a marked message
+    never stacks it and the mentioning footer the Slack extension writes suppresses this plain
+    one."""
     if provider != SLACK_PROVIDER:
         return arguments
     name = slug.lower()
@@ -277,7 +292,7 @@ def slack_attributed(
     attributed = dict(arguments)
     for key in SLACK_MESSAGE_TEXT_ARGUMENTS:
         text = arguments.get(key)
-        if isinstance(text, str) and text.strip() and UFO_ATTRIBUTION not in text:
+        if isinstance(text, str) and text.strip() and not ATTRIBUTION_LINE.search(text):
             attributed[key] = f"{text}\n\n{UFO_ATTRIBUTION}"
     return attributed
 

@@ -30,6 +30,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request as StarletteRequest
+from ufo_ext_slack.attribution import mention_attribution
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
@@ -716,6 +717,58 @@ def test_thread_keying_and_addressing() -> None:
     assert not slack.slack_message_addressed({"type": "message", "text": "hi"}, BOT_USER_ID, False)
     assert slack.slack_message_addressed(
         {"type": "message", "text": f"<@{BOT_USER_ID}> hi"}, BOT_USER_ID, False
+    )
+
+
+def test_the_attribution_footer_is_not_an_address_and_keeps_a_real_mention() -> None:
+    """A message this deploy publishes through a connector is authored by a member's own connected
+    account, so it arrives through ingest like any member message and its footer's mention would
+    otherwise read as that member addressing the agent. Slack delivers the footer mention as
+    `app_mention` too, which is why the event type alone cannot decide.
+
+    Only the mention on the footer line stops counting: one in the body still addresses the agent,
+    and an `app_mention` carrying a mention spelled some way this module cannot read is still Slack
+    telling us it is one."""
+    footer = mention_attribution(BOT_USER_ID)
+    footered = f"the plan is posted\n\n{footer}"
+    assert not slack.slack_message_addressed(
+        {"type": "message", "text": footered}, BOT_USER_ID, False
+    )
+    assert not slack.slack_message_addressed(
+        {"type": "app_mention", "text": footered}, BOT_USER_ID, False
+    )
+    assert slack.slack_message_addressed({"type": "message", "text": footered}, BOT_USER_ID, True)
+    for text in (
+        f"<@{BOT_USER_ID}> take this\n\n{footer}",
+        f"{footer}\nand now <@{BOT_USER_ID}> take this",
+        f"relaying what they wrote: Sent using an iPhone <@{BOT_USER_ID}>",
+        f"<@{BOT_USER_ID}> sent using ufo",
+    ):
+        assert slack.slack_message_addressed({"type": "message", "text": text}, BOT_USER_ID, False)
+    assert slack.slack_message_addressed(
+        {"type": "app_mention", "text": f"<@{BOT_USER_ID}|ufo> hi"}, BOT_USER_ID, False
+    )
+
+
+def test_a_footered_message_stays_in_ambient_reading() -> None:
+    """A message carrying our own attribution footer was never gated in as a turn, so it is not in
+    any transcript — dropping it as a bot mention would take a member's own words out of the agent's
+    reading of the channel. A message that genuinely mentions the bot still drops."""
+    footered = f"the plan is posted\n\n{mention_attribution(BOT_USER_ID)}"
+    digest = slack.ambient_digest(
+        [
+            {"user": "U1", "ts": "1700000000.000100", "text": footered},
+            {"user": "U2", "ts": "1700000060.000200", "text": f"<@{BOT_USER_ID}> already a turn"},
+        ],
+        BOT_USER_ID,
+        slack.AMBIENT_CHANNEL_NOTE,
+        MARK,
+    )
+    assert digest == (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
+        f"{slack.AMBIENT_CHANNEL_NOTE}\n"
+        f"[2023-11-14 22:13] <@U1>: {footered}\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{MARK}>\n"
     )
 
 

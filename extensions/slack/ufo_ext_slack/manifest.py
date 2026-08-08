@@ -12,10 +12,12 @@ proxy, so neither slot carries a wire-injection target."""
 
 from pathlib import Path
 
-from ufo.sdk.manifest import CredentialSlot, Manifest, SkillSpec
+from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SkillSpec
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
+from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
+    SLACK_EXTENSION,
     SLACK_OAUTH_CALLBACK_PATH,
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
@@ -29,7 +31,7 @@ from ufo_ext_slack.surface import (
 )
 from ufo_ext_slack.tools import TOOLS
 
-NAME = "slack"
+NAME = SLACK_EXTENSION
 VERSION = "0.1.0"
 SKILL_DIR = Path(__file__).parent / "skills" / "slack-app-setup"
 
@@ -65,5 +67,12 @@ def manifest() -> Manifest:
             ),
         ),
         tools=TOOLS,
+        hooks=(
+            HookSpec(
+                event="pre_tool_use",
+                handler=attribute_connector_send,
+                tools=(CONNECTOR_CALL_TOOL,),
+            ),
+        ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )
