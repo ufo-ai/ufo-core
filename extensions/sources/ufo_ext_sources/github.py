@@ -35,12 +35,14 @@ intentionally absent — the source seam only reads."""
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import (
+    REPO_BACKFILL_WINDOW_DAYS,
     Ordering,
     PartitionBound,
     PartitionSkipped,
@@ -77,6 +79,7 @@ def _stream(
     created_at_field: str | None = "created_at",
     ordering: Ordering = Ordering.none,
     canonical: bool = False,
+    backfill_window_days: int | None = None,
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -86,6 +89,7 @@ def _stream(
         created_at_field=created_at_field,
         ordering=ordering,
         canonical=canonical,
+        backfill_window_days=backfill_window_days,
     )
 
 
@@ -110,12 +114,23 @@ ALL_STREAMS: list[StreamSpec] = [
         cursor_field="commit.committer.date",
         created_at_field="commit.committer.date",
         ordering=Ordering.newest_first,
+        backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
     ),
     _stream("contributor_activity", cursor_field=None),
     _stream("deployments", cursor_field="updated_at"),
-    _stream("events", cursor_field="created_at", ordering=Ordering.newest_first),
+    _stream(
+        "events",
+        cursor_field="created_at",
+        ordering=Ordering.newest_first,
+        backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
+    ),
     _stream("issue_comment_reactions", cursor_field=None),
-    _stream("issue_events", cursor_field="created_at", ordering=Ordering.newest_first),
+    _stream(
+        "issue_events",
+        cursor_field="created_at",
+        ordering=Ordering.newest_first,
+        backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
+    ),
     _stream("issue_labels", cursor_field=None),
     _stream("issue_reactions", cursor_field=None),
     _stream("issue_timeline_events", cursor_field="created_at"),
@@ -232,8 +247,26 @@ class GitHubConnector(RestConnector):
             return shaped
         return {**shaped, stream.primary_key: f"{partition}/{key}"}
 
+    def paginate_source(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        """Widen the default seam by the row's pinned backfill floor, which only the
+        newest-first per-repo walks read."""
+        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
+
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         path = _PATHS.get(stream.name)
         if not path:
@@ -257,8 +290,18 @@ class GitHubConnector(RestConnector):
             def repo_pages(repo_key: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
                 return self._repo_pages(client, stream, path, repo_key, bound)
 
+            # the pinned floor as the ISO string GitHub stamps records with — the space the walk
+            # compares in and `?since`/`?until` take
+            floor = (
+                None
+                if backfill_after is None
+                else backfill_after.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
             walk = PartitionWalk(
-                ordering=stream.ordering, partitions=repos, pages=repo_pages
+                ordering=stream.ordering,
+                partitions=repos,
+                pages=repo_pages,
+                floor=floor,
             ).stream(cursor)
             try:
                 async for repo_page in walk:
@@ -304,7 +347,12 @@ class GitHubConnector(RestConnector):
         expose no time filter, so a backfill is bounded client-side by dropping records at or above
         `before`. Each page reports its cursor-value span so the walk tracks the watermark/window
         and leaves stamped with its repo, which qualifies every record's page ref; a repo the grant
-        can't read (404/409/410) drops out without failing the run."""
+        can't read (404/409/410) drops out without failing the run.
+
+        The pinned floor arrives as `bound.since` and takes the same two roads: `commits` sends
+        `?since`, so the older history is never fetched; `events`/`issue_events` filter it
+        client-side, which caps what lands but not what is fetched, their API having no time filter.
+        Both compare as the ISO strings GitHub returns."""
         owner, _, repo = repo_key.partition("/")
         scoped = path.format(owner=owner, repo=repo)
         params: dict[str, Any] = {"per_page": PAGE_SIZE}
@@ -314,29 +362,42 @@ class GitHubConnector(RestConnector):
             params |= {"sort": "updated", "direction": "asc"}
             if bound.after:
                 params["since"] = bound.after
-        elif stream.name in _UNTIL_STREAMS and bound.before:
-            params["until"] = bound.before
+        elif stream.name in _UNTIL_STREAMS:
+            if bound.before:
+                params["until"] = bound.before
+            if bound.since:
+                params["since"] = bound.since
         try:
             async for page in self._paginate_link_header(client, scoped, params=dict(params)):
                 if stream.name == "issues":
                     page = [record for record in page if "pull_request" not in record]
+                if not page:
+                    continue
+                landed = page
                 if (
                     stream.ordering is Ordering.newest_first
                     and stream.name not in _UNTIL_STREAMS
-                    and bound.before
+                    and (bound.before or bound.since)
                 ):
-                    before = bound.before
+                    before, since = bound.before, bound.since
                     field = stream.cursor_field
-                    page = [
+                    landed = [
                         record
                         for record in page
-                        if field and isinstance(record.get(field), str) and record[field] <= before
+                        if field
+                        and isinstance(record.get(field), str)
+                        and (before is None or record[field] <= before)
+                        and (since is None or record[field] >= since)
                     ]
-                if not page:
-                    continue
-                high, low = _cursor_bounds(page, stream.cursor_field)
+                high, _ = _cursor_bounds(landed, stream.cursor_field)
+                # `low` spans what the PROVIDER returned, never what survived the filter. The walk
+                # stops its descent when `low` crosses the floor, so reporting the filtered span
+                # would hide that this repo's history had already run past it — and a page filtered
+                # away entirely would report nothing at all, leaving the walk to follow the link
+                # header down the whole history while landing none of it.
+                _, low = _cursor_bounds(page, stream.cursor_field)
                 yield WalkPage(
-                    records=with_context(page, **{REPO_PARTITION_FIELD: repo_key}),
+                    records=with_context(landed, **{REPO_PARTITION_FIELD: repo_key}),
                     high=high,
                     low=low,
                 )

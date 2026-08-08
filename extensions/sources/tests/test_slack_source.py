@@ -48,6 +48,7 @@ async def _fetch(
     *,
     cursor: str | None = None,
     self_user_id: str | None = None,
+    backfill_after: datetime | None = None,
 ) -> SyncResult:
     auth = SourceAuth(
         workspace_id=uuid4(),
@@ -55,7 +56,9 @@ async def _fetch(
         self_user_id=self_user_id,
     )
     return await ConnectorBackend(connector=SlackConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, backfill_after=backfill_after),
+        cursor,
+        auth,
     )
 
 
@@ -310,6 +313,101 @@ async def test_sync_driver_resolves_the_current_surface_user_each_fetch(tmp_path
 
     assert _refs(first) == {"messages/C1:1700000003.000000"}
     assert _refs(second) == {"messages/C1:1700000002.000000"}
+
+
+async def test_a_pinned_floor_bounds_the_channel_walk_and_dissolves_there() -> None:
+    """A channel with years of history is the volume that actually blows up a workspace sync — one
+    walk per channel, all the way down, multiplied by the channel count. The row's pinned cutoff
+    reaches `conversations.history` as `oldest`, so slack never returns what the walk would then
+    discard, and the partition dissolves to its `high` watermark at the floor rather than leaving a
+    window a later run keeps descending from.
+
+    The floor crosses the wire as a slack `ts`, which is what the walk compares message timestamps
+    against — assert the exact string, since a floor rendered in any other shape would compare
+    wrong and silently bound nothing."""
+    pinned = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+    history_calls: list[dict[str, object]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "alice"}]})
+        if path == "/api/conversations.list":
+            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
+        if path == "/api/conversations.history":
+            body = json.loads(request.content) if request.content else {}
+            history_calls.append(body)
+            # slack honours `oldest`, so nothing below the floor comes back
+            return _ok({"messages": [{"ts": "1783000000.000000", "user": "U1", "text": "in"}]})
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    result = await _fetch("messages", handle, backfill_after=pinned)
+
+    assert history_calls[0]["oldest"] == f"{pinned.timestamp():.6f}"
+    assert history_calls[0]["inclusive"] == "true"
+    assert "latest" not in history_calls[0]
+    assert _refs(result) == {"messages/C1:1783000000.000000"}
+    # dissolved to the watermark: the next run is incremental, not another descent
+    assert json.loads(str(result.next_cursor)) == {"C1": "1783000000.000000"}
+
+
+async def test_a_pre_2001_floor_does_not_collapse_the_channel_after_one_page() -> None:
+    """`backfill_days` reaches 36500, so a member can legitimately pin a floor before 2001 — where
+    Unix seconds are 9 digits, not 10. Unpadded, that floor sorts lexicographically ABOVE every
+    current message `ts`, and the walk (which compares as strings) grounds itself on the very first
+    page: each channel lands one page and dissolves to steady state, so the decades asked for are
+    never fetched — on that run or any later one, since re-pinning only widens.
+
+    Padding to a live `ts`'s width is what keeps the comparison honest. The channel here holds two
+    pages, and both have to land."""
+    pinned = datetime(1999, 9, 9, tzinfo=UTC)
+    assert len(f"{pinned.timestamp():.6f}") < len("1783000000.000000")  # the trap: 9 digits
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "alice"}]})
+        if path == "/api/conversations.list":
+            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
+        if path == "/api/conversations.history":
+            body = json.loads(request.content) if request.content else {}
+            if body.get("cursor") == "p2":
+                return _ok({"messages": [{"ts": "1700000000.000000", "user": "U1", "text": "old"}]})
+            return _ok(
+                {
+                    "messages": [{"ts": "1783000000.000000", "user": "U1", "text": "new"}],
+                    "response_metadata": {"next_cursor": "p2"},
+                }
+            )
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    result = await _fetch("messages", handle, backfill_after=pinned)
+
+    assert _refs(result) == {
+        "messages/C1:1783000000.000000",
+        "messages/C1:1700000000.000000",
+    }
+
+
+async def test_a_row_pinning_no_floor_still_walks_the_whole_channel() -> None:
+    """The bound is the row's, not the connector's: a binding that asked for all history sends no
+    `oldest` on its first walk, which is the behaviour every slack row had before the window."""
+    history_calls: list[dict[str, object]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/users.list":
+            return _ok({"members": [{"id": "U1", "name": "alice"}]})
+        if path == "/api/conversations.list":
+            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
+        if path == "/api/conversations.history":
+            history_calls.append(json.loads(request.content) if request.content else {})
+            return _ok({"messages": [{"ts": "1783000000.000000", "user": "U1", "text": "in"}]})
+        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
+
+    await _fetch("messages", handle)
+
+    assert "oldest" not in history_calls[0]
 
 
 async def test_messages_backfill_windows_and_resumes_downward_with_latest(

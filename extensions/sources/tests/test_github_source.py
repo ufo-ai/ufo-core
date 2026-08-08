@@ -13,6 +13,7 @@ via `?until`, and a grant that cannot enumerate orgs at all (`/user/orgs` → 40
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
@@ -50,10 +51,13 @@ async def _fetch(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     cursor: str | None = None,
+    backfill_after: datetime | None = None,
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
     return await ConnectorBackend(connector=GitHubConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+        ConnectorSourceConfig(account=ACCOUNT, stream=stream, backfill_after=backfill_after),
+        cursor,
+        auth,
     )
 
 
@@ -63,6 +67,94 @@ def _refs(result: SyncResult) -> set[str]:
 
 def _commit(sha: str, date: str) -> dict[str, object]:
     return {"sha": sha, "commit": {"committer": {"date": date}}}
+
+
+async def test_a_pinned_floor_bounds_commits_server_side() -> None:
+    """`commits` is the one newest-first repo feed GitHub will bound for us: the row's pinned floor
+    goes out as `?since`, so a repo with years of history never sends the older commits at all. It
+    crosses as the ISO string GitHub stamps `commit.committer.date` with, which is the value space
+    the walk compares against — any other shape would compare wrong and bound nothing."""
+    pinned = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+    queries: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/commits":
+            queries.append(dict(request.url.params))
+            return httpx.Response(200, json=[_commit("c1", "2026-07-20T00:00:00Z")])
+        return httpx.Response(404, json={"path": request.url.path})
+
+    await _fetch("commits", handle, backfill_after=pinned)
+
+    assert queries[0]["since"] == "2026-07-08T12:00:00Z"
+    assert "until" not in queries[0]
+
+
+async def test_a_page_entirely_below_the_floor_stops_the_descent() -> None:
+    """The client-side floor filter must not hide the page span from the walk. Filtering the
+    records first and reporting only the survivors' span means `low` never falls below the floor,
+    so the walk's floor stop never fires — and a page filtered away entirely reports nothing at
+    all, leaving the link header to be followed through a repo's whole history while landing none
+    of it. Nothing lands, so the per-run record cap never trips either, and the run has no
+    checkpointed progress to show for the API calls it spent.
+
+    That is strictly worse than no floor at all, which is what makes it a regression rather than a
+    missing feature: unfiltered, the records landed and the cap ended the run with a resumable
+    window. So the assertion is the request count, not the records — one page, then stop."""
+    pinned = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+    calls: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/events":
+            calls.append(str(request.url))
+            # every record predates the floor, and GitHub offers another page below it
+            return httpx.Response(
+                200,
+                json=[{"id": f"e{len(calls)}", "created_at": "2020-01-01T00:00:00Z"}],
+                headers={
+                    "Link": '<https://api.github.com/repos/acme/repo1/events?page=2>; rel="next"'
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("events", handle, backfill_after=pinned)
+
+    assert len(calls) == 1  # stopped at the floor rather than walking the history down
+    assert _refs(result) == set()
+
+
+async def test_a_pinned_floor_drops_events_below_it_client_side() -> None:
+    """`events` and `issue_events` expose no time filter, so the floor cannot be pushed server-side
+    and is applied to the records instead: everything below it is dropped rather than landed. That
+    caps what the window admits even where it cannot cap what is fetched, and the walk stopping at
+    the floor is what bounds the paging."""
+    pinned = datetime(2026, 7, 8, 12, 0, tzinfo=UTC)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/events":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": "e-inside", "created_at": "2026-07-20T00:00:00Z"},
+                    {"id": "e-below", "created_at": "2020-01-01T00:00:00Z"},
+                ],
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("events", handle, backfill_after=pinned)
+
+    assert _refs(result) == {"events/acme/repo1/e-inside"}
 
 
 async def test_repositories_fan_out_over_granted_orgs_and_advance_a_watermark() -> None:

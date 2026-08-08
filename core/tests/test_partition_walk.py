@@ -71,15 +71,25 @@ class _FakePartitions:
             return [v for v in sorted(values) if bound.after is None or v > bound.after]
         if self.ordering is Ordering.newest_first:
             newest_first = sorted(values, reverse=True)
-            return [v for v in newest_first if bound.before is None or v <= bound.before]
+            return [
+                v
+                for v in newest_first
+                if (bound.before is None or v <= bound.before)
+                and (bound.since is None or v >= bound.since)
+            ]
         return list(values)
 
 
-async def _collect(fake: _FakePartitions, cursor: str | None) -> list[StreamPage]:
+async def _collect(
+    fake: _FakePartitions, cursor: str | None, *, floor: str | None = None
+) -> list[StreamPage]:
     return [
         page
         async for page in PartitionWalk(
-            ordering=fake.ordering, partitions=fake.partitions, pages=fake.pages
+            ordering=fake.ordering,
+            partitions=fake.partitions,
+            pages=fake.pages,
+            floor=floor,
         ).stream(cursor)
     ]
 
@@ -117,6 +127,81 @@ async def test_newest_first_backfill_windows_then_dissolves() -> None:
         {"p": "n3"},
     ]
     assert pages[-1].records == []
+
+
+async def test_a_floor_stops_a_fresh_backfill_descending_past_it() -> None:
+    """Without a floor a fresh partition walks to the beginning of its history, and the fan-out
+    multiplies that by the partition count — every message in every channel. The floor rides down
+    as `PartitionBound.since` so the factory never fetches below it, and the walk then exhausts
+    there and dissolves to its `high` watermark exactly as a whole walk does: the partition moves
+    to steady state instead of re-descending every run."""
+    fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3", "n4"]}, page_size=1)
+    pages = await _collect(fake, None, floor="n3")
+
+    assert _landed(pages) == ["n4", "n3"]  # n2 and n1 are below the floor and never fetched
+    assert fake.seen == [("p", PartitionBound(since="n3"))]
+    assert _cursors(pages)[-1] == {"p": "n4"}  # dissolved: steady state next run
+
+
+async def test_a_floor_bounds_a_resumed_backfill_too() -> None:
+    """A capped run leaves `{high, until}` and the resume descends from `until`. The floor has to
+    reach that request as well, or the bound would hold on a first run and be forgotten on every
+    instalment after it — which is the case that actually walks the long tail."""
+    fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3", "n4"]}, page_size=1)
+    pages = await _collect(fake, json.dumps({"p": {"high": "n4", "until": "n4"}}), floor="n3")
+
+    assert _landed(pages) == ["n4", "n3"]
+    assert fake.seen == [("p", PartitionBound(before="n4", since="n3"))]
+    assert _cursors(pages)[-1] == {"p": "n4"}
+
+
+async def test_a_floor_leaves_steady_state_alone() -> None:
+    """Once a partition has dissolved to a watermark it is incremental, and the floor is a bound on
+    the FIRST walk only. Passing it as `since` beside `after` would re-assert a backfill bound on
+    an incremental pass — and on a row whose floor is older than its watermark that is simply
+    wrong."""
+    fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3"]}, page_size=1)
+    pages = await _collect(fake, json.dumps({"p": "n2"}), floor="n1")
+
+    assert fake.seen == [("p", PartitionBound(after="n2"))]
+    assert _landed(pages) == ["n3", "n2"]
+
+
+async def test_a_floor_does_not_reach_an_ascending_walk() -> None:
+    """`ascending` climbs from a watermark and `none` re-walks whole; neither descends, so neither
+    can overshoot a floor and neither takes one."""
+    fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3"]})
+    await _collect(fake, None, floor="a2")
+    assert fake.seen == [("p", PartitionBound(after=None))]
+
+    plain = _FakePartitions(Ordering.none, {"p": ["x", "y"]})
+    await _collect(plain, None, floor="x")
+    assert plain.seen == [("p", PartitionBound())]
+
+
+async def test_a_factory_that_ignores_the_floor_still_stops_descending() -> None:
+    """`since` is a request, and an API that cannot bound server-side answers it with everything.
+    The walk stops itself on the first page that reaches the floor and dissolves, so such a factory
+    costs one page of overshoot rather than the whole history. Filtering those records is the
+    connector's job — `WalkPage` carries `high`/`low`, not per-record values, so the walk cannot do
+    it here."""
+
+    async def partitions() -> AsyncIterator[str]:
+        yield "p"
+
+    async def unbounded(partition: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+        for value in ("n4", "n3", "n2", "n1"):
+            yield WalkPage(records=[_rec(value)], high=value, low=value)
+
+    pages = [
+        page
+        async for page in PartitionWalk(
+            ordering=Ordering.newest_first, partitions=partitions, pages=unbounded, floor="n3"
+        ).stream(None)
+    ]
+
+    assert _landed(pages) == ["n4", "n3"]  # stopped at the floor, did not walk to n1
+    assert _cursors(pages)[-1] == {"p": "n4"}
 
 
 async def test_newest_first_backfill_resumes_downward_from_until() -> None:

@@ -35,7 +35,13 @@ from ufo.sources.backend import (
     binding_name as binding_name,
 )
 from ufo.sources.connector import (
+    CHAT_BACKFILL_WINDOW_DAYS as CHAT_BACKFILL_WINDOW_DAYS,
+)
+from ufo.sources.connector import (
     MAIL_BACKFILL_WINDOW_DAYS as MAIL_BACKFILL_WINDOW_DAYS,
+)
+from ufo.sources.connector import (
+    REPO_BACKFILL_WINDOW_DAYS as REPO_BACKFILL_WINDOW_DAYS,
 )
 from ufo.sources.connector import (
     Connector as Connector,

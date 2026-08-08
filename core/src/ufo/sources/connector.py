@@ -28,6 +28,8 @@ from ufo.connectors import Credential
 
 TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
 MAIL_BACKFILL_WINDOW_DAYS = 30
+CHAT_BACKFILL_WINDOW_DAYS = 30
+REPO_BACKFILL_WINDOW_DAYS = 30
 
 
 class PaginationStrategy(StrEnum):
@@ -137,10 +139,16 @@ class PartitionBound:
     the partition is fresh: walk it whole from the newest record. A connector translates these into
     its own API — a `since`/`oldest` lower bound, an inclusive `until`/`latest` upper bound, or a
     client-side filter for an API that supports neither (and wraps any record filter of its own,
-    like GitHub's pull-request exclusion, here too)."""
+    like GitHub's pull-request exclusion, here too).
+
+    `since` is the pinned floor of a newest-first backfill, in the partition's own `cursor_field`
+    value space — the connector renders `backfill_after` into it, since only the connector knows
+    whether that space is an epoch string or an ISO instant. It bounds the FIRST walk, never a
+    steady-state pass: `PartitionWalk` sets `after` and `since` on different requests."""
 
     after: str | None = None
     before: str | None = None
+    since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,11 +216,19 @@ class PartitionWalk:
     a dropped partition's watermark cannot outlive it — though a partition deleted and recreated
     under the same name between two syncs (no completed pass observing the absence) inherits the
     old watermark, the residual trade of name-keyed partitions. The other trade is that a factory
-    whose API cannot bound server-side re-fetches the walked prefix each slice."""
+    whose API cannot bound server-side re-fetches the walked prefix each slice.
+
+    `floor` bounds how far back a `newest_first` FIRST walk descends. Without one a fresh partition
+    walks to the beginning of its history, times the partition count. With one the descent stops on
+    the first page reaching it and dissolves to `high` as an exhausted walk does, so the partition
+    moves to steady state rather than re-descending every run; it also rides down as
+    `PartitionBound.since`, so a factory that can bound server-side never fetches what the walk
+    would discard. `ascending` and `none` ignore it — neither descends."""
 
     ordering: Ordering
     partitions: Partitions
     pages: PageFactory
+    floor: str | None = None
 
     async def stream(self, cursor: str | None) -> AsyncIterator[StreamPage]:
         stored = self._decode(cursor)
@@ -247,7 +263,7 @@ class PartitionWalk:
                 match stored.get(partition):
                     case _Window(high=high, until=until):
                         bound, synced, backfill = (
-                            PartitionBound(before=until),
+                            PartitionBound(before=until, since=self.floor),
                             None,
                             True,
                         )
@@ -259,8 +275,13 @@ class PartitionWalk:
                             False,
                         )
                     case _:
-                        bound, high, until, synced = PartitionBound(), None, None, None
                         backfill = self.ordering is Ordering.newest_first
+                        bound, high, until, synced = (
+                            PartitionBound(since=self.floor if backfill else None),
+                            None,
+                            None,
+                            None,
+                        )
                 page_iter = self.pages(partition, bound)
                 try:
                     async for page in page_iter:
@@ -280,7 +301,13 @@ class PartitionWalk:
                             and (until is None or page.low < until)
                         ):
                             until = page.low
-                        if backfill and high is not None and until is not None:
+                        grounded = (
+                            backfill
+                            and self.floor is not None
+                            and until is not None
+                            and until <= self.floor
+                        )
+                        if backfill and high is not None and until is not None and not grounded:
                             checkpoint[partition] = _Window(high=high, until=until)
                         elif not backfill and high is not None:
                             checkpoint[partition] = high
@@ -289,6 +316,10 @@ class PartitionWalk:
                             deletes=page.deletes,
                             next_cursor=self._encode(checkpoint),
                         )
+                        if grounded:
+                            # reached the floor: dissolve to the watermark below rather than leave
+                            # a window a later run keeps descending from
+                            break
                 except PartitionSkipped:
                     continue
                 finally:

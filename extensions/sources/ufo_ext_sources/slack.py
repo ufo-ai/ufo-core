@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import (
+    CHAT_BACKFILL_WINDOW_DAYS,
     Ordering,
     PartitionBound,
     PartitionSkipped,
@@ -64,6 +65,7 @@ ALL_STREAMS: list[StreamSpec] = [
         source_object="conversations.history",
         primary_key="id",
         ordering=Ordering.newest_first,
+        backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
     ),
     StreamSpec(
         name="messages",
@@ -72,12 +74,14 @@ ALL_STREAMS: list[StreamSpec] = [
         created_at_field="sent_at",
         updated_at_field=None,
         ordering=Ordering.newest_first,
+        backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
     ),
     StreamSpec(
         name="message_participants",
         source_object="message_participants",
         primary_key="id",
         ordering=Ordering.newest_first,
+        backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
     ),
 ]
 
@@ -112,6 +116,7 @@ class SlackConnector(RestConnector):
             stream,
             cursor=cursor,
             self_user_id=self_user_id,
+            backfill_after=backfill_after,
         )
 
     async def paginate(
@@ -121,6 +126,7 @@ class SlackConnector(RestConnector):
         *,
         cursor: str | None,
         self_user_id: str | None = None,
+        backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.name == "users":
             async for page in self.iter_users(client):
@@ -154,7 +160,10 @@ class SlackConnector(RestConnector):
                 )
 
             walk = PartitionWalk(
-                ordering=stream.ordering, partitions=partitions, pages=channel_pages
+                ordering=stream.ordering,
+                partitions=partitions,
+                pages=channel_pages,
+                floor=_slack_ts(backfill_after),
             ).stream(cursor)
             try:
                 async for stream_page in walk:
@@ -258,8 +267,13 @@ class SlackConnector(RestConnector):
                 params["cursor"] = cursor
             if bound.after:
                 params |= {"oldest": bound.after, "inclusive": "false"}
-            elif bound.before:
-                params |= {"latest": bound.before, "inclusive": "true"}
+            else:
+                if bound.before:
+                    params |= {"latest": bound.before, "inclusive": "true"}
+                if bound.since:
+                    # the pinned floor, bounding the descent server-side; `inclusive` governs both
+                    # ends and true is right for each
+                    params |= {"oldest": bound.since, "inclusive": "true"}
             try:
                 data = await self._slack_post(client, "/api/conversations.history", json=params)
             except SlackApiError as error:
@@ -390,6 +404,21 @@ def _unix_to_iso(value: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     return datetime.fromtimestamp(seconds, UTC).isoformat()
+
+
+def _slack_ts(value: datetime | None) -> str | None:
+    """A pinned instant as the `ts` string slack orders channel history by, zero-padded to the width
+    of a live one.
+
+    The walk compares these as strings, so a floor narrower than 10 integer digits would sort ABOVE
+    every current `ts` rather than below it — a pin between 1970 and 2001 has 9, and the walk would
+    ground itself on the first page and dissolve the channel after one. Padding puts every instant
+    from the epoch to 2286 in the same width as the values it is compared against. Below the epoch
+    there is nothing to render and nothing to bound, so None."""
+    if value is None:
+        return None
+    seconds = value.timestamp()
+    return None if seconds < 0 else f"{seconds:017.6f}"
 
 
 def _slack_ts_to_iso(value: str | None) -> str | None:

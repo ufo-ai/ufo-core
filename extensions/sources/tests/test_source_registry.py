@@ -38,7 +38,7 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
         for name, cls in CONNECTORS.items()
     }
     declaring = {name: streams for name, streams in obliged.items() if streams}
-    assert set(declaring) == {"gmail", "outlook"}
+    assert set(declaring) == {"github", "gmail", "outlook", "slack"}
 
     deaf = [
         f"{name} declares a window on {streams} but does not override paginate_source"
