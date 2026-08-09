@@ -8,6 +8,7 @@ raised or timed out would deny the member's Slack message, so the unresolvable c
 through the real `HookChain`, where a denial would show.
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -19,7 +20,7 @@ import ufo_ext_connectors.tools as connector_tools
 import ufo_ext_slack.surface as slack
 from cryptography.fernet import Fernet
 from ufo_ext_connectors.tools import CallExternalToolInput
-from ufo_ext_slack.attribution import addressing_mention, mention_attribution
+from ufo_ext_slack.attribution import addressing_mention, mention_attributed, mention_attribution
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
@@ -39,6 +40,8 @@ SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
 SLACK_HISTORY_SLUG = "SLACK_FETCH_CONVERSATION_HISTORY"
 MARK = "beef"
 SENT_TEXT = "the plan is posted"
+SENT_MARKDOWN = "the *plan* is posted"
+SENT_BLOCKS: list[JsonValue] = [{"type": "section", "text": {"type": "mrkdwn", "text": SENT_TEXT}}]
 
 
 class _UnreadableStore(ScopedStore):
@@ -152,7 +155,7 @@ async def test_the_hook_footers_a_send_with_the_id_the_surface_mirrored(db: None
         await slack._mirror_self_user_id(workspace_id, BOT_USER_ID)
         resolution = await _fire(
             _declared_chain(),
-            _send({"channel": "C1", "text": SENT_TEXT, "markdown_text": "the *plan* is posted"}),
+            _send({"channel": "C1", "text": SENT_TEXT, "markdown_text": SENT_MARKDOWN}),
         )
 
     assert (resolution.denied, resolution.failed_closed) == (None, None)
@@ -161,7 +164,7 @@ async def test_the_hook_footers_a_send_with_the_id_the_surface_mirrored(db: None
     assert resolution.tool_input.arguments == {
         "channel": "C1",
         "text": f"{SENT_TEXT}\n\n{footer}",
-        "markdown_text": f"the *plan* is posted\n\n{footer}",
+        "markdown_text": f"{SENT_MARKDOWN}\n\n:::context\n**Sent using** <@{BOT_USER_ID}>\n:::",
     }
     assert footer == f"Sent using <@{BOT_USER_ID}>"
 
@@ -238,6 +241,72 @@ async def test_only_a_slack_send_is_rewritten(call: CallExternalToolInput) -> No
     assert resolution.tool_input.arguments == call.arguments
 
 
+@pytest.mark.parametrize(
+    ("body", "footered"),
+    [
+        (
+            {"markdown_text": SENT_MARKDOWN},
+            {
+                "markdown_text": (
+                    f"{SENT_MARKDOWN}\n\n:::context\n**Sent using** <@{BOT_USER_ID}>\n:::"
+                )
+            },
+        ),
+        ({"text": SENT_TEXT}, {"text": f"{SENT_TEXT}\n\nSent using <@{BOT_USER_ID}>"}),
+        (
+            {"blocks": list(SENT_BLOCKS), "text": SENT_TEXT},
+            {
+                "blocks": [
+                    *SENT_BLOCKS,
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"*Sent using* <@{BOT_USER_ID}>"}],
+                    },
+                ],
+                "text": f"{SENT_TEXT}\n\nSent using <@{BOT_USER_ID}>",
+            },
+        ),
+    ],
+    ids=["markdown_text", "text", "blocks"],
+)
+def test_the_mentioning_footer_takes_the_shape_of_the_body_it_marks(
+    body: dict[str, JsonValue], footered: dict[str, JsonValue]
+) -> None:
+    """The bot mention reaches every body shape in the shape that renders it: the `:::context`
+    directive the broker converts on `markdown_text`, the context block appended to a
+    Block-Kit-authored body with the plain line left on `text` as its notification fallback, and the
+    plain line alone on a text-only send. The mention is left unstyled inside the footer so Slack
+    renders it as the app's chip."""
+    assert mention_attributed(body, BOT_USER_ID) == footered
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"markdown_text": SENT_MARKDOWN},
+        {"text": SENT_TEXT},
+        {"blocks": list(SENT_BLOCKS), "text": SENT_TEXT},
+        {"channel": "C1"},
+    ],
+    ids=["markdown_text", "text", "blocks", "no_body"],
+)
+def test_the_hooks_footer_suppresses_the_tools_own_append_in_every_shape(
+    body: dict[str, JsonValue],
+) -> None:
+    """No double footer in any shape, which is the same join the never-stack guard holds: whatever
+    the hook wrote, the tool's own pass over the rewritten arguments adds nothing — and a call
+    carrying no body at all is never given one by either writer."""
+    rewritten = mention_attributed(body, BOT_USER_ID)
+    assert (
+        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, rewritten)
+        == rewritten
+    )
+    assert connector_tools.UFO_ATTRIBUTION not in json.dumps(rewritten)
+    assert json.dumps(rewritten).count("Sent using") == len(
+        body.keys() & {"markdown_text", "text", "blocks"}
+    )
+
+
 def test_a_footered_message_is_not_a_message_addressed_to_the_agent() -> None:
     """A connector send is authored by a member's own connected account, so no inbound bot-author
     drop catches it. Read naively, its footer's mention would open a turn about the deploy's own
@@ -254,6 +323,54 @@ def test_a_footered_message_is_not_a_message_addressed_to_the_agent() -> None:
         is True
     )
     assert addressing_mention(f"<@{BOT_USER_ID}> and {footered}", BOT_USER_ID) is True
+
+
+def test_a_blocks_authored_send_is_not_an_address_when_slack_delivers_it_back() -> None:
+    """A `blocks`-authored send names no `text`, so the footer's mention has no home but a context
+    element — and the event Slack delivers back for it is an `app_mention` whose `text` is empty.
+    Deciding over `text` alone, the mention is unreadable and the event admits as a turn with no
+    body at all: the deploy's own published message opening a turn about itself. A mention the body
+    blocks carry is the member's own and still addresses the agent."""
+    published = mention_attributed({"channel": "C1", "blocks": list(SENT_BLOCKS)}, BOT_USER_ID)
+    event = {"type": "app_mention", "text": "", "blocks": published["blocks"]}
+    assert slack.slack_message_addressed(event, BOT_USER_ID, is_dm=False) is False
+
+    asked: list[JsonValue] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"<@{BOT_USER_ID}> what happened?"}}
+    ]
+    mentioning = mention_attributed({"channel": "C1", "blocks": asked}, BOT_USER_ID)
+    assert (
+        slack.slack_message_addressed(
+            {"type": "app_mention", "text": "", "blocks": mentioning["blocks"]},
+            BOT_USER_ID,
+            is_dm=False,
+        )
+        is True
+    )
+
+
+def test_a_footer_flattened_onto_the_bodys_line_is_not_an_address() -> None:
+    """The separator does not survive the send. A `markdown_text` body goes out with the footer
+    after a blank line, and the fallback `text` the published message stores comes back with it
+    joined onto the body's own line by whitespace — twice, when the message carries two copies. None
+    of them is a whole line of its own, so a whole-line read strips nothing and the deploy's own
+    send reads as the member mentioning the agent. A real mention alongside a flattened footer
+    still addresses it."""
+    footer = mention_attribution(BOT_USER_ID)
+    for flattened in (
+        f"{SENT_TEXT}  {footer}",
+        f"{SENT_TEXT}  {footer}  {footer}",
+        f"{SENT_TEXT} *Sent using* <@{BOT_USER_ID}>",
+    ):
+        assert (
+            slack.slack_message_addressed(
+                {"type": "app_mention", "text": flattened}, BOT_USER_ID, is_dm=False
+            )
+            is False
+        )
+    assert (
+        addressing_mention(f"<@{BOT_USER_ID}> what happened here?  {footer}", BOT_USER_ID) is True
+    )
 
 
 def test_a_footered_message_stays_visible_in_the_ambient_digest() -> None:

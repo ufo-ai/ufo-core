@@ -114,7 +114,7 @@ from ufo.sdk.surfaces import (
     inbox_name,
     mint_marker,
 )
-from ufo_ext_slack.attribution import addressing_mention
+from ufo_ext_slack.attribution import addressing_mention, message_bodies
 
 SLACK_EXTENSION = "slack"
 """This extension's own name, which the manifest takes from here. It is the key space of the
@@ -930,14 +930,18 @@ def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm
     (`_participating_conversation`), never as passing top-level traffic.
 
     Slack delivers `app_mention` for a footer's mention too, so the event type alone decides only
-    when the text carries no mention this module can read — a mention spelled some other way still
-    admits, a footered one does not."""
+    when the message carries no mention this module can read — a mention spelled some other way
+    still admits, a footered one does not. Every body the message carries is read, never `text`
+    alone: a connector send that authored `blocks` itself leaves `text` empty and the footer's
+    mention in a context element, which read through `text` is an `app_mention` carrying no readable
+    mention at all — admitting this deploy's own outbound message as a turn with an empty body."""
     if is_dm:
         return True
-    text = str(event.get("text") or "")
-    if addressing_mention(text, bot_user_id):
+    bodies = message_bodies(event)
+    if any(addressing_mention(body, bot_user_id) for body in bodies):
         return True
-    return event.get("type") == "app_mention" and f"<@{bot_user_id}>" not in text
+    mention = f"<@{bot_user_id}>"
+    return event.get("type") == "app_mention" and not any(mention in body for body in bodies)
 
 
 def slack_reply_body(

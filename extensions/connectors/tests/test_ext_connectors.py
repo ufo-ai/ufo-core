@@ -14,10 +14,11 @@ import base64
 import hashlib
 import json
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
 
 import pytest
@@ -44,6 +45,7 @@ from ufo.connectors import (
     ConnectorRegistry,
     StagedUpload,
 )
+from ufo.ext.context import JsonValue
 from ufo.ext.loader import turn_tools
 from ufo.grants import Grant, GrantStore
 from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
@@ -68,7 +70,11 @@ SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
 SLACK_UPDATE_SLUG = "SLACK_UPDATES_A_SLACK_MESSAGE"
 SLACK_HISTORY_SLUG = "SLACK_FETCH_CONVERSATION_HISTORY"
 SLACK_SCHEDULED_LIST_SLUG = "SLACK_LIST_SCHEDULED_MESSAGES"
+SLACK_SCHEDULED_DELETE_SLUG = "SLACK_DELETE_A_SCHEDULED_MESSAGE"
 GMAIL_SEND_SLUG = "GMAIL_SEND_EMAIL"
+SLACK_BODY_BLOCKS: list[JsonValue] = [
+    {"type": "section", "text": {"type": "mrkdwn", "text": "the *plan* is posted"}}
+]
 SLACK_ACCOUNT = "slack-acct"
 
 
@@ -327,16 +333,97 @@ async def test_call_external_tool_requires_a_choice_between_connected_accounts()
     assert _payload(result)["account"] == "acct-two"
 
 
-def test_slack_attributed_marks_the_message_text_of_a_send() -> None:
+def test_a_markdown_body_carries_the_footer_as_a_context_directive() -> None:
+    """The preferred body shape, and the footer Slack renders small and muted: the broker converts
+    the `:::context` directive into a context block after the body's own blocks. The lead takes two
+    asterisks each side because the converter reads one pair as italic and two as bold."""
     assert connector_tools.slack_attributed(
         connector_tools.SLACK_PROVIDER,
         SLACK_SEND_SLUG,
-        {"channel": "C1", "text": "the plan is posted", "markdown_text": "the *plan* is posted"},
+        {"channel": "C1", "markdown_text": "the *plan* is posted"},
     ) == {
         "channel": "C1",
-        "text": f"the plan is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
-        "markdown_text": f"the *plan* is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
+        "markdown_text": "the *plan* is posted\n\n:::context\n**Sent using** ufo\n:::",
     }
+
+
+def test_a_text_only_body_carries_the_footer_as_a_plain_line() -> None:
+    """The deprecated shape stays as it is, footered by a plain appended line: blocks invented for
+    it would replace the body, and retyping a mrkdwn body into a section block risks that block's
+    own text cap for no gain."""
+    assert connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "text": "the plan"}
+    ) == {"channel": "C1", "text": f"the plan\n\n{connector_tools.UFO_ATTRIBUTION}"}
+
+
+def test_a_block_body_carries_the_footer_as_a_context_block() -> None:
+    """A Block-Kit-authored body publishes the blocks and reads `text` as the notification fallback,
+    so the footer has to reach both: the context block renders it, the plain line carries it into a
+    notification, a search result, and a client that renders no blocks."""
+    assert connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        {"channel": "C1", "blocks": list(SLACK_BODY_BLOCKS), "text": "the plan"},
+    ) == {
+        "channel": "C1",
+        "blocks": [
+            *SLACK_BODY_BLOCKS,
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]},
+        ],
+        "text": f"the plan\n\n{connector_tools.UFO_ATTRIBUTION}",
+    }
+
+
+@pytest.mark.parametrize("encode", [str, quote], ids=["json", "url_encoded"])
+def test_a_serialized_block_body_is_read_and_re_emitted_the_way_it_arrived(
+    encode: Callable[[str], str],
+) -> None:
+    """The broker's schema takes the block list serialized as well as literal, so both forms are
+    footered — and the value goes back in the encoding it came in, since that is the one the broker
+    reads it out of."""
+    sent = encode(json.dumps(SLACK_BODY_BLOCKS))
+    attributed = connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "blocks": sent}
+    )
+    blocks = attributed["blocks"]
+    assert isinstance(blocks, str) and json.loads(unquote(blocks)) == [
+        *SLACK_BODY_BLOCKS,
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]},
+    ]
+    assert (blocks == unquote(blocks)) is (sent == unquote(sent))
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    ["not json at all", json.dumps({"type": "section"}), [], 7],
+    ids=["unparseable", "not_a_list", "empty", "not_a_body"],
+)
+def test_a_block_body_this_cannot_read_is_left_alone_and_the_text_still_marked(
+    blocks: JsonValue,
+) -> None:
+    """A `blocks` value that is not a block list to append to is passed through exactly as the model
+    wrote it — a body is never rebuilt to be able to hold a footer — and the attribution rides the
+    notification fallback alone."""
+    assert connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"blocks": blocks, "text": "the plan"}
+    ) == {"blocks": blocks, "text": f"the plan\n\n{connector_tools.UFO_ATTRIBUTION}"}
+
+
+@pytest.mark.parametrize(
+    ("slug", "arguments"),
+    [
+        (SLACK_SCHEDULED_LIST_SLUG, {"channel": "C1"}),
+        (SLACK_SCHEDULED_DELETE_SLUG, {"channel": "C1", "scheduled_message_id": "Q1"}),
+    ],
+    ids=["listing", "scheduled_delete"],
+)
+def test_a_call_carrying_no_body_is_never_given_one(slug: str, arguments: dict) -> None:
+    """Both slugs pass the substring gate — "scheduled" carries "schedule" — and neither publishes a
+    message. An argument is only ever rewritten, so a call that names no body comes back identical
+    and no `blocks` is introduced into one that had none."""
+    attributed = connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, slug, arguments)
+    assert attributed == arguments
+    assert "blocks" not in attributed
 
 
 @pytest.mark.parametrize(
@@ -344,26 +431,40 @@ def test_slack_attributed_marks_the_message_text_of_a_send() -> None:
     [
         (connector_tools.SLACK_PROVIDER, SLACK_UPDATE_SLUG, {"ts": "1.0", "text": "corrected"}),
         (connector_tools.SLACK_PROVIDER, SLACK_HISTORY_SLUG, {"channel": "C1"}),
-        (connector_tools.SLACK_PROVIDER, SLACK_SCHEDULED_LIST_SLUG, {"channel": "C1"}),
         (connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "text": "  "}),
         ("gmail", GMAIL_SEND_SLUG, {"to": "a@b.test", "text": "the plan is attached"}),
         (sample.CONNECTOR_PROVIDER, SLACK_SEND_SLUG, {"text": "the plan is posted"}),
     ],
-    ids=["edit", "read", "listing", "empty_text", "other_provider", "other_broker_slug"],
+    ids=["edit", "read", "empty_text", "other_provider", "other_broker_slug"],
 )
 def test_slack_attributed_leaves_every_other_call_alone(
     provider: str, slug: str, arguments: dict
 ) -> None:
-    """Only a Slack send is marked. An edit, a read, and a listing publish nothing new, an empty
-    text is not a body, and another provider's send is another product's message — outbound email
-    included, which this deploy originates through no path of its own."""
+    """Only a Slack send is marked. An edit and a read publish nothing new, an empty text is not a
+    body, and another provider's send is another product's message — outbound email included, which
+    this deploy originates through no path of its own."""
     assert connector_tools.slack_attributed(provider, slug, arguments) == arguments
 
 
-def test_slack_attributed_never_stacks_the_line() -> None:
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"text": "the plan is posted"},
+        {"markdown_text": "the *plan* is posted"},
+        {"blocks": list(SLACK_BODY_BLOCKS), "text": "the plan is posted"},
+        {"blocks": json.dumps(SLACK_BODY_BLOCKS)},
+        {"blocks": quote(json.dumps(SLACK_BODY_BLOCKS))},
+    ],
+    ids=["text", "markdown_text", "blocks", "serialized_blocks", "url_encoded_blocks"],
+)
+def test_slack_attributed_never_stacks_the_footer_in_any_body_shape(arguments: dict) -> None:
+    """Every shape is idempotent, which is what makes a resend of a marked message safe: the second
+    pass finds the footer the first wrote — as a line, as a directive, or as a context element — and
+    adds nothing."""
     once = connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": "the plan is posted"}
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, arguments
     )
+    assert once != arguments
     assert (
         connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, once)
         == once
@@ -371,14 +472,19 @@ def test_slack_attributed_never_stacks_the_line() -> None:
 
 
 def test_the_never_stack_guard_reads_a_whole_line_and_never_a_prefix() -> None:
-    """Either footer form suppresses the append, the mentioning line the Slack extension writes
-    included — it names the app instead of spelling it, so there is no plain literal to test for. A
-    body that merely opens the way a footer does is a body, still owed a footer of its own."""
-    mentioning = connector_tools.UFO_ATTRIBUTION_MENTION.format(bot_user_id="U0BOT")
-    for footered in (
-        f"the plan is posted\n\n{connector_tools.UFO_ATTRIBUTION}",
-        f"the plan is posted\n\n{mentioning}",
+    """Every form this deploy writes suppresses the append, under either subject: the plain line,
+    the mrkdwn line a context element carries, and the `:::context` directive — recognised through
+    the line inside it, which is what a widened guard buys. A body that merely opens the way a
+    footer does is a body, still owed a footer of its own."""
+    for footer in (
+        "Sent using ufo",
+        "Sent using <@U0BOT>",
+        "*Sent using* ufo",
+        "*Sent using* <@U0BOT>",
+        ":::context\n**Sent using** ufo\n:::",
+        ":::context\n**Sent using** <@U0BOT>\n:::",
     ):
+        footered = f"the plan is posted\n\n{footer}"
         assert connector_tools.slack_attributed(
             connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": footered}
         ) == {"text": footered}
@@ -386,6 +492,25 @@ def test_the_never_stack_guard_reads_a_whole_line_and_never_a_prefix() -> None:
         assert connector_tools.slack_attributed(
             connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": body}
         ) == {"text": f"{body}\n\n{connector_tools.UFO_ATTRIBUTION}"}
+
+
+def test_the_inbound_strip_reaches_a_footer_the_outbound_guard_will_not_read() -> None:
+    """The two reads over one footer, split because they want opposite tolerances. Slack keeps no
+    separator on the fallback `text` a published message stores, so the footer comes back flattened
+    onto the body's own line — which the strip has to reach, once per copy the message carries, or
+    this deploy's own send reads as a member mentioning the agent. The guard stays whole-line: a
+    body whose last sentence merely ends the way a footer does is still owed one."""
+    body = "the plan is posted"
+    mention_footer = connector_tools.UFO_ATTRIBUTION_MENTION.format(bot_user_id="U0BOT")
+    flattened = f"{body}  {mention_footer}"
+    assert connector_tools.attribution_stripped(f"{flattened}  {mention_footer}") == body
+    assert connector_tools.attribution_stripped(f"{body} *Sent using* ufo") == body
+    assert not connector_tools.ATTRIBUTION_LINE.search(flattened)
+    inline = "we posted it Sent using ufo yesterday"
+    assert connector_tools.attribution_stripped(inline) == inline
+    assert connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": inline}
+    ) == {"text": f"{inline}\n\n{connector_tools.UFO_ATTRIBUTION}"}
 
 
 async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution() -> None:
