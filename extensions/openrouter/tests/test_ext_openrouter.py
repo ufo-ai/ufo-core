@@ -884,33 +884,52 @@ async def _film(
 
 def test_the_video_allowlist_and_its_limits_name_the_same_models() -> None:
     """The wire schema's model enum and the limits table are one allowlist: a model the agent can
-    ask for that has no entry would price a cost-less job at a KeyError."""
+    ask for that has no entry would price a cost-less job at a KeyError. Every model the tool offers
+    is named in the tool's own description, since that is where the agent reads what to pick."""
     assert set(get_args(openrouter.VideoModel)) == set(openrouter.VIDEO_MODELS)
     assert openrouter.DEFAULT_VIDEO_MODEL == "minimax/hailuo-3"
-    assert openrouter.VIDEO_MODELS["minimax/hailuo-3"].second_micro_usd == 130_000
+    assert set(openrouter.VIDEO_MODELS) == {"minimax/hailuo-3", "bytedance/seedance-2.5"}
+    for model in openrouter.VIDEO_MODELS:
+        assert model in openrouter.GENERATE_VIDEO_DESCRIPTION
 
 
-def test_the_video_field_bounds_are_what_hailuo_3_serves() -> None:
-    """OpenRouter's video model listing gives H3 durations 5-15s and six aspect ratios; the field
-    offers one range and one ratio enum across every model, so the default must serve all of it and
-    no call is spent on a parameter its provider rejects."""
+def test_the_video_field_bounds_span_every_model_the_tool_offers() -> None:
+    """OpenRouter's video model listing gives H3 durations 5-15s and Seedance 4-30s, and both take
+    the same six aspect ratios; the field offers one range and one ratio enum across every model, so
+    the range is the widest any of them films and each model narrows it at the boundary."""
     common = {"prompt": "p", "name": "teaser", "user_description": "d"}
-    limits = openrouter.VIDEO_MODELS[openrouter.DEFAULT_VIDEO_MODEL]
     ratios, _none = get_args(GenerateVideoInput.model_fields["aspect_ratio"].annotation)
     assert set(get_args(ratios)) == {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
-    assert set(get_args(ratios)) == limits.aspect_ratios
-    assert (limits.min_seconds, limits.max_seconds) == (
-        openrouter.MIN_VIDEO_SECONDS,
-        openrouter.MAX_VIDEO_SECONDS,
+    for limits in openrouter.VIDEO_MODELS.values():
+        assert limits.aspect_ratios == set(get_args(ratios))
+    assert (openrouter.MIN_VIDEO_SECONDS, openrouter.MAX_VIDEO_SECONDS) == (
+        min(limits.min_seconds for limits in openrouter.VIDEO_MODELS.values()),
+        max(limits.max_seconds for limits in openrouter.VIDEO_MODELS.values()),
     )
     assert GenerateVideoInput(**common).duration == openrouter.DEFAULT_VIDEO_SECONDS
-    for seconds in range(openrouter.MIN_VIDEO_SECONDS, openrouter.MAX_VIDEO_SECONDS + 1):
-        assert GenerateVideoInput(**common, duration=seconds).duration == seconds
     for refused in (openrouter.MIN_VIDEO_SECONDS - 1, openrouter.MAX_VIDEO_SECONDS + 1):
         with pytest.raises(ValidationError):
             GenerateVideoInput(**common, duration=refused)
     with pytest.raises(ValidationError):
         GenerateVideoInput(**common, aspect_ratio="5:4")
+
+
+def test_each_video_model_films_only_its_own_durations() -> None:
+    """H3's 5-15s and Seedance's 4-30s are one field, so a take the field allows and the chosen
+    model does not is refused here, where the model reads why and can ask again, rather than
+    spending minutes of generation on a 400."""
+    common = {"prompt": "p", "name": "teaser", "user_description": "d"}
+    for model, (low, high) in (
+        ("minimax/hailuo-3", (5, 15)),
+        ("bytedance/seedance-2.5", (4, 30)),
+    ):
+        for seconds in range(low, high + 1):
+            assert GenerateVideoInput(**common, model=model, duration=seconds).duration == seconds
+        for refused in (low - 1, high + 1):
+            if not openrouter.MIN_VIDEO_SECONDS <= refused <= openrouter.MAX_VIDEO_SECONDS:
+                continue
+            with pytest.raises(ValidationError, match=f"films between {low} and {high} seconds"):
+                GenerateVideoInput(**common, model=model, duration=refused)
 
 
 def test_a_video_model_serving_less_than_the_field_offers_is_narrowed_at_the_boundary(
@@ -927,7 +946,8 @@ def test_a_video_model_serving_less_than_the_field_offers_is_narrowed_at_the_bou
             min_seconds=6,
             max_seconds=10,
             aspect_ratios=frozenset({"16:9", "9:16"}),
-            second_micro_usd=130_000,
+            default_resolution="2K",
+            second_micro_usd={"2K": 130_000},
         ),
     )
     assert GenerateVideoInput(**common, duration=10, aspect_ratio="16:9").duration == 10
@@ -936,6 +956,43 @@ def test_a_video_model_serving_less_than_the_field_offers_is_narrowed_at_the_bou
             GenerateVideoInput(**common, duration=refused)
     with pytest.raises(ValidationError, match="does not take aspect_ratio"):
         GenerateVideoInput(**common, duration=6, aspect_ratio="4:3")
+
+
+def test_each_video_model_films_only_the_tiers_it_serves() -> None:
+    """H3 films 2K and nothing else, Seedance films 480p or 720p and has no 2K tier at all, so a
+    tier valid for one model is a 400 for the other and is refused where the model can pick again. A
+    call naming no tier settles on the model's own default rather than the provider's."""
+    common = {"prompt": "p", "name": "teaser", "user_description": "d"}
+    tiers, _none = get_args(GenerateVideoInput.model_fields["resolution"].annotation)
+    assert set(get_args(tiers)) == {"480p", "720p", "2K"}
+    assert GenerateVideoInput(**common).resolution == "2K"
+    assert GenerateVideoInput(**common, model="bytedance/seedance-2.5").resolution == "720p"
+    for tier in ("480p", "720p"):
+        assert (
+            GenerateVideoInput(**common, model="bytedance/seedance-2.5", resolution=tier).resolution
+            == tier
+        )
+        with pytest.raises(ValidationError, match="does not film at"):
+            GenerateVideoInput(**common, resolution=tier)
+    with pytest.raises(ValidationError, match="does not film at 2K; it films 480p, 720p"):
+        GenerateVideoInput(**common, model="bytedance/seedance-2.5", resolution="2K")
+
+
+def test_a_per_second_rate_is_a_rate_at_one_frame_size() -> None:
+    """H3 bills a flat $0.13 per output second; Seedance bills $0.0000107 per video token, tokens
+    being `width * height * seconds * 24 / 1024`, so its per-second rate rises with the frame and
+    one constant cannot price both of its tiers. Each tier's rate is taken at the largest frame it
+    serves — 992x432 and 1112x834 — so a list charge never trails what OpenRouter bills, whatever
+    aspect ratio the provider frames inside the tier."""
+    assert openrouter.VIDEO_MODELS["minimax/hailuo-3"].second_micro_usd == {"2K": 130_000}
+    rates = openrouter.VIDEO_MODELS["bytedance/seedance-2.5"].second_micro_usd
+    assert rates == {
+        "480p": round(992 * 432 * 24 / 1024 * 0.0000107 * 1_000_000),
+        "720p": round(1112 * 834 * 24 / 1024 * 0.0000107 * 1_000_000),
+    }
+    assert rates["720p"] > openrouter.VIDEO_MODELS["minimax/hailuo-3"].second_micro_usd["2K"]
+    for model, limits in openrouter.VIDEO_MODELS.items():
+        assert limits.default_resolution in limits.second_micro_usd, model
 
 
 def test_the_video_payload_is_bounded_at_the_tool_boundary() -> None:
@@ -967,6 +1024,7 @@ async def test_generate_video_posts_the_job_polls_it_and_saves_the_download(
         "model": "minimax/hailuo-3",
         "prompt": "a red panda astronaut drifting down a station corridor",
         "duration": 10,
+        "resolution": "2K",
         "aspect_ratio": "16:9",
         "generate_audio": True,
     }
@@ -987,12 +1045,65 @@ async def test_generate_video_posts_the_job_polls_it_and_saves_the_download(
 async def test_a_job_that_prices_nothing_meters_the_list_rate_per_second(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """H3 lists at $0.13 per output second, so an unpriced job is metered over the seconds asked
-    for rather than at nothing."""
+    """H3 lists at $0.13 per output second at its one 2K tier, so an unpriced job is metered over
+    the seconds asked for rather than at nothing."""
     _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed"}]))
     workspace_id, turn_id = await _keyed_turn()
     await _film(workspace_id, turn_id, _Sandbox(), tmp_path, duration=15)
     assert await _videos_ledger(turn_id) == (1, 15 * 130_000, "minimax/hailuo-3", None)
+
+
+async def test_seedance_films_its_own_length_and_tier_and_is_metered_at_that_tiers_rate(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A take H3 cannot film — 20 seconds at 480p — goes out on Seedance's own bounds, and an
+    unpriced job is metered at that tier's rate, not at H3's flat $0.13 per second."""
+    api = _VideoApi(statuses=[{"status": "completed"}])
+    _wire_video(monkeypatch, api)
+    workspace_id, turn_id = await _keyed_turn()
+    sandbox = _Sandbox()
+    result = await _film(
+        workspace_id,
+        turn_id,
+        sandbox,
+        tmp_path,
+        model="bytedance/seedance-2.5",
+        duration=20,
+        resolution="480p",
+    )
+    assert api.sent() == {
+        "model": "bytedance/seedance-2.5",
+        "prompt": "a red panda astronaut drifting down a station corridor",
+        "duration": 20,
+        "resolution": "480p",
+        "generate_audio": True,
+    }
+    assert sandbox.writes == {"generated-videos/teaser.mp4": MP4}
+    assert json.loads(result.content[0].text)["cost_micro_usd"] == 20 * 107_471
+    assert await _videos_ledger(turn_id) == (
+        1,
+        20 * 107_471,
+        "bytedance/seedance-2.5",
+        None,
+    )
+
+
+async def test_a_bigger_frame_on_a_token_billed_model_meters_more_per_second(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seedance's charge is per video token, so the same 6-second take costs more at 720p than at
+    480p; the fallback rate is read per tier and the ledger carries the difference."""
+    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed"}]))
+    workspace_id, turn_id = await _keyed_turn()
+    await _film(
+        workspace_id,
+        turn_id,
+        _Sandbox(),
+        tmp_path,
+        model="bytedance/seedance-2.5",
+        duration=6,
+    )
+    assert await _videos_ledger(turn_id) == (1, 6 * 232_577, "bytedance/seedance-2.5", None)
 
 
 async def test_a_byok_video_meters_the_upstream_charge_it_reports(
@@ -1129,5 +1240,6 @@ async def test_a_silent_take_asks_the_provider_to_drop_the_audio_track(
         "model": "minimax/hailuo-3",
         "prompt": "a red panda astronaut drifting down a station corridor",
         "duration": 5,
+        "resolution": "2K",
         "generate_audio": False,
     }

@@ -161,12 +161,13 @@ GENERATE_IMAGE_DESCRIPTION = (
 VIDEOS_PATH = "/videos"
 VIDEO_REQUEST_TIMEOUT_SECONDS = 300.0
 VIDEO_POLL_INTERVAL_SECONDS = 5.0
-VIDEO_POLL_TIMEOUT_SECONDS = 600.0
+VIDEO_POLL_TIMEOUT_SECONDS = 1200.0
 """Sized to observed generation plus queue time, not a round number: OpenRouter's own hailuo-3
-example reports 162s for a 5-second 2K clip, so a 15-second clip settles well inside this bound.
-The headroom over that is queue time — MiniMax runs at most 2 concurrent tasks on a free account and
-15 on a paid one, so a job can sit pending behind others before generation starts. A wait past this
-is a job that is not coming back, and reporting that beats holding the turn open."""
+example reports 162s for a 5-second 2K clip — about 32s of work per output second — so the 30-second
+maximum this tool offers lands near 960s. The headroom over that is queue time: MiniMax runs at most
+2 concurrent tasks on a free account and 15 on a paid one, so a job can sit pending behind others
+before generation starts. A wait past this is a job that is not coming back, and reporting that
+beats holding the turn open."""
 VIDEO_DIR = "generated-videos"
 VIDEO_SUFFIX = ".mp4"
 MAX_VIDEO_PROMPT_CHARS = 4_000
@@ -178,45 +179,69 @@ VIDEO_TRANSPORT: httpx.AsyncBaseTransport | None = None
 VIDEO_PENDING_STATUSES = frozenset({"pending", "in_progress"})
 VIDEO_COMPLETED_STATUS = "completed"
 
-VideoModel = Literal["minimax/hailuo-3"]
+VideoModel = Literal["minimax/hailuo-3", "bytedance/seedance-2.5"]
 DEFAULT_VIDEO_MODEL: VideoModel = "minimax/hailuo-3"
 
 VideoAspectRatio = Literal["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
 EVERY_VIDEO_ASPECT_RATIO: frozenset[str] = frozenset(get_args(VideoAspectRatio))
-MIN_VIDEO_SECONDS = 5
-MAX_VIDEO_SECONDS = 15
+VideoResolution = Literal["480p", "720p", "2K"]
+MIN_VIDEO_SECONDS = 4
+MAX_VIDEO_SECONDS = 30
+"""The widest take any allowlisted model films, which is what the duration field offers; a model
+filming a narrower range narrows the call through its own `VIDEO_MODELS` row."""
 DEFAULT_VIDEO_SECONDS = 5
 
 
 @dataclass(frozen=True)
 class VideoModelLimits:
-    """What one allowlisted model's providers actually serve, and what a second of output lists at
-    when the job prices nothing. OpenRouter rejects a generation parameter the serving provider does
-    not offer, so a model's bounds differ from the tool's own caps and are held on the way in."""
+    """What one allowlisted model's providers actually serve, and what a second of its output lists
+    at when the job prices nothing. OpenRouter rejects a generation parameter the serving provider
+    does not offer, so a model's bounds differ from the tool's own caps and are held on the way in:
+    the field offers the widest take and every tier any model films, and a row narrows both.
+
+    `second_micro_usd` is the resolution tiers the model films, each mapped to its list rate, since
+    a rate is only a rate at a size. Hailuo bills a flat $0.13 per output second at its one 2K tier.
+    Seedance bills $0.0000107 per video token, tokens being `width * height * seconds * 24 / 1024`,
+    so its rate rises with the frame: $0.107/s at 480p and $0.233/s at 720p. A tier's rate is taken
+    at the largest frame the tier serves (992x432 and 1112x834), since the aspect ratio decides the
+    frame within a tier and a list rate that trails the real charge would under-bill the workspace.
+
+    `default_resolution` is what a call naming no tier films — the tier that yields a take a member
+    can be given, not the cheapest one."""
 
     min_seconds: int
     max_seconds: int
     aspect_ratios: frozenset[str]
-    second_micro_usd: int
+    default_resolution: VideoResolution
+    second_micro_usd: dict[VideoResolution, int]
 
 
 VIDEO_MODELS: dict[VideoModel, VideoModelLimits] = {
     "minimax/hailuo-3": VideoModelLimits(
-        min_seconds=MIN_VIDEO_SECONDS,
-        max_seconds=MAX_VIDEO_SECONDS,
+        min_seconds=5,
+        max_seconds=15,
         aspect_ratios=EVERY_VIDEO_ASPECT_RATIO,
-        second_micro_usd=130_000,
+        default_resolution="2K",
+        second_micro_usd={"2K": 130_000},
+    ),
+    "bytedance/seedance-2.5": VideoModelLimits(
+        min_seconds=4,
+        max_seconds=30,
+        aspect_ratios=EVERY_VIDEO_ASPECT_RATIO,
+        default_resolution="720p",
+        second_micro_usd={"480p": 107_471, "720p": 232_577},
     ),
 }
 
 GENERATE_VIDEO_DESCRIPTION = (
     "Generate a video from a text prompt and save it into the workspace under "
-    f"{VIDEO_DIR}/. {DEFAULT_VIDEO_MODEL} (MiniMax H3) films "
-    f"{MIN_VIDEO_SECONDS}-{MAX_VIDEO_SECONDS} seconds of 2K MP4 with a native stereo audio track. "
-    "Each call is billed per output second and metered against the workspace, so a longer take "
-    f"costs proportionally more; the default is {DEFAULT_VIDEO_SECONDS} seconds. Generation takes "
-    "minutes and this tool waits for it. The result names the saved file; deliver it to a member "
-    "with share_file."
+    f"{VIDEO_DIR}/. Models: {DEFAULT_VIDEO_MODEL} (default, MiniMax H3) films 5-15 seconds of 2K; "
+    "bytedance/seedance-2.5 films 4-30 seconds at 480p or 720p, for a take longer than 15 seconds "
+    "or cheaper than 2K. Both carry a native stereo audio track. Each call is billed per output "
+    "second at the chosen model and resolution and metered against the workspace, so a longer take "
+    f"or a bigger frame costs proportionally more; the default is {DEFAULT_VIDEO_SECONDS} seconds. "
+    "Generation takes minutes and this tool waits for it. The result names the saved file; deliver "
+    "it to a member with share_file."
 )
 
 
@@ -678,8 +703,17 @@ class GenerateVideoInput(BaseModel):
         ge=MIN_VIDEO_SECONDS,
         le=MAX_VIDEO_SECONDS,
         description=(
-            f"Length in seconds, {DEFAULT_VIDEO_SECONDS} by default. Every second is billed, so "
-            "ask for a longer take only when the action needs it."
+            f"Length in seconds, {DEFAULT_VIDEO_SECONDS} by default. minimax/hailuo-3 films 5-15 "
+            "and bytedance/seedance-2.5 films 4-30. Every second is billed, so ask for a longer "
+            "take only when the action needs it."
+        ),
+    )
+    resolution: VideoResolution | None = Field(
+        default=None,
+        description=(
+            "Resolution tier, defaulting to the best one the chosen model films. minimax/hailuo-3 "
+            "films 2K only; bytedance/seedance-2.5 films 480p or 720p, where 480p costs under half "
+            "of 720p per second — ask for it when the take is a draft."
         ),
     )
     aspect_ratio: VideoAspectRatio | None = Field(
@@ -696,9 +730,11 @@ class GenerateVideoInput(BaseModel):
 
     @model_validator(mode="after")
     def _within_model_limits(self) -> "GenerateVideoInput":
-        """Hold the call to what the chosen model serves. OpenRouter answers 400 for a generation
-        parameter its provider does not offer, so a combination the allowlist already knows is
-        unservable is refused here, where the model reads the reason and can pick another."""
+        """Hold the call to what the chosen model serves, and settle its resolution. OpenRouter
+        answers 400 for a generation parameter its provider does not offer, so a combination the
+        allowlist already knows is unservable is refused here, where the model reads the reason and
+        can pick another. The tier is settled rather than left to the provider because it is what a
+        second of output is metered at, so an unstated one would price a frame nobody chose."""
         limits = VIDEO_MODELS[self.model]
         if not limits.min_seconds <= self.duration <= limits.max_seconds:
             raise ValueError(
@@ -709,6 +745,13 @@ class GenerateVideoInput(BaseModel):
             raise ValueError(
                 f"{self.model} does not take aspect_ratio {self.aspect_ratio}; it accepts "
                 f"{', '.join(sorted(limits.aspect_ratios))}"
+            )
+        if self.resolution is None:
+            self.resolution = limits.default_resolution
+        elif self.resolution not in limits.second_micro_usd:
+            raise ValueError(
+                f"{self.model} does not film at {self.resolution}; it films "
+                f"{', '.join(sorted(limits.second_micro_usd))}"
             )
         return self
 
@@ -743,9 +786,9 @@ class OpenRouterVideos:
 
     Cost, key resolution and metering are the image tool's: `usage.cost` off the completed poll is
     what OpenRouter charged, a BYOK account's `cost_details.upstream_inference_cost` prices the call
-    when it reports zero, and a job pricing neither is charged the model's list rate over the
-    seconds asked for (`VIDEO_MODELS`). Only a generation on the platform's key is
-    metered, since a workspace holding its own `openrouter_api_key` is billed directly and a
+    when it reports zero, and a job pricing neither is charged the chosen model's list rate for the
+    tier it filmed, over the seconds asked for (`VIDEO_MODELS`). Only a generation on the platform's
+    key is metered, since a workspace holding its own `openrouter_api_key` is billed directly and a
     `videos` ledger row exports as platform-served. `transport` is the httpx testability seam;
     production leaves it None."""
 
@@ -887,10 +930,13 @@ class OpenRouterVideos:
 
     def _charge(self, args: GenerateVideoInput, job: VideoJob) -> int:
         """What this generation cost, in micro-USD: what OpenRouter reports for it, else the model's
-        list rate over the seconds asked for."""
+        list rate for the tier it filmed over the seconds asked for. A per-second rate is a rate at
+        one frame size — a token-billed model costs more per second the bigger the frame — so the
+        fallback reads the tier this take filmed, never one rate for the model."""
         if job.cost_micro_usd is not None:
             return job.cost_micro_usd
-        return VIDEO_MODELS[args.model].second_micro_usd * args.duration
+        limits = VIDEO_MODELS[args.model]
+        return limits.second_micro_usd[args.resolution or limits.default_resolution] * args.duration
 
 
 async def _generate_video(ctx: ToolContext, args: GenerateVideoInput) -> ToolResult:
