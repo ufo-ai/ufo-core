@@ -1173,6 +1173,11 @@ def _int_field(usage: dict[str, object], name: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _cached_field(usage: dict[str, object], details_name: str) -> int:
+    details = usage.get(details_name)
+    return _int_field(details, "cached_tokens") if isinstance(details, dict) else 0
+
+
 @dataclass
 class HttpTokenUsage:
     """Decode one HTTP response and recover model-reported usage from its SSE or JSON body."""
@@ -1399,14 +1404,46 @@ class HttpTokenUsage:
         self._seen = True
 
     def _openai(self, event: dict[str, object]) -> None:
+        """Both OpenAI surfaces report one usage block, under their own names: Chat Completions
+        calls it prompt/completion with `prompt_tokens_details`, Responses calls it input/output
+        with `input_tokens_details`. A usage object that answers to neither is a shape this parser
+        does not know, and a billable call must never fall to zero without a trace."""
         model = event.get("model")
         if isinstance(model, str):
             self._model = model
         usage = event.get("usage")
         if not isinstance(usage, dict):
             return
-        self._input = _int_field(usage, "prompt_tokens")
-        self._output = _int_field(usage, "completion_tokens")
+        if "prompt_tokens" in usage:
+            self._absorb_openai(
+                _int_field(usage, "prompt_tokens"),
+                _int_field(usage, "completion_tokens"),
+                _cached_field(usage, "prompt_tokens_details"),
+            )
+        elif "input_tokens" in usage:
+            self._absorb_openai(
+                _int_field(usage, "input_tokens"),
+                _int_field(usage, "output_tokens"),
+                _cached_field(usage, "input_tokens_details"),
+            )
+        else:
+            log("egress.tokens_usage_unparsed", host=self.host)
+
+    def _absorb_openai(self, prompt: int, output: int, cached: int) -> None:
+        """An OpenAI prompt count is INCLUSIVE of the cached prefix, so the cached share is
+        subtracted out and carried as the cache-read dimension — the same normalization the
+        host-side adapters in `ufo.models.openai` apply, so a call the sandbox makes is priced
+        exactly as the host would price it. Where those adapters refuse a cached count above the
+        prompt it is part of, this parser only reads along a response the sandbox client is already
+        receiving: raising here would break a call that succeeded, over a billing reading. The
+        cached share is clamped to the prompt instead — never a negative fresh-input count — and the
+        reading is reported, so an impossible split is not billed without a trace."""
+        if cached > prompt:
+            log("egress.tokens_cached_over_prompt", host=self.host, prompt=prompt, cached=cached)
+            cached = prompt
+        self._input = prompt - cached
+        self._output = output
+        self._cache_read = cached
         self._seen = True
 
     def _fail(self) -> None:

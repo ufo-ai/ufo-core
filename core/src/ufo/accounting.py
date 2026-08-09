@@ -252,11 +252,14 @@ async def record_sandbox_tokens(
     table and stamp the host turn's `tokens` bill uses, so a contributed slug is billed at its real
     rate and sandbox rows reconcile with turn rows by digest. Keyed with an empty attempt under a
     dimension distinct from `tokens`, so its id can never collide with the host row
-    `record_turn_usage` writes for the same turn."""
+    `record_turn_usage` writes for the same turn. The row carries the burn's prompt split beside its
+    total, exactly as the host row does, so `read_turn_cost` reads this dimension's cache share off
+    the same row its tokens and cost come from."""
     total = _total_tokens(usage)
     if total == 0:
         return
     priced = pricing.micro_usd(model, usage)
+    prompt = _prompt_tokens(usage)
     ledger_id = ledger_id_for(workspace_id, turn_id, SANDBOX_TOKENS_DIMENSION)
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     await connection.execute(
@@ -267,6 +270,8 @@ async def record_sandbox_tokens(
             turn_id=turn_id,
             dimension=SANDBOX_TOKENS_DIMENSION,
             amount=total,
+            prompt_tokens=prompt,
+            cache_read_tokens=usage.cache_read_tokens,
             priced_micro_usd=priced,
             model=model,
             price_digest=pricing.digest,
@@ -277,6 +282,8 @@ async def record_sandbox_tokens(
             index_elements=[tables.ledger.c.id],
             set_={
                 "amount": tables.ledger.c.amount + total,
+                "prompt_tokens": tables.ledger.c.prompt_tokens + prompt,
+                "cache_read_tokens": tables.ledger.c.cache_read_tokens + usage.cache_read_tokens,
                 "priced_micro_usd": tables.ledger.c.priced_micro_usd + priced,
                 "updated_at": sa.func.now(),
             },

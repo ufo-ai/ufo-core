@@ -120,6 +120,31 @@ OPENAI_JSON_BODY = (
     b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
     b'"usage":{"prompt_tokens":1000000,"completion_tokens":1000000,"total_tokens":2000000}}'
 )
+JSON_RESPONSE_HEAD = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n"
+OPENAI_CACHED_JSON_BODY = (
+    JSON_RESPONSE_HEAD + b'{"id":"c","object":"chat.completion","model":"gpt-5.5",'
+    b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
+    b'"usage":{"prompt_tokens":100000,"completion_tokens":500,"total_tokens":100500,'
+    b'"prompt_tokens_details":{"cached_tokens":90000}}}'
+)
+OPENAI_RESPONSES_JSON_BODY = (
+    JSON_RESPONSE_HEAD + b'{"id":"resp","object":"response","model":"gpt-5.6-terra",'
+    b'"output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}],'
+    b'"usage":{"input_tokens":100000,"input_tokens_details":{"cached_tokens":90000},'
+    b'"output_tokens":500,"output_tokens_details":{"reasoning_tokens":100},'
+    b'"total_tokens":100500}}'
+)
+OPENAI_UNREADABLE_USAGE_JSON_BODY = (
+    JSON_RESPONSE_HEAD + b'{"id":"c","object":"chat.completion","model":"gpt-5.5",'
+    b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
+    b'"usage":{"tokens_read":100000,"tokens_written":500}}'
+)
+OPENAI_OVER_CACHED_JSON_BODY = (
+    JSON_RESPONSE_HEAD + b'{"id":"c","object":"chat.completion","model":"gpt-5.5",'
+    b'"choices":[{"message":{"role":"assistant","content":"hi"}}],'
+    b'"usage":{"prompt_tokens":100000,"completion_tokens":500,"total_tokens":100500,'
+    b'"prompt_tokens_details":{"cached_tokens":100001}}}'
+)
 
 
 def _fixed(rules: tuple = ()) -> PerAgentRules:
@@ -1814,6 +1839,39 @@ def test_json_body_usage_parses_an_openai_response() -> None:
     )
 
 
+def test_a_usage_object_the_parser_cannot_read_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A body carrying a usage object in neither OpenAI shape parses to nothing — and says so: a
+    billable call that falls to zero leaves a trace rather than passing as a successful parse."""
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        accumulator.feed(OPENAI_UNREADABLE_USAGE_JSON_BODY)
+        assert accumulator.usage() is None
+    assert [record.message for record in caplog.records if record.name == "ufo"] == [
+        "egress.tokens_usage_unparsed"
+    ]
+
+
+def test_cached_tokens_over_the_prompt_count_are_clamped_and_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cached count above the prompt it is part of is an impossible split, but this parser reads
+    along a relayed response the sandbox client already has: it clamps the cache-read share to the
+    prompt — never a negative fresh-input count — and reports the reading, rather than failing a
+    call that succeeded over a billing guard the way the host adapters do."""
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        accumulator.feed(OPENAI_OVER_CACHED_JSON_BODY)
+        assert accumulator.usage() == (
+            "gpt-5.5",
+            Usage(input_tokens=0, output_tokens=500, cache_read_tokens=100_000),
+        )
+    assert [record.message for record in caplog.records if record.name == "ufo"] == [
+        "egress.tokens_cached_over_prompt"
+    ]
+
+
 def test_json_body_usage_reassembles_across_chunk_boundaries() -> None:
     accumulator = HttpTokenUsage(MODEL_HOST)
     for start in range(0, len(ANTHROPIC_JSON_BODY), 7):
@@ -2084,6 +2142,67 @@ async def test_model_host_relay_meters_a_non_streaming_json_body(db: None) -> No
         96_500,
         "claude-opus-4-8",
     )
+
+
+async def _sandbox_token_row(turn_id: UUID) -> sa.Row:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.prompt_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.model,
+                ).where(tables.ledger.c.turn_id == turn_id)
+            )
+        ).one()
+
+
+async def test_openai_cached_prompt_tokens_are_metered_at_the_cache_read_rate(db: None) -> None:
+    """A 100,000-token prompt of which 90,000 were served from cache costs 110,000 micro-USD on
+    `gpt-5.5`, not the 515,000 the whole prompt would cost at the fresh input rate: the cached share
+    is split out of the input count and priced as a cache read. The row carries that split, so the
+    dimension's cache share is a read of the same row its tokens and cost come from."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    proxy = _egress(_fixed())
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    accumulator.feed(OPENAI_CACHED_JSON_BODY)
+    await proxy._meter_tokens(RunToken(workspace_id, turn_id), accumulator)
+    await proxy.stop()
+    row = await _sandbox_token_row(turn_id)
+    assert (
+        row.dimension,
+        int(row.amount),
+        int(row.prompt_tokens),
+        int(row.cache_read_tokens),
+        int(row.priced_micro_usd),
+        row.model,
+    ) == ("sandbox_tokens", 100_500, 100_000, 90_000, 110_000, "gpt-5.5")
+
+
+async def test_a_responses_shaped_body_is_metered_rather_than_billed_nothing(db: None) -> None:
+    """An in-sandbox call to the Responses surface reports input/output-named usage; it is metered
+    under `sandbox_tokens` with the same cached split, where matching only the Chat Completions
+    names parsed every count as zero and wrote no row at all."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id, *_ = await _seed_turn(connection)
+    proxy = _egress(_fixed())
+    accumulator = HttpTokenUsage(OPENAI_HOST)
+    accumulator.feed(OPENAI_RESPONSES_JSON_BODY)
+    await proxy._meter_tokens(RunToken(workspace_id, turn_id), accumulator)
+    await proxy.stop()
+    row = await _sandbox_token_row(turn_id)
+    assert (
+        row.dimension,
+        int(row.amount),
+        int(row.prompt_tokens),
+        int(row.cache_read_tokens),
+        int(row.priced_micro_usd),
+        row.model,
+    ) == ("sandbox_tokens", 100_500, 100_000, 90_000, 55_000, "gpt-5.6-terra")
 
 
 async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:
