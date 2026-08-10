@@ -127,6 +127,9 @@ from ufo.grants import (
     ConnectRequestInvalid as ConnectRequestInvalid,
 )
 from ufo.sandbox.conversation import (
+    WORKSPACE_WRITE_MAX_BYTES as WORKSPACE_WRITE_MAX_BYTES,
+)
+from ufo.sandbox.conversation import (
     WorkspaceFile as WorkspaceFile,
 )
 from ufo.schema.records import (

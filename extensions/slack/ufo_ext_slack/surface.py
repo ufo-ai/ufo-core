@@ -57,11 +57,11 @@ secret, before any workspace is bound.
 Everything Slack-specific lives here — signature verification, the OAuth install exchange, thread
 keying, Block Kit rendering, the chunked external-upload flow, the `url_private` download — reaching
 core only through the privileged `SurfaceContext` (admit, identity, workspace write, credential read
-and OAuth-install write, installation binding, tail) and the streaming `BlobStore`. Attachments move
-without ever buffering a whole file: an inbound file
-streams from `url_private` straight into the workspace before the turn runs, and a shared file
-streams from the blob store straight to Slack's external-upload URL. Uploads fan out with
-`asyncio.gather` on the one event loop — never a thread pool."""
+and OAuth-install write, installation binding, tail) and the streaming `BlobStore`. An inbound file
+streams from `url_private` into the workspace before the turn runs, bounded by the workspace write
+it feeds; a shared file streams from the blob store straight to Slack's external-upload URL without
+ever buffering whole. Uploads fan out with `asyncio.gather` on the one event loop — never a thread
+pool."""
 
 import asyncio
 import hashlib
@@ -94,6 +94,7 @@ from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
+    WORKSPACE_WRITE_MAX_BYTES,
     AskUserInput,
     BlobStore,
     ConnectRequest,
@@ -713,7 +714,8 @@ SLACK_SECTION_TEXT_LIMIT = 3_000
 SLACK_CONTEXT_TEXT_LIMIT = 3_000
 MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
-SLACK_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+# Slack's own documented ceiling for a single file; an over-cap artifact goes out as a TTL link.
+SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 DEBUG_SURFACE_PATH = "/surface/debug"
@@ -729,7 +731,9 @@ SLACK_FILE_HOST_SUFFIX = ".slack.com"
 SLACK_INBOX_DIR = "slack-inbox"
 MAX_INBOUND_FILES = 10
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
-SLACK_INBOUND_FILE_MAX_BYTES = 25 * 1024 * 1024
+# The workspace write takes the body whole, so its bound is the ceiling on an inbound file: a larger
+# one could not land at all, and refusing it here skips that file instead of failing the message.
+SLACK_INBOUND_FILE_MAX_BYTES = WORKSPACE_WRITE_MAX_BYTES
 PRIVATE_ROOM_CHANNEL_TYPES = frozenset({"group", "mpim"})
 CHANNEL_LABEL_PREFIX = "#"
 DIRECT_MESSAGE_LABEL = "Direct message"

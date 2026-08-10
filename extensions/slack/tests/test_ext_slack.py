@@ -67,7 +67,11 @@ from ufo.hub import (
     ToolCall,
 )
 from ufo.loop.queue import _load_turn
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+)
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
@@ -3349,6 +3353,33 @@ async def test_writeback_streams_dm_attachment_without_threading_under_the_bot_r
     assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
 
 
+async def test_large_media_within_the_upload_cap_is_streamed_not_linked(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await blob.put("artifacts/a/clip.mp4", b"MP4-CONTENT")
+    await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "here you go",
+        blob,
+        artifact=True,
+        artifact_name="clip.mp4",
+        artifact_key="artifacts/a/clip.mp4",
+        artifact_size=200 * 1024 * 1024,
+        artifact_media_type="video/mp4",
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    assert slack.SLACK_OVERSIZE_HEADING not in json.loads(posts[0].content)["text"]
+    assert len([r for r in recorder if str(r.url) == slack.SLACK_FILES_COMPLETE_UPLOAD]) == 1
+
+
 async def test_oversize_artifact_is_delivered_as_a_download_link(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -3688,6 +3719,73 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     assert inbound.endswith(f"<attachments_{mark}>\n{note}\n</attachments_{mark}>")
     assert f"</member_message_{mark}>\n<attachments_{mark}>" in inbound
     assert note not in inbound.partition(f"</member_message_{mark}>")[0]
+
+
+def test_the_inbound_cap_is_the_workspace_write_bound() -> None:
+    """Where the bytes stop is what sets the cap: the workspace write takes the body whole and
+    refuses anything over its own bound with a `ValueError` that ingest does not catch, failing the
+    member's whole message. Capping the stream at that bound keeps `SlackDownloadTooLarge` — one
+    file skipped, the message admitted — the only over-cap outcome."""
+    assert slack.SLACK_INBOUND_FILE_MAX_BYTES == WORKSPACE_WRITE_MAX_BYTES
+
+
+async def test_a_large_inbound_file_lands_whole_in_the_workspace(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Everyday Slack media — a 51 MB video — is not oversize, so it arrives as a workspace file the
+    agent's tools can read, with nothing skipped. Absolute size, not a monkeypatched cap: this is
+    what the number has to admit."""
+    workspace_id, _ = await _seed()
+    content = b"V" * (51 * 1024 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url).split("?")[0]
+        if url.endswith("/clip.mp4"):
+            return httpx.Response(200, content=content)
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"is_channel": True, "is_private": False}}
+            )
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    body = _event_body(
+        type="app_mention",
+        channel_type="channel",
+        user="U1",
+        channel="C1",
+        ts="8.0",
+        text="<@UBOT00000> clip",
+        files=[
+            {
+                "id": "F1",
+                "name": "clip.mp4",
+                "url_private_download": "https://files.slack.com/files-pri/T-F1/clip.mp4",
+                "mimetype": "video/mp4",
+            }
+        ],
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.status_code == 200
+
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.queue_key == "C1:8.0"
+                )
+            )
+        ).scalar_one()
+    landed = _workspace_file(tmp_path, conversation_id, f"{slack.SLACK_INBOX_DIR}/clip.mp4")
+    assert landed.stat().st_size == len(content)
+    inbound = await _turn_inbound(workspace_id)
+    assert f"{slack.SLACK_INBOX_DIR}/clip.mp4" in inbound
+    assert "Skipped files" not in inbound
 
 
 def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]:
