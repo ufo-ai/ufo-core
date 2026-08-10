@@ -713,6 +713,53 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
         slack.slack_reply_body("C5", None, "hi", "x" * (slack.SLACK_CONTEXT_TEXT_LIMIT + 1))
 
 
+def test_a_reply_unfurls_one_link_and_no_more() -> None:
+    for text in (
+        "nothing to see",
+        "the plan is [here](https://ufo.test/plan)",
+        "the plan is at https://ufo.test/plan",
+        "the plan is <https://ufo.test/plan|here>",
+    ):
+        single = json.loads(slack.slack_reply_body("C5", None, text, None))
+        assert "unfurl_links" not in single
+        assert "unfurl_media" not in single
+    for text in (
+        "the [plan](https://ufo.test/plan) and the [spec](https://ufo.test/spec)",
+        "the [plan](https://ufo.test/plan) and https://ufo.test/spec",
+        "https://ufo.test/plan https://ufo.test/spec",
+        "<https://ufo.test/plan|plan> · <https://ufo.test/spec|spec>",
+    ):
+        several = json.loads(slack.slack_reply_body("C5", None, text, None))
+        assert several["unfurl_links"] is False
+        assert several["unfurl_media"] is False
+    big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
+    degraded = json.loads(
+        slack.slack_reply_body("C5", None, f"{big} https://ufo.test/a https://ufo.test/b", None)
+    )
+    assert "blocks" not in degraded
+    assert degraded["unfurl_links"] is False
+    assert degraded["unfurl_media"] is False
+
+
+def test_a_markdown_header_renders_tight_against_the_paragraph_above_it() -> None:
+    text = "Material gathered.\n\n## RSI, from your focus area 5\n\nThe literature caught up."
+    body = json.loads(slack.slack_reply_body("C5", None, text, None))
+    assert body["blocks"] == [
+        {
+            "type": "markdown",
+            "text": (
+                "Material gathered.\n## RSI, from your focus area 5\n\nThe literature caught up."
+            ),
+        }
+    ]
+    assert body["text"] == text
+    padded = "one\n\n\n# top\n\ntwo\n \n### deep\nkept # mid"
+    tightened = json.loads(slack.slack_reply_body("C5", None, padded, None))
+    assert tightened["blocks"] == [
+        {"type": "markdown", "text": "one\n# top\n\ntwo\n### deep\nkept # mid"}
+    ]
+
+
 def test_thread_keying_and_addressing() -> None:
     assert slack.slack_thread_key("C1", "100.5", is_dm=False) == "C1:100.5"
     assert slack.slack_thread_key("D1", "100.5", is_dm=True) == "D1"

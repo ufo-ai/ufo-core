@@ -718,6 +718,10 @@ MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
+MARKDOWN_LINK_PATTERN = r"\[[^\]]*\]\(<?https?://[^)>\s]+[^)]*\)"
+URL_PATTERN = r"https?://[^\s>|]+"
+HEADER_PADDING_PATTERN = r"\n[ \t]*\n+(?=#{1,6} )"
+MAX_UNFURLED_LINKS = 1
 DEBUG_SURFACE_PATH = "/surface/debug"
 WEB_SURFACE_PATH = "/surface/web"
 
@@ -948,6 +952,12 @@ def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm
     return event.get("type") == "app_mention" and not any(mention in body for body in bodies)
 
 
+def _link_count(text: str) -> int:
+    markdown = re.findall(MARKDOWN_LINK_PATTERN, text)
+    bare = re.sub(MARKDOWN_LINK_PATTERN, "", text)
+    return len(markdown) + len(re.findall(URL_PATTERN, bare))
+
+
 def slack_reply_body(
     channel: str,
     thread_ts: str | None,
@@ -963,7 +973,15 @@ def slack_reply_body(
     metadata — degrading to a text-only body when a reply without required actions exceeds
     Slack's block or payload caps. Action-bearing replies split their text across bounded blocks;
     `sections=True` uses conservative section blocks after Slack rejects markdown blocks as
-    `invalid_blocks`. `text` always carries the whole reply as the notification fallback."""
+    `invalid_blocks`. `text` always carries the whole reply as the notification fallback.
+
+    A body carrying more than one link posts with unfurling off: Slack previews every link it finds,
+    so a reply that cites its sources arrives buried under a stack of cards taller than the answer.
+    One link keeps its preview, which is the case where the card is the content.
+
+    Blank lines above a markdown header are dropped before the text is chunked. Slack renders each
+    one as an empty paragraph, leaving a header floating a full line below the prose it heads, and
+    an ATX header needs no blank line above it to parse."""
     if not text:
         raise ValueError("Slack reply text is required")
     if metadata is not None and len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
@@ -971,9 +989,13 @@ def slack_reply_body(
     base: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
+    if _link_count(text) > MAX_UNFURLED_LINKS:
+        base["unfurl_links"] = False
+        base["unfurl_media"] = False
     if blocks and (len(text) <= SLACK_MARKDOWN_TEXT_LIMIT or actions is not None):
+        rendered = re.sub(HEADER_PADDING_PATTERN, "\n", text)
         limit = SLACK_SECTION_TEXT_LIMIT if sections else SLACK_MARKDOWN_TEXT_LIMIT
-        chunks = [text[start : start + limit] for start in range(0, len(text), limit)]
+        chunks = [rendered[start : start + limit] for start in range(0, len(rendered), limit)]
         block_list: list[dict[str, object]] = [
             (
                 {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
