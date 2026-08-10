@@ -122,6 +122,8 @@ from evals.registry import (
     VISUAL_JUDGE_MODEL,
     selected_run_tasks,
 )
+from evals.response_formatting import CASES as FORMATTING_CASES
+from evals.response_formatting import structured_answer_scorer
 from evals.response_register import CASES as REGISTER_CASES
 from evals.response_register import (
     CHANGE_NOTE,
@@ -260,6 +262,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["document_visual"].simulator_model is None
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
+    assert tasks["response_formatting"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["response_formatting"].simulator_model is None
     assert tasks["delegated_response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["delegated_response_register"].simulator_model is None
     assert tasks["closing_message"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -280,6 +284,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "object_tools_flows",
             "document_visual",
             "response_register",
+            "response_formatting",
             "delegated_response_register",
             "closing_message",
             "slack_message_block",
@@ -3372,6 +3377,100 @@ async def test_delegated_split_delivery_scorer_proves_all_three_hops() -> None:
         assert reason in verdict.reason
 
 
+async def test_structured_answer_scorer_passes_a_short_list_of_whole_sentences() -> None:
+    scorer = structured_answer_scorer(120, 8, 2, 5, 6)
+    listed = CapabilityOutput(
+        "Two are within walking distance this morning:\n"
+        "- Abyssinian Baptist on West 138th starts its service at eleven.\n"
+        "- First Corinthian Baptist on Adam Clayton Powell starts at ten.\n"
+        "- Mount Neboh Baptist on West 114th also starts at ten.",
+        (),
+    )
+
+    verdict = await scorer(listed)
+
+    assert verdict.passed
+    assert verdict.reason == "structured answer: 40 words, 3 bullets"
+    assert verdict.evidence == {
+        "words": 40,
+        "lines": 4,
+        "headers": 0,
+        "bullets": 3,
+        "bulletWords": [10, 10, 10],
+    }
+
+
+async def test_structured_answer_scorer_flags_a_prose_wall_and_an_overlong_list() -> None:
+    """Both directions of the bullet count fail: parallel options the member has to choose between
+    are unreadable as one paragraph, and a list long enough to need its own skim is a report."""
+    scorer = structured_answer_scorer(120, 8, 2, 5, 6)
+    wall = CapabilityOutput(
+        "Abyssinian Baptist starts at eleven and First Corinthian at ten, both a short walk from "
+        "where you are.",
+        (),
+    )
+
+    verdict = await scorer(wall)
+
+    assert not verdict.passed
+    assert "0 bullet lines under the 2 floor" in verdict.reason
+    assert verdict.evidence["bulletWords"] == []
+    sprawling = CapabilityOutput(
+        "\n".join(f"- option {index} runs its own service this morning" for index in range(7)), ()
+    )
+    rejected = await scorer(sprawling)
+    assert not rejected.passed
+    assert "7 bullet lines over the 5 budget" in rejected.reason
+
+
+async def test_structured_answer_scorer_flags_bullets_that_are_fragments() -> None:
+    scorer = structured_answer_scorer(120, 8, 2, 5, 6)
+    clipped = CapabilityOutput(
+        "Two options:\n- Abyssinian, eleven\n- First Corinthian, ten\n- Mount Neboh, ten", ()
+    )
+
+    verdict = await scorer(clipped)
+
+    assert not verdict.passed
+    assert "3 bullets under the 6-word sentence floor" in verdict.reason
+    assert verdict.evidence["bulletWords"] == [2, 3, 3]
+
+
+async def test_structured_answer_scorer_rejects_a_header_over_an_otherwise_valid_list() -> None:
+    scorer = structured_answer_scorer(120, 8, 2, 5, 6)
+    body = (
+        "\n- Abyssinian Baptist on West 138th starts its service at eleven."
+        "\n- First Corinthian Baptist on Adam Clayton Powell starts at ten."
+    )
+
+    atx = await scorer(CapabilityOutput(f"## Options{body}", ()))
+    bold = await scorer(CapabilityOutput(f"**Options**{body}", ()))
+
+    assert not atx.passed
+    assert "1 section headers" in atx.reason
+    assert not bold.passed
+    assert bold.evidence["headers"] == 1
+
+
+async def test_structured_answer_scorer_ignores_a_list_inside_a_fenced_block() -> None:
+    """A manifest snippet's `-` lines are content, so counting them would let a fenced example
+    satisfy the bullet floor and would fail a valid reply for the fragments inside its code."""
+    scorer = structured_answer_scorer(120, 8, 2, 5, 6)
+    fenced = CapabilityOutput(
+        "Rotate it with the manifest in hand:\n"
+        "```yaml\n- events: message.channels\n- scopes: chat:write\n```\n"
+        "- Regenerate the signing secret on the app's Basic Information page.\n"
+        "- Put the new secret in the workspace credential slot before saving.",
+        (),
+    )
+
+    verdict = await scorer(fenced)
+
+    assert verdict.passed
+    assert verdict.evidence["bullets"] == 2
+    assert verdict.evidence["bulletWords"] == [10, 11]
+
+
 def test_measure_counts_every_structure_marker() -> None:
     shape = measure("### Findings\n\n- first\n2. second\n• third\n\nplain tail line")
     assert shape == Shape(words=11, lines=5, headers=1, bullets=3)
@@ -3382,6 +3481,21 @@ def test_register_length_floors_keep_brevity_from_rewarding_clipped_disputes() -
     assert sum("at most" in grading for grading in gradings) == 10
     assert sum("at least" in grading for grading in gradings) == 5
     assert sum("shared Markdown report" in grading for grading in gradings) == 5
+
+
+def test_formatting_suite_runs_by_default_and_grades_both_shape_directions() -> None:
+    """A suite that only rewarded structure would score highest on a reply that bullets a single
+    fact, so its prose cases hold the same line the register suite beside it holds."""
+    task = next(item for item in TASKS if item.name == "response_formatting")
+    gradings = [grading_statement(case.grader) for case in FORMATTING_CASES]
+
+    assert task.name in {default.name for default in selected_run_tasks()}
+    assert task.cases == tuple(case.name for case in FORMATTING_CASES)
+    assert all(case.samples == 3 for case in FORMATTING_CASES)
+    assert all(case.artifact_rubric == () for case in FORMATTING_CASES)
+    assert all("at most" in grading and "no section headers" in grading for grading in gradings)
+    assert sum("bullet lines of at least" in grading for grading in gradings) == 3
+    assert sum("no bullet list" in grading for grading in gradings) == 2
 
 
 def test_the_grounding_case_stages_a_note_its_code_contradicts() -> None:

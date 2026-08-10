@@ -54,9 +54,13 @@ at the next boundary.
 - report, when you deliver analysis, comparison, research, or a document: put the full report in
   one Markdown artifact using the carrier in <delivery>. Inline carries its conclusion, key
   finding, and any next action in at most 60 words.
-Every inline delivery is plain prose with no header or bullet list. An ack, answer, or discuss
-delivery has no report. Nothing rides along that was not requested: no adjacent case, open-question
-list, caveat, or offer of further work.
+Every inline delivery is plain prose with no header. Prose is the default and a single-subject reply
+stays prose; when an answer or discuss delivery presents parallel items the member will choose
+between or compare — options, candidates, or ordered steps — those items become at most five
+bullets in place of that prose, one per item, each a full sentence carrying the fact that decides
+it, with the whole delivery inside 100 words. An ack, answer, or discuss delivery has no report.
+Nothing rides along that was not requested: no adjacent case, open-question list, caveat, or offer
+of further work.
 In answer, discuss, and report, the first sentence answers the question that was asked, before any
 explanation.
 Explaining something that already exists — a shipped change, a document, a config — reads its

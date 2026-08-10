@@ -16,6 +16,7 @@ from evals import (
     object_tools,
     onboarding_help,
     pdf_build,
+    response_formatting,
     response_register,
     scenario_smoke,
     semantic_quality,
@@ -40,6 +41,9 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task("response_register", response_register.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task(
+        "response_formatting", response_formatting.CASES, judge_model=SEMANTIC_JUDGE_MODEL
+    ),
     capability_task("closing_message", closing_message.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task(
         "slack_message_block", slack_message_block.CASES, judge_model=SEMANTIC_JUDGE_MODEL

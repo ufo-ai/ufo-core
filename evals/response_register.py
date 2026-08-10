@@ -29,7 +29,7 @@ from an empty workspace."""
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -43,33 +43,49 @@ from evals.harness.harness import JsonObject
 
 HEADER_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|\*\*[^*\n]{1,60}\*\*:?\s*$)", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s{0,3}(?:[-*•]\s+\S|\d{1,2}[.)]\s+\S)", re.MULTILINE)
+BULLET_MARKER_RE = re.compile(r"^\s{0,3}(?:[-*•]|\d{1,2}[.)])\s+")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,}).*?(?:^\s{0,3}\1\s*$|\Z)", re.MULTILINE | re.DOTALL)
 
 
 @dataclass(frozen=True)
 class Shape:
     """The measured shape of one reply. A bold-only line counts as a header: a pseudo-header
-    imposes the same reading cost as a real one, so both fail a chat register."""
+    imposes the same reading cost as a real one, so both fail a chat register. Each bullet's own
+    length is recorded separately from the counts, because only a grader that sets a bullet-length
+    floor reads it: two replies of the same counts are the same shape."""
 
     words: int
     lines: int
     headers: int
     bullets: int
+    bullet_words: tuple[int, ...] = field(default=(), compare=False)
 
     @property
     def evidence(self) -> JsonObject:
-        return dict(asdict(self))
+        return {
+            "words": self.words,
+            "lines": self.lines,
+            "headers": self.headers,
+            "bullets": self.bullets,
+        }
+
+    @property
+    def bullet_evidence(self) -> JsonObject:
+        return self.evidence | {"bulletWords": list(self.bullet_words)}
 
 
 def measure(text: str) -> Shape:
     """Words and lines count the whole reply; headers and bullets count only outside fenced code,
-    where a `#` comment or a diff's `-` line carries no document structure."""
+    where a `#` comment or a diff's `-` line carries no document structure. A bullet's own length
+    excludes its marker, so a one-word item counts as one word."""
     prose = FENCE_RE.sub("", text)
+    bullets = [line for line in prose.splitlines() if BULLET_RE.match(line)]
     return Shape(
         words=len(text.split()),
         lines=len([line for line in text.splitlines() if line.strip()]),
         headers=len(HEADER_RE.findall(prose)),
-        bullets=len(BULLET_RE.findall(prose)),
+        bullets=len(bullets),
+        bullet_words=tuple(len(BULLET_MARKER_RE.sub("", line).split()) for line in bullets),
     )
 
 
