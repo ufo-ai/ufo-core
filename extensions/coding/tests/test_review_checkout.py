@@ -8,6 +8,7 @@ import pytest
 import ufo_ext_coding.review_checkout as review_checkout
 from ufo_ext_coding.review_checkout import (
     CODE_REVIEW_PROFILE,
+    CODE_REVIEW_ROUND_LIMIT,
     CODE_REVIEW_TOOL,
     CheckoutCodeReviewInput,
     ExactComparison,
@@ -22,6 +23,7 @@ from ufo_ext_coding.review_checkout import (
 )
 from ufo_ext_coding.review_routing import ReviewTarget
 
+from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT
 from ufo.sandbox.local import LocalCarrier
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.sandbox import ProxyEndpoint, SandboxSession, SandboxSpec
@@ -249,6 +251,11 @@ async def test_exact_comparison_checkout_refuses_every_wrong_identity(
         ).run(ExactComparison.model_validate(values))
     reviews = tmp_path / "workspace" / ".ufo-review"
     assert not list(reviews.iterdir())
+
+
+def test_review_lifts_its_round_budget_above_the_default() -> None:
+    assert CODE_REVIEW_PROFILE.max_rounds == CODE_REVIEW_ROUND_LIMIT == 200
+    assert CODE_REVIEW_PROFILE.max_rounds > SUBAGENT_ROUND_LIMIT
 
 
 def test_review_candidate_has_only_checkout_and_read_tools() -> None:

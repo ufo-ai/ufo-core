@@ -12,6 +12,7 @@ from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_coding.review_routing import ReviewTarget, record_review_conversation
 
 REVIEW_CHECKOUT_TIMEOUT_SECONDS = 300
+CODE_REVIEW_ROUND_LIMIT = 200
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 CODE_REVIEW_PROFILE_NAME = "code_review"
@@ -471,6 +472,7 @@ CODE_REVIEW_PROFILE = SubagentProfile(
     tool_names=tuple(tool.name for tool in CODE_REVIEW_TOOLS),
     input_model=ExactComparison,
     output_model=CodeReviewOutput,
+    max_rounds=CODE_REVIEW_ROUND_LIMIT,
     untrusted_output=True,
     isolated_tools=True,
 )
