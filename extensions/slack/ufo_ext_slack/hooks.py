@@ -10,7 +10,7 @@ nothing.
 `pre_tool_use` is a gating event: a handler that raises or outruns the loader's per-handler timeout
 is a Deny, and the member's Slack send never leaves. A footer is cosmetic and must never hold that
 power, so every await here is inside a timeout of its own and every failure resolves to `None` —
-no rewrite, and the plain attribution the tool appends on its own. The read is the extension's
+no rewrite, and the generic attribution the tool appends on its own. The read is the extension's
 scoped store, which the surface mirrors the id into, so the send path asks Slack nothing."""
 
 import asyncio

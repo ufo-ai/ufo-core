@@ -1,16 +1,16 @@
 """The attribution footer a connector-sent Slack message carries, rendered as a mention of the bot
 user this workspace's own Slack install proved.
 
-The connectors tool marks every Slack send it dispatches with `UFO_ATTRIBUTION` — the one connector
-call that publishes text this deploy wrote into someone else's surface, marked there because a
-connector send passes through no renderer of ours. This module writes that attribution with the
-deploy's own bot user mentioned in place of its plain name, so a reader can reach the agent from the
-message that mentions it.
+The connectors tool marks every Slack send it dispatches with the product's own name — the one
+connector call that publishes text this deploy wrote into someone else's surface, marked there
+because a connector send passes through no renderer of ours. This module writes that attribution
+with the deploy's own bot user mentioned in place of that name, so a reader can reach the agent from
+the message that mentions it.
 
-The footer's shapes are imported, never restated — only the subject changes here. The tool
-attributes a body only when it carries no footer of its own, so a footer written here is what
-suppresses that append: the never-stack guard and this footer are one join, not two copies of a
-string that could drift apart.
+The footer's shape is imported, never restated — only the subject changes here. The tool attributes
+a send only when it carries no footer of its own, so a footer written here is what suppresses that
+append: the never-stack guard and this footer are one join, not two copies of a string that could
+drift apart.
 
 `addressing_mention` is the other half of the same join, read by the surface's inbound tests. A
 connector send is authored by a member's own connected Slack account, not by the deploy's bot, so
@@ -25,21 +25,12 @@ from ufo_ext_connectors.tools import (
     SLACK_PROVIDER,
     SLACK_SEND_VERBS,
     SLACK_TEXT_ARGUMENT,
-    UFO_ATTRIBUTION_MENTION,
     UFO_ATTRIBUTION_MENTION_SUBJECT,
     attributed_arguments,
     attribution_stripped,
 )
 
 from ufo.sdk.context import JsonValue
-
-
-def mention_attribution(bot_user_id: str) -> str:
-    """The attribution footer mentioning this deploy's own Slack bot user, which Slack renders as
-    the app's handle, in the plain shape a send's `text` carries. It is one of the forms
-    `ATTRIBUTION_LINE` matches, so the connectors tool's own append finds an attribution line
-    already present and adds nothing."""
-    return UFO_ATTRIBUTION_MENTION.format(bot_user_id=bot_user_id)
 
 
 def is_slack_send(provider: str, slug: str) -> bool:
@@ -55,12 +46,11 @@ def is_slack_send(provider: str, slug: str) -> bool:
 
 
 def mention_attributed(arguments: dict[str, JsonValue], bot_user_id: str) -> dict[str, JsonValue]:
-    """`arguments` with the mentioning footer attached to a Slack send's body, in whichever shapes
-    that body renders in — the same shaping the connectors tool applies to its own plain footer,
-    with the bot mentioned in place of the product's name. A body already carrying an attribution
-    line of its own is returned untouched — the resend of a marked message, and the reason a second
-    pass over these arguments adds nothing. A body that merely opens the way a footer does is not
-    one, and is footered like any other."""
+    """`arguments` with the mentioning footer appended as the send's last block — the same shaping
+    the connectors tool applies to its own generic footer, with the bot mentioned in place of the
+    product's name. A send already carrying an attribution line of its own is returned untouched —
+    the resend of a marked message, and the reason a second pass over these arguments adds nothing.
+    A body that merely opens the way a footer does is not one, and is footered like any other."""
     subject = UFO_ATTRIBUTION_MENTION_SUBJECT.format(bot_user_id=bot_user_id)
     return attributed_arguments(arguments, subject)
 
@@ -70,18 +60,19 @@ def addressing_mention(text: str, bot_user_id: str) -> bool:
     Every attribution is removed before the test, so a member who addresses the agent in a message
     that also carries a footer is still addressing it.
 
-    A footer is stripped here in any shape the send can arrive in, not only the whole-line shape
-    the outbound guard reads: the broker keeps no separator on the fallback `text` it stores, so the
-    footer comes back flattened onto the body's own line. Tolerating that is what keeps this
-    deploy's own published message from reading as the member addressing the agent."""
+    A footer is stripped here wherever a message can carry it, not only on the whole line the
+    outbound guard reads: a body quoting a marked message keeps text on both sides of the footer,
+    and a fallback `text` Slack stores comes back with it flattened onto the body's own line.
+    Tolerating that is what keeps this deploy's own published message from reading as the member
+    addressing the agent."""
     return f"<@{bot_user_id}>" in attribution_stripped(text)
 
 
 def message_bodies(event: Mapping[str, object]) -> tuple[str, ...]:
     """Every string a Slack message could carry a mention in: its `text` and the text of each block
-    and rich-text element under it. A `blocks`-authored send names no `text` at all, so the footer
-    this deploy appended lives only in a context element — read `text` alone and the mention it
-    carries is invisible to the address decision while Slack still delivers `app_mention` for it."""
+    and rich-text element under it. The footer this deploy appends lives in a context element and
+    never in `text` — read `text` alone and the mention it carries is invisible to the address
+    decision while Slack still delivers `app_mention` for it."""
     blocks = event.get(SLACK_BLOCKS_ARGUMENT)
     return (str(event.get(SLACK_TEXT_ARGUMENT) or ""), *_nested_strings(blocks))
 

@@ -77,43 +77,32 @@ AVAILABLE_TOOLS_OMITTED_NOTE = (
 UFO_ATTRIBUTION_LEAD = "Sent using"
 UFO_ATTRIBUTION_SUBJECT = "ufo"
 UFO_ATTRIBUTION_MENTION_SUBJECT = "<@{bot_user_id}>"
-ATTRIBUTION_PLAIN = f"{UFO_ATTRIBUTION_LEAD} {{subject}}"
 ATTRIBUTION_MRKDWN = f"*{UFO_ATTRIBUTION_LEAD}* {{subject}}"
-ATTRIBUTION_DIRECTIVE = f":::context\n**{UFO_ATTRIBUTION_LEAD}** {{subject}}\n:::"
-"""One shape per body shape a Slack send carries: the plain line, which `text` takes and a
-notification, a search result, and a client rendering no blocks read; the mrkdwn line of a Block Kit
-context element, which Slack renders in its small muted contextual type; and the broker's
-`:::context` directive, which `markdown_text` takes and the broker converts into exactly that
-element. The lead is bold in both rendered shapes — two asterisks in the directive, whose converter
-reads one pair as italic — and the subject is left unstyled so a bot mention renders as its chip."""
-UFO_ATTRIBUTION = ATTRIBUTION_PLAIN.format(subject=UFO_ATTRIBUTION_SUBJECT)
-UFO_ATTRIBUTION_MENTION = ATTRIBUTION_PLAIN.format(subject=UFO_ATTRIBUTION_MENTION_SUBJECT)
-"""The same footer with the deploy's own Slack bot user mentioned rather than named in plain text,
-which the Slack extension writes when its own install has proved that id. This tool holds no Slack
-identity, so it writes the plain form, and the mentioning form is the one a reader can reach the
-agent from."""
+"""The footer's one shape: the mrkdwn line of a Block Kit context element, which Slack renders in
+its small muted contextual type. The lead is bold and the subject left unstyled, so a bot mention
+renders as its chip."""
 _MENTION_SUBJECT_ARM = UFO_ATTRIBUTION_MENTION_SUBJECT.format(bot_user_id=r"[^\s>]+")
 _ATTRIBUTION_ARM = (
-    rf"(\*{{0,2}}){re.escape(UFO_ATTRIBUTION_LEAD)}\1[ \t]+"
+    rf"(\*?){re.escape(UFO_ATTRIBUTION_LEAD)}\1[ \t]+"
     rf"(?:{re.escape(UFO_ATTRIBUTION_SUBJECT)}|{_MENTION_SUBJECT_ARM})"
 )
-"""The footer itself, in every form this deploy writes it: either subject, and the lead plain, bold
-in mrkdwn (`*Sent using*`), or bold in the markdown a `:::context` directive carries
-(`**Sent using**`) — the backreference is what pairs the asterisks rather than accepting a body that
-opens with a stray one. The two patterns over it differ only in what they demand around it, because
-the outbound and inbound reads want opposite tolerances."""
+"""The footer itself, under either subject and with the lead bold or plain — Slack's own renderers
+keep the mrkdwn asterisks on the text a message stores and drop them from the element it delivers
+back. The backreference is what pairs the asterisks rather than accepting a body that opens with a
+stray one. The two patterns over it differ only in what they demand around it, because the outbound
+and inbound reads want opposite tolerances."""
 ATTRIBUTION_LINE = re.compile(rf"(?:\A|\n)[ \t]*{_ATTRIBUTION_ARM}[ \t]*(?=\n|\Z)")
 """A footer holding a whole line of its own — the never-stack guard, and the only form an outbound
-body is read for. Matching a whole line and never a prefix is what keeps a body that merely opens
-the same way ("Sent using an iPhone") a body, still owed a footer of its own; matching the line
-inside a `:::context` directive is what makes the directive recognised."""
-ATTRIBUTION_TRAILING = re.compile(rf"(?:\A|\s)[ \t]*{_ATTRIBUTION_ARM}\s*\Z")
-"""The same footer closing a body that no newline separates it from. Slack itself produces this: a
-`markdown_text` send carries the footer after a blank line, and the fallback `text` the published
-message stores comes back with it flattened onto the body's own line, joined by whitespace. Only the
-inbound read tolerates it, because there a footer this deploy wrote must not be readable as a member
-addressing the agent in any shape the send can produce."""
+send is read for. Matching a whole line and never a prefix is what keeps a body that merely opens
+the same way ("Sent using an iPhone") a body, still owed a footer of its own."""
+ATTRIBUTION_ANYWHERE = re.compile(rf"[ \t]*{_ATTRIBUTION_ARM}")
+"""The same footer wherever a published message carries it, whole line or not. Only the inbound read
+tolerates this much, because there a footer this deploy wrote must not be readable as a member
+addressing the agent in any shape a message can come back in — flattened onto the body's own line,
+or quoted with a member's own text on both sides of it."""
 CONTEXT_BLOCK_TYPE = "context"
+MARKDOWN_BLOCK_TYPE = "markdown"
+SECTION_BLOCK_TYPE = "section"
 MRKDWN_ELEMENT_TYPE = "mrkdwn"
 SLACK_PROVIDER = "slack"
 SLACK_MESSAGE_NOUN = "message"
@@ -121,6 +110,15 @@ SLACK_SEND_VERBS = ("send", "post", "reply", "schedule")
 SLACK_MARKDOWN_ARGUMENT = "markdown_text"
 SLACK_BLOCKS_ARGUMENT = "blocks"
 SLACK_TEXT_ARGUMENT = "text"
+SLACK_MARKDOWN_TEXT_LIMIT = 12_000
+"""Slack's cap on the `markdown` blocks of one payload, counted across all of them together — the
+bound every writer of that block holds, here and on the surface's own reply, since a payload past it
+is a send Slack refuses as `invalid_blocks`. It is also the cap Slack documents on the
+`markdown_text` argument, so a body over it is refused whichever of the two carries it and splitting
+it across blocks of the same type buys nothing."""
+SLACK_SECTION_TEXT_LIMIT = 3_000
+"""Slack's cap on one mrkdwn text object, counted per object rather than per payload — the bound a
+`text` body is chunked at, since that argument carries far more than one object holds."""
 
 BASE64_MARKER = "base64"
 INLINED_MARKER = "utf-8"
@@ -305,73 +303,95 @@ async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsI
 
 
 def attribution_stripped(text: str) -> str:
-    """`text` with every attribution this deploy could have written removed, whether it holds a line
-    of its own or was flattened onto the body's — what an inbound read decides over, so a mention
-    left in it is a mention the author wrote. The trailing form is stripped until none is left,
-    because a body can carry the footer twice and only the last of a run trails the text."""
-    stripped = ATTRIBUTION_LINE.sub("", text)
-    while (trailing := ATTRIBUTION_TRAILING.sub("", stripped)) != stripped:
-        stripped = trailing
-    return stripped
+    """`text` with every attribution this deploy could have written removed, wherever the message it
+    came back from carries it — what an inbound read decides over, so a mention left in it is a
+    mention the author wrote."""
+    return ATTRIBUTION_ANYWHERE.sub("", text)
 
 
-def attribution_block(subject: str) -> dict[str, JsonValue]:
-    """The footer as the Block Kit context block a `blocks`-authored body is given — the element the
-    broker's directive converts to, appended after the body's own blocks."""
-    return {
+def attributed_arguments(arguments: dict[str, JsonValue], subject: str) -> dict[str, JsonValue]:
+    """`arguments` with the attribution appended as the send's last block — the footer as a section
+    of the message like any other, built as the Block Kit context block the Slack surface's own
+    reply closes on, which is the one shape Slack renders it in. A body the send authored as
+    `blocks` is appended to; a `markdown_text` body moves into the `markdown` block that argument is
+    the top-level spelling of, which is also what keeps the two from being sent together, and a
+    `text` body stays where it is as the notification fallback while blocks of its own carry it.
+    Each body reaches the block that renders the markup it is already written in, so a footer costs
+    a send nothing in how it reads. A send already carrying a footer anywhere is left as it is, and
+    a call that names no body — a listing, a delete — comes back exactly as it went in."""
+    if _carries_attribution(arguments):
+        return arguments
+    footer: dict[str, JsonValue] = {
         "type": CONTEXT_BLOCK_TYPE,
         "elements": [
             {"type": MRKDWN_ELEMENT_TYPE, "text": ATTRIBUTION_MRKDWN.format(subject=subject)}
         ],
     }
-
-
-def attributed_arguments(arguments: dict[str, JsonValue], subject: str) -> dict[str, JsonValue]:
-    """`arguments` with the attribution attached to every body a Slack send carries, each in the
-    shape that body renders in. A body already carrying a footer of its own is left as it is, and an
-    argument is only ever rewritten, never introduced: a call that names no body — a listing, a
-    delete — comes back exactly as it went in, and no body is retyped into another form to be given
-    a footer it could not otherwise hold."""
-    attributed = dict(arguments)
-    markdown = arguments.get(SLACK_MARKDOWN_ARGUMENT)
-    if isinstance(markdown, str) and markdown.strip() and not ATTRIBUTION_LINE.search(markdown):
-        directive = ATTRIBUTION_DIRECTIVE.format(subject=subject)
-        attributed[SLACK_MARKDOWN_ARGUMENT] = f"{markdown}\n\n{directive}"
     if SLACK_BLOCKS_ARGUMENT in arguments:
-        blocks = _attributed_blocks(arguments[SLACK_BLOCKS_ARGUMENT], subject)
-        if blocks is not None:
-            attributed[SLACK_BLOCKS_ARGUMENT] = blocks
+        appended = _appended_blocks(arguments[SLACK_BLOCKS_ARGUMENT], footer)
+        if appended is None:
+            return arguments
+        return {**arguments, SLACK_BLOCKS_ARGUMENT: appended}
+    body = _body_blocks(arguments)
+    if body is None:
+        return arguments
+    kept = {name: value for name, value in arguments.items() if name != SLACK_MARKDOWN_ARGUMENT}
+    return {**kept, SLACK_BLOCKS_ARGUMENT: [*body, footer]}
+
+
+def _body_blocks(arguments: dict[str, JsonValue]) -> list[JsonValue] | None:
+    """The body a send authored as text, as the blocks the footer's own block follows, or None when
+    it authored none. The two arguments are written in different markup languages and each reaches
+    the block that renders its own: `markdown_text` is the standard markdown of a `markdown` block,
+    `text` is the mrkdwn of a section's text object, and typing either into the other's block is
+    what would publish `<https://x|label>` as its own characters and read `*x*` as emphasis instead
+    of bold.
+
+    A `markdown_text` body stays whole in its one block: Slack caps that argument and those blocks
+    at the same 12,000 characters, counted across the payload, so a longer body is a send it refuses
+    either way. A `text` body runs to the 40,000 characters that argument carries, past what one
+    text object holds, so it is chunked at the object's own cap the way the Slack surface chunks its
+    own reply."""
+    markdown = arguments.get(SLACK_MARKDOWN_ARGUMENT)
+    if isinstance(markdown, str) and markdown.strip():
+        return [{"type": MARKDOWN_BLOCK_TYPE, "text": markdown}]
     text = arguments.get(SLACK_TEXT_ARGUMENT)
-    if isinstance(text, str) and text.strip() and not ATTRIBUTION_LINE.search(text):
-        attributed[SLACK_TEXT_ARGUMENT] = f"{text}\n\n{ATTRIBUTION_PLAIN.format(subject=subject)}"
-    return attributed
+    if isinstance(text, str) and text.strip():
+        return [
+            {
+                "type": SECTION_BLOCK_TYPE,
+                "text": {
+                    "type": MRKDWN_ELEMENT_TYPE,
+                    "text": text[start : start + SLACK_SECTION_TEXT_LIMIT],
+                },
+            }
+            for start in range(0, len(text), SLACK_SECTION_TEXT_LIMIT)
+        ]
+    return None
 
 
-def _attributed_blocks(value: JsonValue, subject: str) -> JsonValue | None:
-    """The `blocks` value with the footer's context block appended, or None to leave the argument as
-    it is — an empty list is no body, a value already carrying a footer needs none, and a value this
-    cannot read is left to the plain line on `text`. The broker's schema takes the list itself and a
-    serialized form of it, so a string is parsed and re-emitted the way it arrived."""
+def _appended_blocks(value: JsonValue, footer: dict[str, JsonValue]) -> JsonValue | None:
+    """The `blocks` value with the footer's block after it, or None to leave the argument as it is —
+    an empty list is no body, and a value this cannot read is one no footer can be appended to. The
+    broker's schema takes the list itself and a serialized form of it, so a string is parsed and
+    re-emitted the way it arrived — and read for a footer of its own only once parsed, since inside
+    a serialized body no element holds a line."""
     match value:
-        case list() if _appendable(value):
-            return [*value, attribution_block(subject)]
+        case list() if value:
+            return [*value, footer]
         case str():
             for url_encoded in (False, True):
                 try:
                     parsed = json.loads(unquote(value) if url_encoded else value)
                 except ValueError:
                     continue
-                if not isinstance(parsed, list) or not _appendable(parsed):
+                if not isinstance(parsed, list) or not parsed or _carries_attribution(parsed):
                     return None
-                rendered = json.dumps([*parsed, attribution_block(subject)])
+                rendered = json.dumps([*parsed, footer])
                 return quote(rendered) if url_encoded else rendered
             return None
         case _:
             return None
-
-
-def _appendable(blocks: list[JsonValue]) -> bool:
-    return bool(blocks) and not _carries_attribution(blocks)
 
 
 def _carries_attribution(value: JsonValue) -> bool:
@@ -392,9 +412,9 @@ def slack_attributed(
     """`arguments` with the ufo attribution attached to the body of a Slack send — the one connector
     call that publishes a message this deploy wrote, and the only place it can be marked: the Slack
     surface's own reply carries its footer, a message posted through a connector passes through no
-    renderer of ours. A read, an edit, and a listing are untouched, as is a body already carrying a
+    renderer of ours. A read, an edit, and a listing are untouched, as is a send already carrying a
     footer of its own, so a resend or an edit of a marked message never stacks it and the mentioning
-    footer the Slack extension writes suppresses this plain one."""
+    footer the Slack extension writes suppresses this generic one."""
     if provider != SLACK_PROVIDER:
         return arguments
     name = slug.lower()

@@ -30,7 +30,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request as StarletteRequest
-from ufo_ext_slack.attribution import mention_attribution
+from ufo_ext_connectors.tools import ATTRIBUTION_MRKDWN
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
@@ -780,7 +780,7 @@ def test_the_attribution_footer_is_not_an_address_and_keeps_a_real_mention() -> 
     Only the mention on the footer line stops counting: one in the body still addresses the agent,
     and an `app_mention` carrying a mention spelled some way this module cannot read is still Slack
     telling us it is one."""
-    footer = mention_attribution(BOT_USER_ID)
+    footer = ATTRIBUTION_MRKDWN.format(subject=f"<@{BOT_USER_ID}>")
     footered = f"the plan is posted\n\n{footer}"
     assert not slack.slack_message_addressed(
         {"type": "message", "text": footered}, BOT_USER_ID, False
@@ -805,7 +805,8 @@ def test_a_footered_message_stays_in_ambient_reading() -> None:
     """A message carrying our own attribution footer was never gated in as a turn, so it is not in
     any transcript — dropping it as a bot mention would take a member's own words out of the agent's
     reading of the channel. A message that genuinely mentions the bot still drops."""
-    footered = f"the plan is posted\n\n{mention_attribution(BOT_USER_ID)}"
+    footer = ATTRIBUTION_MRKDWN.format(subject=f"<@{BOT_USER_ID}>")
+    footered = f"the plan is posted\n\n{footer}"
     digest = slack.ambient_digest(
         [
             {"user": "U1", "ts": "1700000000.000100", "text": footered},
