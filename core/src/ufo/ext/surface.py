@@ -367,6 +367,8 @@ class Writeback:
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
 TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
+OPENING_MESSAGE_CHARS = 240
+MAX_CONVERSATION_SPEAKERS = 8
 
 
 class AgentSummary(BaseModel):
@@ -686,17 +688,41 @@ async def record_transcript_access(
     )
 
 
+class ConversationSpeaker(BaseModel):
+    """One member who has spoken in a conversation: the workspace email their turns are attributed
+    to, and `sender` — the line the admitting surface reported them under on the first of those
+    turns, which Slack writes as `Real Name (email)`. A `member` row carries no display name and a
+    Slack handle is stored nowhere, so that line is the only name there is; a surface that reports
+    none leaves it None and the address is the whole answer."""
+
+    email: str
+    sender: str | None
+
+
 class ListedConversation(BaseModel):
     """One conversation as the portal's per-agent conversations view lists it: `ConversationSummary`
     plus whether this viewer may read its content now and whether they may disclose it to
     themselves by acknowledging (an admin, another member's private conversation — never a
-    room's). Disclosures recorded against it are not here and no portal read lists them: the
-    record is the operator's, kept in `transcript_access` and reported by
-    `surface.transcript_disclosed`."""
+    room's), the words that opened it, and who has spoken in it. Disclosures recorded against it
+    are not here and no portal read lists them: the record is the operator's, kept in
+    `transcript_access` and reported by `surface.transcript_disclosed`.
+
+    `opening_message` is the member's own words out of the first turn's inbound — the ambient
+    digest a channel surface renders around them is not what the conversation is about — capped at
+    `OPENING_MESSAGE_CHARS`, and empty for a conversation no member opened. `speakers` runs in
+    order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
+
+    Both are content of the conversation and both answer empty unless `readable`: a row listed to
+    an admin as administration metadata states whose it is and how busy, never a word of it and
+    never who else is in it. Reading it is the acknowledgement's act, and the acknowledgement is
+    what `record_transcript_access` audits — so the gate is here, where `readable` is decided, and
+    no read surface can carry past it."""
 
     summary: ConversationSummary
     readable: bool
     disclosable: bool
+    opening_message: str
+    speakers: tuple[ConversationSpeaker, ...]
 
 
 class SubagentRun(BaseModel):
@@ -2129,7 +2155,12 @@ class SurfaceContext:
         acknowledge and read another member's private one — `record_transcript_access` is the
         act). Subagent conversations are absent: they are the agent's own work on a request,
         listed nested under the turn that spawned them, never beside it. `conversation_id` selects
-        one exact row before the bound for a durable permalink."""
+        one exact row before the bound for a durable permalink.
+
+        The opening words and the speakers are two further reads over the page's ids, never one
+        per row: what a conversation is about and who is in it are facts of its turns, and only a
+        turn read can answer them. Both reads are narrowed to the rows this viewer may read, so an
+        unreadable row's content is never fetched, let alone carried."""
         activity = (
             sa.select(
                 tables.turn.c.conversation_id,
@@ -2176,6 +2207,12 @@ class SurfaceContext:
             )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
+        if not rows:
+            return ()
+        readable = _readable_audience_values(member_id)
+        content = [row.id for row in rows if row.audience in readable]
+        openings = await self._conversation_openings(content)
+        speakers = await self._conversation_speakers(content)
         mine = str(conversation_audience(member_id))
         return tuple(
             ListedConversation(
@@ -2188,13 +2225,108 @@ class SurfaceContext:
                     turn_count=row.turn_count or 0,
                     last_turn_at=row.last_turn_at,
                 ),
-                readable=row.audience in _readable_audience_values(member_id),
+                readable=row.audience in readable,
                 disclosable=admin
                 and row.audience != mine
                 and audience_member(parse_audience(row.audience)) is not None,
+                opening_message=openings.get(row.id, ""),
+                speakers=speakers.get(row.id, ()),
             )
             for row in rows
         )
+
+    async def _conversation_openings(self, listed: Sequence[UUID]) -> dict[UUID, str]:
+        if not listed:
+            return {}
+        opening = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.min(tables.turn.c.seq).label("seq"),
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id.in_(listed),
+            )
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.inbound)
+            .select_from(
+                tables.turn.join(
+                    opening,
+                    sa.and_(
+                        tables.turn.c.conversation_id == opening.c.conversation_id,
+                        tables.turn.c.seq == opening.c.seq,
+                    ),
+                )
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.conversation_id: member_message_text(row.inbound)[:OPENING_MESSAGE_CHARS]
+            for row in rows
+        }
+
+    async def _conversation_speakers(
+        self, listed: Sequence[UUID]
+    ) -> dict[UUID, tuple[ConversationSpeaker, ...]]:
+        if not listed:
+            return {}
+        said = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                tables.turn.c.seq,
+                tables.turn.c.context,
+                tables.member.c.email,
+                sa.func.row_number()
+                .over(
+                    partition_by=(tables.turn.c.conversation_id, tables.turn.c.speaker_member_id),
+                    order_by=tables.turn.c.seq,
+                )
+                .label("said_rank"),
+            )
+            .select_from(
+                tables.turn.join(
+                    tables.member, tables.member.c.id == tables.turn.c.speaker_member_id
+                )
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id.in_(listed),
+            )
+            .subquery()
+        )
+        first = (
+            sa.select(
+                said.c.conversation_id,
+                said.c.context,
+                said.c.email,
+                sa.func.row_number()
+                .over(partition_by=said.c.conversation_id, order_by=said.c.seq)
+                .label("speaker_rank"),
+            )
+            .where(said.c.said_rank == 1)
+            .subquery()
+        )
+        query = (
+            sa.select(first.c.conversation_id, first.c.context, first.c.email)
+            .where(first.c.speaker_rank <= MAX_CONVERSATION_SPEAKERS)
+            .order_by(first.c.conversation_id, first.c.speaker_rank)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        spoke: dict[UUID, list[ConversationSpeaker]] = {}
+        for row in rows:
+            context = None if row.context is None else TurnContext.model_validate(row.context)
+            spoke.setdefault(row.conversation_id, []).append(
+                ConversationSpeaker(
+                    email=row.email, sender=None if context is None else context.sender
+                )
+            )
+        return {conversation_id: tuple(who) for conversation_id, who in spoke.items()}
 
     async def readable_conversation(
         self, conversation_id: UUID, agent_id: UUID, member_id: UUID, *, admin: bool = False

@@ -22,6 +22,8 @@ export type Conversation = {
   id: string;
   surface: string;
   member_email: string | null;
+  description: string;
+  speakers: string[];
   turn_count: number;
   created_at: string;
   last_turn_at: string | null;

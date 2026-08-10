@@ -24,7 +24,7 @@ privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
@@ -913,11 +913,12 @@ async def _resolve_chat(
     )
     if not listed:
         return JSONResponse({"chats": []})
+    titles = await _chat_titles(store, listed)
     return JSONResponse(
         {
             "chats": [],
             "conversation": {
-                **_conversation_row(listed[0]),
+                **_conversation_row(listed[0], titles.get(listed[0].summary.id)),
                 "agent_id": str(target_agent.id),
             },
         }
@@ -1121,14 +1122,43 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     listed = await ctx.list_agent_conversations(
         agent_id, member_id, admin=audience.admin, limit=CONVERSATION_LIST_LIMIT
     )
-    return JSONResponse({"conversations": [_conversation_row(entry) for entry in listed]})
+    titles = await _chat_titles(web_extension().store, listed)
+    return JSONResponse(
+        {
+            "conversations": [
+                _conversation_row(entry, titles.get(entry.summary.id)) for entry in listed
+            ]
+        }
+    )
 
 
-def _conversation_row(entry: ListedConversation) -> dict[str, object]:
+async def _chat_titles(store: ScopedStore, listed: Sequence[ListedConversation]) -> dict[UUID, str]:
+    """The rail's own label for each listed conversation this surface opened, read in one go. A
+    conversation another surface holds carries no chat row, and one this viewer may not read is
+    not asked for: its label is cut from its first message, which is content the row withholds."""
+    keys = {entry.summary.id: _chat_row_key(entry.summary.id) for entry in listed if entry.readable}
+    records = await store.get_many(list(keys.values()))
+    titles: dict[UUID, str] = {}
+    for conversation_id, key in keys.items():
+        value = records.get(key)
+        if value is not None:
+            titles[conversation_id] = ChatRecord.model_validate(value).title
+    return titles
+
+
+def _conversation_row(entry: ListedConversation, title: str | None) -> dict[str, object]:
+    """One conversation as the panel lists it. `description` is what the conversation is called:
+    the title this surface stored when it opened the chat — the same string the rail shows, so an
+    index row and a rail row never name one conversation two ways — else that same cut taken from
+    the words that opened it, which is how a conversation another surface holds gets a name at
+    all. A row this viewer may not read carries neither a description nor a speaker: core withholds
+    the content, and the title of a chat it did not open is that content by another route."""
     return {
         "id": str(entry.summary.id),
         "surface": entry.summary.surface,
         "member_email": entry.summary.member_email,
+        "description": (title or _chat_title(entry.opening_message, ())) if entry.readable else "",
+        "speakers": [who.sender or who.email for who in entry.speakers],
         "turn_count": entry.summary.turn_count,
         "created_at": _iso(entry.summary.created_at),
         "last_turn_at": _iso(entry.summary.last_turn_at),

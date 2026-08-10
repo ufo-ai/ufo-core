@@ -38,6 +38,8 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
+    MAX_CONVERSATION_SPEAKERS,
+    OPENING_MESSAGE_CHARS,
     OPERATOR_EMAIL_DOMAIN,
     TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
@@ -52,7 +54,9 @@ from ufo.ext.surface import (
     SurfaceSpec,
     Writeback,
     WritebackPoller,
+    fence_member_message,
     inbox_name,
+    mint_marker,
     record_transcript_access,
     writeback_workspaces,
 )
@@ -2310,6 +2314,8 @@ async def _seed_conversation_turn(
     inbound: str,
     parent_turn_id: UUID | None = None,
     subagent_profile: str | None = None,
+    speaker_member_id: UUID | None = None,
+    context: TurnContext | None = None,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -2325,6 +2331,8 @@ async def _seed_conversation_turn(
                 terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
                 parent_turn_id=parent_turn_id,
                 subagent_profile=subagent_profile,
+                speaker_member_id=speaker_member_id,
+                context=None if context is None else context.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2475,6 +2483,152 @@ async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_pat
         conversation_id=older,
     )
     assert [entry.summary.id for entry in linked] == [older]
+
+
+async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
+    db: None, tmp_path
+) -> None:
+    """What a conversation is about and who is in it, off the page's turns. The opening words are
+    the member's own out of the first turn — the ambient digest a channel surface renders around
+    them is not what the conversation is about — capped, and empty where no turn has landed.
+    Speakers run in order of first appearance, once each however often they speak, carrying the
+    display line the surface reported and the address where it reported none."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
+    channel = await _seed_conversation(
+        workspace_id, agent_id, queue_key="C7", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    marker = mint_marker()
+    await _seed_conversation_turn(
+        workspace_id,
+        channel,
+        agent_id,
+        seq=1,
+        inbound=fence_member_message(
+            marker,
+            "<ambient_1>\nbystander: deploy is red again\n</ambient_1>\n",
+            "can you take a look at the failing deploy",
+            "",
+        ),
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)"),
+    )
+    await _seed_conversation_turn(
+        workspace_id,
+        channel,
+        agent_id,
+        seq=2,
+        inbound="thanks",
+        speaker_member_id=peer_id,
+        context=TurnContext(sender="Pat Reyes (peer@example.com)"),
+    )
+    await _seed_conversation_turn(
+        workspace_id, channel, agent_id, seq=3, inbound="anything else?", speaker_member_id=peer_id
+    )
+    await _seed_conversation_turn(
+        workspace_id, channel, agent_id, seq=4, inbound="no", speaker_member_id=member_id
+    )
+    await _seed_conversation_turn(workspace_id, channel, agent_id, seq=5, inbound="a timer fired")
+    long_open = await _seed_conversation(
+        workspace_id, agent_id, queue_key="long", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_conversation_turn(
+        workspace_id, long_open, agent_id, seq=1, inbound="w" * (OPENING_MESSAGE_CHARS + 50)
+    )
+    turnless = await _seed_conversation(
+        workspace_id, agent_id, queue_key="quiet", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+    by_id = {entry.summary.id: entry for entry in listed}
+
+    assert by_id[channel].opening_message == "can you take a look at the failing deploy"
+    assert "bystander" not in by_id[channel].opening_message
+    assert [(who.email, who.sender) for who in by_id[channel].speakers] == [
+        ("m@example.com", "Mel Okafor (m@example.com)"),
+        ("peer@example.com", "Pat Reyes (peer@example.com)"),
+    ]
+    assert by_id[long_open].opening_message == "w" * OPENING_MESSAGE_CHARS
+    assert by_id[turnless].opening_message == ""
+    assert by_id[turnless].speakers == ()
+
+
+async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
+    db: None, tmp_path
+) -> None:
+    """A row an admin lists but may not read is administration metadata and nothing more: it states
+    whose it is and how busy, and carries neither the words that opened it nor who else is in it.
+    Reading it is the acknowledgement's act, audited by `record_transcript_access` — a listing that
+    quoted the first message would hand an admin the content the acknowledgement exists to record.
+    A room stays walled on the same read for the same admin."""
+    workspace_id, agent_id, admin_id = await _seed(member_email="boss@example.com")
+    assert admin_id is not None
+    owner_id = await _seed_member_row(workspace_id, "owner@example.com")
+    theirs = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(owner_id)),
+        member_id=owner_id,
+    )
+    room = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="room",
+        audience=str(room_audience("slack", "C7")),
+        member_id=None,
+    )
+    for conversation_id in (theirs, room):
+        await _seed_conversation_turn(
+            workspace_id,
+            conversation_id,
+            agent_id,
+            seq=1,
+            inbound="the salary review spreadsheet",
+            speaker_member_id=owner_id,
+            context=TurnContext(sender="Robin Vale (owner@example.com)"),
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_agent_conversations(agent_id, admin_id, admin=True, limit=50)
+    by_id = {entry.summary.id: entry for entry in listed}
+
+    assert by_id[theirs].disclosable is True
+    assert by_id[theirs].summary.member_email == "owner@example.com"
+    for conversation_id in (theirs, room):
+        assert by_id[conversation_id].readable is False
+        assert by_id[conversation_id].opening_message == ""
+        assert by_id[conversation_id].speakers == ()
+
+
+async def test_agent_conversation_speakers_stop_at_the_bound(db: None, tmp_path) -> None:
+    """A conversation more members have spoken in than a row can name carries the first
+    `MAX_CONVERSATION_SPEAKERS` of them and no more — the read is bounded by the page, never by
+    how loud one channel is."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    crowded = await _seed_conversation(
+        workspace_id, agent_id, queue_key="crowd", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    speakers = [member_id] + [
+        await _seed_member_row(workspace_id, f"member{index}@example.com")
+        for index in range(MAX_CONVERSATION_SPEAKERS + 3)
+    ]
+    for seq, speaker in enumerate(speakers, start=1):
+        await _seed_conversation_turn(
+            workspace_id, crowded, agent_id, seq=seq, inbound="hi", speaker_member_id=speaker
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+
+    assert len(listed) == 1
+    assert [who.email for who in listed[0].speakers] == [
+        "m@example.com",
+        *(f"member{index}@example.com" for index in range(MAX_CONVERSATION_SPEAKERS - 1)),
+    ]
 
 
 async def test_readable_conversation_holds_the_audience_and_the_wall(db: None, tmp_path) -> None:

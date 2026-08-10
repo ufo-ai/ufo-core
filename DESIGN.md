@@ -117,6 +117,25 @@ above the card body, filled by the record's own image where it has one and left 
 where it does not (Artifacts, Sites); the status then rides the name's line. A band that fails to
 load falls back to the same fill rather than to a broken image.
 
+Row lines are `RowLines` (`kernel/rows.tsx`) — the list both the declared listings and a bespoke
+section draw, as `CardGrid` is for cards. Where the record is a thing to open, the whole row is the
+control, and `rowControl` (`kernel/row.ts`) is the one thing in the portal that makes it one, on
+whatever element the presentation makes a row out of — a `<tr>`, a row line's `<li>`, a card. The
+target is the row, not a word inside it, which is why this is not the name-as-control the cards
+refuse: there is nothing to hunt for and nothing that reads differently at rest than under the
+pointer. The hover fill states the extent of what is being pressed.
+
+The row takes `role` and `tabIndex` rather than being a `<button>`, because a row holds its own
+acts and a button inside a button is not markup a browser will keep. `rowControl` therefore guards
+every press: one that lands on the row's own control — a `ConfirmButton`, a download link, a
+field — belongs to that control and never also opens the row, so opening cannot ride along with a
+delete. Eligibility is decided in one place, by whether a row is handed a control at all: a row the
+member may not open takes no role, no tab stop and no pointer cursor, and the state it is in
+(`Private`, `Not shared with you`) is a meta part rather than a control offering an act the row does
+not carry. One record is named one way on every surface that lists it: a conversation's row states
+the same string its rail row does, falling back to whose it is where the words that would name it
+are content the member may not read.
+
 A card's name is text, never a link and never a button. The act is a `Button variant="row"` at the
 card's foot saying what it does — `View` where it opens the record. A name that is also the control
 makes the card's one target invisible until hover and reads as a different affordance on every
@@ -433,8 +452,11 @@ Copy a known-good implementation instead of composing from rules:
 - `components/ui/filter.tsx` — the one segmented filter every listing narrows with.
 - `views/SubagentPane.tsx` — a subject's own pane: its facts as a column, its prompt behind the
   fold, its runs and skills in headed sections.
-- `views/Conversations.tsx` — an index whose row opens a record inside the pane: one way back
-  above the record, the record's own heading, and its sections beneath.
+- `views/Conversations.tsx` — an index of row lines whose row is itself the control that opens a
+  record inside the pane: one way back above the record, the record's own heading, and its
+  sections beneath.
+- `kernel/rows.tsx` — the row-line list both the declared listings and the bespoke sections draw.
+- `kernel/row.ts` — the one way a record's whole row becomes the control that opens it.
 - `components/ui/facts.tsx` — the labelled column a pane states its subject's facts in.
 - `components/ui/reveal.tsx` — the fold long content is held at.
 - `views/Overview.tsx` — an agent's facts, its schema-driven settings as a form card, its prompt

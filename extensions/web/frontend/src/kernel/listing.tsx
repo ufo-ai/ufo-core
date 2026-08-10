@@ -16,6 +16,7 @@ import {
   type NoticeState,
 } from "@/kernel/panel";
 import { Pager, type Placement } from "@/kernel/pager";
+import { RowLines } from "@/kernel/rows";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { CredentialRequest } from "@/lib/types";
@@ -308,33 +309,17 @@ function RowList<Payload, Row>({
   rows: Row[];
   context: RowContext<Row>;
 }) {
+  const { when } = line;
+  const { actions } = spec;
   return (
-    <ul className="m-0 list-none p-0">
-      {rows.map((row) => (
-        <li
-          key={spec.rowKey(row)}
-          className="flex items-baseline gap-md border-b border-edge-soft py-md last:border-b-0"
-        >
-          <div className="min-w-0 flex-1">
-            <div data-part="primary" className="truncate text-body">
-              {part(line.primary, row, context)}
-            </div>
-            <MetaLine
-              parts={line.meta.map((entry) => part(entry, row, context))}
-            />
-          </div>
-          {line.when ? (
-            <div
-              data-part="when"
-              className="whitespace-nowrap font-mono text-small tabular-nums opacity-(--muted)"
-            >
-              {part(line.when, row, context)}
-            </div>
-          ) : null}
-          {spec.actions ? <div>{spec.actions(row, context)}</div> : null}
-        </li>
-      ))}
-    </ul>
+    <RowLines
+      rows={rows}
+      rowKey={spec.rowKey}
+      primary={(row) => part(line.primary, row, context)}
+      meta={(row) => line.meta.map((entry) => part(entry, row, context))}
+      when={when ? (row) => part(when, row, context) : undefined}
+      action={actions ? (row) => actions(row, context) : undefined}
+    />
   );
 }
 
@@ -364,22 +349,6 @@ function Cards<Payload, Row>({
   );
 }
 
-function MetaLine({ parts }: { parts: ReactNode[] }) {
-  const shown = parts.filter(
-    (entry) => entry !== null && entry !== undefined && entry !== "",
-  );
-  if (!shown.length) return null;
-  return (
-    <div data-part="meta" className="truncate text-small opacity-(--muted)">
-      {shown.map((entry, index) => (
-        <span key={index}>
-          {index ? " · " : ""}
-          {entry}
-        </span>
-      ))}
-    </div>
-  );
-}
 
 function cursor<Payload, Row>(
   spec: ListingSpec<Payload, Row>,

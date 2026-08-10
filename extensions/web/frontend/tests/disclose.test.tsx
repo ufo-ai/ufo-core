@@ -12,6 +12,8 @@ const PRIVATE = {
   id: "c1",
   surface: "slack",
   member_email: "owner@example.com",
+  description: "",
+  speakers: [],
   turn_count: 3,
   created_at: "2026-07-30T10:00:00",
   last_turn_at: "2026-07-30T11:00:00",
@@ -25,24 +27,29 @@ const conversations = (entries: unknown[]) => ({
   "/conversations": () => json({ conversations: entries }),
 });
 
+/** A row the member may not read carries no words of its own, so `Private` is what marks the one
+ *  an admin may acknowledge — and it is on the row itself, which is the control. */
+const disclosable = () => screen.findByRole("button", { name: /Private/ });
+
 beforeEach(() => {
   location.hash = "#/agents/" + AGENT.id + "/conversations";
   useStreamFake();
 });
 
-test("a disclosable conversation offers admin opening, one that is not says so", async () => {
+test("a disclosable row is the control, one shared with nobody is inert and says so", async () => {
   wire(conversations([PRIVATE, WALLED]));
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  expect(await screen.findByRole("button", { name: "Open as admin" })).toBeTruthy();
-  expect(screen.getByText("not shared with you")).toBeTruthy();
+  expect(await disclosable()).toBeTruthy();
+  expect(screen.getByText(/Not shared with you/)).toBeTruthy();
+  expect(screen.queryAllByRole("button", { name: /Not shared with you/ })).toEqual([]);
 });
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
+  await userEvent.click(await disclosable());
 
   const warning = await screen.findByText(/private to owner@example.com/);
   expect(warning.textContent).toContain("may contain private information");
@@ -64,7 +71,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
+  await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
   await waitFor(() => expect(bodies.length).toBe(1));
@@ -91,7 +98,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
+  await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
   await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
@@ -100,7 +107,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("No turns in this conversation yet.")).toBeNull();
-  expect(screen.getByRole("button", { name: "Open as admin" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Private/ })).toBeTruthy();
 });
 
 test("an acknowledgement in flight for one conversation never opens over another", async () => {
@@ -118,12 +125,12 @@ test("an acknowledgement in flight for one conversation never opens over another
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  const openers = await screen.findAllByRole("button", { name: "Open as admin" });
+  const openers = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(openers[0]);
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
   await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
-  const again = await screen.findAllByRole("button", { name: "Open as admin" });
+  const again = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(again[1]);
 
   release!(Response.json({ applied: true, message: "Recorded." }));
@@ -140,7 +147,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
+  await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
   await refusedNotice("Only an admin may read it.");
@@ -192,8 +199,8 @@ test("leaving the acknowledgement returns to the listing without reading", async
   wire(conversations([PRIVATE]));
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Open as admin" }));
+  await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
-  expect(await screen.findByRole("button", { name: "Open as admin" })).toBeTruthy();
+  expect(await disclosable()).toBeTruthy();
 });

@@ -69,7 +69,12 @@ from ufo.credentials import (
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
-from ufo.ext.surface import SurfaceContext, record_transcript_access
+from ufo.ext.surface import (
+    SurfaceContext,
+    fence_member_message,
+    mint_marker,
+    record_transcript_access,
+)
 from ufo.grants import (
     ConnectFlow,
     GrantStore,
@@ -109,6 +114,7 @@ from ufo.schema.records import (
     CredentialRequest,
     QuestionOption,
     TerminalFrame,
+    TurnContext,
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
@@ -2585,7 +2591,7 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     client, workspace_id, agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     conversation_id = await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -2594,7 +2600,15 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         member_id=None,
         surface="slack",
     )
-    await _seed_listed_turn(workspace_id, conversation_id, agent_id, seq=1, inbound="from Slack")
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound="from Slack",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Robin Vale (owner@example.com)"),
+    )
 
     resolved = await client.get(
         f"/surface/web/api/chats?conversation={conversation_id}",
@@ -2609,6 +2623,8 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         "agent_id": str(agent_id),
         "surface": "slack",
         "member_email": None,
+        "description": "from Slack",
+        "speakers": ["Robin Vale (owner@example.com)"],
         "turn_count": 1,
         "created_at": target["created_at"],
         "last_turn_at": target["last_turn_at"],
@@ -5693,6 +5709,8 @@ async def _seed_listed_turn(
     inbound: str,
     parent_turn_id: UUID | None = None,
     subagent_profile: str | None = None,
+    speaker_member_id: UUID | None = None,
+    context: TurnContext | None = None,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -5708,11 +5726,147 @@ async def _seed_listed_turn(
                 terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
                 parent_turn_id=parent_turn_id,
                 subagent_profile=subagent_profile,
+                speaker_member_id=speaker_member_id,
+                context=None if context is None else context.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
     return turn_id
+
+
+async def test_a_conversation_describes_itself_and_names_who_spoke(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Every conversation the panel lists says what it is about and who is in it. A Slack one has
+    no chat row of this surface's, so its description is the same cut the rail takes, from the
+    member's own words — never the ambient digest Slack renders around them, which is the
+    bystanders' traffic and not what the member asked. Speakers read as the display line Slack
+    reported, in order of first appearance and once each; a member the surface named no line for
+    reads as their address."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C7:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    marker = mint_marker()
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound=fence_member_message(
+            marker,
+            "<ambient_1>\nbystander: the salary spreadsheet went to the wrong channel\n"
+            "</ambient_1>\n",
+            "can you take a look at the failing deploy",
+            "",
+        ),
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)"),
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="on it",
+        speaker_member_id=peer_id,
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=3,
+        inbound="thanks",
+        speaker_member_id=member_id,
+    )
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert listed.status_code == 200
+    row = listed.json()["conversations"][0]
+    assert row["description"] == "can you take a look at the failing deploy"
+    assert "salary spreadsheet" not in row["description"]
+    assert row["speakers"] == ["Mel Okafor (m@example.com)", "peer@example.com"]
+
+
+async def test_a_web_conversation_is_described_by_the_title_the_rail_shows(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """One conversation is named one way wherever the member meets it. A chat this surface opened
+    already carries the rail's title in its own store row, so the panel states that string rather
+    than re-cutting the first message and drifting from the row beside it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="Rename the deploy job",
+    )
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    rows = listed.json()["conversations"]
+    assert [row["id"] for row in rows] == [str(conversation_id)]
+    assert rows[0]["description"] == "Rename the deploy job"
+    assert rows[0]["speakers"] == ["m@example.com"]
+
+
+async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A row an admin may list but not read stays administration metadata: whose it is and how
+    busy, never a word of it and never who else is in it. Opening it is the acknowledgement's act
+    and that act is what gets audited, so a listing that quoted the first message would hand over
+    the content the acknowledgement exists to record."""
+    client, workspace_id, agent_id = web
+    owner_id, _owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    theirs = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="D1:1.0",
+        audience=str(conversation_audience(owner_id)),
+        member_id=owner_id,
+        surface="slack",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        theirs,
+        agent_id,
+        seq=1,
+        inbound="the salary review spreadsheet",
+        speaker_member_id=owner_id,
+        context=TurnContext(sender="Robin Vale (owner@example.com)"),
+    )
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations",
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
+    )
+
+    row = next(entry for entry in listed.json()["conversations"] if entry["id"] == str(theirs))
+    assert row["readable"] is False
+    assert row["disclosable"] is True
+    assert row["member_email"] == "owner@example.com"
+    assert row["description"] == ""
+    assert row["speakers"] == []
 
 
 async def test_conversations_list_by_audience_and_the_agent_wall(

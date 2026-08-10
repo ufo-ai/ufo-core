@@ -5,10 +5,12 @@ import { expect, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { Pager } from "@/kernel/pager";
+import { RowLines } from "@/kernel/rows";
 import { getJson } from "@/lib/api";
 import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { Table, Td, Th } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import type { SchemaProperty } from "@/lib/types";
 
 import { json, opened } from "./harness";
@@ -412,4 +414,72 @@ test("a section with nothing to act on draws no action bar", () => {
 test("a section with no action draws no action slot", () => {
   render(<Section title="Members">roster</Section>);
   expect(screen.queryByRole("button")).toBeNull();
+});
+
+test("a row's own act fires without opening the row it stands on", async () => {
+  const opened: string[] = [];
+  const acted: string[] = [];
+  render(
+    <RowLines
+      rows={[{ name: "one" }, { name: "two" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      meta={() => []}
+      open={(row) => () => opened.push(row.name)}
+      action={(row) => (
+        <Button variant="row" onClick={() => acted.push(row.name)}>
+          Remove
+        </Button>
+      )}
+    />,
+  );
+
+  await userEvent.click(screen.getAllByRole("button", { name: "Remove" })[0]);
+  expect(acted).toEqual(["one"]);
+  expect(opened).toEqual([]);
+
+  await userEvent.click(screen.getByRole("button", { name: /^two/ }));
+  expect(opened).toEqual(["two"]);
+});
+
+test("a row the listing declines to open takes no role and no tab stop", async () => {
+  const opened: string[] = [];
+  render(
+    <RowLines
+      rows={[{ name: "shared" }, { name: "walled" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      meta={() => []}
+      open={(row) => (row.name === "walled" ? null : () => opened.push(row.name))}
+    />,
+  );
+
+  expect(screen.getAllByRole("button").map((row) => row.textContent)).toEqual(["shared"]);
+  const walled = screen.getByText("walled").closest("li")!;
+  expect(walled.getAttribute("tabindex")).toBeNull();
+  expect(walled.className).not.toContain("cursor-pointer");
+
+  await userEvent.click(walled);
+  expect(opened).toEqual([]);
+});
+
+test("the keyboard opens a row on Enter and on Space", async () => {
+  const opened: string[] = [];
+  render(
+    <RowLines
+      rows={[{ name: "one" }]}
+      rowKey={(row) => row.name}
+      primary={(row) => row.name}
+      meta={() => []}
+      open={(row) => () => opened.push(row.name)}
+    />,
+  );
+
+  const row = screen.getByRole("button", { name: "one" });
+  row.focus();
+  expect(document.activeElement).toBe(row);
+  await userEvent.keyboard("{Enter}");
+  await userEvent.keyboard(" ");
+
+  expect(opened).toEqual(["one", "one"]);
 });

@@ -288,6 +288,8 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
             id: shared,
             surface: "slack",
             member_email: null,
+            description: "",
+            speakers: [],
             turn_count: 3,
             created_at: "2026-07-30T10:00:00",
             last_turn_at: null,
@@ -302,12 +304,62 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   const label = "Shared · " + shared.slice(0, 8);
-  const row = (await screen.findByText("slack")).closest("tr")!;
-  expect(row.querySelector("td")!.textContent).toBe(label);
+  const row = await screen.findByRole("button", { name: new RegExp(label) });
+  expect(row.querySelector("[data-part='primary']")!.textContent).toBe(label);
   expect(row.textContent).not.toContain("Channel or room");
+  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("slack · 3 turns");
 
-  await userEvent.click(screen.getByRole("button", { name: "Open" }));
+  await userEvent.click(row);
   expect(await screen.findByText("slack · " + label)).toBeTruthy();
+});
+
+test("a conversation row names what it is about and who spoke, and the keyboard opens it", async () => {
+  const opened = "8f2c1d40-0000-4000-8000-000000000004";
+  wire({
+    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/files": () => json({ files: [] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          {
+            id: opened,
+            surface: "slack",
+            member_email: "mel@example.com",
+            description: "can you take a look at the failing deploy",
+            speakers: ["Mel Okafor (mel@example.com)", "pat@example.com"],
+            turn_count: 4,
+            created_at: "2026-07-30T10:00:00",
+            last_turn_at: "2026-08-07T11:00:00",
+            readable: true,
+            disclosable: false,
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  const row = await screen.findByRole("button", {
+    name: /can you take a look at the failing deploy/,
+  });
+  expect(row.getAttribute("tabindex")).toBe("0");
+  expect(row.querySelector("[data-part='primary']")!.textContent).toBe(
+    "can you take a look at the failing deploy",
+  );
+  expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
+    "Mel Okafor (mel@example.com), pat@example.com · slack · 4 turns",
+  );
+  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 7 2026");
+
+  row.focus();
+  expect(document.activeElement).toBe(row);
+  await userEvent.keyboard("{Enter}");
+
+  expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "slack · can you take a look at the failing deploy" }),
+  ).toBeTruthy();
 });
 
 test("conversations open a turn tree that nests a subagent under the turn that spawned it", async () => {
@@ -367,6 +419,8 @@ test("conversations open a turn tree that nests a subagent under the turn that s
             id: rootConversation,
             surface: "web",
             member_email: "member@example.com",
+            description: "Rename the deploy job",
+            speakers: ["member@example.com"],
             turn_count: 2,
             created_at: "2026-07-30T10:00:00",
             last_turn_at: "2026-07-30T10:00:01",
@@ -378,7 +432,7 @@ test("conversations open a turn tree that nests a subagent under the turn that s
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Open" }));
+  await userEvent.click(await screen.findByRole("button", { name: /Rename the deploy job/ }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("child answer")).toBeTruthy();
@@ -413,6 +467,8 @@ test("a conversation nobody shared offers no opener", async () => {
             id: "7ae41c02-0000-4000-8000-000000000001",
             surface: "slack",
             member_email: null,
+            description: "",
+            speakers: [],
             turn_count: 4,
             created_at: "2026-07-30T10:00:00",
             last_turn_at: null,
@@ -422,6 +478,8 @@ test("a conversation nobody shared offers no opener", async () => {
             id: "31bd9f77-0000-4000-8000-000000000002",
             surface: "slack",
             member_email: null,
+            description: "",
+            speakers: [],
             turn_count: 2,
             created_at: "2026-07-30T11:00:00",
             last_turn_at: null,
@@ -433,10 +491,10 @@ test("a conversation nobody shared offers no opener", async () => {
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  expect((await screen.findAllByText("not shared with you")).length).toBe(2);
-  expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
-  const rows = screen.getAllByText("slack").map((cell) => cell.closest("tr")!);
-  const labels = rows.map((row) => row.querySelector("td")!.textContent ?? "");
+  expect((await screen.findAllByText(/Not shared with you/)).length).toBe(2);
+  expect(screen.queryAllByRole("button", { name: /Channel or room/ })).toEqual([]);
+  const rows = screen.getAllByText(/Not shared with you/).map((meta) => meta.closest("li")!);
+  const labels = rows.map((row) => row.querySelector("[data-part='primary']")!.textContent ?? "");
   expect(labels.every((label) => label.startsWith("Channel or room · "))).toBe(true);
   expect(new Set(labels).size).toBe(labels.length);
   expect(labels.some((label) => label.startsWith("Shared"))).toBe(false);
@@ -653,9 +711,13 @@ test("a conversation the member may not read says so instead of reporting a stat
         conversations: [
           {
             id: "c1",
-            title: "a shared thread",
-            audience: "shared",
-            updated_at: "2026-07-30T12:00:00",
+            surface: "slack",
+            member_email: null,
+            description: "a shared thread",
+            speakers: [],
+            turn_count: 1,
+            created_at: "2026-07-30T12:00:00",
+            last_turn_at: "2026-07-30T12:00:00",
             readable: true,
           },
         ],
@@ -664,7 +726,7 @@ test("a conversation the member may not read says so instead of reporting a stat
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Open" }));
+  await userEvent.click(await screen.findByRole("button", { name: /a shared thread/ }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
 });

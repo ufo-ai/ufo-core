@@ -16,6 +16,7 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
+import { RowLines } from "@/kernel/rows";
 import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -144,14 +145,35 @@ export function who(entry: { member_email: string | null; readable: boolean; id:
   return kind + " · " + entry.id.slice(0, 8);
 }
 
+/** What a conversation is called: the words it opened with — the same cut the rail labels a chat
+ *  with, so an index row and a rail row never name one conversation two ways — else whose it is,
+ *  which is all a row the member may not read has to state. */
+function subject(conversation: Conversation): string {
+  return conversation.description || who(conversation);
+}
+
 /** One conversation names itself the same way on every screen that opens it — the surface it came
- *  in on, then whose it is. */
+ *  in on, then what it is about. A row states its surface in its own meta line; a heading standing
+ *  alone above a transcript has nowhere else to put it. */
 function title(conversation: Conversation): string {
-  return conversation.surface + " · " + who(conversation);
+  return conversation.surface + " · " + subject(conversation);
+}
+
+/** What a member may do with a row they cannot simply open. `Private` reads on another member's
+ *  conversation an admin may disclose to themselves: pressing it reaches the acknowledgement,
+ *  never the transcript, so the record of who read whose is still written by an act. */
+function standing(entry: Conversation): string {
+  if (entry.readable) return "";
+  return entry.disclosable ? "Private" : "Not shared with you";
+}
+
+function turns(count: number): string {
+  return count === 1 ? "1 turn" : count + " turns";
 }
 
 function matches(entry: Conversation, query: string): boolean {
-  return (who(entry) + " " + entry.surface).toLowerCase().includes(query.toLowerCase());
+  const stated = [subject(entry), who(entry), entry.surface, ...entry.speakers].join(" ");
+  return stated.toLowerCase().includes(query.toLowerCase());
 }
 
 export function Conversations({ agent }: { agent: Agent }) {
@@ -183,54 +205,57 @@ export function Conversations({ agent }: { agent: Agent }) {
   }
   return (
     <Panel state={state}>
-      {(payload) => (
-        <Section
-          title="Conversations"
-          bar={
-            <>
-              <Input
-                type="search"
-                aria-label="Search"
-                placeholder="Search"
-                className="max-w-control-row"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-              <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-            </>
-          }
-        >
-          <DataTable
-            columns={["Member", "Surface", "Turns", "Last Activity", ""]}
-            rows={payload.conversations.filter((entry) => matches(entry, query))}
-            rowKey={(entry) => entry.id}
-            empty={"No conversations with " + agent.name + " yet."}
-            note={query ? "No conversation matches this search." : undefined}
-          >
-            {(entry) => (
+      {(payload) => {
+        const shown = payload.conversations.filter((entry) => matches(entry, query));
+        return (
+          <Section
+            title="Conversations"
+            bar={
               <>
-                <Td>{who(entry)}</Td>
-                <Td>{entry.surface}</Td>
-                <Td>{String(entry.turn_count)}</Td>
-                <Td>{day(entry.last_turn_at) || day(entry.created_at)}</Td>
-                <Td>
-                  {entry.readable ? (
-                    <Button variant="row" onClick={() => setOpened(entry)}>
-                      Open
-                    </Button>
-                  ) : entry.disclosable ? (
-                    <Button variant="row" onClick={() => setDisclosing(entry)}>
-                      Open as admin
-                    </Button>
-                  ) : (
-                    <span className="opacity-(--muted-soft)">not shared with you</span>
-                  )}
-                </Td>
+                <Input
+                  type="search"
+                  aria-label="Search"
+                  placeholder="Search"
+                  className="max-w-control-row"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+                <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
               </>
+            }
+          >
+            {shown.length ? (
+              <RowLines
+                rows={shown}
+                rowKey={(entry) => entry.id}
+                primary={subject}
+                meta={(entry) => [
+                  entry.speakers.join(", "),
+                  entry.surface,
+                  turns(entry.turn_count),
+                  standing(entry),
+                ]}
+                when={(entry) => day(entry.last_turn_at) || day(entry.created_at)}
+                open={(entry) =>
+                  entry.readable
+                    ? () => setOpened(entry)
+                    : entry.disclosable
+                      ? () => setDisclosing(entry)
+                      : null
+                }
+              />
+            ) : (
+              <PanelBlank
+                body={
+                  query
+                    ? "No conversation matches this search."
+                    : "No conversations with " + agent.name + " yet."
+                }
+              />
             )}
-          </DataTable>
-        </Section>
-      )}
+          </Section>
+        );
+      }}
     </Panel>
   );
 }
