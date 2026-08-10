@@ -54,6 +54,8 @@ def with_recall_aggregates(report: EvalReport) -> EvalReport:
     coverages: list[float] = []
     degraded_recall_count = 0
     unmapped_evidence_count = 0
+    page_evidence_found = 0
+    page_evidence_expected = 0
     for case in report.cases:
         selected_attempt = case.evidence.get("selectedAttempt")
         attempts = case.evidence.get("attempts")
@@ -86,6 +88,13 @@ def with_recall_aggregates(report: EvalReport) -> EvalReport:
         if not isinstance(unmapped, list) or not all(isinstance(item, str) for item in unmapped):
             raise TypeError("unmapped recall evidence must be a list of source refs")
         unmapped_evidence_count += len(unmapped)
+        found = grader.get("pageEvidenceFound")
+        total = grader.get("pageEvidenceExpected")
+        if isinstance(found, bool) or isinstance(total, bool):
+            raise TypeError("page evidence counts must be integers")
+        if isinstance(found, int) and isinstance(total, int):
+            page_evidence_found += found
+            page_evidence_expected += total
     mean_coverage = sum(coverages) / len(coverages) if coverages else None
     return report.model_copy(
         update={
@@ -93,5 +102,8 @@ def with_recall_aggregates(report: EvalReport) -> EvalReport:
             "min_mapped_evidence_coverage": min(coverages) if coverages else None,
             "degraded_recall_count": degraded_recall_count,
             "unmapped_evidence_count": unmapped_evidence_count,
+            "page_evidence_coverage": (
+                page_evidence_found / page_evidence_expected if page_evidence_expected else None
+            ),
         }
     )

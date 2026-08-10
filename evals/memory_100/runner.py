@@ -1,10 +1,13 @@
 import json
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
+from ufo_ext_memory.objects import PAGE_OBJECT_KIND
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -20,9 +23,12 @@ from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
 from ufo.subjects import SHARED_SUBJECT
 
-MEMORY_100_GRADER_REVISION = "evidence-coverage-gate-1"
+MEMORY_100_GRADER_REVISION = "page-evidence-coverage-1"
 MEMORY_JUDGE_MODEL = "gpt-5.4"
 ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE = 1.0
+PAGE_REF_PATTERN = re.compile(
+    rf"\b{PAGE_OBJECT_KIND}/([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})"
+)
 
 
 @dataclass(frozen=True)
@@ -94,8 +100,13 @@ MEMORY_100_LEAVES = (
 
 @dataclass(frozen=True)
 class ExpectedEvidence:
+    """One expected evidence row and the corpus objects that carry it. A row is recalled when the
+    `user_prompt_submit` hook injected one of its memory items, and retrieved when the turn's own
+    tool calls surfaced one of its pages — two different mechanisms, scored separately."""
+
     source_ref: str
     memory_ids: frozenset[UUID]
+    page_ids: frozenset[UUID]
 
 
 @dataclass(frozen=True)
@@ -131,23 +142,27 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
     repeated = sorted(case_id for case_id, leaves in memberships.items() if len(leaves) > 1)
     if repeated:
         raise ValueError(f"memory_100 cases belong to multiple leaves: {', '.join(repeated)}")
+    owners_by_ref: defaultdict[tuple[str, str], set[UUID]] = defaultdict(set)
+    for owner in readiness.evidence:
+        owners_by_ref[owner.source_ref, owner.owner_kind].add(owner.owner_id)
     cases: dict[str, CapabilityCase] = {}
     for case in snapshot.cases:
         (leaf,) = memberships[case.id]
         expected = tuple(
             ExpectedEvidence(
                 source_ref,
-                frozenset(
-                    owner.owner_id
-                    for owner in readiness.evidence
-                    if owner.source_ref == source_ref and owner.owner_kind == "memory_item"
-                ),
+                frozenset(owners_by_ref[source_ref, "memory_item"]),
+                frozenset(owners_by_ref[source_ref, "page"]),
             )
             for source_ref in case.evidence_refs
         )
         evidence_identity = json.dumps(
             [
-                [item.source_ref, sorted(str(memory_id) for memory_id in item.memory_ids)]
+                [
+                    item.source_ref,
+                    sorted(str(memory_id) for memory_id in item.memory_ids),
+                    sorted(str(page_id) for page_id in item.page_ids),
+                ]
                 for item in expected
             ],
             ensure_ascii=False,
@@ -222,8 +237,9 @@ class Memory100Grader:
     def grading(self) -> str:
         statement = (
             "the turn exports a valid memory recall log whose selected memories are ranked "
-            "against each expected evidence owner and the answer is non-empty; answer substance "
-            "is judged against the semantic rubric"
+            "against each expected evidence owner and the answer is non-empty; the pages the "
+            "turn's own tool calls surfaced are scored against page-owned evidence; answer "
+            "substance is judged against the semantic rubric"
         )
         if self.min_mapped_evidence_coverage is None:
             return statement
@@ -258,15 +274,33 @@ class Memory100Grader:
         found = sum(rank is not None for rank in ranks.values())
         expected = sum(bool(owner.memory_ids) for owner in self.expected)
         coverage = found / expected if expected else None
+        retrieved_pages = {
+            UUID(page_id)
+            for call in output.calls
+            if call.succeeded
+            for page_id in PAGE_REF_PATTERN.findall(call.result)
+        }
+        page_hits = {
+            owner.source_ref: bool(owner.page_ids & retrieved_pages)
+            for owner in self.expected
+            if owner.page_ids
+        }
+        page_found = sum(page_hits.values())
         evidence: JsonObject = {
             "recallError": recall.error_class,
             "selectedCount": len(selected),
             "expectedCount": expected,
             "evidenceRanks": ranks,
             "unmappedEvidence": [
-                owner.source_ref for owner in self.expected if not owner.memory_ids
+                owner.source_ref
+                for owner in self.expected
+                if not owner.memory_ids and not owner.page_ids
             ],
             "coverage": coverage,
+            "pageEvidenceFound": page_found,
+            "pageEvidenceExpected": len(page_hits),
+            "pageCoverage": page_found / len(page_hits) if page_hits else None,
+            "missingPageEvidence": [ref for ref, hit in page_hits.items() if not hit],
         }
         if not output.response.strip():
             return CapabilityVerdict(False, "answer is empty", evidence)

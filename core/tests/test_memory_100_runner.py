@@ -10,7 +10,12 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
 import evals.memory_100.runner as memory_100_runner
 from evals.__main__ import _tasks as selected_eval_tasks
-from evals.harness.capability import CapabilityCase, CapabilityOutput, TurnLog
+from evals.harness.capability import (
+    CapabilityCase,
+    CapabilityOutput,
+    ToolInvocation,
+    TurnLog,
+)
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
 from evals.harness.recall import MemoryRecallEvent, with_recall_aggregates
@@ -179,7 +184,11 @@ async def test_memory_100_grader_reports_observed_evidence_without_gating_the_an
     wrong_id = uuid4()
     turn_id = uuid4()
     grader = Memory100Grader(
-        (ExpectedEvidence("memory/answer", frozenset({expected_id, alternate_expected_id})),)
+        (
+            ExpectedEvidence(
+                "memory/answer", frozenset({expected_id, alternate_expected_id}), frozenset()
+            ),
+        )
     )
     output = CapabilityOutput(
         "answer",
@@ -203,12 +212,55 @@ async def test_memory_100_grader_reports_observed_evidence_without_gating_the_an
     no_answer = await Memory100Grader(())(output)
     assert no_answer.passed
     assert no_answer.evidence["coverage"] is None
-    unmapped = await Memory100Grader((ExpectedEvidence("page/handbook", frozenset()),))(output)
+    unmapped = await Memory100Grader(
+        (ExpectedEvidence("page/handbook", frozenset(), frozenset()),)
+    )(output)
     assert unmapped.evidence["coverage"] is None
     assert unmapped.evidence["expectedCount"] == 0
     assert unmapped.evidence["evidenceRanks"] == {"page/handbook": None}
     assert unmapped.evidence["unmappedEvidence"] == ["page/handbook"]
     assert not (await grader(CapabilityOutput("", (), log=output.log))).passed
+
+
+async def test_memory_100_grader_scores_page_evidence_the_turn_retrieved_itself() -> None:
+    retrieved = uuid4()
+    missed = uuid4()
+    grader = Memory100Grader(
+        (
+            ExpectedEvidence("enterprise/found", frozenset(), frozenset({retrieved})),
+            ExpectedEvidence("enterprise/missed", frozenset(), frozenset({missed})),
+        )
+    )
+    log = TurnLog(event=MEMORY_RECALL_EVENT, turn_id=uuid4(), attributes={"memory_ids": []})
+    searched = CapabilityOutput(
+        "answer",
+        (
+            ToolInvocation(
+                name="memory_search",
+                input={},
+                result=f"- [doc] the clause (page/{retrieved}, 2026-08-10)",
+                has_result=True,
+            ),
+        ),
+        log=log,
+    )
+
+    verdict = await grader(searched)
+
+    assert verdict.evidence["pageEvidenceExpected"] == 2
+    assert verdict.evidence["pageEvidenceFound"] == 1
+    assert verdict.evidence["pageCoverage"] == 0.5
+    assert verdict.evidence["missingPageEvidence"] == ["enterprise/missed"]
+    assert verdict.evidence["unmappedEvidence"] == []
+    assert verdict.evidence["coverage"] is None
+
+    blind = await grader(CapabilityOutput("answer", (), log=log))
+    assert blind.evidence["pageEvidenceFound"] == 0
+    assert blind.evidence["pageCoverage"] == 0.0
+
+    failed_call = replace(searched.calls[0], is_error=True)
+    errored = await grader(CapabilityOutput("answer", (failed_call,), log=log))
+    assert errored.evidence["pageEvidenceFound"] == 0
 
 
 def _recalled(*memory_ids: UUID) -> CapabilityOutput:
@@ -228,9 +280,9 @@ async def test_memory_100_alias_leaf_gates_the_verdict_on_mapped_evidence_covera
     handle = uuid4()
     unrelated = uuid4()
     expected = (
-        ExpectedEvidence("ufo/page/halyard-charter", frozenset()),
-        ExpectedEvidence("ufo/memory/halyard-cutover-window", frozenset({full_name})),
-        ExpectedEvidence("ufo/memory/halyard-deputy", frozenset({handle})),
+        ExpectedEvidence("ufo/page/halyard-charter", frozenset(), frozenset()),
+        ExpectedEvidence("ufo/memory/halyard-cutover-window", frozenset({full_name}), frozenset()),
+        ExpectedEvidence("ufo/memory/halyard-deputy", frozenset({handle}), frozenset()),
     )
     grader = Memory100Grader(expected, ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE)
 

@@ -51,6 +51,9 @@ class EvalReport(BaseModel):
     )
     degraded_recall_count: int | None = Field(default=None, ge=0, alias="degradedRecallCount")
     unmapped_evidence_count: int | None = Field(default=None, ge=0, alias="unmappedEvidenceCount")
+    page_evidence_coverage: float | None = Field(
+        default=None, ge=0.0, le=1.0, alias="pageEvidenceCoverage"
+    )
     benchmark: JsonObject | None = None
     metrics: tuple[EvalMetric, ...] = ()
 
@@ -134,8 +137,13 @@ class EvalReport(BaseModel):
                 f"mapped evidence coverage mean {self.mean_mapped_evidence_coverage:.0%}, "
                 f"min {self.min_mapped_evidence_coverage:.0%}"
             )
+        pages = (
+            "page evidence n/a"
+            if self.page_evidence_coverage is None
+            else f"page evidence coverage {self.page_evidence_coverage:.0%}"
+        )
         return (
-            f"{summary}, {coverage}, {self.degraded_recall_count} degraded, "
+            f"{summary}, {coverage}, {pages}, {self.degraded_recall_count} degraded, "
             f"{self.unmapped_evidence_count} unmapped evidence {self.digest}"
         )
 
