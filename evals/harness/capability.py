@@ -271,7 +271,9 @@ class CapabilityCase:
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
     whose private memory the eval conversation may recall. `followup`, when set, derives one second
     inbound from the first turn's output and durable state; returning None grades the first turn.
-    `rubric` judges the answer text; `artifact_rubric` judges the Markdown files the turn shared;
+    `rubric` judges the answer text — with `answer_spans_artifacts`, the Markdown the turn shared
+    joins that answer, for a case whose reply is expected to carry its detail in a shared file
+    rather than inline; `artifact_rubric` judges the Markdown files the turn shared;
     `visual_rubric` judges its rendered page images. Each reaches the model judge only after the
     deterministic grader passes and requires a judge model on the task. `seed`, when set, receives
     (workspace_id, agent_id, blob) before the case's conversation opens and establishes the state
@@ -289,6 +291,7 @@ class CapabilityCase:
     digest_tag: str = ""
     rubric: tuple[str, ...] = ()
     artifact_rubric: tuple[str, ...] = ()
+    answer_spans_artifacts: bool = False
     visual_rubric: tuple[str, ...] = ()
     member_key: str | None = None
     shared_audience: bool = False
@@ -322,6 +325,8 @@ class CapabilityCase:
             payload["visualRubric"] = list(self.visual_rubric)
         if self.artifact_rubric:
             payload["artifactRubric"] = list(self.artifact_rubric)
+        if self.answer_spans_artifacts:
+            payload["answerSpansArtifacts"] = True
         if self.rubric or self.artifact_rubric or self.visual_rubric:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
@@ -556,9 +561,10 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         )
     verdicts: list[RubricVerdict] = []
     if case.rubric:
-        verdicts.append(
-            await rubric_pass(case.message, result.output.response, case.rubric, target.judge)
-        )
+        answer = result.output.response
+        if case.answer_spans_artifacts:
+            answer = "\n\n".join((answer, *_markdown_artifacts(result.output.artifacts)))
+        verdicts.append(await rubric_pass(case.message, answer, case.rubric, target.judge))
     if case.artifact_rubric:
         markdown = tuple(
             artifact
@@ -592,6 +598,21 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         result.trajectory,
         judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
     )
+
+
+def _markdown_artifacts(artifacts: tuple[SharedArtifact, ...]) -> tuple[str, ...]:
+    """The turn's shared Markdown, each headed by its filename, for a rubric whose answer spans the
+    reply and the files it references. A file that is not UTF-8 carries no readable answer, so it is
+    left out and the rubric it was meant to satisfy goes unmet."""
+    readable: list[str] = []
+    for artifact in artifacts:
+        if not artifact.name.lower().endswith(".md"):
+            continue
+        try:
+            readable.append(f"# {artifact.name}\n\n{artifact.content.decode()}")
+        except UnicodeDecodeError:
+            continue
+    return tuple(readable)
 
 
 def _linked_artifacts(artifacts: tuple[SharedArtifact, ...]) -> list[Json]:

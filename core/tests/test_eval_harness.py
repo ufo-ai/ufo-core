@@ -3990,6 +3990,56 @@ async def test_artifact_case_judges_the_shared_markdown_separately() -> None:
     assert result.evidence["artifactRubric"] == ["develops the evidence"]
 
 
+async def test_an_answer_spanning_artifacts_judges_the_reply_and_its_shared_markdown() -> None:
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "recall",
+        "what did we decide",
+        exact_scorer("shared"),
+        rubric=("states the decision",),
+        answer_spans_artifacts=True,
+    )
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget(
+            (
+                SharedArtifact("decision.md", b"We chose Postgres."),
+                SharedArtifact("notes.txt", b"plain text, not the answer"),
+                SharedArtifact("chart.png", b"\x89PNG binary"),
+            ),
+            judge,
+        ),
+    )
+
+    assert result.passed
+    prompt = judge.messages[0].content
+    assert isinstance(prompt, str)
+    payload = loads(prompt.splitlines()[1])
+    assert payload["candidateAnswer"] == "ANSWER: shared\n\n# decision.md\n\nWe chose Postgres."
+    assert payload["rubric"] == ["states the decision"]
+    assert case.payload()["answerSpansArtifacts"] is True
+
+
+async def test_an_answer_not_spanning_artifacts_judges_only_the_reply() -> None:
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "recall",
+        "what did we decide",
+        exact_scorer("shared"),
+        rubric=("states the decision",),
+    )
+
+    await run_capability_case(
+        case, ArtifactTarget((SharedArtifact("decision.md", b"We chose Postgres."),), judge)
+    )
+
+    prompt = judge.messages[0].content
+    assert isinstance(prompt, str)
+    assert loads(prompt.splitlines()[1])["candidateAnswer"] == "ANSWER: shared"
+    assert "answerSpansArtifacts" not in case.payload()
+
+
 async def test_artifact_case_fails_before_the_model_without_shared_markdown() -> None:
     case = CapabilityCase(
         "report",

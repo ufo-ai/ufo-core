@@ -179,6 +179,7 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
                 f"{leaf.min_mapped_evidence_coverage}"
             ),
             rubric=_answer_rubric(case),
+            answer_spans_artifacts=True,
             member_key=audiences[case.audience] or readiness.asker_email,
             shared_audience=case.audience == SHARED_SUBJECT,
         )
