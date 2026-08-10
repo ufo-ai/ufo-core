@@ -687,7 +687,7 @@ async def test_raw_request_body_stops_on_the_first_chunk_past_one_mib() -> None:
     assert reads == 2
 
 
-def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
+def test_block_kit_reply_body_renders_markdown_and_bounds_each_part() -> None:
     metadata = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
     body = json.loads(slack.slack_reply_body("C5", "200.0", "hi **there**", metadata))
     assert body["channel"] == "C5"
@@ -699,18 +699,60 @@ def test_block_kit_reply_body_renders_markdown_and_degrades() -> None:
     without_footer = json.loads(slack.slack_reply_body("C5", "200.0", "hi", None))
     assert without_footer["blocks"] == [{"type": "markdown", "text": "hi"}]
     big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
-    degraded = json.loads(slack.slack_reply_body("C5", None, big, metadata))
-    assert "blocks" not in degraded
-    assert degraded["text"] == f"{big}\n\n{metadata}"
+    with pytest.raises(ValueError, match="part is too large"):
+        slack.slack_reply_body("C5", None, big, metadata)
     connect = slack.slack_connect_blocks(
         ConnectRequest(provider="github", requester_member_id=uuid4()), uuid4()
     )
     assert connect is not None
-    preserved = json.loads(slack.slack_reply_body("C5", None, big, metadata, actions=connect))
-    assert "".join(block["text"] for block in preserved["blocks"][:-2]) == big
-    assert preserved["blocks"][-2] == connect[0]
+    with pytest.raises(ValueError, match="part is too large"):
+        slack.slack_reply_body("C5", None, big, metadata, actions=connect)
     with pytest.raises(ValueError, match="metadata is too large"):
         slack.slack_reply_body("C5", None, "hi", "x" * (slack.SLACK_CONTEXT_TEXT_LIMIT + 1))
+
+
+def test_slack_reply_parts_are_bounded_and_lossless() -> None:
+    text = "A complete sentence. " * 700
+
+    parts = slack.slack_reply_parts(text)
+
+    assert len(parts) == 2
+    assert all(len(part) <= slack.SLACK_MARKDOWN_TEXT_LIMIT for part in parts)
+    assert "".join(parts) == text
+
+
+def test_slack_reply_parts_do_not_split_words() -> None:
+    text = "ordinary_words stay_together " * 600
+
+    parts = slack.slack_reply_parts(text)
+
+    assert len(parts) > 1
+    assert all(
+        re.match(r"\w", left[-1]) is None or re.match(r"\w", right[0]) is None
+        for left, right in itertools.pairwise(parts)
+    )
+
+
+def test_slack_reply_parts_keep_a_markdown_table_together() -> None:
+    table = "| Name | Value |\n| --- | --- |\n| alpha | beta |\n"
+    text = f"{'word ' * 2_390}\n\n{table}\nAfter the table."
+
+    parts = slack.slack_reply_parts(text)
+
+    assert len(parts) == 2
+    assert any(table in part for part in parts)
+    assert "".join(parts) == text
+
+
+def test_slack_reply_parts_keep_a_fenced_code_block_together() -> None:
+    code = "```python\nprint('alpha')\nprint('beta')\n```\n"
+    text = f"{'word ' * 2_390}\n\n{code}\nAfter the code."
+
+    parts = slack.slack_reply_parts(text)
+
+    assert len(parts) == 2
+    assert any(code in part for part in parts)
+    assert "".join(parts) == text
 
 
 def test_a_reply_unfurls_one_link_and_no_more() -> None:
@@ -732,13 +774,18 @@ def test_a_reply_unfurls_one_link_and_no_more() -> None:
         several = json.loads(slack.slack_reply_body("C5", None, text, None))
         assert several["unfurl_links"] is False
         assert several["unfurl_media"] is False
-    big = "x" * (slack.SLACK_MARKDOWN_TEXT_LIMIT + 1)
-    degraded = json.loads(
-        slack.slack_reply_body("C5", None, f"{big} https://ufo.test/a https://ufo.test/b", None)
+    plain = json.loads(
+        slack.slack_reply_body(
+            "C5",
+            None,
+            f"{'x' * 3_000} https://ufo.test/a https://ufo.test/b",
+            None,
+            blocks=False,
+        )
     )
-    assert "blocks" not in degraded
-    assert degraded["unfurl_links"] is False
-    assert degraded["unfurl_media"] is False
+    assert "blocks" not in plain
+    assert plain["unfurl_links"] is False
+    assert plain["unfurl_media"] is False
 
 
 def test_a_markdown_header_renders_tight_against_the_paragraph_above_it() -> None:
@@ -3163,6 +3210,259 @@ async def test_writeback_posts_block_kit_reply_and_streams_the_attachment(
     assert complete_body["channel_id"] == "C5"
     assert complete_body["thread_ts"] == "200.0"
     assert complete_body["files"] == [{"id": "F1", "title": "report.pdf"}]
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == "C5:999.100"
+
+
+def _long_reply_transport(
+    recorder: list[httpx.Request], invalid_post: int | None = None
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"id": "C5", "is_ext_shared": False}}
+            )
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            count = len(
+                [
+                    posted
+                    for posted in recorder
+                    if str(posted.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+                ]
+            )
+            if count == invalid_post:
+                return httpx.Response(200, json={"ok": False, "error": "invalid_blocks"})
+            return httpx.Response(200, json={"ok": True, "channel": "C5", "ts": f"999.{count}00"})
+        return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_long_writeback_returns_the_first_post_and_finishes_with_actions(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _long_reply_transport(recorder)
+    )
+    text = "A useful sentence with several words.\n\n" * 350
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        text,
+        blob,
+        artifact=False,
+        question=ASK_QUESTION,
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert len(posts) == 2
+    assert "".join(posted["text"] for posted in posts) == text
+    assert all(posted["thread_ts"] == "200.0" for posted in posts)
+    assert posts[0]["blocks"] == [{"type": "markdown", "text": posts[0]["text"]}]
+    assert posts[1]["blocks"][0] == {"type": "markdown", "text": posts[1]["text"]}
+    assert any(block["type"] == "actions" for block in posts[1]["blocks"])
+    assert posts[1]["blocks"][-1]["type"] == "context"
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == "C5:999.100"
+
+
+@pytest.mark.parametrize(
+    "accepted_before_failure", [False, True], ids=["rate_limited", "response_lost"]
+)
+@pytest.mark.parametrize(
+    ("queue_key", "reconcile_url"),
+    [
+        ("C5:200.0", slack.SLACK_CONVERSATIONS_REPLIES_URL),
+        ("D5", slack.SLACK_CONVERSATIONS_HISTORY_URL),
+    ],
+    ids=["thread", "dm"],
+)
+async def test_long_writeback_retry_resumes_after_its_last_accepted_part(
+    db: None,
+    tmp_path,
+    monkeypatch,
+    accepted_before_failure: bool,
+    queue_key: str,
+    reconcile_url: str,
+) -> None:
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    deliveries: dict[str, dict[str, object]] = {}
+    second_failure_sent = False
+    channel = queue_key.partition(":")[0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal second_failure_sent
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_INFO_URL:
+            return httpx.Response(
+                200, json={"ok": True, "channel": {"id": channel, "is_ext_shared": False}}
+            )
+        if url == reconcile_url:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        *([{"ts": "200.0", "text": "root"}] if ":" in queue_key else []),
+                        *deliveries.values(),
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if url != slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+        body = json.loads(request.content)
+        delivery_id = body["metadata"]["event_payload"]["id"]
+        if deliveries and delivery_id not in deliveries and not second_failure_sent:
+            second_failure_sent = True
+            if not accepted_before_failure:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "1"},
+                    json={"ok": False, "error": "ratelimited"},
+                )
+            ts = f"999.{len(deliveries) + 1}00"
+            deliveries[delivery_id] = {
+                "ts": ts,
+                "text": body["text"],
+                "metadata": body["metadata"],
+            }
+            raise httpx.ReadTimeout(
+                "response lost after Slack accepted the message", request=request
+            )
+        ts = f"999.{len(deliveries) + 1}00"
+        deliveries[delivery_id] = {
+            "ts": ts,
+            "text": body["text"],
+            "metadata": body["metadata"],
+        }
+        return httpx.Response(
+            200,
+            json={"ok": True, "channel": channel, "ts": ts},
+        )
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    text = "A useful sentence with several words.\n\n" * 350
+    turn_id = await _seed_done_turn(workspace_id, queue_key, text, blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+    async with workspace_tx() as connection:
+        progress = await connection.scalar(
+            sa.select(tables.ext_store.c.value).where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                tables.ext_store.c.key == slack._slack_reply_progress_key(turn_id),
+            )
+        )
+        assert progress == {
+            "deliveries": [{"id": f"{turn_id}:0:markdown", "ts": "999.100"}],
+            "pending": f"{turn_id}:1:markdown",
+            "complete": False,
+        }
+        await connection.execute(
+            sa.update(tables.writeback)
+            .where(tables.writeback.c.turn_id == turn_id)
+            .values(claim_expires_at=None)
+        )
+    await app.state.writeback_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    ids = [posted["metadata"]["event_payload"]["id"] for posted in posts]
+    second_id = f"{turn_id}:1:markdown"
+    assert ids == [
+        f"{turn_id}:0:markdown",
+        second_id,
+        *(() if accepted_before_failure else (second_id,)),
+    ]
+    assert len(deliveries) == 2
+    reconciliations = [
+        request for request in recorder if str(request.url).split("?")[0] == reconcile_url
+    ]
+    assert len(reconciliations) == 1
+    assert reconciliations[0].url.params["include_all_metadata"] == "true"
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+        progress = await connection.scalar(
+            sa.select(tables.ext_store.c.value).where(
+                tables.ext_store.c.workspace_id == workspace_id,
+                tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                tables.ext_store.c.key == slack._slack_reply_progress_key(turn_id),
+            )
+        )
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref == f"{channel}:999.100"
+    assert progress is None
+
+
+async def test_long_invalid_blocks_fallback_stays_below_slacks_text_splitter(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _long_reply_transport(recorder, invalid_post=2)
+    )
+    text = "A complete sentence. " * 1_095
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", text, blob, artifact=False)
+
+    await app.state.writeback_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert len(posts) > 3
+    assert "blocks" in posts[0]
+    assert "blocks" in posts[1]
+    fallback = posts[2:]
+    assert all("blocks" not in posted for posted in fallback)
+    assert all(len(posted["text"]) <= slack.SLACK_TEXT_MESSAGE_LIMIT for posted in fallback)
+    footer = posts[1]["blocks"][-1]["elements"][0]["text"]
+    fallback_text = "".join(posted["text"] for posted in fallback)
+    assert fallback_text.removesuffix(f"\n\n{footer}") == posts[1]["text"]
 
     async with workspace_tx() as connection:
         row = (

@@ -89,7 +89,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.sdk.context import ScopedStore
+from ufo.sdk.context import JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
@@ -455,6 +455,9 @@ SLACK_CONVERSATIONS_INFO_URL = "https://slack.com/api/conversations.info"
 SLACK_CONVERSATION_TYPES = "public_channel,private_channel,mpim,im"
 SLACK_CONVERSATIONS_PAGE_SIZE = 200
 SLACK_CONVERSATIONS_MAX_PAGES = 5
+SLACK_REPLY_PROGRESS_PREFIX = "reply_progress/"
+SLACK_REPLY_METADATA_EVENT = "ufo_reply_part"
+SLACK_REPLY_RECONCILE_WINDOW_SECONDS = 7_200
 SLACK_MPIM_MEMBERS_LIMIT = 50
 SLACK_PEOPLE_RESOLVE_MAX = 100
 
@@ -711,6 +714,7 @@ AMBIENT_CHANNEL_NOTE = (
 )
 AMBIENT_OMITTED_MARKER = "[… earlier messages omitted …]"
 SLACK_CONTEXT_TEXT_LIMIT = 3_000
+SLACK_TEXT_MESSAGE_LIMIT = 3_500
 MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 # Slack's own documented ceiling for a single file; an over-cap artifact goes out as a TTL link.
@@ -720,6 +724,8 @@ SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
 MARKDOWN_LINK_PATTERN = r"\[[^\]]*\]\(<?https?://[^)>\s]+[^)]*\)"
 URL_PATTERN = r"https?://[^\s>|]+"
 HEADER_PADDING_PATTERN = r"\n[ \t]*\n+(?=#{1,6} )"
+SLACK_FENCE_START_PATTERN = r"[ \t]*(`{3,}|~{3,})"
+SLACK_REPLY_BOUNDARY_PATTERNS = (r"\n[ \t]*\n", r"\n", r"[.!?][\"')\]]*[ \t]+", r"[ \t]+")
 MAX_UNFURLED_LINKS = 1
 DEBUG_SURFACE_PATH = "/surface/debug"
 WEB_SURFACE_PATH = "/surface/web"
@@ -957,22 +963,100 @@ def _link_count(text: str) -> int:
     return len(markdown) + len(re.findall(URL_PATTERN, bare))
 
 
+def slack_reply_parts(text: str, limit: int = SLACK_MARKDOWN_TEXT_LIMIT) -> list[str]:
+    """Split a reply at the strongest available markdown-safe boundary."""
+    if not text:
+        raise ValueError("Slack reply text is required")
+    if limit <= 0:
+        raise ValueError("Slack reply part limit must be positive")
+    if len(text) <= limit:
+        return [text]
+
+    atomic_spans: list[tuple[int, int]] = []
+    fence_start: int | None = None
+    fence_marker: str | None = None
+    table_start: int | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        marker = re.match(SLACK_FENCE_START_PATTERN, line)
+        if fence_start is not None:
+            stripped = line.strip()
+            if (
+                fence_marker is not None
+                and stripped
+                and set(stripped) == {fence_marker[0]}
+                and len(stripped) >= len(fence_marker)
+            ):
+                atomic_spans.append((fence_start, offset + len(line)))
+                fence_start = None
+                fence_marker = None
+            offset += len(line)
+            continue
+        if marker is not None:
+            if table_start is not None:
+                atomic_spans.append((table_start, offset))
+                table_start = None
+            fence_start = offset
+            fence_marker = marker.group(1)
+        elif line.lstrip().startswith("|"):
+            if table_start is None:
+                table_start = offset
+        elif table_start is not None:
+            atomic_spans.append((table_start, offset))
+            table_start = None
+        offset += len(line)
+    if fence_start is not None:
+        atomic_spans.append((fence_start, len(text)))
+    if table_start is not None:
+        atomic_spans.append((table_start, len(text)))
+
+    parts: list[str] = []
+    start = 0
+    while len(text) - start > limit:
+        ceiling = start + limit
+        cut = None
+        for pattern in SLACK_REPLY_BOUNDARY_PATTERNS:
+            candidates = [
+                start + match.end()
+                for match in re.finditer(pattern, text[start:ceiling])
+                if not any(
+                    span_start < start + match.end() < span_end
+                    for span_start, span_end in atomic_spans
+                )
+            ]
+            if candidates:
+                cut = candidates[-1]
+                break
+        if cut is None:
+            containing = next(
+                (
+                    (span_start, span_end)
+                    for span_start, span_end in atomic_spans
+                    if span_start < ceiling < span_end
+                ),
+                None,
+            )
+            cut = containing[0] if containing is not None and containing[0] > start else ceiling
+        parts.append(text[start:cut])
+        start = cut
+    parts.append(text[start:])
+    return parts
+
+
 def slack_reply_body(
     channel: str,
     thread_ts: str | None,
     text: str,
     metadata: str | None,
+    delivery_id: str | None = None,
     blocks: bool = True,
     actions: list[dict[str, object]] | None = None,
     sections: bool = False,
 ) -> bytes:
-    """The chat.postMessage body: one Block Kit `markdown` block so Slack renders the agent's own
-    markdown natively, plus the `actions` blocks (the rendered ask or connect handoff) when the
-    turn ended on one and an optional final `context` block for the turn's accounting and model
-    metadata — degrading to a text-only body when a reply without required actions exceeds
-    Slack's block or payload caps. Action-bearing replies split their text across bounded blocks;
+    """The chat.postMessage body for one bounded reply part: a Block Kit `markdown` block, the
+    rendered ask or connect handoff when present, and an optional final accounting context block.
     `sections=True` uses conservative section blocks after Slack rejects markdown blocks as
-    `invalid_blocks`. `text` always carries the whole reply as the notification fallback.
+    `invalid_blocks`. `text` carries the whole part as the notification fallback.
 
     A body carrying more than one link posts with unfurling off: Slack previews every link it finds,
     so a reply that cites its sources arrives buried under a stack of cards taller than the answer.
@@ -983,18 +1067,25 @@ def slack_reply_body(
     an ATX header needs no blank line above it to parse."""
     if not text:
         raise ValueError("Slack reply text is required")
+    if len(text) > SLACK_MARKDOWN_TEXT_LIMIT:
+        raise ValueError("Slack reply part is too large")
     if metadata is not None and len(metadata) > SLACK_CONTEXT_TEXT_LIMIT:
         raise ValueError("Slack reply metadata is too large")
     base: dict[str, object] = {"channel": channel, "text": text}
+    if delivery_id is not None:
+        base["metadata"] = {
+            "event_type": SLACK_REPLY_METADATA_EVENT,
+            "event_payload": {"id": delivery_id},
+        }
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
     if _link_count(text) > MAX_UNFURLED_LINKS:
         base["unfurl_links"] = False
         base["unfurl_media"] = False
-    if blocks and (len(text) <= SLACK_MARKDOWN_TEXT_LIMIT or actions is not None):
+    if blocks:
         rendered = re.sub(HEADER_PADDING_PATTERN, "\n", text)
         limit = SLACK_SECTION_TEXT_LIMIT if sections else SLACK_MARKDOWN_TEXT_LIMIT
-        chunks = [rendered[start : start + limit] for start in range(0, len(rendered), limit)]
+        chunks = slack_reply_parts(rendered, limit)
         block_list: list[dict[str, object]] = [
             (
                 {"type": "section", "text": {"type": "mrkdwn", "text": chunk}}
@@ -2512,8 +2603,155 @@ async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
     )
 
 
+class _SlackReplyDelivery(BaseModel):
+    id: str
+    ts: str
+
+
+class _SlackReplyProgress(BaseModel):
+    deliveries: tuple[_SlackReplyDelivery, ...] = ()
+    pending: str | None = None
+    complete: bool = False
+
+
+def _slack_reply_progress_key(turn_id: UUID) -> str:
+    return f"{SLACK_REPLY_PROGRESS_PREFIX}{turn_id}"
+
+
+async def _slack_reply_progress(
+    store: ScopedStore, key: str
+) -> tuple[_SlackReplyProgress, JsonValue]:
+    stored = await store.get(key)
+    if stored is not None:
+        return _SlackReplyProgress.model_validate(stored), stored
+    progress = _SlackReplyProgress()
+    encoded = progress.model_dump(mode="json")
+    if await store.put_if(key, encoded, expected=None):
+        return progress, encoded
+    stored = await store.get(key)
+    if stored is None:
+        raise SlackApiError("Slack reply progress disappeared")
+    return _SlackReplyProgress.model_validate(stored), stored
+
+
+async def _checkpoint_slack_reply(
+    store: ScopedStore,
+    key: str,
+    expected: JsonValue,
+    progress: _SlackReplyProgress,
+) -> tuple[_SlackReplyProgress, JsonValue]:
+    encoded = progress.model_dump(mode="json")
+    if not await store.put_if(key, encoded, expected=expected):
+        raise SlackApiError("Slack reply progress changed during delivery")
+    return progress, encoded
+
+
+def _slack_reply_delivery(message: object, delivery_id: str) -> str | None:
+    if not isinstance(message, dict):
+        return None
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("event_type") != SLACK_REPLY_METADATA_EVENT:
+        return None
+    payload = metadata.get("event_payload")
+    ts = message.get("ts")
+    if (
+        isinstance(payload, dict)
+        and payload.get("id") == delivery_id
+        and isinstance(ts, str)
+        and ts
+    ):
+        return ts
+    return None
+
+
+async def _reconcile_slack_reply(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    channel: str,
+    thread_ts: str | None,
+    delivery_id: str,
+) -> str | None:
+    cursor = ""
+    oldest = f"{time.time() - SLACK_REPLY_RECONCILE_WINDOW_SECONDS:.6f}"
+    for _page in range(SLACK_CONVERSATIONS_MAX_PAGES):
+        params = {
+            "channel": channel,
+            "oldest": oldest,
+            "limit": str(SLACK_CONVERSATIONS_PAGE_SIZE),
+            "include_all_metadata": "true",
+        }
+        if thread_ts is not None:
+            params["ts"] = thread_ts
+        if cursor:
+            params["cursor"] = cursor
+        payload = await _slack_ok(
+            client.get(
+                SLACK_CONVERSATIONS_REPLIES_URL
+                if thread_ts is not None
+                else SLACK_CONVERSATIONS_HISTORY_URL,
+                params=params,
+                headers={"Authorization": f"Bearer {bot_token}"},
+            )
+        )
+        messages = payload.get("messages")
+        for message in messages if isinstance(messages, list) else ():
+            if ts := _slack_reply_delivery(message, delivery_id):
+                return ts
+        response_metadata = payload.get("response_metadata")
+        next_cursor = (
+            response_metadata.get("next_cursor") if isinstance(response_metadata, dict) else None
+        )
+        cursor = next_cursor if isinstance(next_cursor, str) else ""
+        if not cursor:
+            return None
+    raise SlackApiError("Slack reply reconciliation exceeded its page limit")
+
+
+async def _deliver_slack_reply(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    store: ScopedStore,
+    key: str,
+    progress: _SlackReplyProgress,
+    expected: JsonValue,
+    delivery_id: str,
+    body: bytes,
+) -> tuple[_SlackReplyProgress, JsonValue, Mapping[str, object]]:
+    delivered = next((item for item in progress.deliveries if item.id == delivery_id), None)
+    if delivered is not None:
+        return progress, expected, {"ok": True, "ts": delivered.ts}
+    progress, expected = await _checkpoint_slack_reply(
+        store,
+        key,
+        expected,
+        progress.model_copy(update={"pending": delivery_id}),
+    )
+    payload = await _chat_post(client, bot_token, body)
+    if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
+        progress, expected = await _checkpoint_slack_reply(
+            store,
+            key,
+            expected,
+            progress.model_copy(update={"pending": None}),
+        )
+        return progress, expected, payload
+    ts = _posted_message_ts(payload)
+    progress, expected = await _checkpoint_slack_reply(
+        store,
+        key,
+        expected,
+        progress.model_copy(
+            update={
+                "deliveries": (*progress.deliveries, _SlackReplyDelivery(id=delivery_id, ts=ts)),
+                "pending": None,
+            }
+        ),
+    )
+    return progress, expected, payload
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
-    """Post the reply to the thread and return its message ref (`channel:ts`), the delivery record.
+    """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
     Every reply links to its web conversation and agent configuration when the deploy has a public
     base URL. The conversation rides as the `?c=` query parameter, not a fragment: a fragment never
     reaches the server, so a signed-out click would arrive at the portal with the target already
@@ -2522,7 +2760,11 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     rejection is deterministic, so the reply re-posts once — as conservative section blocks when
     it carries an ask or connect handoff (the affordance survives the markdown blocks Slack
     rejected), as plain text otherwise — rather than the poller retrying the identical Block Kit
-    body until it ages out."""
+    body until it ages out. Each accepted part is checkpointed in the extension store. Before an
+    uncertain request, its delivery ID is attached as Slack message metadata; a retry reads that
+    marker back before deciding whether to post, covering a response lost after Slack accepted the
+    message. The completed checkpoint survives until `attach`, after core has durably recorded the
+    first message as the delivery ref."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -2557,31 +2799,120 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         if web_links is not None:
             metadata = f"{metadata} · {web_links}"
         metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
+    parts = slack_reply_parts(text)
+    first_ts: str | None = None
+    store = ScopedStore(SLACK_EXTENSION)
+    progress_key = _slack_reply_progress_key(writeback.turn_id)
+    progress, stored = await _slack_reply_progress(store, progress_key)
+    if progress.complete:
+        if not progress.deliveries:
+            raise SlackApiError("Completed Slack reply has no deliveries")
+        return f"{channel}:{progress.deliveries[0].ts}"
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
-        payload = await _chat_post(
-            client, bot_token, slack_reply_body(channel, thread, text, metadata, actions=actions)
-        )
-        if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
-            _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
-            payload = await _chat_post(
+        if progress.pending is not None:
+            reconciled_ts = await _reconcile_slack_reply(
+                client, bot_token, channel, thread, progress.pending
+            )
+            deliveries = progress.deliveries
+            if reconciled_ts is not None:
+                deliveries = (
+                    *deliveries,
+                    _SlackReplyDelivery(id=progress.pending, ts=reconciled_ts),
+                )
+            progress, stored = await _checkpoint_slack_reply(
+                store,
+                progress_key,
+                stored,
+                progress.model_copy(update={"deliveries": deliveries, "pending": None}),
+            )
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            part_metadata = metadata if last else None
+            part_actions = actions if last else None
+            delivery_id = f"{writeback.turn_id}:{index}:markdown"
+            progress, stored, payload = await _deliver_slack_reply(
                 client,
                 bot_token,
+                store,
+                progress_key,
+                progress,
+                stored,
+                delivery_id,
                 slack_reply_body(
                     channel,
                     thread,
-                    text,
-                    metadata,
-                    blocks=actions is not None,
-                    actions=actions,
-                    sections=actions is not None,
+                    part,
+                    part_metadata,
+                    delivery_id=delivery_id,
+                    actions=part_actions,
                 ),
             )
-    if payload.get("ok") is not True:
-        raise SlackApiError(str(payload.get("error")))
-    ts = payload.get("ts")
-    if not isinstance(ts, str) or not ts:
+            if payload.get("error") != SLACK_INVALID_BLOCKS_ERROR:
+                ts = _posted_message_ts(payload)
+                if first_ts is None:
+                    first_ts = ts
+                continue
+            _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
+            if part_actions is not None:
+                delivery_id = f"{writeback.turn_id}:{index}:sections"
+                progress, stored, payload = await _deliver_slack_reply(
+                    client,
+                    bot_token,
+                    store,
+                    progress_key,
+                    progress,
+                    stored,
+                    delivery_id,
+                    slack_reply_body(
+                        channel,
+                        thread,
+                        part,
+                        part_metadata,
+                        delivery_id=delivery_id,
+                        actions=part_actions,
+                        sections=True,
+                    ),
+                )
+                ts = _posted_message_ts(payload)
+                if first_ts is None:
+                    first_ts = ts
+                continue
+            metadata_size = len(part_metadata) + 2 if part_metadata is not None else 0
+            fallback_parts = slack_reply_parts(part, SLACK_TEXT_MESSAGE_LIMIT - metadata_size)
+            for fallback_index, fallback_part in enumerate(fallback_parts):
+                fallback_metadata = (
+                    part_metadata if fallback_index == len(fallback_parts) - 1 else None
+                )
+                delivery_id = f"{writeback.turn_id}:{index}:plain:{fallback_index}"
+                progress, stored, payload = await _deliver_slack_reply(
+                    client,
+                    bot_token,
+                    store,
+                    progress_key,
+                    progress,
+                    stored,
+                    delivery_id,
+                    slack_reply_body(
+                        channel,
+                        thread,
+                        fallback_part,
+                        fallback_metadata,
+                        delivery_id=delivery_id,
+                        blocks=False,
+                    ),
+                )
+                ts = _posted_message_ts(payload)
+                if first_ts is None:
+                    first_ts = ts
+    if first_ts is None:
         raise SlackApiError("Slack response missing ts")
-    return f"{channel}:{ts}"
+    await _checkpoint_slack_reply(
+        store,
+        progress_key,
+        stored,
+        progress.model_copy(update={"complete": True}),
+    )
+    return f"{channel}:{first_ts}"
 
 
 async def _chat_post(
@@ -2627,6 +2958,15 @@ async def _chat_post(
     return response.json()
 
 
+def _posted_message_ts(payload: Mapping[str, object]) -> str:
+    if payload.get("ok") is not True:
+        raise SlackApiError(str(payload.get("error")))
+    ts = payload.get("ts")
+    if not isinstance(ts, str) or not ts:
+        raise SlackApiError("Slack response missing ts")
+    return ts
+
+
 async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None:
     """Stream each shared file that fits the upload cap into the conversation, all at once on the
     event loop; an over-cap file is delivered as a link in `post`, not here. The upload targets the
@@ -2634,6 +2974,7 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     threading on a reply's ts, and the bot reply is itself a thread reply in a channel. Best effort:
     a rejected file is logged and the rest still deliver, so an upload never re-posts the reply or
     blocks its siblings."""
+    await ScopedStore(SLACK_EXTENSION).delete(_slack_reply_progress_key(writeback.turn_id))
     inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
     if not inline:
         return
