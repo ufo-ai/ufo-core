@@ -95,6 +95,9 @@ from evals.jobbench.runner import (
 )
 from evals.mcp_atlas_100.runner import load_mcp_atlas_task
 from evals.mcp_atlas_100.target import McpAtlasTarget
+from evals.memory_100.runner import (
+    WORKFLOW_WAIT_SECONDS as MEMORY_100_WORKFLOW_WAIT_SECONDS,
+)
 from evals.memory_100.runner import Memory100Run, load_memory_100
 from evals.onboarding_help import ONBOARDING_HELP_PACKS
 from evals.reconstruct import RunReconstruction, write_reconstruction
@@ -511,6 +514,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = HANDBOOK_WORKFLOW_WAIT_SECONDS
     if coding_repo_tasks is not None:
         workflow_wait_seconds = CODING_REPO_WORKFLOW_WAIT_SECONDS
+    if memory_run is not None:
+        workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
     if tasks and all(task.name == "document_visual" for task in tasks):
         workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(

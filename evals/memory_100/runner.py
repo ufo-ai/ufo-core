@@ -25,6 +25,7 @@ from ufo.subjects import SHARED_SUBJECT
 
 MEMORY_100_GRADER_REVISION = "page-evidence-coverage-1"
 MEMORY_JUDGE_MODEL = "gpt-5.4"
+WORKFLOW_WAIT_SECONDS = 900.0
 ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE = 1.0
 PAGE_REF_PATTERN = re.compile(
     rf"\b{PAGE_OBJECT_KIND}/([0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}})"
