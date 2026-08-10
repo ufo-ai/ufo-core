@@ -42,6 +42,7 @@ class CorpusReadiness(BaseModel):
     memory_count: int
     chunk_count: int
     audiences: tuple[AudienceBinding, ...]
+    asker_email: str
     evidence: tuple[EvidenceOwner, ...]
 
 
@@ -74,6 +75,7 @@ class CorpusAttestor:
     source_id: UUID
     pages_root: Path
     audiences: tuple[AudienceBinding, ...]
+    asker_email: str
     blob: BlobStore
 
     async def attest(self) -> CorpusReadiness:
@@ -246,6 +248,7 @@ class CorpusAttestor:
             memory_count=len(memory_rows),
             chunk_count=len(chunk_rows),
             audiences=self.audiences,
+            asker_email=self.asker_email,
             evidence=evidence,
         )
 

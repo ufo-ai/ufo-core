@@ -73,7 +73,9 @@ class ScriptedStepTarget:
     def conversations(self) -> "ScriptedStepTarget":
         return self
 
-    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
+    async def open(
+        self, case_name: str, member_key: str | None = None, *_: object, **__: object
+    ) -> UUID:
         return self.conversation_id
 
     async def step(self, conversation_id: UUID, message: str, idempotency_key: str) -> TargetResult:

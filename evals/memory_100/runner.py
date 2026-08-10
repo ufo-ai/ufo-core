@@ -18,6 +18,7 @@ from evals.harness.registry import EvalTask, capability_task
 from evals.memory_100.models import Corpus, SnapshotCase
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import CorpusReadiness
+from ufo.subjects import SHARED_SUBJECT
 
 MEMORY_100_GRADER_REVISION = "evidence-coverage-gate-1"
 MEMORY_JUDGE_MODEL = "gpt-5.4"
@@ -162,7 +163,8 @@ def load_memory_100(snapshot_root: Path, readiness_path: Path) -> Memory100Run:
                 f"{leaf.min_mapped_evidence_coverage}"
             ),
             rubric=_answer_rubric(case),
-            member_key=audiences[case.audience],
+            member_key=audiences[case.audience] or readiness.asker_email,
+            shared_audience=case.audience == SHARED_SUBJECT,
         )
     tasks: list[EvalTask] = []
     for leaf in MEMORY_100_LEAVES:

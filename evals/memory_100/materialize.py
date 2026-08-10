@@ -51,6 +51,11 @@ memory_manifest = import_module("ufo_ext_memory.manifest")
 memory_store = import_module("ufo_ext_memory.store")
 
 STAGE_FILE_MODE = 0o644
+ASKER_EMAIL = "memory-100+asker@eval.invalid"
+"""The member a shared-audience case speaks as. It is not an audience binding: a shared room is
+unowned, and this member owns no page and no memory item, so the private subject it adds to a
+case's reads is empty. It exists only so a shared-audience case has an author — authorship rides
+the turn, ownership rides the conversation, and the two are not the same column."""
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,7 @@ class Memory100Materializer:
                 source_id=source_id,
                 pages_root=self.pages_root,
                 audiences=audiences,
+                asker_email=ASKER_EMAIL,
                 blob=self.blob,
             ).attest()
 
@@ -181,6 +187,15 @@ class Memory100Materializer:
                         updated_at=sa.func.now(),
                     )
                 )
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=uuid5(workspace_id, "memory_100/asker"),
+                    workspace_id=workspace_id,
+                    email=ASKER_EMAIL,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
 
     @classmethod
     def _stage_pages(cls, snapshot: Snapshot, pages_root: Path) -> None:

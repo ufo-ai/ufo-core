@@ -150,10 +150,15 @@ class EvalConversations(Protocol):
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
+        shared: bool = False,
     ) -> UUID: ...
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID: ...
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None: ...
@@ -212,6 +217,7 @@ class InProcessTarget:
             case.workspace_files,
             case.prior_messages,
             case.undelivered,
+            shared=case.shared_audience,
         )
         for reference in case.references:
             await self.conversations.stage(
@@ -227,6 +233,7 @@ class InProcessTarget:
                 conversation_id,
                 case.message,
                 f"{case.name}:{conversation_id}",
+                speaker_key=case.member_key,
             )
         except Exception as error:
             return _invoke_failure(conversation_id, error)

@@ -16,6 +16,7 @@ from evals.harness.judge import MAX_CRITERIA, MAX_CRITERION_CHARS
 from evals.harness.recall import MemoryRecallEvent, with_recall_aggregates
 from evals.harness.target import TargetResult
 from evals.harness.viewer import EvalRun, render_viewer
+from evals.memory_100.materialize import ASKER_EMAIL
 from evals.memory_100.models import SnapshotCase, SnapshotMemory
 from evals.memory_100.runner import (
     ALIAS_MIN_MAPPED_EVIDENCE_COVERAGE,
@@ -160,6 +161,7 @@ def _memory_100_paths(tmp_path: Path) -> tuple[Path, Path]:
         page_count=0,
         memory_count=0,
         chunk_count=0,
+        asker_email=ASKER_EMAIL,
         audiences=(
             AudienceBinding(alias="shared", email=None, member_id=None),
             AudienceBinding(alias="owner", email="owner@eval.invalid", member_id=uuid4()),
@@ -440,6 +442,7 @@ async def test_memory_100_leaves_pin_all_memory_owners_and_bind_member(
         page_count=0,
         memory_count=1,
         chunk_count=1,
+        asker_email=ASKER_EMAIL,
         audiences=(
             AudienceBinding(alias="shared", email=None, member_id=None),
             AudienceBinding(alias="owner", email="owner@eval.invalid", member_id=uuid4()),
@@ -622,6 +625,7 @@ def test_memory_100_task_groups_long_enterprise_answer_rubric(tmp_path: Path) ->
         page_count=0,
         memory_count=1,
         chunk_count=1,
+        asker_email=ASKER_EMAIL,
         audiences=(
             AudienceBinding(alias="shared", email=None, member_id=None),
             AudienceBinding(alias="owner", email="owner@eval.invalid", member_id=uuid4()),
@@ -674,6 +678,7 @@ def test_memory_100_task_rejects_a_different_snapshot(tmp_path: Path) -> None:
         page_count=0,
         memory_count=0,
         chunk_count=0,
+        asker_email=ASKER_EMAIL,
         audiences=(),
         evidence=(),
     )

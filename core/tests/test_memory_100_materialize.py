@@ -419,6 +419,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
                 source_id=readiness.source_id,
                 pages_root=readiness.pages_root,
                 audiences=readiness.audiences,
+                asker_email=readiness.asker_email,
                 blob=blob,
             ).attest()
         async with workspace_tx() as connection:
@@ -447,6 +448,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
             source_id=readiness.source_id,
             pages_root=readiness.pages_root,
             audiences=readiness.audiences,
+            asker_email=readiness.asker_email,
             blob=blob,
         ).attest()
         assert rematerialized.corpus_digest != readiness.corpus_digest
@@ -471,6 +473,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
                 source_id=readiness.source_id,
                 pages_root=readiness.pages_root,
                 audiences=readiness.audiences,
+                asker_email=readiness.asker_email,
                 blob=blob,
             ).attest()
         async with workspace_tx() as connection:
@@ -495,5 +498,6 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
                 source_id=readiness.source_id,
                 pages_root=readiness.pages_root,
                 audiences=readiness.audiences,
+                asker_email=readiness.asker_email,
                 blob=blob,
             ).attest()

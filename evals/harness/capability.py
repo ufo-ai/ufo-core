@@ -291,6 +291,7 @@ class CapabilityCase:
     artifact_rubric: tuple[str, ...] = ()
     visual_rubric: tuple[str, ...] = ()
     member_key: str | None = None
+    shared_audience: bool = False
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
     undelivered: tuple[UndeliveredRound, ...] = ()
@@ -325,6 +326,8 @@ class CapabilityCase:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
+        if self.shared_audience:
+            payload["sharedAudience"] = True
         if self.workspace_files:
             payload["workspaceFiles"] = [
                 {

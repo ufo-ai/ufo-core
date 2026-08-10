@@ -169,11 +169,20 @@ class WorkspaceDriver:
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
+        shared: bool = False,
     ) -> UUID:
         """Open one isolated eval conversation, bound to the member who speaks in it. A case names
         its member by the exact workspace `member.email`; one that names none speaks as the
         workspace's founding admin, so a case reads to the runtime as the member message it is
-        written as rather than as a background fire. An absent email fails rather than degrading to
+        written as rather than as a background fire.
+
+        `shared` leaves the conversation unowned, which is what a shared room is: the
+        `conversation_audience_member` check holds `member_id` not-null exactly when the audience is
+        that member's private subject, so a conversation cannot be both owned and shared. Ownership
+        is not authorship — the member who speaks rides `turn.speaker_member_id`, which `admit`
+        carries, so a shared-audience case still speaks as its asker.
+
+        An absent email fails rather than degrading to
         shared-only recall. Seeded undelivered rounds land as the narration-plus-tool-call pairs
         they were, so the case message reads to the model as a member writing into a turn already
         at work."""
@@ -187,7 +196,7 @@ class WorkspaceDriver:
                     agent_id=self.agent_id,
                     surface=EVAL_SURFACE,
                     queue_key=f"{EVAL_SURFACE}:{case_name}:{conversation_id}",
-                    member_id=member_id,
+                    member_id=None if shared else member_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -289,20 +298,36 @@ class WorkspaceDriver:
             )
         ).scalar_one_or_none()
 
-    async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
-    ) -> UUID:
-        """Admit one case message as the conversation's member, through the same
-        `MemberAdmission` every surface admits through — so a case exercises the member path it is
-        written as, pause consumption included."""
-        async with workspace_tx() as connection:
-            speaker = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.member_id).where(
-                        tables.conversation.c.id == conversation_id
-                    )
+    async def _owner(self, connection: AsyncConnection, conversation_id: UUID) -> UUID | None:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == conversation_id
                 )
-            ).scalar_one()
+            )
+        ).scalar_one()
+
+    async def admit(
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
+    ) -> UUID:
+        """Admit one case message as the member who speaks it, through the same `MemberAdmission`
+        every surface admits through — so a case exercises the member path it is written as, pause
+        consumption included.
+
+        `speaker_key` is that member's email, carried by the case rather than read off the
+        conversation: a shared room is unowned (`member_id` is null) yet still has someone talking
+        in it, so authorship cannot be derived from ownership. Absent one, the conversation's own
+        member speaks, which is the private-conversation case."""
+        async with workspace_tx() as connection:
+            speaker = await (
+                self._speaker(connection, speaker_key)
+                if speaker_key is not None
+                else self._owner(connection, conversation_id)
+            )
         admitter = MemberAdmission(
             admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
             workspace_id=self.workspace_id,

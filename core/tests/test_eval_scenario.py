@@ -62,7 +62,11 @@ class ScriptedWorker:
     transcript: tuple[Message, ...] = ()
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID:
         index = self.invoked
         self.invoked += 1
@@ -133,14 +137,20 @@ class DbConversations:
     worker: ScriptedWorker
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID:
         return await self.worker.admit(conversation_id, message, idempotency_key)
 
     def workspace_path(self, conversation_id: UUID, rel: str) -> Path:
         return Path(gettempdir()) / "eval-scenario-workspaces" / str(conversation_id) / rel
 
-    async def open(self, case_name: str, member_key: str | None = None) -> UUID:
+    async def open(
+        self, case_name: str, member_key: str | None = None, *_: object, **__: object
+    ) -> UUID:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(

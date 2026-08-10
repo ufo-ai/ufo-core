@@ -865,6 +865,7 @@ class StubWorker:
     expected_head: tuple[Message, ...] = ()
     seq: int = 1
     idempotency_keys: list[str] = field(default_factory=list)
+    speaker_keys: list[str | None] = field(default_factory=list)
     order: list[str] | None = None
     tokens: int = 0
     cost_micro_usd: int = 0
@@ -872,8 +873,13 @@ class StubWorker:
     child_cost_micro_usd: int = 0
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID:
+        self.speaker_keys.append(speaker_key)
         async with workspace_tx() as connection:
             agent_id = (
                 await connection.execute(
@@ -1207,15 +1213,20 @@ class DriverConversations:
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
+        shared: bool = False,
     ) -> UUID:
         return await self.driver.open(
             case_name, member_key, workspace_files, prior_messages, undelivered
         )
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID:
-        return await self.worker.admit(conversation_id, message, idempotency_key)
+        return await self.worker.admit(conversation_id, message, idempotency_key, speaker_key)
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
         await self.driver.stage(conversation_id, path, source)
@@ -1230,7 +1241,11 @@ class DbConversations:
     worker: "StubWorker | None" = None
 
     async def admit(
-        self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
     ) -> UUID:
         assert self.worker is not None, "this double was built to open only"
         return await self.worker.admit(conversation_id, message, idempotency_key)
@@ -1248,6 +1263,7 @@ class DbConversations:
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
+        shared: bool = False,
     ) -> UUID:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
@@ -1429,6 +1445,7 @@ async def test_a_capability_seed_establishes_state_before_the_conversation_opens
             workspace_files: tuple[WorkspaceFile, ...] = (),
             prior_messages: tuple[str, ...] = (),
             undelivered: tuple[UndeliveredRound, ...] = (),
+            shared: bool = False,
         ) -> UUID:
             order.append("open")
             return await super().open(
@@ -1795,7 +1812,11 @@ async def test_in_process_target_reads_durable_compaction_state(
         worker: StubWorker
 
         async def admit(
-            self, conversation_id: UUID, message: str, idempotency_key: str | None = None
+            self,
+            conversation_id: UUID,
+            message: str,
+            idempotency_key: str | None = None,
+            speaker_key: str | None = None,
         ) -> UUID:
             return await self.worker.admit(conversation_id, message, idempotency_key)
 
@@ -1812,6 +1833,7 @@ async def test_in_process_target_reads_durable_compaction_state(
             workspace_files: tuple[WorkspaceFile, ...] = (),
             prior_messages: tuple[str, ...] = (),
             undelivered: tuple[UndeliveredRound, ...] = (),
+            shared: bool = False,
         ) -> UUID:
             return self.conversation_id
 
@@ -4480,6 +4502,59 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         pytest.raises(ValueError, match="is not a member email in this workspace"),
     ):
         await driver.open("missing-member", "missing@eval.invalid")
+
+
+async def test_a_shared_case_leaves_the_conversation_unowned_and_speaks_through_the_turn(
+    db: None, tmp_path
+) -> None:
+    """Ownership is not authorship. `conversation_audience_member` holds `member_id` not-null
+    exactly when the audience is that member's private subject, so a shared room cannot be owned —
+    and a driver that read the speaker off ownership would leave every shared-audience case
+    speaking as nobody. The conversation stays shared and unowned; the asker rides the turn."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    driver = WorkspaceDriver(
+        workspace_id, agent_id, PROMPT, blob, UNCALLED_DBOS, tmp_path / "workspaces"
+    )
+    asker = await _seed_member(workspace_id, "asker@evalco.test")
+
+    with ws(workspace_id):
+        shared = await driver.open("shared-room", "asker@evalco.test", shared=True)
+        owned = await driver.open("private-room", "asker@evalco.test")
+        async with workspace_tx() as connection:
+            rows = dict(
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.conversation.c.id,
+                            tables.conversation.c.member_id,
+                        ).where(tables.conversation.c.workspace_id == workspace_id)
+                    )
+                ).all()
+            )
+        ctx = _context(blob, worker)
+        target = InProcessTarget(
+            ctx=ctx,
+            agent_id=agent_id,
+            conversations=DriverConversations(driver, worker),
+            outcome=CorpusOutcome(ctx),
+            blob=blob,
+        )
+        await target.run(
+            CapabilityCase(
+                "shared-room-case",
+                "who owns billing?",
+                restraint_scorer(WEB_TOOLS),
+                member_key="asker@evalco.test",
+                shared_audience=True,
+            )
+        )
+
+    assert rows[shared] is None, "a shared room is unowned"
+    assert rows[owned] == asker, "a private room is owned by its member"
+    assert worker.speaker_keys == ["asker@evalco.test"], "the asker still speaks the turn"
 
 
 async def test_workspace_driver_speaks_as_the_named_member_then_the_founding_admin(
