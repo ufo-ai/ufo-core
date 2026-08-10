@@ -166,7 +166,7 @@ export const TASK_KIND = {
 
 export const SITE_KIND = {
   kind: "site",
-  fields: ["conversation", "created_at", "visibility"],
+  fields: ["conversation", "created_at", "visibility", "site_url"],
   spec_schema: {
     properties: { visibility: { type: "string", enum: ["private", "workspace", "public"] } },
   },

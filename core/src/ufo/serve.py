@@ -292,7 +292,13 @@ def run() -> None:
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         subagents=runtime.subagents,
         memory=memory,
-        objects=member_object_registry(manifests, credentials, index, embed),
+        objects=member_object_registry(
+            manifests,
+            credentials,
+            index,
+            embed,
+            public_base_url=config.connect.public_base_url,
+        ),
     )
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)

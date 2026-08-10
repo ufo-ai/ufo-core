@@ -161,7 +161,7 @@ test("a value the kind's spec declares as an enum reads as its own chip", async 
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/sites";
+  location.hash = "#/sites";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await viewCard("docs-abc"));
@@ -182,13 +182,13 @@ test("an empty index states that the kind has no objects here", async () => {
   expect(screen.queryByRole("table")).toBeNull();
 });
 
-test("the sites tab of a deploy without the extension states that, not an error", async () => {
+test("the sites section of a deploy without the extension states that, not an error", async () => {
   wire({
     "/objects/site": () => new Response("no object kind named 'site'", { status: 404 }),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/sites";
+  location.hash = "#/sites";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
@@ -555,7 +555,7 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
   expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
 });
 
-test("the workspace sites tab is the site index on the main agent", async () => {
+test("the sites section is the site index on the main agent", async () => {
   const reads: string[] = [];
   wire({
     "/objects/site": (url) => {
@@ -565,7 +565,7 @@ test("the workspace sites tab is the site index on the main agent", async () => 
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/sites";
+  location.hash = "#/sites";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText(NO_SITES)).toBeTruthy();

@@ -106,6 +106,8 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        scoped = _workspace(ext)
+        base = scoped.public_base_url
         return tuple(
             OwnedRow(
                 name=name,
@@ -119,7 +121,16 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     "conversation": str(site.conversation_id),
                     "created_at": site.created_at.isoformat(),
                     "visibility": site.visibility,
-                },
+                }
+                | (
+                    {}
+                    if not base
+                    else {
+                        "site_url": site_url(
+                            base, scoped.store.workspace_id, site.conversation_id, site.name
+                        )
+                    }
+                ),
             )
             for name, site in _named(await _sites(ext).all()).items()
         )
@@ -223,9 +234,10 @@ SITE_OBJECT = ObjectKind(
         "Sites a deploy left hosted, one object per site and conversation, named "
         "<site-name>-<conversation-digest> (the deploy result carries the name). A site is visible "
         "to the member who deployed it, and to every member once it is workspace or public. "
-        "Listings filter and order on `conversation`, `created_at`, and `visibility` — filter on "
-        "this conversation's id for the sites it hosts, or order by `created_at` desc for the "
-        "newest. "
+        "Each listed site carries its hosted `site_url`, absent only on a deploy that configures "
+        "no public base URL and therefore hosts no reachable link. Listings filter and order on "
+        "`conversation`, `created_at`, and `visibility` — filter on this conversation's id for the "
+        "sites it hosts, or order by `created_at` desc for the newest. "
         "object_get returns its visibility, and its status carries the hosted site_url, the "
         "sandbox port serving it, and its creator; the `created_in` link names the conversation "
         "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
@@ -237,5 +249,5 @@ SITE_OBJECT = ObjectKind(
     ),
     spec_model=SiteSpec,
     store=SiteObjects(),
-    list_fields=frozenset({"conversation", "created_at", "visibility"}),
+    list_fields=frozenset({"conversation", "created_at", "visibility", "site_url"}),
 )

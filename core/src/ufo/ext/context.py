@@ -639,6 +639,7 @@ class ExtensionContext:
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
     key_slot_for: Callable[[str], str | None] | None = None
+    public_base_url: str | None = None
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
@@ -1284,12 +1285,14 @@ def context_for(
     credential_store: CredentialStore | None = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
+    public_base_url: str | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
     workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
     installation registration; a `model_resolver` wires the metered model seam, keyed and billed
-    to that same workspace."""
+    to that same workspace. `public_base_url` is the deploy's externally reachable base, which a
+    kind listing rows a member opens needs and cannot reach any other way."""
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(
@@ -1308,4 +1311,5 @@ def context_for(
         invoker=invoker,
         model=None if model_resolver is None else ModelAccess(model_resolver),
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
+        public_base_url=public_base_url,
     )

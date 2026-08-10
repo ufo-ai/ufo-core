@@ -13,6 +13,7 @@ import { App } from "@/App";
 import {
   AGENT,
   MEMBER,
+  PlacedSection,
   PlacedWorkspace,
   json,
   refusedNotice,
@@ -767,7 +768,7 @@ test("the artifacts declaration binds its parts to the artifact payload", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -831,7 +832,7 @@ test("an outcome released after the member left never resets the view they are o
   location.hash = "#/workspace/sources";
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
 
-  location.hash = "#/workspace/artifacts";
+  location.hash = "#/artifacts";
   await userEvent.click(await screen.findByRole("button", { name: "Older" }));
   await waitFor(() => expect(artifactReads.length).toBe(2));
 

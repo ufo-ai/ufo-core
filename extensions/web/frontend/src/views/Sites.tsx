@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { CardGrid } from "@/kernel/cards";
+import { cn } from "@/lib/cn";
 import {
   ObjectDetail,
   type ObjectAddress,
@@ -154,9 +155,21 @@ function SiteCards({
                 }
                 body={(row) => row.summary}
                 action={(row) => (
-                  <Button variant="row" onClick={() => onOpen(row.name)}>
-                    View
-                  </Button>
+                  <div className="flex flex-wrap gap-xs">
+                    {typeof row.site_url === "string" ? (
+                      <a
+                        href={row.site_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={cn(buttonVariants({ variant: "send" }), "no-underline")}
+                      >
+                        Open
+                      </a>
+                    ) : null}
+                    <Button variant="row" onClick={() => onOpen(row.name)}>
+                      View
+                    </Button>
+                  </div>
                 )}
               />
               {payload.next_cursor || cursor ? (

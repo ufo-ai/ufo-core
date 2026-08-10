@@ -176,7 +176,7 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/sites";
+  location.hash = "#/sites";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await viewCard("docs-abc"));
@@ -621,6 +621,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
@@ -637,10 +638,13 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   expect(screen.queryByRole("tablist")).toBeNull();
 
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  expect(location.hash).toBe("#/artifacts");
+
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");
-  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
-  expect(location.hash).toBe("#/workspace/sites");
+  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
+  expect(location.hash).toBe("#/sites");
   expect(await screen.findByText(NO_SITES)).toBeTruthy();
 });
 

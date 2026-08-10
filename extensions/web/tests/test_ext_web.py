@@ -1689,7 +1689,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     path = f"/surface/web/objects/site?agent={agent_id}"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
     assert sorted(row["name"].split("-")[0] for row in m_view["objects"]) == ["draft", "landing"]
-    assert m_view["fields"] == ["conversation", "created_at", "visibility"]
+    assert sorted(m_view["fields"]) == ["conversation", "created_at", "site_url", "visibility"]
     assert "guidance" not in m_view and "description" not in m_view
     assert m_view["applies"] is False
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()

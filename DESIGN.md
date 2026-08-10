@@ -18,7 +18,7 @@ surface outside this system.
 | Reduced motion, `100dvh` + safe-area insets, table overflow | `theme.test.tsx` |
 | Wordmark is `ufo`, one word, no tracking | `theme.test.tsx` |
 | Hash grammar, place keys, push/replace/back history | `route.ts` types + `urlstate.test.tsx` |
-| A workspace tab without a view is a compile error | `registry.tsx` totality |
+| A workspace tab or a section without a view is a compile error | `registry.tsx` totality |
 | Only the field primitives draw a field surface (`bg-field`) | `theme.test.tsx` |
 | Font smoothing, balanced headings, pretty body wrap | `theme.test.tsx` |
 | Press scale, hover fill, reduced-motion cutoff | `theme.test.tsx` |
@@ -35,17 +35,25 @@ the inline alternative.
 
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
 `--breakpoint-narrow` it flips to a top strip. The sidebar holds, in order: wordmark, new
-conversation, the conversation rail, `Agents`, the top-level sections (`Scheduled`), `Workspace`,
-footer (member email, admin entry). No
+conversation, the conversation rail, `Agents`, the top-level sections (`Scheduled`, `Artifacts`,
+`Sites`), `Workspace`, footer (member email, admin entry). No
 icons. Selection is the 2px left marker (`border-l-ink`) plus `aria-current`.
 
 A destination the sidebar reaches directly is a top-level section: the hash is `#/<section>`, the
 name is one member of `SECTIONS` in `lib/route.ts` and one entry in `SECTION_VIEWS`, and
 `SectionPane` draws it — the `<h1>` off the registry label, then one scrolling body, and no tab
-strip, because the pane is the page. A screen earns the sidebar when its records belong to every
-agent instead of to one: Scheduled lists one kind across the whole audience, which no agent's tab
-can head. The section's own body is a `Section` headed by that same label, as a workspace tab's
-listing is headed by the tab's.
+strip, because the pane is the page. The section's own body is a `Section` headed by that same
+label, as a workspace tab's listing is headed by the tab's. Both shells take their place
+bookkeeping from `usePlaceRecorder` (`kernel/place.ts`) — one owner, so a section's hash carries
+the same place keys a workspace tab's does and a row opened in a section answers Back exactly the
+way a row opened under a tab does.
+
+A screen earns the sidebar when the member comes to it for what the agents produced rather than to
+change how the workspace behaves. Scheduled, Artifacts and Sites are that work, read as often as a
+conversation is, and a record two clicks deep behind a strip of settings tabs is a record the
+member does not know is there; Workspace keeps what governs the workspace — team, sources,
+credentials, memory, usage. Scheduled could not have stayed a tab in any case: it lists one kind
+across the whole audience, which no single agent's tab can head.
 
 A section and an agent tab may hold the same kind, and Scheduled does: the section is every
 agent's, the tab is that agent's own. They carry the same label, because the label names the kind
@@ -69,9 +77,10 @@ requires: one press reaches the strip, then left/right move the selection and ca
 wrapping at each end. The panel carries `role="tabpanel"` and `aria-labelledby`. A view passes its
 tab array, the current tab, a label function, and a pick handler; it never writes the markup.
 
-A new view is one registry entry — label, renderer, and tab together — plus its tab-array member
-in `lib/route.ts`. No second list: a label map or dispatch chain beside a registry is the shape
-to refuse.
+A new view is one registry entry — label, renderer, and tab together — plus its member in the
+`lib/route.ts` array its shell reads (`WORKSPACE_TABS` for a tab, `SECTIONS` for a section). No
+second list: a label map or dispatch chain beside a registry is the shape to refuse, and the
+sidebar draws its section buttons by mapping `SECTIONS` rather than naming them.
 
 ## Settings views
 
@@ -156,9 +165,16 @@ A card's name is text, never a link and never a button. The act is a `Button var
 card's foot saying what it does — `View` where it opens the record. A name that is also the control
 makes the card's one target invisible until hover and reads as a different affordance on every
 screen; a labelled button reads the same everywhere. Where the row carries an act the member came
-for rather than an act on the record — Agents' `New conversation` — that one takes `send` and leads
-the foot, with `View` beside it: a card grid is a launcher as much as a directory, and the filled
-button says which of the two the screen expects.
+for rather than an act on the record — Agents' `New conversation`, Sites' `Open` — that one takes
+`send` and leads the foot, with `View` beside it: a card grid is a launcher as much as a directory,
+and the filled button says which of the two the screen expects.
+
+An act that leaves the portal is an `<a>`, and it is drawn only where the row can answer it. Sites'
+`Open` carries the site's own link and so takes `target="_blank"` and `rel="noopener noreferrer"`,
+while `View` beside it opens the record in the pane — one foot, two destinations, each named by the
+word for where it goes. A site whose row carries no link draws no `Open` at all rather than a dead
+control: the field is absent exactly when the deploy configures no public base URL, and a button
+that cannot do its one thing is worse than its absence.
 
 A card's text is cut to a fixed number of lines — one for the name (`truncate`), two for the
 description (`line-clamp-2`) — and `CardGrid` imposes both, so no row can opt out. A grid reads as a
@@ -471,7 +487,7 @@ Copy a known-good implementation instead of composing from rules:
   bar, tablist, table, and dialog as the declared listings.
 - `views/Artifacts.tsx` — a declared listing whose face is cards led by an image band.
 - `views/Sites.tsx` — a bespoke section over a typed object kind, reading the same `CardGrid` the
-  declared listings do.
+  declared listings do, with a leaving-the-portal anchor beside the row's `View`.
 - `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.

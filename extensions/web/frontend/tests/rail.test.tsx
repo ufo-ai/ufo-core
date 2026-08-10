@@ -11,6 +11,7 @@ import {
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
+  NO_SITES,
   SECOND,
   SECOND_ID,
   TURN_ID,
@@ -422,38 +423,25 @@ test("the sidebar marks the section the member is in and leaves the others off",
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
-  const marked = (name: string) =>
-    screen.getByRole("button", { name }).getAttribute("aria-current");
+  const marked = () =>
+    ["Agents", "Scheduled", "Artifacts", "Sites", "Workspace"].filter(
+      (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
+    );
 
   await userEvent.click(screen.getByRole("button", { name: "Scheduled" }));
-  expect([marked("Scheduled"), marked("Agents"), marked("Workspace")]).toEqual([
-    "true",
-    "false",
-    "false",
-  ]);
+  await waitFor(() => expect(marked()).toEqual(["Scheduled"]));
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
-  expect([marked("Workspace"), marked("Agents"), marked("Scheduled")]).toEqual([
-    "true",
-    "false",
-    "false",
-  ]);
+  expect(marked()).toEqual(["Workspace"]);
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("true");
-  expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("false");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
-  await waitFor(() =>
-    expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("true"),
-  );
-  expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
+  await waitFor(() => expect(marked()).toEqual(["Sites"]));
+  expect(await screen.findByText(NO_SITES)).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  expect([marked("Agents"), marked("Workspace"), marked("Scheduled")]).toEqual([
-    "true",
-    "false",
-    "false",
-  ]);
+  expect(marked()).toEqual(["Agents"]);
   const index = within(await screen.findByRole("main"));
   expect(index.getAllByText("opus").length).toBe(2);
   expect(index.getByText("assistant")).toBeTruthy();

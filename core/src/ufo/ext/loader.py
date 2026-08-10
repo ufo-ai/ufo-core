@@ -402,6 +402,7 @@ def turn_tools(
     embed: EmbedClient | None = None,
     *,
     audience: Audience,
+    public_base_url: str | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — and, per extension tool, the workspace-scoped ExtensionContext its
@@ -440,6 +441,7 @@ def turn_tools(
             ),
             credential_store=credential_store,
             audience=audience,
+            public_base_url=public_base_url,
         )
         for tool in declared_tools:
             tools.append(tool)
@@ -458,6 +460,8 @@ def member_object_registry(
     credential_store: CredentialStore | None = None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    *,
+    public_base_url: str | None = None,
 ) -> dict[str, BoundKind]:
     """The deploy's object kinds bound for member reads outside a turn — the portal's registry.
     The same kinds and the same boot validation as `turn_tools`, but each extension context is
@@ -478,6 +482,7 @@ def member_object_registry(
             index,
             embed,
             surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            public_base_url=public_base_url,
         )
         bound.extend(
             BoundKind(kind=kind, extension=manifest.name, context=context)

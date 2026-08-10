@@ -40,6 +40,7 @@ from ufo_ext_sites.surface import (
     VISIBILITY_BADGES,
     SiteHostingUnconfigured,
     site_token,
+    site_url,
 )
 from ufo_ext_sites.tools import (
     APP_SERVE_PORT,
@@ -194,7 +195,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
             subagents=NO_SUBAGENTS,
-            objects=member_object_registry(manifests),
+            objects=member_object_registry(manifests, public_base_url=PUBLIC_BASE_URL),
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 
@@ -266,9 +267,13 @@ async def _seed_conversation(
     return conversation_id
 
 
-def _tool(name: str, audience: Audience) -> tuple[ToolDef, ToolContext]:
+def _tool(
+    name: str, audience: Audience, public_base_url: str | None = PUBLIC_BASE_URL
+) -> tuple[ToolDef, ToolContext]:
     """One real tool and the context the engine dispatches it with, its extension bound."""
-    tools, ext_by_tool = turn_tools((sites_manifest(),), None, audience=audience)
+    tools, ext_by_tool = turn_tools(
+        (sites_manifest(),), None, audience=audience, public_base_url=public_base_url
+    )
     tool = next(entry for entry in tools if entry.name == name)
     return tool, ToolContext(
         sandbox=FakeSandbox(),
@@ -288,7 +293,7 @@ def _tool(name: str, audience: Audience) -> tuple[ToolDef, ToolContext]:
         speaker_member_id=None,
         audience=audience,
         artifact_token_secret="",
-        public_base_url=PUBLIC_BASE_URL,
+        public_base_url=public_base_url,
         ext=ext_by_tool.get(name),
     )
 
@@ -1093,12 +1098,60 @@ async def test_the_site_kind_filters_and_orders_on_its_declared_fields(db: None)
     first_row = {row["name"]: row for row in listed["objects"]}[first_name]
     assert first_row["conversation"] == str(first_conversation)
     assert first_row["visibility"] == "private"
+    assert first_row["site_url"] == site_url(
+        PUBLIC_BASE_URL, workspace.id, first_conversation, SITE
+    )
     assert datetime.fromisoformat(first_row["created_at"]).replace(tzinfo=UTC) == datetime(
         2026, 7, 3, tzinfo=UTC
     )
     assert [row["name"] for row in by_conversation["objects"]] == [second_name]
     assert [row["name"] for row in by_visibility["objects"]] == [first_name]
     assert [row["name"] for row in newest_first["objects"]] == [second_name, first_name]
+
+
+async def test_a_listing_on_a_deploy_that_hosts_no_link_omits_it_rather_than_failing(
+    db: None,
+) -> None:
+    """A deploy with no public base URL hosts nothing reachable, which is a state the index answers
+    in rather than raising through: the rows arrive without the field, so the screen still lists
+    every site and simply offers no way to open one."""
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    await _deploy(workspace, conversation_id, audience, creator_id)
+
+    with ws(workspace.id):
+        tool, ctx = _tool("object_list", audience, public_base_url=None)
+        listed = await _dispatch(
+            tool,
+            _bind(ctx, workspace, conversation_id, creator_id),
+            kind=SITE_KIND,
+        )
+
+    (row,) = listed["objects"]
+    assert row["name"] == site_object_name(conversation_id, SITE)
+    assert "site_url" not in row
+
+
+async def test_the_portal_index_carries_each_site_s_link(deployment: Deployment) -> None:
+    """The member's index is the one read the sites screen makes, so the link it draws `Open` from
+    rides those rows — the field the agent's `object_get` has always carried, on the listing too."""
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    hosted = await _deploy(workspace, conversation_id, audience, creator_id)
+
+    read = await client.get(
+        f"/surface/web/objects/site?agent={workspace.agent_id}", headers=_cookie(creator_token)
+    )
+
+    assert read.status_code == 200
+    assert "site_url" in read.json()["fields"]
+    (row,) = read.json()["objects"]
+    assert row["name"] == site_object_name(conversation_id, SITE)
+    assert row["site_url"] == hosted["site_url"]
 
 
 async def test_the_site_kind_refuses_create_naming_the_deploy(db: None) -> None:

@@ -258,6 +258,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.index,
             runtime.embed,
             audience=audience,
+            public_base_url=runtime.config.connect.public_base_url,
         )
         hooks = turn_hooks(
             runtime.manifests,

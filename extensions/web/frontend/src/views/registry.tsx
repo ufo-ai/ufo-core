@@ -45,8 +45,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
-  artifacts: declared("Artifacts", ARTIFACTS),
-  sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
   usage: {
     label: "Usage",
     remountOnPlace: false,
@@ -56,4 +54,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
   scheduled: { label: "Scheduled", remountOnPlace: false, render: () => <Scheduled /> },
+  artifacts: declared("Artifacts", ARTIFACTS),
+  sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
 };

@@ -48,12 +48,11 @@ test("the artifact viewer is torn down when the member navigates to another view
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
-  await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
+  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
@@ -64,8 +63,7 @@ test("the artifact viewer is torn down when the member returns to a conversation
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
-  await userEvent.click(await screen.findByRole("tab", { name: "Artifacts" }));
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 

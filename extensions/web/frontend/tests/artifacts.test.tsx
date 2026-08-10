@@ -4,7 +4,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { PlacedWorkspace, AGENT, json, useStreamFake, viewCard } from "./harness";
+import {
+  AGENT,
+  PlacedSection,
+  SITE_KIND,
+  json,
+  objectIndex,
+  useStreamFake,
+  viewCard,
+} from "./harness";
 
 const TEXT_URL = "/dl/notes.txt";
 
@@ -48,7 +56,7 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -71,7 +79,7 @@ test("the listing stays reachable behind an open viewer", async () => {
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -81,19 +89,18 @@ test("the listing stays reachable behind an open viewer", async () => {
   expect(await viewCard("notes.txt")).toBeTruthy();
 });
 
-test("leaving the view takes the viewer with it", async () => {
+test("leaving the section takes the viewer with it", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
-      if (url.includes("/workspace/memory"))
-        return json({ available: true, kinds: [], matches: [], older: null, newer: null });
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       return new Response("hello from the file");
     }),
   );
   const view = render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -102,7 +109,7 @@ test("leaving the view takes the viewer with it", async () => {
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="memory" />
+      <PlacedSection section="sites" />
     </MainAgentProvider>,
   );
 
@@ -124,7 +131,7 @@ test("the viewer bounds a long read by bytes, not characters, and cancels the re
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -149,7 +156,7 @@ test("a body of exactly the bound renders whole and claims nothing about truncat
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -175,7 +182,7 @@ test("a read that fails mid-body states the fault instead of staying on Loading"
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -194,7 +201,7 @@ test("a read whose request never lands states the fault instead of staying on Lo
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -210,7 +217,7 @@ test("an image whose link expired states it rather than showing an empty panel",
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -235,7 +242,7 @@ test("a type with no preview says to download it, and the viewer offers that dow
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -251,7 +258,7 @@ test("an artifact with no link stays plain text and opens nothing", async () => 
   vi.stubGlobal("fetch", vi.fn(async () => json({ artifacts: [artifact({ url: null })] })));
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -269,7 +276,7 @@ test("Escape dismisses the viewer", async () => {
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -300,7 +307,7 @@ test("closing the viewer discards a body still in flight", async () => {
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -325,7 +332,7 @@ test("the artifacts listing renders as cards, each led by its own band", async (
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 
@@ -350,7 +357,7 @@ test("an image artifact fills its band, and a dead link leaves the placeholder",
   );
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="artifacts" />
+      <PlacedSection section="artifacts" />
     </MainAgentProvider>,
   );
 

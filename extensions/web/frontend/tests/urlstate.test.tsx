@@ -8,6 +8,7 @@ import {
   chatHash,
   conversationSlotHash,
   parseHash,
+  sectionHash,
   subagentConversationHash,
   subagentHash,
   workspaceHash,
@@ -88,15 +89,20 @@ function serve() {
   return calls;
 }
 
-test("the workspace hash carries its place and parses back to it", () => {
+test("a workspace tab and a section carry the same place and parse back to it", () => {
   const place = { kind: "fact", after: "c2", q: "roadmap", chip: "Shared", open: OLDER_KEY };
-  const route = parseHash(workspaceHash("memory", place));
-  expect(route).toEqual({ kind: "workspace", view: "memory", place });
-  expect(parseHash(workspaceHash("artifacts"))).toEqual({
+  expect(parseHash(workspaceHash("memory", place))).toEqual({
     kind: "workspace",
-    view: "artifacts",
-    place: {},
+    view: "memory",
+    place,
   });
+  expect(parseHash(sectionHash("artifacts", place))).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place,
+  });
+  expect(parseHash("#/workspace/artifacts")).toEqual({ kind: "home" });
+  expect(parseHash("#/workspace/sites")).toEqual({ kind: "home" });
 });
 
 test("conversation slots parse in chat and standalone URLs", () => {
@@ -170,7 +176,7 @@ test("a wrong-cased permalink reports the bad link instead of opening a new chat
 });
 
 test("a reload lands on the page and the open artifact the hash names", async () => {
-  location.hash = workspaceHash("artifacts", { after: "c-older", open: OLDER_KEY });
+  location.hash = sectionHash("artifacts", { after: "c-older", open: OLDER_KEY });
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -180,7 +186,7 @@ test("a reload lands on the page and the open artifact the hash names", async ()
 });
 
 test("paging writes the cursor to the hash and Back steps to the previous page", async () => {
-  location.hash = workspaceHash("artifacts");
+  location.hash = sectionHash("artifacts");
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -190,12 +196,12 @@ test("paging writes the cursor to the hash and Back steps to the previous page",
   expect(location.hash).toContain("after=c-older");
 
   history.back();
-  await waitFor(() => expect(location.hash).toBe("#/workspace/artifacts"));
+  await waitFor(() => expect(location.hash).toBe("#/artifacts"));
   expect(await viewCard("report.txt")).toBeTruthy();
 });
 
 test("opening an artifact names it in the hash and closing clears it", async () => {
-  location.hash = workspaceHash("artifacts", { after: "c-older" });
+  location.hash = sectionHash("artifacts", { after: "c-older" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -256,7 +262,7 @@ test("a tab click releases the filters, so returning starts unfiltered", async (
 
 test("closing the viewer unwinds the entry opening it pushed", async () => {
   location.hash = "#/agents";
-  location.hash = workspaceHash("artifacts");
+  location.hash = sectionHash("artifacts");
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -264,7 +270,7 @@ test("closing the viewer unwinds the entry opening it pushed", async () => {
   expect(await screen.findByText("file body")).toBeTruthy();
   expect(location.hash).toContain("open=");
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(location.hash).toBe("#/workspace/artifacts"));
+  await waitFor(() => expect(location.hash).toBe("#/artifacts"));
 
   history.back();
   await waitFor(() => expect(location.hash).toBe("#/agents"));
@@ -272,7 +278,7 @@ test("closing the viewer unwinds the entry opening it pushed", async () => {
 });
 
 test("a cursor the surface refuses leaves a way back to the first page", async () => {
-  location.hash = workspaceHash("artifacts", { after: "not-a-cursor" });
+  location.hash = sectionHash("artifacts", { after: "not-a-cursor" });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -287,12 +293,12 @@ test("a cursor the surface refuses leaves a way back to the first page", async (
   await userEvent.click(await screen.findByRole("button", { name: "First page" }));
 
   expect(await viewCard("report.txt")).toBeTruthy();
-  expect(location.hash).toBe("#/workspace/artifacts");
+  expect(location.hash).toBe("#/artifacts");
 });
 
 test("a second row opened behind the sheet still closes to the listing", async () => {
   location.hash = "#/agents";
-  location.hash = workspaceHash("artifacts", { after: "c-older" });
+  location.hash = sectionHash("artifacts", { after: "c-older" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -310,7 +316,7 @@ test("a second row opened behind the sheet still closes to the listing", async (
 });
 
 test("paging away from an open row carries no dead open key", async () => {
-  location.hash = workspaceHash("artifacts");
+  location.hash = sectionHash("artifacts");
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -490,7 +496,7 @@ test("a search cleared from a kind returns to that kind rather than page one", a
 });
 
 test("a deep link naming a row that is not on this page says so", async () => {
-  location.hash = workspaceHash("artifacts", { open: "2020-01-01T00:00:00|gone.txt" });
+  location.hash = sectionHash("artifacts", { open: "2020-01-01T00:00:00|gone.txt" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
@@ -500,7 +506,7 @@ test("a deep link naming a row that is not on this page says so", async () => {
 });
 
 test("opening and closing the viewer issues no second listing read", async () => {
-  location.hash = workspaceHash("artifacts");
+  location.hash = sectionHash("artifacts");
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
