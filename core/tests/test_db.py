@@ -194,7 +194,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0071",
+        "0072",
         "index_default_0002",
         "memory_0012",
         "sample_ext_note_0001",
@@ -241,7 +241,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0071" in revisions
+    assert "0072" in revisions
     assert "knowledge_graph_0001" not in revisions
 
 

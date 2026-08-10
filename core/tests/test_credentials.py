@@ -244,18 +244,18 @@ async def test_credential_requests_open_an_owner_bound_authorization(db: None) -
     workspace_id = await _workspace()
     member_id = uuid4()
     requests = CredentialRequests(
-        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"yc"}), fillable=frozenset({"yc"})
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}), fillable=frozenset({"a"})
     )
     with pytest.raises(ValueError, match="empty"):
-        requests.authorize(workspace_id, member_id, "yc", "")
-    sealed = requests.authorize(workspace_id, member_id, "yc", '{"device":"secret"}')
+        requests.authorize(workspace_id, member_id, "a", "")
+    sealed = requests.authorize(workspace_id, member_id, "a", '{"device":"secret"}')
     assert (
-        requests.open_authorization(sealed, workspace_id, member_id, "yc") == '{"device":"secret"}'
+        requests.open_authorization(sealed, workspace_id, member_id, "a") == '{"device":"secret"}'
     )
     with pytest.raises(CredentialRequestInvalid, match="workspace"):
-        requests.open_authorization(sealed, uuid4(), member_id, "yc")
+        requests.open_authorization(sealed, uuid4(), member_id, "a")
     with pytest.raises(CredentialRequestInvalid, match="member"):
-        requests.open_authorization(sealed, workspace_id, uuid4(), "yc")
+        requests.open_authorization(sealed, workspace_id, uuid4(), "a")
     with pytest.raises(CredentialRequestInvalid, match="slot"):
         requests.open_authorization(sealed, workspace_id, member_id, "other")
 

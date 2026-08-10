@@ -25,8 +25,6 @@ from evals import (
     slack_message_block,
     tool_calling,
     web_research,
-    yc_recall,
-    yc_workflows,
 )
 from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
 from evals.scenario_env import frontier, lookups, multistep, restraint, writes
@@ -95,8 +93,6 @@ TASKS: tuple[EvalTask, ...] = (
         judge_max_tokens=16_000,
         judge_reasoning="high",
     ),
-    capability_task("yc_recall", yc_recall.CASES),
-    capability_task("yc_workflows", yc_workflows.CASES),
     capability_task("cos_workflows", cos_workflows.CASES),
     capability_task(
         "onboarding_help",

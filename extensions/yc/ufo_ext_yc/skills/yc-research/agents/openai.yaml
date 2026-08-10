@@ -1,4 +1,0 @@
-interface:
-  display_name: "YC Research"
-  short_description: "Research YC guidance and Bookface knowledge"
-  default_prompt: "Research this YC question using indexed guidance and live YC sources."

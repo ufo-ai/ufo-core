@@ -193,15 +193,6 @@ OWNER_EMAIL = "owner@evalco.test"
 TURN_EVENT = "memory.pre_response_recall"
 
 
-def test_yc_evals_require_explicit_selection() -> None:
-    assert all(not task.name.startswith("yc_") for task in selected_run_tasks())
-    assert [task.name for task in selected_run_tasks(("yc_recall", "yc_workflows"))] == [
-        "yc_recall",
-        "yc_workflows",
-    ]
-    assert {task.name for task in TASKS} >= {"yc_recall", "yc_workflows"}
-
-
 def test_cos_workflows_is_opt_in_and_grades_memory_routing_under_the_cos_pack() -> None:
     task = next(task for task in TASKS if task.name == "cos_workflows")
 

@@ -337,14 +337,7 @@ unnarrowed set (the lockfile's pins, or every discovered extension in dev). The 
 **assistant** — memory (with its index and embed backends), the browser pack (its BUA engine over
 the default `sandbox_chrome` transport), brokered connectors (Composio's open namespace plus the
 Pipedream allowlist), and web
-research (the research tools over the Exa search backend). **yc** is the founder workspace: the
-authenticated YC CLI, Bookface Knowledge Base and Startup Library sources, memory derivations,
-documents, scheduled tasks, todos, and pack-level founder-operations and diligence skills.
-
-The YC extension's `yc_auth` tool runs that admin-sealed device flow: the member receives the YC
-URL and code in chat, approves in the browser, then the encrypted credential is available to the
-CLI, tools, and sources without entering the transcript. One admin-authorized YC identity serves
-the workspace, and every provider operation exposed by the extension is read-only.
+research (the research tools over the Exa search backend).
 
 ## Third-party extensions
 
@@ -771,7 +764,6 @@ bundle installs OSS, on-prem, or hosted.
 | Redis stream hub | hubs |
 | turbopuffer index | indexes |
 | GitHub / Asana feed-sync sources | sources, credentials, auth_proxies (`direct`) |
-| YC CLI + Bookface guidance | tools, sources, credentials, skills, onboarding |
 | Agent-guided education / onboarding | onboarding, tools |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools, requires (`memory_search`) |
 | GH code review on PR | sources, hooks (page_change), credentials, invoke, subagents, tools |
@@ -786,9 +778,8 @@ Packs (activation bundles, not code — see Packs): **assistant** bundles memory
 (the research tools over the Exa search backend) (the flagship); **chief-of-staff** bundles
 brokered connector grants plus feed sync (Google Meet transcripts and Gemini smart notes, Slack, a
 folder-synced state repo) with memory, the Slack surface, scheduling, todos, workspace
-skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`, setup); **yc**
-bundles authenticated YC research, indexed YC guidance, memory, documents, scheduled tasks, todos,
-and founder workflows. **support bot** bundles knowledge sources, keys onboarding, and websites.
+skills, and self-improvement behind four pack skills (`sync`, `prep`, `triage`, setup).
+**support bot** bundles knowledge sources, keys onboarding, and websites.
 Each activates one coherent config, no code of its own beyond what it references.
 
 ## Non-goals (core, now)
