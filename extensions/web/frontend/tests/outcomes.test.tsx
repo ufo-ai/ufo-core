@@ -40,14 +40,14 @@ beforeEach(() => {
 });
 
 test("a connect intent opens the stream for the turn it reports and shows the consent link", async () => {
-  location.hash = "#/agents/" + AGENT.id + "/connections";
+  location.hash = "#/agents/" + AGENT.id + "/connectors";
   wire({
     "/connections": () => json({ connections: [] }),
     "/intents": () => json({ applied: true, message: "Requested.", turn_id: TURN_ID }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Add connection" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
     "github",
@@ -386,7 +386,7 @@ test("the scheduled, overview, and skills refusals tone their notices", async ()
   await refusedNotice("The workspace refuses it.");
   second.unmount();
 
-  location.hash = "#/agents/" + AGENT.id + "/skills";
+  location.hash = "#/customize/skills";
   wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }), "/intents": refuse });
   const third = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));

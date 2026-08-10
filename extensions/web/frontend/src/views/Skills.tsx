@@ -11,10 +11,13 @@ import {
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td } from "@/components/ui/table";
+import { AgentPicker, chosenAgent } from "@/kernel/agentpick";
+import type { Placement } from "@/kernel/pager";
 import {
   type NoticeState,
   OutcomeNotice,
   Panel,
+  PanelEmpty,
   QUIET,
   Section,
   outcomeNotice,
@@ -22,6 +25,7 @@ import {
 } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
+import { useAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 
 type Skill = { name: string; description: string; origin: string };
@@ -58,7 +62,39 @@ function skillDocument(name: string, description: string, instructions: string):
   ].join("\n");
 }
 
-export function Skills({ agent }: { agent: Agent }) {
+/** A skill belongs to one agent — the read, the empty line, and the lane a save or a delete is
+ *  admitted into all name it — so the tab states which agent it is showing and lets the member say.
+ *  The pick rides the place, so a reload and a link both land on the agent the member was reading.
+ *  Remounting on it is what discards the read left behind. */
+export function Skills({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  const agents = useAgents();
+  const agent = chosenAgent(agents, place);
+  if (!agent) return <PanelEmpty>No such agent.</PanelEmpty>;
+  return (
+    <AgentSkills
+      key={agent.id}
+      agent={agent}
+      agents={agents}
+      onPick={(id) => onPlace({ agent: id })}
+    />
+  );
+}
+
+function AgentSkills({
+  agent,
+  agents,
+  onPick,
+}: {
+  agent: Agent;
+  agents: Agent[];
+  onPick: (agentId: string) => void;
+}) {
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [saveNotice, setSaveNotice] = useState<NoticeState>(QUIET);
@@ -108,30 +144,31 @@ export function Skills({ agent }: { agent: Agent }) {
   }
 
   return (
-    <Panel state={state}>
-      {(payload) => (
-        <>
-          <OutcomeNotice state={notice} />
-          <Section
-            title="Skills"
-            bar={
-              <>
-                <Input
-                  type="search"
-                  aria-label="Search"
-                  placeholder="Search"
-                  className="max-w-control-row"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-                <Filter options={ORIGINS} value={narrowed} onChange={setNarrowed} />
-                <Button variant="send" onClick={() => setWriting(true)}>
-                  New skill
-                </Button>
-                <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-              </>
-            }
-          >
+    <>
+      <OutcomeNotice state={notice} />
+      <Section
+        title="Skills"
+        bar={
+          <>
+            <AgentPicker agent={agent} agents={agents} onPick={onPick} />
+            <Input
+              type="search"
+              aria-label="Search"
+              placeholder="Search"
+              className="max-w-control-row"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <Filter options={ORIGINS} value={narrowed} onChange={setNarrowed} />
+            <Button variant="send" onClick={() => setWriting(true)}>
+              New skill
+            </Button>
+            <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
+          </>
+        }
+      >
+        <Panel state={state}>
+          {(payload) => (
             <DataTable
               columns={["Name", "Description", "Source", ""]}
               rows={payload.skills.filter(
@@ -165,68 +202,68 @@ export function Skills({ agent }: { agent: Agent }) {
                 </>
               )}
             </DataTable>
-          </Section>
+          )}
+        </Panel>
+      </Section>
 
-          {writing ? (
-            <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>New skill</DialogTitle>
-                </DialogHeader>
-                <OutcomeNotice state={saveNotice} />
-                <form id="save-skill" onSubmit={save} className="flex flex-col gap-xl">
-                  <Field
-                    label="Name"
-                    htmlFor="skill-name"
-                    description="Lowercase letters, digits, and hyphens."
-                  >
-                    <Input
-                      id="skill-name"
-                      required
-                      pattern={NAME_PATTERN}
-                      maxLength={NAME_MAX}
-                      aria-describedby="skill-name-description"
-                      placeholder="release-notes"
-                      value={name}
-                      onChange={(event) => setName(event.target.value)}
-                    />
-                  </Field>
-                  <Field
-                    label="Description"
-                    htmlFor="skill-description"
-                    description="The agent reads this to decide when to load the skill."
-                  >
-                    <Input
-                      id="skill-description"
-                      required
-                      aria-describedby="skill-description-description"
-                      placeholder="Load when a member asks to draft release notes."
-                      value={description}
-                      onChange={(event) => setDescription(event.target.value)}
-                    />
-                  </Field>
-                  <Field label="Instructions" htmlFor="skill-instructions">
-                    <Textarea
-                      id="skill-instructions"
-                      required
-                      placeholder={
-                        "Read the merged pull requests since the last tag.\nGroup them by area, and lead each line with the verb."
-                      }
-                      value={instructions}
-                      onChange={(event) => setInstructions(event.target.value)}
-                    />
-                  </Field>
-                </form>
-                <DialogFooter>
-                  <Button type="submit" form="save-skill" variant="send" busy={busy}>
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          ) : null}
-        </>
-      )}
-    </Panel>
+      {writing ? (
+        <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>New skill</DialogTitle>
+            </DialogHeader>
+            <OutcomeNotice state={saveNotice} />
+            <form id="save-skill" onSubmit={save} className="flex flex-col gap-xl">
+              <Field
+                label="Name"
+                htmlFor="skill-name"
+                description="Lowercase letters, digits, and hyphens."
+              >
+                <Input
+                  id="skill-name"
+                  required
+                  pattern={NAME_PATTERN}
+                  maxLength={NAME_MAX}
+                  aria-describedby="skill-name-description"
+                  placeholder="release-notes"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </Field>
+              <Field
+                label="Description"
+                htmlFor="skill-description"
+                description="The agent reads this to decide when to load the skill."
+              >
+                <Input
+                  id="skill-description"
+                  required
+                  aria-describedby="skill-description-description"
+                  placeholder="Load when a member asks to draft release notes."
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                />
+              </Field>
+              <Field label="Instructions" htmlFor="skill-instructions">
+                <Textarea
+                  id="skill-instructions"
+                  required
+                  placeholder={
+                    "Read the merged pull requests since the last tag.\nGroup them by area, and lead each line with the verb."
+                  }
+                  value={instructions}
+                  onChange={(event) => setInstructions(event.target.value)}
+                />
+              </Field>
+            </form>
+            <DialogFooter>
+              <Button type="submit" form="save-skill" variant="send" busy={busy}>
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+    </>
   );
 }

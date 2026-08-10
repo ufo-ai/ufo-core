@@ -35,18 +35,18 @@ the inline alternative.
 
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
 `--breakpoint-narrow` it flips to a top strip. The sidebar holds, in order: wordmark, new
-conversation, the conversation rail, `Agents`, the top-level sections (`Scheduled`, `Artifacts`,
-`Sites`), `Workspace`, footer (member email, admin entry). No
-icons. Selection is the 2px left marker (`border-l-ink`) plus `aria-current`.
+conversation, the conversation rail, section buttons — Agents, Scheduled, Artifacts, Sites,
+Customize, Workspace — footer (member email, admin entry). No icons. Selection is the 2px left
+marker (`border-l-ink`) plus `aria-current`.
 
 A destination the sidebar reaches directly is a top-level section: the hash is `#/<section>`, the
-name is one member of `SECTIONS` in `lib/route.ts` and one entry in `SECTION_VIEWS`, and
-`SectionPane` draws it — the `<h1>` off the registry label, then one scrolling body, and no tab
-strip, because the pane is the page. The section's own body is a `Section` headed by that same
-label, as a workspace tab's listing is headed by the tab's. Both shells take their place
-bookkeeping from `usePlaceRecorder` (`kernel/place.ts`) — one owner, so a section's hash carries
-the same place keys a workspace tab's does and a row opened in a section answers Back exactly the
-way a row opened under a tab does.
+name is one member of `SECTIONS` in `lib/route.ts` and one entry in `SECTION_VIEWS`, and it holds
+one view, so the shell draws no tab strip — the pane is the page, and a strip of one names what the
+`<h1>` above it already said. The section's own body is a `Section` headed by that same label, as a
+workspace tab's listing is headed by the tab's. Section and tab alike take their place bookkeeping
+from `usePlaceRecorder` (`kernel/place.ts`) — one owner, so a section's hash carries the same place
+keys a workspace tab's does and a row opened in a section answers Back exactly the way a row opened
+under a tab does.
 
 A screen earns the sidebar when the member comes to it for what the agents produced rather than to
 change how the workspace behaves. Scheduled, Artifacts and Sites are that work, read as often as a
@@ -81,6 +81,15 @@ A new view is one registry entry — label, renderer, and tab together — plus 
 `lib/route.ts` array its shell reads (`WORKSPACE_TABS` for a tab, `SECTIONS` for a section). No
 second list: a label map or dispatch chain beside a registry is the shape to refuse, and the
 sidebar draws its section buttons by mapping `SECTIONS` rather than naming them.
+
+A destination the sidebar reaches is `TabbedPane`: a title, a tab array, and one registry. Workspace,
+Customize and each section differ in nothing else, so they are one shell and one place recorder
+(`kernel/place.ts`) — a second copy would be a second answer to what opening a row does to history,
+and a strip is drawn only where the array holds more than one view. Each destination keeps its own
+route kind, its own tab type, and its own hash builder, so a tab without a view stays a compile
+error rather than a string the router fails to match. Workspace holds what the workspace *is* — its
+people, its inputs, its output, its spend. Customize holds what the member shapes the agents *with*:
+connectors, skills, memory.
 
 ## Settings views
 
@@ -279,6 +288,32 @@ bar does not wrap — a control that drops to a second line reads as an orphan o
 it, and the search is the item that has to give, since a name is short and the table beneath it
 carries the whole record anyway. `Section` draws the row `items-stretch`, so every control in it
 resolves to the height of the tallest and no button floats short beside the search.
+
+A Customize screen whose records belong to one agent leads that bar with the agent, as the shared
+`AgentPicker` (`kernel/agentpick.tsx`) — one `Select` at `max-w-control-row` carrying its own
+`aria-label`, never a second spelling per tab. It sits ahead of the search because it chooses the
+set and the search narrows within it; a picker after the act would read as an act. It is drawn only
+where there is more than one agent to pick, the way the sidebar's new-conversation control is — a
+picker of one is chrome. The pick rides the place (`#/customize/skills?agent=<id>`), so a reload
+lands on the agent the member was reading and a link opens the screen they were looking at; it is
+the one place the agent is named, and a link is the only way to reach one that is not the default.
+Picking remounts the screen on the agent, which discards the read left behind and clears the search
+and the filter that narrowed the one before it. Every fact naming the agent follows the pick: the
+read, the empty line, and the lane a mutation is admitted into. An agent the place names and this
+member cannot reach reports `No such agent.` rather than falling back to a different agent's
+records.
+
+A bar that outlives its records is drawn outside `Panel`, never inside it. A first read replaces
+what `Panel` holds with the skeleton, so a bar drawn within it takes the picker out from under the
+member the moment they use it — the read the pick starts is exactly the read that erases the
+control that started it.
+
+One record set can be stated twice, to two audiences, from one read. Customize's Connectors states
+every grant the member holds on the agent they picked; the agent's own Connectors tab states the
+subset that agent can actually reach, since a grant kept private is the member's and not the
+agent's. The two differ in their rows, their picker, and the line they show when empty — never in
+their table, their acts, or the endpoint behind them, and a second read for the narrower audience
+would be a second answer to the same question.
 
 The order sits on the head of the column it orders, never in a picker beside the search. A picker
 states the field names a second time, in a control wide enough to push the act off the bar, and it
@@ -492,6 +527,10 @@ Copy a known-good implementation instead of composing from rules:
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.
 - `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card.
+- `views/Skills.tsx` — a Customize tab whose records belong to an agent the member picks from
+  the bar, the pick riding the place.
+- `views/Connectors.tsx` — one read stated twice: the member's grants under Customize, and what
+  the agent can reach on its own tab.
 - `kernel/listing.tsx` — the listing renderer the declarations feed.
 - `views/Usage.tsx` — figures over headed breakdown tables, every wire value labelled.
 - `kernel/cards.tsx` — the card grid both the declared and the bespoke card sections draw.

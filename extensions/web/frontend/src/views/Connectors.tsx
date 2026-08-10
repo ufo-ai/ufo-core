@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import {
@@ -10,11 +10,14 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label } from "@/components/ui/field";
 import { Td } from "@/components/ui/table";
+import { AgentPicker, chosenAgent } from "@/kernel/agentpick";
+import type { Placement } from "@/kernel/pager";
 import {
   Notice,
   type NoticeState,
   OutcomeNotice,
   Panel,
+  PanelEmpty,
   QUIET,
   Section,
   outcomeNotice,
@@ -23,6 +26,7 @@ import {
 import { DataTable } from "@/kernel/table";
 import { day } from "@/lib/moments";
 import { BASE, postIntent } from "@/lib/api";
+import { useAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 
 type Connection = {
@@ -41,7 +45,46 @@ function matches(entry: Connection, query: string): boolean {
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
-export function Connections({ agent }: { agent: Agent }) {
+/** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own tab
+ *  states the same records narrowed to what that agent can actually reach; both read the one
+ *  grant list, so nothing here needs a second endpoint. */
+export function Connectors({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  const agents = useAgents();
+  const agent = chosenAgent(agents, place);
+  if (!agent) return <PanelEmpty>No such agent.</PanelEmpty>;
+  return (
+    <ConnectorList
+      key={agent.id}
+      agent={agent}
+      picker={
+        <AgentPicker agent={agent} agents={agents} onPick={(id) => onPlace({ agent: id })} />
+      }
+      sharedOnly={false}
+    />
+  );
+}
+
+/** What this agent can reach: a grant the member kept private is theirs, not the agent's, so the
+ *  agent's own tab does not list it. */
+export function AgentConnectors({ agent }: { agent: Agent }) {
+  return <ConnectorList agent={agent} picker={null} sharedOnly />;
+}
+
+function ConnectorList({
+  agent,
+  picker,
+  sharedOnly,
+}: {
+  agent: Agent;
+  picker: ReactNode;
+  sharedOnly: boolean;
+}) {
   const [reloads, setReloads] = useState(0);
   const [handoff, setHandoff] = useState<NoticeState>(QUIET);
   const [consentUrl, setConsentUrl] = useState<string | null>(null);
@@ -120,44 +163,51 @@ export function Connections({ agent }: { agent: Agent }) {
   }
 
   return (
-    <Panel state={state}>
-      {(payload) => (
-        <>
-          {consentUrl || handoff.text ? (
-            <Notice tone={handoff.refused ? "attention" : "quiet"}>
-              {consentUrl ? (
-                <a href={consentUrl} target="_blank" rel="noopener">
-                  Open the provider consent page
-                </a>
-              ) : (
-                handoff.text
-              )}
-            </Notice>
-          ) : null}
-          <Section
-            title="Connections"
-            bar={
-              <>
-                <Input
-                  type="search"
-                  aria-label="Search"
-                  placeholder="Search"
-                  className="max-w-control-row"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-                <Button variant="send" onClick={() => setAdding(true)}>
-                  Add connection
-                </Button>
-                <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-              </>
-            }
-          >
+    <>
+      {consentUrl || handoff.text ? (
+        <Notice tone={handoff.refused ? "attention" : "quiet"}>
+          {consentUrl ? (
+            <a href={consentUrl} target="_blank" rel="noopener">
+              Open the provider consent page
+            </a>
+          ) : (
+            handoff.text
+          )}
+        </Notice>
+      ) : null}
+      <Section
+        title="Connectors"
+        bar={
+          <>
+            {picker}
+            <Input
+              type="search"
+              aria-label="Search"
+              placeholder="Search"
+              className="max-w-control-row"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <Button variant="send" onClick={() => setAdding(true)}>
+              Add connector
+            </Button>
+            <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
+          </>
+        }
+      >
+        <Panel state={state}>
+          {(payload) => (
             <DataTable
               columns={["Provider", "Account", "Owner", "Access", "Connected", ""]}
-              rows={payload.connections.filter((entry) => matches(entry, query))}
+              rows={payload.connections.filter(
+                (entry) => (!sharedOnly || entry.shared) && matches(entry, query),
+              )}
               rowKey={(entry) => entry.grant}
-              empty="No accounts are connected to this agent."
+              empty={
+                sharedOnly
+                  ? "No connector is shared with " + agent.name + " yet."
+                  : "No account is connected to " + agent.name + " yet."
+              }
               note={query ? "No connected account matches this search." : undefined}
             >
               {(entry) => (
@@ -204,48 +254,48 @@ export function Connections({ agent }: { agent: Agent }) {
                 </>
               )}
             </DataTable>
-          </Section>
-          {adding ? (
-            <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Add connection</DialogTitle>
-                </DialogHeader>
-                <OutcomeNotice state={refusal} />
-                <form id="add-connection" onSubmit={connect} className="flex flex-col gap-xl">
-                  <Field
-                    label="Provider"
-                    htmlFor="connect-provider"
-                    description="Consent opens privately for you once the provider is named."
-                  >
-                    <Input
-                      id="connect-provider"
-                      required
-                      aria-describedby="connect-provider-description"
-                      placeholder="github"
-                      value={provider}
-                      onChange={(event) => setProvider(event.target.value)}
-                    />
-                  </Field>
-                  <div className="flex items-center gap-sm">
-                    <Checkbox
-                      id="connect-shared"
-                      checked={shared}
-                      onChange={(event) => setShared(event.target.checked)}
-                    />
-                    <Label htmlFor="connect-shared">Share with agent</Label>
-                  </div>
-                </form>
-                <DialogFooter>
-                  <Button type="submit" form="add-connection" variant="send" busy={busy}>
-                    Connect
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          ) : null}
-        </>
-      )}
-    </Panel>
+          )}
+        </Panel>
+      </Section>
+      {adding ? (
+        <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add connector</DialogTitle>
+            </DialogHeader>
+            <OutcomeNotice state={refusal} />
+            <form id="add-connector" onSubmit={connect} className="flex flex-col gap-xl">
+              <Field
+                label="Provider"
+                htmlFor="connect-provider"
+                description="Consent opens privately for you once the provider is named."
+              >
+                <Input
+                  id="connect-provider"
+                  required
+                  aria-describedby="connect-provider-description"
+                  placeholder="github"
+                  value={provider}
+                  onChange={(event) => setProvider(event.target.value)}
+                />
+              </Field>
+              <div className="flex items-center gap-sm">
+                <Checkbox
+                  id="connect-shared"
+                  checked={shared}
+                  onChange={(event) => setShared(event.target.checked)}
+                />
+                <Label htmlFor="connect-shared">Share with agent</Label>
+              </div>
+            </form>
+            <DialogFooter>
+              <Button type="submit" form="add-connector" variant="send" busy={busy}>
+                Connect
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+    </>
   );
 }

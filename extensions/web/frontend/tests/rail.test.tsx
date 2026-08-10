@@ -324,8 +324,8 @@ test("the new-conversation control targets the main agent, or picks among severa
 });
 
 test("the agents index opens a conversation; the agent's own page states settings only", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
-  wire({ "/skills": () => json({ skills: [] }) });
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  wire({ "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   await screen.findByRole("main");
   expect(
@@ -406,25 +406,27 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
 });
 
 test("a hash naming an agent this member cannot reach reports it", async () => {
-  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/skills";
+  location.hash = "#/agents/99999999-9999-4999-8999-999999999999/connectors";
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Skills" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
 });
 
 test("the sidebar marks the section the member is in and leaves the others off", async () => {
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
+    "/skills": () => json({ skills: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/overview": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   const marked = () =>
-    ["Agents", "Scheduled", "Artifacts", "Sites", "Workspace"].filter(
+    ["Agents", "Scheduled", "Artifacts", "Sites", "Customize", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 

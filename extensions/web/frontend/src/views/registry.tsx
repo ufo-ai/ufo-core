@@ -2,11 +2,13 @@ import type { ReactNode } from "react";
 
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
-import type { Section, WorkspaceTab } from "@/lib/route";
+import type { CustomizeTab, Section, WorkspaceTab } from "@/lib/route";
 import { ARTIFACTS } from "@/views/Artifacts";
+import { Connectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { Scheduled } from "@/views/Scheduled";
 import { Sites } from "@/views/Sites";
+import { Skills } from "@/views/Skills";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
@@ -40,11 +42,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   },
   sources: declared("Sources", SOURCES),
   credentials: declared("Credentials", CREDENTIALS),
-  memory: {
-    label: "Memory",
-    remountOnPlace: false,
-    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
-  },
   usage: {
     label: "Usage",
     remountOnPlace: false,
@@ -56,4 +53,22 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
   scheduled: { label: "Scheduled", remountOnPlace: false, render: () => <Scheduled /> },
   artifacts: declared("Artifacts", ARTIFACTS),
   sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
+};
+
+export const CUSTOMIZE_VIEWS: Record<CustomizeTab, PaneView> = {
+  connectors: {
+    label: "Connectors",
+    remountOnPlace: false,
+    render: (place, onPlace) => <Connectors place={place} onPlace={onPlace} />,
+  },
+  skills: {
+    label: "Skills",
+    remountOnPlace: false,
+    render: (place, onPlace) => <Skills place={place} onPlace={onPlace} />,
+  },
+  memory: {
+    label: "Memory",
+    remountOnPlace: false,
+    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
+  },
 };

@@ -203,7 +203,7 @@ test("skills name where each came from, and save posts one skill file", async ()
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
+  location.hash = "#/customize/skills";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByText("deploy skill")).toBeTruthy();
@@ -244,7 +244,7 @@ test("skills name where each came from, and save posts one skill file", async ()
   });
 });
 
-test("connections flip and revoke a grant, and a 404 usage read says it is not shared", async () => {
+test("a private grant is shared with the agent from the connectors tab", async () => {
   const posted: unknown[] = [];
   wire({
     "/connections": () =>
@@ -267,14 +267,54 @@ test("connections flip and revoke a grant, and a 404 usage read says it is not s
     "/usage": () => new Response("no", { status: 404 }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connections";
+  location.hash = "#/customize/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
   expect(await screen.findByText("Private")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
+});
 
-  await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+test("the agent's own tab lists what is shared with it and not what is held privately", async () => {
+  wire({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            provider: "github",
+            account_id: "acct",
+            owner_email: "member@example.com",
+            shared: true,
+            connected_at: "2026-07-01T00:00:00",
+            grant: "g1",
+          },
+          {
+            provider: "notion",
+            account_id: "acct2",
+            owner_email: "member@example.com",
+            shared: false,
+            connected_at: "2026-07-01T00:00:00",
+            grant: "g2",
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(screen.queryByText("notion")).toBeNull();
+});
+
+test("a 404 usage read says it is not shared", async () => {
+  wire({
+    "/usage": () => new Response("no", { status: 404 }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/usage";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+
   expect(await screen.findByText("Usage for this agent is not shared with you.")).toBeTruthy();
 });
 
@@ -620,6 +660,9 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
     "/overview": () => json(OVERVIEW),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
+    "/skills": () => json({ skills: [] }),
+    "/connections": () => json({ connections: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [] }),
   });
@@ -640,6 +683,13 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   expect(location.hash).toBe("#/artifacts");
+
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  expect(location.hash).toBe("#/customize/connectors");
+  expect(screen.getByRole("button", { name: "Customize" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+  expect(await screen.findByRole("heading", { level: 1, name: "Customize" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");
@@ -693,12 +743,17 @@ test("a member who is not an admin is offered no administration control", () => 
 });
 
 test("the agent tab strip opens the tab named in the hash", async () => {
-  location.hash = "#/agents/" + AGENT_ID + "/skills";
-  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  wire({
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  expect(await screen.findByText("No skill has been saved onto assistant yet.")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
+  expect(await screen.findByText("No connector is shared with assistant yet.")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
 });
 
 test("the model field offers the deploy's models, which its schema alone cannot supply", async () => {
@@ -767,9 +822,9 @@ test("a refusal after a consent link supersedes the link with the toned message"
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connections";
+  location.hash = "#/customize/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Add connection" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
     "github",
@@ -844,9 +899,9 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/connections";
+  location.hash = "#/customize/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Add connection" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
     "github",

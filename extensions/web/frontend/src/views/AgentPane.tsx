@@ -1,9 +1,8 @@
 import { ObjectPane } from "@/kernel/objects";
 import { TabPanel, TabStrip } from "@/kernel/tabs";
-import { Connections } from "@/views/Connections";
+import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { Overview } from "@/views/Overview";
-import { Skills } from "@/views/Skills";
 import { AgentUsage } from "@/views/Usage";
 import type { AgentTab } from "@/lib/route";
 import type { Agent } from "@/lib/types";
@@ -14,8 +13,7 @@ const TAB_LABELS: Record<AgentTab, string> = {
   overview: "Overview",
   conversations: "Conversations",
   scheduled: "Scheduled",
-  connections: "Connections",
-  skills: "Skills",
+  connectors: "Connectors",
   usage: "Usage",
 };
 
@@ -56,8 +54,7 @@ export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
           />
         ) : null}
         {tab === "conversations" ? <Conversations agent={agent} /> : null}
-        {tab === "connections" ? <Connections agent={agent} /> : null}
-        {tab === "skills" ? <Skills agent={agent} /> : null}
+        {tab === "connectors" ? <AgentConnectors agent={agent} /> : null}
         {tab === "usage" ? <AgentUsage agent={agent} /> : null}
       </TabPanel>
     </main>

@@ -134,8 +134,8 @@ function SubagentSkills({ base }: { base: string }) {
         <Section title="Deploy skills">
           {payload.loads_skills ? (
             <Hint className="m-0">
-              A child also loads the member-authored skills of the agent that spawned it, listed on
-              that agent's own skills panel.
+              A child also loads the member-authored skills of the agent that spawned it, listed
+              under Customize for that agent.
             </Hint>
           ) : null}
           {payload.loads_skills && payload.skills.length ? (

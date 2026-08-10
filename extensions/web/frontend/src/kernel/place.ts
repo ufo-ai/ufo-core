@@ -61,10 +61,12 @@ export function usePlaceRecorder({
       q: "q" in patch ? patch.q : held.q,
       chip: "chip" in patch ? patch.chip : held.chip,
       open: "open" in patch ? patch.open : held.open,
+      agent: "agent" in patch ? patch.agent : held.agent,
     };
     const moved =
       (next.after !== undefined && next.after !== held.after) ||
-      (next.kind !== undefined && next.kind !== held.kind);
+      (next.kind !== undefined && next.kind !== held.kind) ||
+      (next.agent !== undefined && next.agent !== held.agent);
     const opened = next.open !== undefined && held.open === undefined;
     const closed = !moved && next.open === undefined && held.open !== undefined;
     const step: PlaceStep =

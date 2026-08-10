@@ -6,7 +6,7 @@ import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
-  PlacedWorkspace,
+  PlacedCustomize,
   AGENT,
   MEMBER,
   NO_TASKS,
@@ -14,21 +14,31 @@ import {
   TASK_KIND,
   json,
   objectIndex,
+  pick,
   useStreamFake,
 } from "./harness";
+
+const STALE_CONNECTION = {
+  provider: "stale-provider",
+  account_id: null,
+  owner_email: null,
+  shared: true,
+  connected_at: "2026-07-30T12:00:00",
+  grant: "g1",
+};
 
 beforeEach(() => {
   useStreamFake();
 });
 
 test("switching tabs discards the read left behind rather than painting it", async () => {
-  let releaseSkills: ((value: Response) => void) | null = null;
+  let releaseConnectors: ((value: Response) => void) | null = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
-      if (url.includes("/skills")) {
+      if (url.includes("/connections")) {
         return new Promise<Response>((resolve) => {
-          releaseSkills = resolve;
+          releaseConnectors = resolve;
         });
       }
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
@@ -37,22 +47,22 @@ test("switching tabs discards the read left behind rather than painting it", asy
     }),
   );
 
-  location.hash = "#/agents/" + AGENT.id + "/skills";
+  location.hash = "#/agents/" + AGENT.id + "/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await waitFor(() => expect(releaseSkills).not.toBeNull());
+  await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
 
-  releaseSkills!(json({ skills: [{ name: "stale", description: "stale skill", origin: "member" }] }));
+  releaseConnectors!(json({ connections: [STALE_CONNECTION] }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  expect(screen.queryByText("stale skill")).toBeNull();
+  expect(screen.queryByText("stale-provider")).toBeNull();
   expect(screen.getByText(NO_TASKS)).toBeTruthy();
 });
 
-test("switching agents discards the read left behind rather than painting it", async () => {
+test("picking another agent discards the read left behind rather than painting it", async () => {
   const pending = new Map<string, (value: Response) => void>();
   vi.stubGlobal(
     "fetch",
@@ -67,13 +77,13 @@ test("switching agents discards the read left behind rather than painting it", a
     }),
   );
 
-  location.hash = "#/agents/" + AGENT.id + "/skills";
+  location.hash = "#/customize/skills";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   await waitFor(() => expect(pending.size).toBe(1));
   const [firstUrl] = [...pending.keys()];
 
-  location.hash = "#/agents/" + SECOND.id + "/skills";
+  await pick("Agent", "second");
   await waitFor(() => expect(pending.size).toBe(2));
   const secondUrl = [...pending.keys()].find((url) => url !== firstUrl)!;
 
@@ -105,7 +115,7 @@ test("a slow read for a filter the member left never paints over the filter they
 
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="memory" />
+      <PlacedCustomize view="memory" />
     </MainAgentProvider>,
   );
 

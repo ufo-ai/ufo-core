@@ -3,9 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, vi } from "vitest";
 
-import { SectionPane } from "@/views/SectionPane";
-import { Workspace } from "@/views/Workspace";
-import type { Section, WorkspacePlace, WorkspaceTab } from "@/lib/route";
+import { TabbedPane } from "@/views/TabbedPane";
+import { CUSTOMIZE_VIEWS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import {
+  CUSTOMIZE_TABS,
+  WORKSPACE_TABS,
+  type CustomizeTab,
+  type Section,
+  type WorkspacePlace,
+  type WorkspaceTab,
+} from "@/lib/route";
 
 export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   const [placed, setPlaced] = useState<{ view: WorkspaceTab; place: WorkspacePlace }>({
@@ -14,7 +21,30 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   });
   if (placed.view !== view) setPlaced({ view, place: {} });
   return (
-    <Workspace
+    <TabbedPane
+      title="Workspace"
+      group="workspace"
+      tabs={WORKSPACE_TABS}
+      views={WORKSPACE_VIEWS}
+      view={view}
+      place={placed.place}
+      onPlace={(next, place) => setPlaced({ view: next, place })}
+    />
+  );
+}
+
+export function PlacedCustomize({ view }: { view: CustomizeTab }) {
+  const [placed, setPlaced] = useState<{ view: CustomizeTab; place: WorkspacePlace }>({
+    view,
+    place: {},
+  });
+  if (placed.view !== view) setPlaced({ view, place: {} });
+  return (
+    <TabbedPane
+      title="Customize"
+      group="customize"
+      tabs={CUSTOMIZE_TABS}
+      views={CUSTOMIZE_VIEWS}
       view={view}
       place={placed.place}
       onPlace={(next, place) => setPlaced({ view: next, place })}
@@ -29,8 +59,12 @@ export function PlacedSection({ section }: { section: Section }) {
   });
   if (placed.section !== section) setPlaced({ section, place: {} });
   return (
-    <SectionPane
-      section={section}
+    <TabbedPane
+      title={SECTION_VIEWS[section].label}
+      group="section"
+      tabs={[section]}
+      views={SECTION_VIEWS}
+      view={section}
       place={placed.place}
       onPlace={(next, place) => setPlaced({ section: next, place })}
     />

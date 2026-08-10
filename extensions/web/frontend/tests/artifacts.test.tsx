@@ -95,6 +95,8 @@ test("leaving the section takes the viewer with it", async () => {
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/team"))
+        return json({ members: [], can_add: false, domain: null });
       return new Response("hello from the file");
     }),
   );

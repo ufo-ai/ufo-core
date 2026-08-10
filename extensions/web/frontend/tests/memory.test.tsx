@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, PlacedWorkspace, json, refusedNotice, useStreamFake, wire } from "./harness";
+import { AGENT, PlacedCustomize, json, refusedNotice, useStreamFake, wire } from "./harness";
 const MATCH = {
   text: "the deploy runs on EKS",
   kind: "fact",
@@ -15,7 +15,7 @@ const MATCH = {
 function open(view: "memory" = "memory") {
   return render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view={view} />
+      <PlacedCustomize view={view} />
     </MainAgentProvider>,
   );
 }

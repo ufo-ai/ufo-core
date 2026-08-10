@@ -16,9 +16,7 @@ export function MainAgentProvider({ agents, children }: { agents: Agent[]; child
 }
 
 export function useMainAgent(): Agent | null {
-  const agent = useContext(MainAgent);
-  if (agent === undefined) throw new Error("a view read the main agent outside the provider");
-  return agent;
+  return useAgents().find((agent) => agent.main) ?? null;
 }
 
 /** Every agent the viewer's web audience holds. A view listing one kind across the workspace names

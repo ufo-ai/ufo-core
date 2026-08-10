@@ -9,9 +9,8 @@ import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
-import { SectionPane } from "@/views/SectionPane";
-import { SECTION_VIEWS } from "@/views/registry";
-import { Workspace } from "@/views/Workspace";
+import { TabbedPane } from "@/views/TabbedPane";
+import { CUSTOMIZE_VIEWS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -26,17 +25,21 @@ import {
 } from "@/lib/rail";
 import {
   AGENT_TABS,
+  CUSTOMIZE_TABS,
   SECTIONS,
   SUBAGENT_TABS,
+  WORKSPACE_TABS,
   agentHash,
   bootRoute,
   chatHash,
+  customizeHash,
   newChatHash,
   parseHash,
   sectionHash,
   subagentHash,
   workspaceHash,
   type AgentTab,
+  type CustomizeTab,
   type PlaceStep,
   type Route,
   type Section,
@@ -170,6 +173,25 @@ export function App({ agents, subagents, member }: AppProps) {
     [go],
   );
 
+  const placeCustomize = useCallback(
+    (view: CustomizeTab, place: WorkspacePlace, step: PlaceStep) => {
+      const seen = routeRef.current;
+      if (step !== "push" && (seen.kind !== "customize" || seen.view !== view)) return;
+      if (step === "back") {
+        history.back();
+        return;
+      }
+      const next: Route = { kind: "customize", view, place };
+      if (step === "replace") {
+        history.replaceState(null, "", customizeHash(view, place));
+        setRoute(next);
+        return;
+      }
+      go(customizeHash(view, place), next);
+    },
+    [go],
+  );
+
   const openAdmin = useCallback(() => go("#/admin", { kind: "admin" }), [go]);
 
   const created = useCallback(
@@ -266,6 +288,14 @@ export function App({ agents, subagents, member }: AppProps) {
             ))}
             <li>
               <SidebarButton
+                current={route.kind === "customize"}
+                onClick={() => placeCustomize(CUSTOMIZE_TABS[0], {}, "push")}
+              >
+                Customize
+              </SidebarButton>
+            </li>
+            <li>
+              <SidebarButton
                 current={route.kind === "workspace"}
                 onClick={() => placeWorkspace("team", {}, "push")}
               >
@@ -304,6 +334,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
           onPlaceSection={placeSection}
+          onPlaceCustomize={placeCustomize}
           sought={sought}
           linked={linked}
         />
@@ -327,6 +358,7 @@ function Pane({
   onNewChat,
   onPlaceWorkspace,
   onPlaceSection,
+  onPlaceCustomize,
   sought,
   linked,
 }: {
@@ -344,17 +376,49 @@ function Pane({
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
+  onPlaceCustomize: (view: CustomizeTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, LinkedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
-    return <Workspace view={route.view} place={route.place} onPlace={onPlaceWorkspace} />;
+    return (
+      <TabbedPane
+        title="Workspace"
+        group="workspace"
+        tabs={WORKSPACE_TABS}
+        views={WORKSPACE_VIEWS}
+        view={route.view}
+        place={route.place}
+        onPlace={onPlaceWorkspace}
+      />
+    );
+  }
+  if (route.kind === "customize") {
+    return (
+      <TabbedPane
+        title="Customize"
+        group="customize"
+        tabs={CUSTOMIZE_TABS}
+        views={CUSTOMIZE_VIEWS}
+        view={route.view}
+        place={route.place}
+        onPlace={onPlaceCustomize}
+      />
+    );
   }
   if (route.kind === "section") {
     return (
-      <SectionPane section={route.section} place={route.place} onPlace={onPlaceSection} />
+      <TabbedPane
+        title={SECTION_VIEWS[route.section].label}
+        group="section"
+        tabs={[route.section]}
+        views={SECTION_VIEWS}
+        view={route.section}
+        place={route.place}
+        onPlace={onPlaceSection}
+      />
     );
   }
   if (route.kind === "agents") {
