@@ -3,8 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, vi } from "vitest";
 
+import { SectionPane } from "@/views/SectionPane";
 import { Workspace } from "@/views/Workspace";
-import type { WorkspacePlace, WorkspaceTab } from "@/lib/route";
+import type { Section, WorkspacePlace, WorkspaceTab } from "@/lib/route";
 
 export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
   const [placed, setPlaced] = useState<{ view: WorkspaceTab; place: WorkspacePlace }>({
@@ -17,6 +18,21 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
       view={view}
       place={placed.place}
       onPlace={(next, place) => setPlaced({ view: next, place })}
+    />
+  );
+}
+
+export function PlacedSection({ section }: { section: Section }) {
+  const [placed, setPlaced] = useState<{ section: Section; place: WorkspacePlace }>({
+    section,
+    place: {},
+  });
+  if (placed.section !== section) setPlaced({ section, place: {} });
+  return (
+    <SectionPane
+      section={section}
+      place={placed.place}
+      onPlace={(next, place) => setPlaced({ section: next, place })}
     />
   );
 }
@@ -133,7 +149,6 @@ export const CHAT_ROW = {
 export const json = (payload: unknown) => Response.json(payload);
 
 export const NO_TASKS = "No scheduled task has been created yet.";
-export const NO_SITE_OBJECTS = "No site has been created yet.";
 export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {
@@ -160,6 +175,11 @@ export const SITE_KIND = {
 
 export function objectIndex(kind: unknown, objects: unknown[], next: string | null = null) {
   return json({ ...(kind as object), objects, next_cursor: next });
+}
+
+/** A row of the cross-agent object index, which names the agent that owns it. */
+export function owned(row: object, agent = AGENT) {
+  return { ...row, agent_id: agent.id, agent_name: agent.name };
 }
 
 export async function opened(name: string): Promise<HTMLElement[]> {

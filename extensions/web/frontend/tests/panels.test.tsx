@@ -13,6 +13,7 @@ import {
   PlacedWorkspace,
   SECOND,
   NO_SITES,
+  NO_TASKS,
   SITE_KIND,
   StreamFake,
   TASK_KIND,
@@ -21,6 +22,7 @@ import {
   json,
   objectIndex,
   opened,
+  owned,
   pick,
   refusedNotice,
   useStreamFake,
@@ -96,7 +98,7 @@ test("an overview that fails to read states the error and offers no form", async
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("the task index lists declared fields and its detail pauses through the intent lane", async () => {
+test("the scheduled index lists declared fields and its detail pauses through the intent lane", async () => {
   const posted: unknown[] = [];
   wire({
     "/objects/scheduled_task/digest": () =>
@@ -112,12 +114,12 @@ test("the task index lists declared fields and its detail pauses through the int
       }),
     "/objects/scheduled_task": () =>
       objectIndex(TASK_KIND, [
-        {
+        owned({
           name: "digest",
           summary: "0 9 * * * — summarize",
           next_run_at: "2026-08-01T09:00:00Z",
           paused: false,
-        },
+        }),
       ]),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
@@ -125,7 +127,7 @@ test("the task index lists declared fields and its detail pauses through the int
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/tasks";
+  location.hash = "#/agents/" + AGENT_ID + "/scheduled";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   const listed = (await screen.findByRole("button", { name: "digest" })).closest("tr");
@@ -612,11 +614,12 @@ test("a member with no rollup sees only their own figure and no workspace sectio
   expect(screen.queryByText("Spend by member")).toBeNull();
 });
 
-test("the sidebar routes agents and the workspace by hash and marks the section selected", async () => {
+test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
   wire({
     "/transcript": () => json({ messages: [] }),
     "/overview": () => json(OVERVIEW),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/site": () => objectIndex(SITE_KIND, []),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
@@ -628,6 +631,11 @@ test("the sidebar routes agents and the workspace by hash and marks the section 
   await userEvent.click(await viewCard("second"));
   expect(location.hash).toBe("#/agents/" + SECOND.id);
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
+
+  await userEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+  expect(location.hash).toBe("#/scheduled");
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  expect(screen.queryByRole("tablist")).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");

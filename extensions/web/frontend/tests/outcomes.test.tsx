@@ -346,7 +346,7 @@ test("a refused store states the reason the server gave and keeps the field", as
   expect(screen.getByLabelText("the key")).toBeTruthy();
 });
 
-test("the tasks, overview, and skills refusals tone their notices", async () => {
+test("the scheduled, overview, and skills refusals tone their notices", async () => {
   const OVERVIEW = {
     agent: {
       name: "assistant",
@@ -366,7 +366,7 @@ test("the tasks, overview, and skills refusals tone their notices", async () => 
   };
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
-  location.hash = "#/agents/" + AGENT.id + "/tasks";
+  location.hash = "#/agents/" + AGENT.id + "/scheduled";
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/transcript": () => json({ messages: [] }),

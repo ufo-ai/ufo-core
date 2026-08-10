@@ -15,6 +15,7 @@ import {
   SECOND_ID,
   TURN_ID,
   SITE_KIND,
+  TASK_KIND,
   json,
   objectIndex,
   useStreamFake,
@@ -415,18 +416,28 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
 test("the sidebar marks the section the member is in and leaves the others off", async () => {
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/overview": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
-  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
+  const marked = (name: string) =>
+    screen.getByRole("button", { name }).getAttribute("aria-current");
+
+  await userEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+  expect([marked("Scheduled"), marked("Agents"), marked("Workspace")]).toEqual([
     "true",
-  );
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe(
     "false",
-  );
+    "false",
+  ]);
+
+  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
+  expect([marked("Workspace"), marked("Agents"), marked("Scheduled")]).toEqual([
+    "true",
+    "false",
+    "false",
+  ]);
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("true");
   expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("false");
@@ -438,12 +449,11 @@ test("the sidebar marks the section the member is in and leaves the others off",
   expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("false");
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe(
+  expect([marked("Agents"), marked("Workspace"), marked("Scheduled")]).toEqual([
     "true",
-  );
-  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
     "false",
-  );
+    "false",
+  ]);
   const index = within(await screen.findByRole("main"));
   expect(index.getAllByText("opus").length).toBe(2);
   expect(index.getByText("assistant")).toBeTruthy();

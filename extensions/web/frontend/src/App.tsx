@@ -9,6 +9,8 @@ import { ChatPane } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
+import { SectionPane } from "@/views/SectionPane";
+import { SECTION_VIEWS } from "@/views/registry";
 import { Workspace } from "@/views/Workspace";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -24,17 +26,20 @@ import {
 } from "@/lib/rail";
 import {
   AGENT_TABS,
+  SECTIONS,
   SUBAGENT_TABS,
   agentHash,
   bootRoute,
   chatHash,
   newChatHash,
   parseHash,
+  sectionHash,
   subagentHash,
   workspaceHash,
   type AgentTab,
   type PlaceStep,
   type Route,
+  type Section,
   type SubagentTab,
   type WorkspacePlace,
   type WorkspaceTab,
@@ -146,6 +151,25 @@ export function App({ agents, subagents, member }: AppProps) {
     [go],
   );
 
+  const placeSection = useCallback(
+    (section: Section, place: WorkspacePlace, step: PlaceStep) => {
+      const seen = routeRef.current;
+      if (step !== "push" && (seen.kind !== "section" || seen.section !== section)) return;
+      if (step === "back") {
+        history.back();
+        return;
+      }
+      const next: Route = { kind: "section", section, place };
+      if (step === "replace") {
+        history.replaceState(null, "", sectionHash(section, place));
+        setRoute(next);
+        return;
+      }
+      go(sectionHash(section, place), next);
+    },
+    [go],
+  );
+
   const openAdmin = useCallback(() => go("#/admin", { kind: "admin" }), [go]);
 
   const created = useCallback(
@@ -230,6 +254,16 @@ export function App({ agents, subagents, member }: AppProps) {
                 Agents
               </SidebarButton>
             </li>
+            {SECTIONS.map((section) => (
+              <li key={section}>
+                <SidebarButton
+                  current={route.kind === "section" && route.section === section}
+                  onClick={() => placeSection(section, {}, "push")}
+                >
+                  {SECTION_VIEWS[section].label}
+                </SidebarButton>
+              </li>
+            ))}
             <li>
               <SidebarButton
                 current={route.kind === "workspace"}
@@ -269,6 +303,7 @@ export function App({ agents, subagents, member }: AppProps) {
           onOpenSubagent={openSubagent}
           onNewChat={openNewChat}
           onPlaceWorkspace={placeWorkspace}
+          onPlaceSection={placeSection}
           sought={sought}
           linked={linked}
         />
@@ -291,6 +326,7 @@ function Pane({
   onOpenSubagent,
   onNewChat,
   onPlaceWorkspace,
+  onPlaceSection,
   sought,
   linked,
 }: {
@@ -307,6 +343,7 @@ function Pane({
   onOpenSubagent: (name: string, tab?: SubagentTab) => void;
   onNewChat: (agentId: string) => void;
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
+  onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, LinkedConversation>>;
 }) {
@@ -314,6 +351,11 @@ function Pane({
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
   if (route.kind === "workspace") {
     return <Workspace view={route.view} place={route.place} onPlace={onPlaceWorkspace} />;
+  }
+  if (route.kind === "section") {
+    return (
+      <SectionPane section={route.section} place={route.place} onPlace={onPlaceSection} />
+    );
   }
   if (route.kind === "agents") {
     return (

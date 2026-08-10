@@ -1,7 +1,7 @@
 export const AGENT_TABS = [
   "overview",
   "conversations",
-  "tasks",
+  "scheduled",
   "connections",
   "skills",
   "usage",
@@ -19,9 +19,12 @@ export const WORKSPACE_TABS = [
 
 export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
 
+export const SECTIONS = ["scheduled"] as const;
+
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type SubagentTab = (typeof SUBAGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+export type Section = (typeof SECTIONS)[number];
 
 export type PlaceStep = "push" | "replace" | "back";
 
@@ -48,6 +51,7 @@ export type Route =
   | { kind: "agent"; agentId: string; tab: AgentTab }
   | { kind: "subagent"; name: string; tab: SubagentTab; conversationId?: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
+  | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "admin" }
   | { kind: "bad-link" };
 
@@ -61,6 +65,7 @@ const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
 const SUBAGENT_CONVERSATION_HASH = /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
+const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 
 const PLACE_KEYS = ["kind", "after", "q", "chip", "open"] as const;
 
@@ -97,6 +102,10 @@ function isWorkspaceTab(name: string): name is WorkspaceTab {
   return WORKSPACE_TABS.includes(name as WorkspaceTab);
 }
 
+function isSection(name: string): name is Section {
+  return SECTIONS.includes(name as Section);
+}
+
 export function parseHash(hash: string): Route {
   if (hash === "#/admin") return { kind: "admin" };
   if (hash === "#/agents") return { kind: "agents" };
@@ -124,6 +133,10 @@ export function parseHash(hash: string): Route {
   const workspace = hash.match(WORKSPACE_HASH);
   if (workspace && isWorkspaceTab(workspace[1])) {
     return { kind: "workspace", view: workspace[1], place: parsePlace(workspace[2]) };
+  }
+  const section = hash.match(SECTION_HASH);
+  if (section && isSection(section[1])) {
+    return { kind: "section", section: section[1], place: parsePlace(section[2]) };
   }
   const agent = hash.match(AGENT_HASH);
   if (agent) {
@@ -191,4 +204,8 @@ export function subagentConversationHash(name: string, conversationId: string): 
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {
   return "#/workspace/" + view + serializePlace(place);
+}
+
+export function sectionHash(section: Section, place: WorkspacePlace = {}): string {
+  return "#/" + section + serializePlace(place);
 }

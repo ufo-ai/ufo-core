@@ -11,6 +11,13 @@ import {
 } from "@/components/ui/dialog";
 import { Field, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Td } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
 import {
@@ -24,14 +31,26 @@ import {
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
+import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { day, isMoment, relativeMoment } from "@/lib/moments";
+import { agentHash } from "@/lib/route";
+import type { Agent } from "@/lib/types";
+
+const AGENT_FIELD = "object-agent";
 
 export type ObjectValue = string | number | boolean | null;
 
 export type ObjectRow = { name: string; summary: string } & Record<string, ObjectValue>;
 
+/** One row of an index. The projection names the agent that owns the row whether the read ran in
+ *  one namespace or across the audience, so an act reaches the right intent lane either way. */
+type IndexRow = ObjectRow & { agent_id: string; agent_name: string };
+
 export type ObjectLink = { relation: string; kind: string; name: string; opens: boolean };
 
+/** What every object page knows about the kind it renders, ahead of any one row: the fields it
+ *  declared for columns and filters, the schema its form draws, and whether the intent lane takes
+ *  an `apply` for it at all. */
 type Kind = {
   kind: string;
   fields: string[];
@@ -39,7 +58,7 @@ type Kind = {
   applies: boolean;
 };
 
-type IndexPayload = Kind & { objects: ObjectRow[]; next_cursor: string | null };
+type IndexPayload = Kind & { objects: IndexRow[]; next_cursor: string | null };
 
 type DetailPayload = Kind & {
   name: string;
@@ -89,7 +108,12 @@ function Chip({ children }: { children: ReactNode }) {
  *  name, so the value stands alone — and a value the record does not hold takes an em dash rather
  *  than an empty cell, which reads as a table that failed to draw. A status moment is the one the
  *  member is waiting on, so it reads as the wait; every calendar day takes `day()`. */
-function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now: Date): ReactNode {
+function cell(
+  field: string,
+  value: ObjectValue,
+  schema: SpecSchema | null,
+  now: Date,
+): ReactNode {
   if (value === null || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
@@ -101,50 +125,51 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now:
 /** Where an object page stands: one kind, and one of its objects once a row or a link is opened. */
 export type ObjectAddress = { kind: string; name: string | null };
 
-/** One kind's pages for one agent: its index, and one row's detail once a row or a link is opened. */
+/** An address inside one agent's namespace. A row opened out of a cross-agent index belongs to the
+ *  agent that owns it, and so does every link the detail follows out of it. */
+type At = ObjectAddress & { agentId: string };
+
+/** One kind's pages: its index, and one row's detail once a row or a link is opened. `agentId`
+ *  names the one agent namespace to read, or null to read across the viewer's whole audience —
+ *  the same choice the index route itself offers. */
 export function ObjectPane({
   agentId,
   kind,
   label,
 }: {
-  agentId: string;
+  agentId: string | null;
   kind: string;
   label: string;
 }) {
-  const [at, setAt] = useState<ObjectAddress>({ kind, name: null });
-  if (at.name === null) {
+  const [at, setAt] = useState<At | null>(null);
+  if (at !== null && at.name !== null) {
     return (
-      <ObjectIndex
-        agentId={agentId}
+      <ObjectDetail
+        key={at.agentId + "/" + at.kind + "/" + at.name}
+        agentId={at.agentId}
         kind={at.kind}
-        label={label}
-        onOpen={(name) => setAt({ kind: at.kind, name })}
+        name={at.name}
+        onOpen={(next) => setAt({ ...next, agentId: at.agentId })}
+        onBack={() => setAt(null)}
       />
     );
   }
-  return (
-    <ObjectDetail
-      key={at.kind + "/" + at.name}
-      agentId={agentId}
-      kind={at.kind}
-      name={at.name}
-      onOpen={(next) => setAt(next)}
-      onBack={() => setAt({ kind, name: null })}
-    />
-  );
+  return <ObjectIndex agentId={agentId} kind={kind} label={label} onOpen={setAt} />;
 }
 
-export function ObjectIndex({
+function ObjectIndex({
   agentId,
   kind,
   label,
   onOpen,
 }: {
-  agentId: string;
+  agentId: string | null;
   kind: string;
   label: string;
-  onOpen: (name: string) => void;
+  onOpen: (at: At) => void;
 }) {
+  const agents = useAgents();
+  const mainAgent = useMainAgent();
   const [reloads, setReloads] = useState(0);
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
@@ -154,32 +179,33 @@ export function ObjectIndex({
   const [cursor, setCursor] = useState("");
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const params = new URLSearchParams({ agent: agentId, order_by: orderBy });
+  const params = new URLSearchParams({ order_by: orderBy });
+  if (agentId) params.set("agent", agentId);
   if (query) params.set("q", query);
   if (descending) params.set("order", "desc");
   if (cursor) params.set("cursor", cursor);
   if (narrowed) params.set(narrowed, "true");
   const state = usePanelRead<IndexPayload>("/objects/" + kind + "?" + params.toString(), reloads);
   const now = new Date();
+  const owner = agentId ?? mainAgent?.id ?? agents[0]?.id ?? null;
 
-  async function submit(envelope: unknown) {
-    const outcome = await postIntent(agentId, envelope);
+  async function submit(lane: string, envelope: unknown) {
+    const outcome = await postIntent(lane, envelope);
     setReloads((count) => count + 1);
     return outcomeNotice(outcome);
-  }
-
-  async function remove(name: string) {
-    setNotice(await submit({ verb: "delete", kind, name }));
   }
 
   return (
     <Panel state={state}>
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
-        const acts = payload.applies && payload.spec_schema !== null;
-        const columns: Column[] = ["name", "summary"]
-          .concat(payload.fields)
-          .map((field) => ({ label: heading(field, payload.spec_schema), sort: field }));
+        const acts = payload.applies && payload.spec_schema !== null && owner !== null;
+        const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
+        if (agentId === null) columns.push("Agent");
+        columns.push({ label: heading("summary", payload.spec_schema), sort: "summary" });
+        for (const field of payload.fields) {
+          columns.push({ label: heading(field, payload.spec_schema), sort: field });
+        }
         if (acts) columns.push("");
         const flags = payload.fields.filter(
           (field) =>
@@ -233,7 +259,7 @@ export function ObjectIndex({
               <DataTable
                 columns={columns}
                 rows={payload.objects}
-                rowKey={(row) => row.name}
+                rowKey={(row) => row.agent_id + "/" + row.name}
                 empty={"No " + noun(payload.kind) + " has been created yet."}
                 note={narrowing ? "No " + noun(payload.kind) + " matches this search." : undefined}
                 sort={{
@@ -252,12 +278,24 @@ export function ObjectIndex({
                       <button
                         type="button"
                         data-part="primary"
-                        onClick={() => onOpen(row.name)}
+                        onClick={() =>
+                          onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
+                        }
                         className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-strong text-inherit"
                       >
                         {row.name}
                       </button>
                     </Td>
+                    {agentId === null ? (
+                      <Td>
+                        <a
+                          href={agentHash(row.agent_id, "overview")}
+                          className="text-inherit underline"
+                        >
+                          {row.agent_name}
+                        </a>
+                      </Td>
+                    ) : null}
                     <Td>{row.summary || "—"}</Td>
                     {payload.fields.map((field) => (
                       <Td key={field}>
@@ -269,7 +307,15 @@ export function ObjectIndex({
                         <ConfirmButton
                           verb="Delete"
                           variant="row"
-                          onClick={() => remove(row.name)}
+                          onClick={async () =>
+                            setNotice(
+                              await submit(row.agent_id, {
+                                verb: "delete",
+                                kind: payload.kind,
+                                name: row.name,
+                              }),
+                            )
+                          }
                         />
                       </Td>
                     ) : null}
@@ -291,13 +337,12 @@ export function ObjectIndex({
                 </div>
               ) : null}
             </Section>
-            {creating && payload.spec_schema ? (
-              <SpecDialog
+            {creating && payload.spec_schema && owner !== null ? (
+              <NewObject
                 schema={payload.spec_schema}
                 kind={payload.kind}
-                name={null}
-                spec={null}
-                title={"New " + noun(payload.kind)}
+                agents={agentId === null ? agents : []}
+                owner={owner}
                 onDone={submit}
                 onClose={() => setCreating(false)}
               />
@@ -306,6 +351,56 @@ export function ObjectIndex({
         );
       }}
     </Panel>
+  );
+}
+
+/** The create act of an index read across the audience has one question a single namespace never
+ *  raises: which agent runs the new row. The picker is drawn only where there is a choice to
+ *  make — a select with one option states one the member does not have. */
+function NewObject({
+  schema,
+  kind,
+  agents,
+  owner,
+  onDone,
+  onClose,
+}: {
+  schema: SpecSchema;
+  kind: string;
+  agents: Agent[];
+  owner: string;
+  onDone: (lane: string, envelope: unknown) => Promise<NoticeState>;
+  onClose: () => void;
+}) {
+  const [lane, setLane] = useState(owner);
+  return (
+    <SpecDialog
+      schema={schema}
+      kind={kind}
+      name={null}
+      spec={null}
+      title={"New " + noun(kind)}
+      lead={
+        agents.length > 1 ? (
+          <Field label="Agent" htmlFor={AGENT_FIELD}>
+            <Select value={lane} onValueChange={setLane}>
+              <SelectTrigger id={AGENT_FIELD}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {agents.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null
+      }
+      onDone={(envelope) => onDone(lane, envelope)}
+      onClose={onClose}
+    />
   );
 }
 
@@ -464,13 +559,16 @@ function specFact(field: string, value: ObjectValue, schema: SpecSchema | null):
 /** The one form a typed object is written through, for both the act that creates it and the act
  *  that changes it. Six schema fields under the records push the records off the screen and read as
  *  a seventh section of the page; in a dialog they are the act the member asked for, committed or
- *  cancelled, with the index still behind them. */
+ *  cancelled, with the index still behind them. `lead` is for the one field the schema cannot
+ *  state: which agent's namespace the new row lands in, which only a view listing across agents
+ *  knows to ask. */
 function SpecDialog({
   schema,
   kind,
   name,
   spec,
   title,
+  lead,
   onDone,
   onClose,
 }: {
@@ -479,6 +577,7 @@ function SpecDialog({
   name: string | null;
   spec: Record<string, ObjectValue> | null;
   title: string;
+  lead?: ReactNode;
   onDone: (envelope: unknown) => Promise<NoticeState>;
   onClose: () => void;
 }) {
@@ -523,6 +622,7 @@ function SpecDialog({
         </DialogHeader>
         <OutcomeNotice state={notice} />
         <form id="object-spec" onSubmit={send} className="flex flex-col gap-xl">
+          {lead}
           <Field label="Name" htmlFor="object-name">
             <Input
               id="object-name"

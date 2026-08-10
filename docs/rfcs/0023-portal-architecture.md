@@ -188,9 +188,9 @@ despite the ignore, `npm ci && npm run build` in CI before the wheel gate, and t
 Small and owned centrally, because these are exactly the things that must not be re-implemented:
 
 - **Boot and session** — the `api/agents` read, the token card branch, the signed-out state.
-- **Routing** — the hash grammar (`#/agents/<id>/<tab>`, `#/workspace/<view>`, `#/admin`) parsed
-  once, with the listing cursor and filter carried as query state so a reload lands where the
-  member was.
+- **Routing** — the hash grammar (`#/agents/<id>/<tab>`, `#/workspace/<view>`, `#/<section>`,
+  `#/admin`) parsed once, with the listing cursor and filter carried as query state so a reload
+  lands where the member was.
 - **The request fence** — one `load()` helper that owns the monotonic token, the abort of a
   superseded read, the error arm, and the empty arm. A view never writes `load !== panelLoad`
   again; the 19 hand-written copies become one.

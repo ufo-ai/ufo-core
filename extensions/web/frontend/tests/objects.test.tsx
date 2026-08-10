@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -6,6 +6,7 @@ import { App } from "@/App";
 import { ObjectPane } from "@/kernel/objects";
 import { relativeMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { Scheduled } from "@/views/Scheduled";
 
 import {
   AGENT,
@@ -13,7 +14,6 @@ import {
   CONVO_ID,
   MEMBER,
   NO_SITES,
-  NO_SITE_OBJECTS,
   NO_TASKS,
   SECOND,
   SECOND_ID,
@@ -21,27 +21,33 @@ import {
   TASK_KIND,
   json,
   objectIndex,
+  owned,
+  pick,
   refusedNotice,
   useStreamFake,
+  viewCard,
   wire,
 } from "./harness";
 
 const NOW = new Date("2026-08-01T12:00:00Z");
 const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
-const TASK_ROW = {
+const TASK_ROW = owned({
   name: "daily-brief",
   summary: "0 9 * * * — daily brief",
   next_run_at: IN_THREE_HOURS,
   paused: false,
-};
+});
 
-const SECOND_TASK_ROW = {
-  name: "weekly-roll",
-  summary: "0 9 * * 1 — weekly roll-up",
-  next_run_at: IN_THREE_HOURS,
-  paused: false,
-};
+const SECOND_TASK_ROW = owned(
+  {
+    name: "weekly-roll",
+    summary: "0 9 * * 1 — weekly roll-up",
+    next_run_at: IN_THREE_HOURS,
+    paused: false,
+  },
+  SECOND,
+);
 
 const TASK_DETAIL = {
   ...TASK_KIND,
@@ -87,10 +93,18 @@ function headings(): string[] {
   return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
 }
 
-function mount(kind: string, label = "Tasks") {
+function mount(agents = [AGENT]) {
   render(
-    <MainAgentProvider agents={[AGENT]}>
-      <ObjectPane agentId={AGENT_ID} kind={kind} label={label} />
+    <MainAgentProvider agents={agents}>
+      <Scheduled />
+    </MainAgentProvider>,
+  );
+}
+
+function mountAgent() {
+  render(
+    <MainAgentProvider agents={[AGENT, SECOND]}>
+      <ObjectPane agentId={AGENT_ID} kind="scheduled_task" label="Scheduled" />
     </MainAgentProvider>,
   );
 }
@@ -105,15 +119,16 @@ test("a moment reads as elapsed behind now and as remaining ahead of it", () => 
 
 test("an index is a table: one column per field the kind declares, headed by a member's word", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
-  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Summary", "Next Run At", "Paused", ""]);
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-brief");
-  expect(said[1]).toBe("0 9 * * * — daily brief");
-  expect(said[2]).toContain("in ");
-  expect(said[3]).toBe("No");
+  expect(said[1]).toBe("assistant");
+  expect(said[2]).toBe("0 9 * * * — daily brief");
+  expect(said[3]).toContain("in ");
+  expect(said[4]).toBe("No");
 });
 
 test("a boolean cell answers its column, and a field the record lacks takes a dash", async () => {
@@ -121,41 +136,49 @@ test("a boolean cell answers its column, and a field the record lacks takes a da
     "/objects/scheduled_task": () =>
       objectIndex(TASK_KIND, [{ ...TASK_ROW, paused: true, next_run_at: null }]),
   });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
-  expect(cells("daily-brief")[2]).toBe("—");
-  expect(cells("daily-brief")[3]).toBe("Yes");
+  expect(cells("daily-brief")[3]).toBe("—");
+  expect(cells("daily-brief")[4]).toBe("Yes");
 });
 
 test("a value the kind's spec declares as an enum reads as its own chip", async () => {
   wire({
+    "/objects/site/docs-abc": () =>
+      json({
+        ...SITE_KIND,
+        name: "docs-abc",
+        summary: "docs · workspace · sandbox port 3000",
+        spec: { visibility: "workspace" },
+        status: { conversation: CONVO_ID, created_at: "2026-07-01T09:00:00Z", visibility: "public" },
+        links: [],
+        created_at: "2026-07-01T09:00:00Z",
+        updated_at: null,
+      }),
     "/objects/site": () =>
-      objectIndex(SITE_KIND, [
-        {
-          name: "docs-abc",
-          summary: "docs · workspace · sandbox port 3000",
-          conversation: CONVO_ID,
-          created_at: "2026-07-01T09:00:00Z",
-          visibility: "workspace",
-        },
-      ]),
+      objectIndex(SITE_KIND, [{ name: "docs-abc", summary: "docs", visibility: "workspace" }]),
+    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/transcript": () => json({ messages: [] }),
   });
-  mount("site");
+  location.hash = "#/workspace/sites";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
-  await screen.findByRole("button", { name: "docs-abc" });
-  expect(headings()).toEqual(["Name", "Summary", "Conversation", "Created At", "Visibility"]);
-  const said = cells("docs-abc");
-  expect(said[2]).toBe(CONVO_ID);
-  expect(said[3]).toContain("ago");
-  expect(said[4]).toBe("workspace");
+  await userEvent.click(await viewCard("docs-abc"));
+
+  const applied = await screen.findByText("workspace");
+  const live = screen.getByText("public");
+  for (const chip of [applied, live]) {
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip.className).toContain("rounded-control");
+  }
 });
 
 test("an empty index states that the kind has no objects here", async () => {
-  wire({ "/objects/site": () => objectIndex(SITE_KIND, []) });
-  mount("site");
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, []) });
+  mount();
 
-  expect(await screen.findByText(NO_SITE_OBJECTS)).toBeTruthy();
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   expect(screen.queryByRole("table")).toBeNull();
 });
 
@@ -174,18 +197,18 @@ test("the sites tab of a deploy without the extension states that, not an error"
 
 test("a kind the deploy always installs states the error it got, never an absence", async () => {
   wire({ "/objects/scheduled_task": () => new Response("no such agent", { status: 404 }) });
-  mount("scheduled_task");
+  mount();
 
   expect(await screen.findByText("Error 404 — reload to retry.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
 });
 
 test("a read that breaks still states the error, never an empty kind", async () => {
-  wire({ "/objects/site": () => new Response("nope", { status: 503 }) });
-  mount("site");
+  wire({ "/objects/scheduled_task": () => new Response("nope", { status: 503 }) });
+  mount();
 
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
-  expect(screen.queryByText(NO_SITE_OBJECTS)).toBeNull();
+  expect(screen.queryByText(NO_TASKS)).toBeNull();
 });
 
 test("ordering and a boolean filter ride the read, so the kind applies them", async () => {
@@ -196,7 +219,7 @@ test("ordering and a boolean filter ride the read, so the kind applies them", as
       return objectIndex(TASK_KIND, [TASK_ROW]);
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
   expect(reads[0]).toContain("order_by=name");
@@ -217,14 +240,14 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
     "/objects/scheduled_task": (url) =>
       objectIndex(TASK_KIND, url.includes("paused=true") ? [] : [TASK_ROW]),
   });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
   await userEvent.click(screen.getByRole("tab", { name: "Paused" }));
 
   expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Summary", "Next Run At", "Paused", ""]);
   expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
@@ -239,7 +262,7 @@ test("what a member types rides the read as the kind's own search", async () => 
       return objectIndex(TASK_KIND, url.includes("q=brief") ? [TASK_ROW] : []);
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByText(NO_TASKS);
   await userEvent.type(screen.getByLabelText("Search scheduled task"), "brief{enter}");
@@ -256,25 +279,59 @@ test("what a member types rides the read as the kind's own search", async () => 
 
 test("the order sits on the head of the column it orders, and only there", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
   const heads = screen.getAllByRole("columnheader");
   expect(heads.map((head) => head.querySelector("button")?.textContent ?? null)).toEqual([
     "Name",
+    null,
     "Summary",
     "Next Run At",
     "Paused",
     null,
   ]);
   expect(heads[0].getAttribute("aria-sort")).toBe("ascending");
-  expect(heads[2].getAttribute("aria-sort")).toBe("none");
+  expect(heads[3].getAttribute("aria-sort")).toBe("none");
 
   await userEvent.click(screen.getByRole("button", { name: "Name" }));
   expect(screen.getAllByRole("columnheader")[0].getAttribute("aria-sort")).toBe("descending");
 });
 
-test("a page with more behind it walks on the cursor the kind returned", async () => {
+test("the index names no agent, so the read fans out over the whole audience", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      reads.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]);
+    },
+  });
+  mount([AGENT, SECOND]);
+
+  await screen.findByRole("button", { name: "daily-brief" });
+  expect(reads[0]).not.toContain("agent=");
+  expect(reads[0]).not.toContain("cursor=");
+  expect(cells("daily-brief")[1]).toBe("assistant");
+  expect(cells("weekly-roll")[1]).toBe("second");
+});
+
+test("one agent's index names that agent, so it neither reads nor draws the owner", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      reads.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW]);
+    },
+  });
+  mountAgent();
+
+  await screen.findByRole("button", { name: "daily-brief" });
+  expect(reads[0]).toContain("agent=" + AGENT_ID);
+  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  expect(screen.queryByRole("link", { name: "assistant" })).toBeNull();
+});
+
+test("a page with more behind it walks on the cursor one agent's read returned", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task": (url) => {
@@ -284,7 +341,7 @@ test("a page with more behind it walks on the cursor the kind returned", async (
         : objectIndex(TASK_KIND, [TASK_ROW], "c1");
     },
   });
-  mount("scheduled_task");
+  mountAgent();
 
   await screen.findByRole("button", { name: "daily-brief" });
   await userEvent.click(screen.getByRole("button", { name: "Next page" }));
@@ -298,12 +355,20 @@ test("a page with more behind it walks on the cursor the kind returned", async (
   expect(reads.at(-1)).not.toContain("cursor=");
 });
 
+test("a row names the agent that owns it, and that name is the link to it", async () => {
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [SECOND_TASK_ROW]) });
+  mount([AGENT, SECOND]);
+
+  const owner = await screen.findByRole("link", { name: "second" });
+  expect(owner.getAttribute("href")).toBe("#/agents/" + SECOND_ID);
+});
+
 test("a detail renders spec, then status, then links, then when the row was made", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
 
@@ -324,7 +389,7 @@ test("a task detail's reports_to link lands on that conversation's detail page",
       return objectIndex(TASK_KIND, [TASK_ROW]);
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   const link = await screen.findByText("reports_to conversation " + CONVO_ID);
@@ -348,7 +413,7 @@ test("an outcome stays on the row it happened to, not the next one opened", asyn
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
     "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
@@ -367,7 +432,7 @@ test("a spec the kind elides reads as the row's own summary, with no form to sub
       json({ ...TASK_DETAIL, spec: null, summary: "0 9 * * * — private member task" }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
 
@@ -389,7 +454,7 @@ test("a deleted row lands back on the index; a refused delete states the refusal
       return json({ applied: true, message: "Deleted daily-brief." });
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
@@ -410,7 +475,25 @@ test("a deleted row lands back on the index; a refused delete states the refusal
   ]);
 });
 
-test("the tasks tab of an agent is that agent's scheduled_task index", async () => {
+test("the scheduled section is reached by its own hash and lists across the audience", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      reads.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]);
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/scheduled";
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+
+  expect(await screen.findByRole("heading", { level: 1, name: "Scheduled" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "weekly-roll" })).toBeTruthy();
+  expect(reads[0]).not.toContain("agent=");
+  expect(screen.queryByRole("tab", { name: "Tasks" })).toBeNull();
+});
+
+test("the scheduled tab of an agent is that agent's own scheduled_task index", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task": (url) => {
@@ -419,31 +502,57 @@ test("the tasks tab of an agent is that agent's scheduled_task index", async () 
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/tasks";
+  location.hash = "#/agents/" + AGENT_ID + "/scheduled";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
 
   expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
+  expect(screen.getByRole("tab", { name: "Scheduled" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("button", { name: "Scheduled" }).getAttribute("aria-current")).toBe(
+    "false",
+  );
 });
 
-test("landing on another agent's tasks leaves the first agent's detail behind", async () => {
+test("landing on another agent's scheduled tab leaves the first agent's detail behind", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
     "/objects/scheduled_task": (url) =>
       objectIndex(TASK_KIND, url.includes(AGENT_ID) ? [TASK_ROW] : [SECOND_TASK_ROW]),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/tasks";
+  location.hash = "#/agents/" + AGENT_ID + "/scheduled";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await screen.findByRole("heading", { name: "daily-brief" });
 
-  location.hash = "#/agents/" + SECOND_ID + "/tasks";
+  location.hash = "#/agents/" + SECOND_ID + "/scheduled";
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   expect(await screen.findByRole("button", { name: "weekly-roll" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "daily-brief" })).toBeNull();
+});
+
+test("a row opens under the agent that owns it, and Back returns to the whole index", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task/weekly-roll": (url) => {
+      reads.push(url);
+      return json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" });
+    },
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/scheduled";
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "weekly-roll" }));
+
+  expect(await screen.findByRole("heading", { name: "weekly-roll" })).toBeTruthy();
+  expect(reads[0]).toContain("agent=" + SECOND_ID);
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
 });
 
 test("the workspace sites tab is the site index on the main agent", async () => {
@@ -469,7 +578,7 @@ test("the act that writes an object opens over the index, and a refusal keeps it
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
     "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
   });
-  mount("scheduled_task");
+  mount();
 
   expect(await screen.findByRole("button", { name: "daily-brief" })).toBeTruthy();
   expect(screen.queryByLabelText("Name")).toBeNull();
@@ -487,7 +596,7 @@ test("an object the lane accepts closes the act it was written through", async (
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
     "/intents": () => json({ applied: true }),
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
   await userEvent.type(await screen.findByLabelText("Name"), "digest");
@@ -517,7 +626,7 @@ test("a moment typed on the clock in front of the member is submitted as an inst
       return json({ applied: true });
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
   await userEvent.type(await screen.findByLabelText("Name"), "digest");
@@ -536,7 +645,7 @@ test("an instant off the wire is shown on the clock in front of the member", asy
       json({ ...TASK_DETAIL, ...EXPIRING_KIND, spec: { ...TASK_DETAIL.spec, expires_at: instant } }),
     "/objects/scheduled_task": () => objectIndex(EXPIRING_KIND, [TASK_ROW]),
   });
-  mount("scheduled_task");
+  mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "daily-brief" }));
   await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
@@ -553,7 +662,7 @@ test("a record is deleted from the row it stands on, and a refusal says so above
       return json({ applied: false, message: "The workspace refuses it." });
     },
   });
-  mount("scheduled_task");
+  mount();
 
   await screen.findByRole("button", { name: "daily-brief" });
   await userEvent.click(screen.getByRole("button", { name: "Delete" }));
@@ -565,10 +674,72 @@ test("a record is deleted from the row it stands on, and a refusal says so above
   await refusedNotice("The workspace refuses it.");
 });
 
-test("a kind the member cannot write offers no act on its rows", async () => {
-  wire({ "/objects/site": () => objectIndex(SITE_KIND, [{ name: "docs-abc", summary: "docs" }]) });
-  mount("site");
+test("a row is deleted through the lane of the agent that owns it", async () => {
+  const lanes: string[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/intents": (url) => {
+      lanes.push(url);
+      return json({ applied: true, message: "Deleted weekly-roll." });
+    },
+  });
+  mount([AGENT, SECOND]);
 
-  await screen.findByRole("button", { name: "docs-abc" });
+  const row = (await screen.findByRole("button", { name: "weekly-roll" })).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "Delete" }));
+  await userEvent.click(within(row).getByRole("button", { name: "Confirm delete" }));
+
+  await waitFor(() => expect(lanes.length).toBe(1));
+  expect(lanes[0]).toContain("/agents/" + SECOND_ID + "/intents");
+});
+
+test("the act that writes a task asks which agent runs it, and writes to that lane", async () => {
+  const lanes: string[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/intents": (url) => {
+      lanes.push(url);
+      return json({ applied: true });
+    },
+  });
+  mount([AGENT, SECOND]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+  await pick("Agent", "second");
+  await userEvent.type(screen.getByLabelText("Name"), "digest");
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+  await waitFor(() => expect(lanes.length).toBe(1));
+  expect(lanes[0]).toContain("/agents/" + SECOND_ID + "/intents");
+});
+
+test("one agent in the audience is no choice, so the act asks for none", async () => {
+  const lanes: string[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/intents": (url) => {
+      lanes.push(url);
+      return json({ applied: true });
+    },
+  });
+  mount();
+
+  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
+  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+  await userEvent.type(screen.getByLabelText("Name"), "digest");
+  await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+  await waitFor(() => expect(lanes.length).toBe(1));
+  expect(lanes[0]).toContain("/agents/" + AGENT_ID + "/intents");
+});
+
+test("a kind the lane declines to write offers no act on its rows", async () => {
+  wire({
+    "/objects/scheduled_task": () => objectIndex({ ...TASK_KIND, applies: false }, [TASK_ROW]),
+  });
+  mount();
+
+  await screen.findByRole("button", { name: "daily-brief" });
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "New scheduled task" })).toBeNull();
 });

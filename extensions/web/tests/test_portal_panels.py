@@ -286,6 +286,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert row["paused"] is False
     assert row["next_run_at"] == NEXT_RUN.isoformat()
     assert row["summary"] == "0 9 * * * — daily brief"
+    assert (row["agent_id"], row["agent_name"]) == (str(agent_a), "assistant")
     mine = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=creator_headers
     )
@@ -326,6 +327,55 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=admin_headers
     )
     assert empty_wall.json()["objects"] == []
+
+
+async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> None:
+    """The Scheduled section's read: no `agent` names one namespace, so the index answers every
+    agent the viewer's web audience holds, each row naming its own. An agent no grant reaches
+    contributes nothing until it does, the merged page is ordered across agents rather than
+    standing in agent blocks, and it carries no cursor — the kind mints one per agent, and there
+    is no single walk to continue."""
+    client, workspace_id, agent_a, agent_b = portal
+    creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    with ws(workspace_id):
+        for agent_id, name, schedule in (
+            (agent_a, "daily-brief", "0 9 * * *"),
+            (agent_b, "alpha-sweep", "0 3 * * *"),
+        ):
+            conversation_id = await _seed_conversation(workspace_id, agent_id)
+            with bind_agent(agent_id):
+                await ScheduleStore().create(
+                    conversation_id,
+                    name,
+                    schedule,
+                    f"run {name}",
+                    name,
+                    NEXT_RUN,
+                    created_by_member_id=creator_id,
+                )
+    index = "/surface/web/objects/scheduled_task"
+
+    walled = await client.get(index, headers=creator_headers)
+    assert [row["name"] for row in walled.json()["objects"]] == ["daily-brief"]
+    assert walled.json()["next_cursor"] is None
+
+    await _grant(workspace_id, agent_b, CREATOR_EMAIL)
+    fanned = await client.get(index, headers=creator_headers)
+    assert [
+        (row["name"], row["agent_id"], row["agent_name"]) for row in fanned.json()["objects"]
+    ] == [
+        ("alpha-sweep", str(agent_b), "ops"),
+        ("daily-brief", str(agent_a), "assistant"),
+    ]
+
+    descending = await client.get(index + "?order=desc", headers=creator_headers)
+    assert [row["name"] for row in descending.json()["objects"]] == ["daily-brief", "alpha-sweep"]
+    searched = await client.get(index + "?q=sweep", headers=creator_headers)
+    assert [row["name"] for row in searched.json()["objects"]] == ["alpha-sweep"]
+
+    walking = await client.get(index + "?cursor=abc", headers=creator_headers)
+    assert walking.status_code == 400
+    assert (await client.get(index)).status_code == 401
 
 
 async def test_skills_list_the_agents_own_and_the_deploys(portal) -> None:

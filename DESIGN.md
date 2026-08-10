@@ -35,8 +35,24 @@ the inline alternative.
 
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
 `--breakpoint-narrow` it flips to a top strip. The sidebar holds, in order: wordmark, new
-conversation, the conversation rail, section buttons, footer (member email, admin entry). No
+conversation, the conversation rail, `Agents`, the top-level sections (`Scheduled`), `Workspace`,
+footer (member email, admin entry). No
 icons. Selection is the 2px left marker (`border-l-ink`) plus `aria-current`.
+
+A destination the sidebar reaches directly is a top-level section: the hash is `#/<section>`, the
+name is one member of `SECTIONS` in `lib/route.ts` and one entry in `SECTION_VIEWS`, and
+`SectionPane` draws it — the `<h1>` off the registry label, then one scrolling body, and no tab
+strip, because the pane is the page. A screen earns the sidebar when its records belong to every
+agent instead of to one: Scheduled lists one kind across the whole audience, which no agent's tab
+can head. The section's own body is a `Section` headed by that same label, as a workspace tab's
+listing is headed by the tab's.
+
+A section and an agent tab may hold the same kind, and Scheduled does: the section is every
+agent's, the tab is that agent's own. They carry the same label, because the label names the kind
+and not the scope — the pane the member is standing in already states the scope, and a tab reading
+`This Agent's Scheduled` would say twice what the agent's own `<h1>` says once. Nothing else is
+duplicated: one `ObjectPane` draws both, taking the agent to read in or null to read across the
+audience, which is the same choice the index route itself offers.
 
 A rail row states the conversation's title, and nothing else the member did not ask for. The rail
 is already ordered by recency and already grouped under `Today` / `Yesterday`, so a stamp on every
@@ -182,11 +198,23 @@ a model id, a digest — stays mono. A typed object states its spec and its stat
 column, each row labelled by the schema's `title` — never by the wire's field name, which is what a
 `·`-separated status line has no room to expand.
 
-A wire identifier is never a member's word. The kind the wire calls `scheduled_task` heads its
-section as `Tasks` — the tab label the member clicked to arrive, threaded into `ObjectPane` — and
-names itself in a sentence as `scheduled task`. An object screen's own copy is written around the
+A wire identifier is never a member's word. The kind the wire calls `scheduled_task` heads both of
+its screens as `Scheduled` — the sidebar button and the agent tab the member pressed to arrive, the
+two differing in scope and not in name — and names itself in a sentence as `scheduled task`. An
+object screen's own copy is written around the
 singular, so no screen has to guess a plural: `No scheduled task has been created yet.`,
 `No scheduled task matches this search.`
+
+An index read across every agent states the owner on the row; one read in a single namespace does
+not, because the pane already named it. So the Agent column appears only in the section, second and
+right of the name — the member reads which record and then whose, before the summary they scan
+past — and carries that agent's name as a link to it. It is the one head that does not order: the
+order the heads carry is the kind's own vocabulary, and the owner is the projection's. The section
+also offers no pager, because a page merged out of one walk per agent has no single walk to
+continue, while the tab pages on the cursor its one agent returned. Every act goes to the row's own
+agent either way — the detail opens under it, the row's delete posts to its lane — and the create
+act asks which agent runs the new row, drawn only in the section and only where the audience holds
+more than one, since a select with one option states a choice the member does not have.
 
 Content whose length the member cannot predict is held at the fold. `Reveal`
 (`components/ui/reveal.tsx`) draws the same card, clips to `--size-reveal`, fades the last line
@@ -444,6 +472,9 @@ Copy a known-good implementation instead of composing from rules:
 - `views/Artifacts.tsx` — a declared listing whose face is cards led by an image band.
 - `views/Sites.tsx` — a bespoke section over a typed object kind, reading the same `CardGrid` the
   declared listings do.
+- `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
+  audience: the owner as a linked column where the scope needs it, and every act addressed to the
+  row's own agent.
 - `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card.
 - `kernel/listing.tsx` — the listing renderer the declarations feed.
 - `views/Usage.tsx` — figures over headed breakdown tables, every wire value labelled.

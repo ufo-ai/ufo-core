@@ -90,6 +90,7 @@ from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectListQuery
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
+    AgentSummary,
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
@@ -129,6 +130,7 @@ MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
+OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 CONVERSATION_CHANGE_PATCH_MAX_CHARS = SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS
 CONVERSATION_CHANGES_RESPONSE_MAX_BYTES = 256_000
@@ -2162,26 +2164,32 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
 
 async def _object_gate(
     ctx: SurfaceContext, request: Request
-) -> tuple[UUID, bool, UUID, PortalKind] | Response:
-    """The shared entry of both object pages: the session's member and admin standing, the agent
-    namespace the read runs in — named by `agent` and gated by the viewer's web audience like every
-    per-agent panel — and the kind's declared fields and spec schema. A kind this deploy does not
-    register is not-found by name, never a 500 from inside it."""
+) -> tuple[UUID, WebAudience, PortalKind] | Response:
+    """The shared entry of both object pages: the session's member, the web audience walling every
+    agent namespace a read may run in, and the kind's declared fields and spec schema. A kind this
+    deploy does not register is not-found by name, never a 500 from inside it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
-    try:
-        agent_id = UUID(request.query_params.get("agent", ""))
-    except ValueError:
-        return Response("no such agent", status_code=404)
-    if not audience.allows(agent_id):
-        return Response("no such agent", status_code=404)
     kind = request.path_params["kind"]
     described = ctx.object_kind(kind)
     if described is None:
         return Response(f"no object kind named {kind!r}", status_code=404)
-    return member_id, audience.admin, agent_id, described
+    return member_id, audience, described
+
+
+def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Response:
+    """The one agent namespace a read runs in, named by `agent` and gated by the viewer's web
+    audience like every per-agent panel."""
+    try:
+        agent_id = UUID(request.query_params.get("agent", ""))
+    except ValueError:
+        return Response("no such agent", status_code=404)
+    for agent in audience.agents:
+        if agent.id == agent_id:
+            return agent
+    return Response("no such agent", status_code=404)
 
 
 def _kind_payload(kind: PortalKind) -> dict[str, object]:
@@ -2203,16 +2211,37 @@ def _filter_value(raw: str) -> JsonValue:
         return raw
 
 
+def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]:
+    """Where one row falls in a fanned-out index. Each agent answers its own ordered page, so the
+    merge re-ranks every row on the same field — absent, then flags, then numbers, then text, ties
+    broken by name — rather than leaving the page standing in agent blocks."""
+    name = str(row["name"])
+    match row.get(order_by):
+        case None:
+            return (0, "", name)
+        case bool() as flag:
+            return (1, int(flag), name)
+        case int() | float() as number:
+            return (2, number, name)
+        case value:
+            return (3, str(value), name)
+
+
 async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     """One object kind's rows for the signed-in member — the portal's index projection, answering
     through the kind's own visibility gate and searched, filtered, and ordered on the fields the
-    kind declared. `q` searches, `order_by`/`order` sort, `cursor` continues the walk, and every
-    remaining query parameter is an exact filter; a field the kind never declared is the kind's
-    own refusal, so the page offers only what the kind admits."""
+    kind declared. `agent` names one agent's namespace; without it the read fans out over every
+    agent the viewer's web audience holds, and every row names the agent that owns it either way,
+    so a section listing one kind across the workspace addresses each edit to the right lane. `q`
+    searches, `order_by`/`order` sort, `cursor` continues one agent's walk, and every remaining
+    query parameter is an exact filter; a field the kind never declared is the kind's own refusal,
+    so the page offers only what the kind admits. A fanned-out read takes `OBJECT_FANOUT_LIMIT`
+    rows from each agent and answers no cursor — the kind mints one per agent, and there is no
+    single walk for the member to continue."""
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, admin, agent_id, kind = gated
+    member_id, audience, kind = gated
     reserved = {"agent", "q", "order_by", "order", "cursor"}
     order: Literal["asc", "desc"] = "asc"
     match request.query_params.get("order", "asc"):
@@ -2222,6 +2251,16 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
             order = "desc"
         case _:
             return Response("order must be asc or desc", status_code=400)
+    named = bool(request.query_params.get("agent", ""))
+    cursor = request.query_params.get("cursor", "")
+    if cursor and not named:
+        return Response("a cursor continues one agent's walk and names that agent", status_code=400)
+    agents = audience.agents
+    if named:
+        one = _object_agent(request, audience)
+        if isinstance(one, Response):
+            return one
+        agents = (one,)
     query = ObjectListQuery(
         query=request.query_params.get("q", ""),
         filters={
@@ -2231,25 +2270,34 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
         },
         order_by=request.query_params.get("order_by", "name"),
         order=order,
-        cursor=request.query_params.get("cursor", ""),
+        cursor=cursor,
     )
-    try:
-        page = await ctx.list_member_objects(
-            kind.kind, agent_id, member_id, admin=admin, query=query
+    rows: list[dict[str, object]] = []
+    walk: str | None = None
+    for agent in agents:
+        try:
+            page = await ctx.list_member_objects(
+                kind.kind, agent.id, member_id, admin=audience.admin, query=query
+            )
+        except ValueError as error:
+            return Response(str(error), status_code=400)
+        if page is None:
+            return Response(f"{kind.kind} does not list in the portal", status_code=404)
+        rows.extend(
+            {
+                "name": row.name,
+                "summary": row.summary,
+                **row.fields,
+                "agent_id": str(agent.id),
+                "agent_name": agent.name,
+            }
+            for row in page.rows[:OBJECT_FANOUT_LIMIT]
         )
-    except ValueError as error:
-        return Response(str(error), status_code=400)
-    if page is None:
-        return Response(f"{kind.kind} does not list in the portal", status_code=404)
-    return JSONResponse(
-        {
-            **_kind_payload(kind),
-            "objects": [
-                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
-            ],
-            "next_cursor": page.next_cursor,
-        }
-    )
+        if named:
+            walk = page.next_cursor
+    if not named:
+        rows.sort(key=lambda row: _merged_rank(row, query.order_by), reverse=order == "desc")
+    return JSONResponse({**_kind_payload(kind), "objects": rows, "next_cursor": walk})
 
 
 async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
@@ -2262,7 +2310,11 @@ async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, admin, agent_id, kind = gated
+    member_id, audience, kind = gated
+    agent = _object_agent(request, audience)
+    if isinstance(agent, Response):
+        return agent
+    agent_id, admin = agent.id, audience.admin
     name = request.path_params["name"]
     found = await ctx.member_object(kind.kind, name, agent_id, member_id, admin=admin)
     if found is None:

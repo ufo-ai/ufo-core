@@ -2,16 +2,17 @@ import type { ReactNode } from "react";
 
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
-import type { WorkspaceTab } from "@/lib/route";
+import type { Section, WorkspaceTab } from "@/lib/route";
 import { ARTIFACTS } from "@/views/Artifacts";
 import { Memory } from "@/views/Memory";
+import { Scheduled } from "@/views/Scheduled";
 import { Sites } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
 import { WorkspaceUsage } from "@/views/Usage";
 
-export type WorkspaceView = {
+export type PaneView = {
   label: string;
   render: (place: Placement, onPlace: (place: Placement) => void) => ReactNode;
   /** Remount when the placement changes, so a mutation's outcome notice reaches the new mount. */
@@ -21,7 +22,7 @@ export type WorkspaceView = {
 function declared<Payload, Row>(
   label: string,
   spec: ListingSpec<Payload, Row>,
-): WorkspaceView {
+): PaneView {
   return {
     label,
     remountOnPlace: true,
@@ -31,7 +32,7 @@ function declared<Payload, Row>(
   };
 }
 
-export const WORKSPACE_VIEWS: Record<WorkspaceTab, WorkspaceView> = {
+export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   team: {
     label: "Team",
     remountOnPlace: true,
@@ -51,4 +52,8 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, WorkspaceView> = {
     remountOnPlace: false,
     render: () => <WorkspaceUsage />,
   },
+};
+
+export const SECTION_VIEWS: Record<Section, PaneView> = {
+  scheduled: { label: "Scheduled", remountOnPlace: false, render: () => <Scheduled /> },
 };

@@ -9,8 +9,8 @@ import {
   PlacedWorkspace,
   AGENT,
   MEMBER,
-  SECOND,
   NO_TASKS,
+  SECOND,
   TASK_KIND,
   json,
   objectIndex,
@@ -42,7 +42,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
 
   await waitFor(() => expect(releaseSkills).not.toBeNull());
 
-  await userEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
 
   releaseSkills!(json({ skills: [{ name: "stale", description: "stale skill", origin: "member" }] }));

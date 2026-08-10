@@ -13,7 +13,7 @@ const SCHEDULED_TASK_KIND = "scheduled_task";
 const TAB_LABELS: Record<AgentTab, string> = {
   overview: "Overview",
   conversations: "Conversations",
-  tasks: "Tasks",
+  scheduled: "Scheduled",
   connections: "Connections",
   skills: "Skills",
   usage: "Usage",
@@ -47,12 +47,12 @@ export function AgentPane({ agent, tab, tabs, onTab }: AgentPaneProps) {
         data-testid="panel"
       >
         {tab === "overview" ? <Overview agent={agent} /> : null}
-        {tab === "tasks" ? (
+        {tab === "scheduled" ? (
           <ObjectPane
             key={agent.id}
             agentId={agent.id}
             kind={SCHEDULED_TASK_KIND}
-            label={TAB_LABELS.tasks}
+            label={TAB_LABELS.scheduled}
           />
         ) : null}
         {tab === "conversations" ? <Conversations agent={agent} /> : null}
