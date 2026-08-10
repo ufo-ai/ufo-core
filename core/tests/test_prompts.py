@@ -10,6 +10,7 @@ import re
 import pytest
 
 from ufo.ext.loader import load_manifests
+from ufo.ext.surface import SILENCE_SENTINEL
 from ufo.loop.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
     DELIVERY_REGISTER_BLOCK,
@@ -69,6 +70,22 @@ def test_shell_splits_long_delivery_between_chat_and_one_markdown_report() -> No
     assert "put every piece of it in\nthis one message, in full" not in SHELL
     assert "report, when you deliver" in SHELL
     assert "full structure, because the content is genuinely report-shaped" not in SHELL
+
+
+def test_shell_reconciles_the_closing_message_with_a_silent_turn() -> None:
+    """The sentinel is one constant in code and the prompt must show that exact token, so the model
+    reproduces the bytes the predicate reads. Both halves of the rule are pinned: a message that
+    asks nothing gets the sentinel alone, and a message that challenges the agent's own work or
+    answers its question is still the agent's to answer even unaddressed — over-triggering is the
+    risk that matters, since a suppressed reply reaches nobody."""
+    prose = " ".join(SHELL.split())
+    assert SHELL.count(SILENCE_SENTINEL) == 2
+    assert "The closing message is owed when the message that opened the turn asks" in prose
+    assert "human-to-human thread traffic you merely sit in" in prose
+    assert 'no offer to help, no "standing by", no "nothing further from me"' in prose
+    assert "asks a question the thread makes clearly yours" in prose
+    assert "answers a question you asked is for you even when it does not name you" in prose
+    assert "never send it in a turn that did work or produced a file" in prose
 
 
 def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> None:

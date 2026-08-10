@@ -8,7 +8,10 @@ context fetched from Slack at admit time — the thread's earlier un-addressed m
 mentioned mid-thread, the channel's recent messages when starting a fresh thread; after that
 every member reply is its own turn, so the transcript itself holds the thread. A first-time DM
 speaker resolves by Slack-confirmed email: an existing member links, and a same-domain teammate
-joins as a new member — only the initial member onboards through the CLI.
+joins as a new member — only the initial member onboards through the CLI. Admission cannot tell a
+thread reply that asks something of the agent from human-to-human traffic it merely sits in — that
+needs the model — so the discrimination lands on delivery instead: a turn whose whole answer is the
+silence sentinel posts no message at all, and the member sees nothing rather than filler.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
@@ -95,6 +98,7 @@ from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
+    NOTHING_DELIVERED,
     WORKSPACE_WRITE_MAX_BYTES,
     AskUserInput,
     BlobStore,
@@ -103,6 +107,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialSlotUnset,
+    NothingDelivered,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -114,6 +119,7 @@ from ufo.sdk.surfaces import (
     Writeback,
     fence_member_message,
     inbox_name,
+    is_silence_sentinel,
     mint_marker,
 )
 from ufo_ext_slack.attribution import addressing_mention, message_bodies
@@ -2071,7 +2077,13 @@ class TurnActivity:
         with nothing but the clock behind it is skipped, never filled with a placeholder. One that
         saw no *new* call still posts: naming the step the turn has sat in for the whole interval
         answers "is it stalled?", the question that earns the post. Every named step is bounded on
-        the way in, so the line is bounded by how many it names."""
+        the way in, so the line is bounded by how many it names.
+
+        A turn whose text in flight is the silence sentinel has settled on saying nothing, and a
+        progress post about a turn that will deliver no reply is the noise this whole feature
+        removes — so that checkpoint is skipped too."""
+        if is_silence_sentinel("".join(self.streaming)):
+            return None
         step = self.current_step()
         if not self.narration and not step:
             return None
@@ -2750,8 +2762,14 @@ async def _deliver_slack_reply(
     return progress, expected, payload
 
 
-async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
+async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
+    A done turn whose whole answer is the silence sentinel sends nothing at all — no
+    `chat.postMessage`, so neither an attribution footer nor the `(no reply)` placeholder — and
+    reports that it delivered nothing, which settles the writeback instead of retrying it. A turn
+    that shared a file posts as usual whatever its text says, because `attach` only runs once a
+    reply exists and silence is not allowed to swallow a delivery; the failed and cancelled lines
+    are this surface's own words rather than the agent's, so they are never silence either.
     Every reply links to its web conversation and agent configuration when the deploy has a public
     base URL. The conversation rides as the `?c=` query parameter, not a fragment: a fragment never
     reaches the server, so a signed-out click would arrive at the portal with the target already
@@ -2767,6 +2785,18 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     first message as the delivery ref."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
+    if (
+        writeback.status == "done"
+        and not writeback.artifacts
+        and is_silence_sentinel(writeback.text)
+    ):
+        log(
+            "slack.reply_suppressed",
+            turn=str(writeback.turn_id),
+            channel=channel,
+            thread_ts=thread,
+        )
+        return NOTHING_DELIVERED
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     text = _reply_with_oversize_links(ctx, writeback)
     actions = slack_ask_blocks(writeback.question) or slack_connect_blocks(

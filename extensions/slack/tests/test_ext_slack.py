@@ -50,6 +50,7 @@ from ufo.ext.surface import (
     ATTACHMENTS_ELEMENT,
     MEMBER_MESSAGE_ELEMENT,
     OPERATOR_EMAIL_DOMAIN,
+    SILENCE_SENTINEL,
     WRITEBACK_DELIVERED,
     fence_member_message,
     member_message_text,
@@ -82,6 +83,7 @@ from ufo.schema.records import (
     ConnectRequest,
     QuestionOption,
     TerminalFrame,
+    TerminalStatus,
 )
 from ufo.sdk.audience import (
     SHARED_AUDIENCE,
@@ -2795,6 +2797,7 @@ async def _seed_done_turn(
     question: AskUserInput | None = None,
     connect_request: ConnectRequest | None = None,
     speaker_member_id: UUID | None = None,
+    status: TerminalStatus = "done",
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -2822,11 +2825,11 @@ async def _seed_done_turn(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 seq=1,
-                status="done",
+                status=status,
                 inbound="ask",
                 speaker_member_id=speaker_member_id,
                 terminal=TerminalFrame(
-                    status="done",
+                    status=status,
                     text=text,
                     tokens=1_234,
                     cost_micro_usd=1_234,
@@ -3169,6 +3172,90 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
     assert {tuple(row) for row in delivered} == {
         (turn_a, WRITEBACK_DELIVERED),
         (turn_b, WRITEBACK_DELIVERED),
+    }
+
+
+async def test_a_turn_answering_with_the_sentinel_posts_nothing_at_all(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """The whole point of the sentinel: a thread message that asked the agent nothing gets no Slack
+    message — no reply, no attribution footer, and not the `(no reply)` placeholder either — while
+    the writeback settles as delivered so the poller never comes back to it."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id, "C5:200.0", SILENCE_SENTINEL, blob, artifact=False
+    )
+
+    await app.state.writeback_poller.drain()
+    await app.state.writeback_poller.drain()
+
+    assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref is None
+    suppressed = [r for r in caplog.records if r.message == "slack.reply_suppressed"]
+    assert [(r.ufo["turn"], r.ufo["channel"], r.ufo["thread_ts"]) for r in suppressed] == [
+        (str(turn_id), "C5", "200.0")
+    ]
+
+
+async def test_a_silent_turn_that_shared_a_file_still_posts_and_uploads_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Silence must not swallow a delivery. `attach` only runs once a reply exists, so a turn that
+    shared a file posts as usual whatever its text says — the sentinel reaches the thread as text
+    rather than the file reaching nobody."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    await _seed_done_turn(workspace_id, "C5:200.0", SILENCE_SENTINEL, blob, artifact=True)
+
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    assert len(posts) == 1
+    assert json.loads(posts[0].content)["blocks"][0] == {
+        "type": "markdown",
+        "text": SILENCE_SENTINEL,
+    }
+    uploads = [r for r in recorder if str(r.url) == UPLOAD_URL]
+    assert len(uploads) == 1 and uploads[0].content == b"PDF-CONTENT"
+
+
+async def test_the_placeholder_and_outcome_lines_survive_the_suppression_path(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Only the sentinel is silence. A done turn that genuinely produced no text still gets the
+    placeholder, and a failed or cancelled turn still gets its outcome line — those are the
+    surface's own words about a turn the member is owed an answer for."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    await _seed_done_turn(workspace_id, "C6:200.0", "", blob, artifact=False)
+    await _seed_done_turn(workspace_id, "C7:200.0", "", blob, artifact=False, status="failed")
+    await _seed_done_turn(workspace_id, "C8:200.0", "", blob, artifact=False, status="cancelled")
+
+    await app.state.writeback_poller.drain()
+
+    posted = {
+        json.loads(request.content)["channel"]: json.loads(request.content)["blocks"][0]["text"]
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    }
+    assert posted == {
+        "C6": slack.SLACK_EMPTY_REPLY_TEXT,
+        "C7": slack.SLACK_TURN_FAILED_TEXT,
+        "C8": slack.SLACK_TURN_CANCELLED_TEXT,
     }
 
 
@@ -5102,6 +5189,23 @@ def test_every_closing_line_a_tool_free_checkpoint_can_render() -> None:
     writing.stream("Drafting the summary")
 
     assert writing.report(300.0) == ("*Now:* writing — 20 characters so far\n_5m in_")
+
+
+def test_a_checkpoint_on_a_turn_that_settled_on_silence_posts_nothing() -> None:
+    """A long turn that ends up saying nothing must not leave a progress message standing in its
+    place. Once the text in flight is the sentinel the turn has settled on silence, the checkpoint
+    is skipped however much work sits behind it — and a turn still writing a real answer keeps
+    reporting, sentinel-shaped prose in the answer included."""
+    silent = slack.TurnActivity()
+    silent.tool("read", "reading the thread")
+    silent.stream(SILENCE_SENTINEL)
+
+    assert silent.report(1_200.0) is None
+
+    resumed = slack.TurnActivity()
+    resumed.stream(f"The token to send is {SILENCE_SENTINEL} and nothing else.")
+
+    assert resumed.report(1_200.0) is not None
 
 
 def _progress_posts(recorder: list[httpx.Request]) -> list[dict[str, object]]:

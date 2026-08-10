@@ -33,8 +33,10 @@ Slack's own pages and enters two values privately in their terminal.
   rotate it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying
   in-thread; when mentioned in a thread it reads the earlier thread messages for context, and when
-  first addressed it reads the channel's recent messages — though it only ever answers when
-  addressed. Replies render the agent's markdown, and files the agent shares upload into the
+  first addressed it reads the channel's recent messages. Once a mention has made a thread its own
+  it reads every later reply there, mentioned or not, and answers the ones that ask it something —
+  two members talking to each other get no reply at all.
+  Replies render the agent's markdown, and files the agent shares upload into the
   thread; a message's attachments download into the agent's workspace. While it works it shows
   Slack's native thread status ("Thinking…", then what it's doing), and when it asks a question
   with fixed choices it presents them as buttons — clicking one answers as the member who clicked.

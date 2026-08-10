@@ -39,14 +39,17 @@ from ufo.credentials import (
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
     MAX_CONVERSATION_SPEAKERS,
+    NOTHING_DELIVERED,
     OPENING_MESSAGE_CHARS,
     OPERATOR_EMAIL_DOMAIN,
+    SILENCE_SENTINEL,
     TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
     WRITEBACK_WORKSPACE_BATCH,
+    NothingDelivered,
     SharedArtifact,
     SurfaceContext,
     SurfaceDeliveryError,
@@ -56,6 +59,7 @@ from ufo.ext.surface import (
     WritebackPoller,
     fence_member_message,
     inbox_name,
+    is_silence_sentinel,
     mint_marker,
     record_transcript_access,
     writeback_workspaces,
@@ -139,6 +143,16 @@ class RecordingSurface:
         self.attached.append(
             (writeback.turn_id, reply_ref, tuple(a.filename for a in writeback.artifacts))
         )
+
+
+@dataclass
+class SilentSurface(RecordingSurface):
+    """A surface whose delivery for this turn was to send nothing — the shape Slack takes when a
+    turn's whole answer is the silence sentinel."""
+
+    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> NothingDelivered:
+        self.posted.append(writeback.turn_id)
+        return NOTHING_DELIVERED
 
 
 @dataclass
@@ -1068,6 +1082,56 @@ async def test_write_workspace_file_streams_into_the_conversation_workspace(
         await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
     landed = root / str(conversation_id) / "slack-inbox/note.txt"
     assert landed.read_bytes() == b"hello world"
+
+
+def test_the_silence_sentinel_is_the_whole_answer_or_it_is_not_silence() -> None:
+    """The predicate is the only reader of the token, and it decides whether a member sees nothing
+    at all — so both directions are pinned. Whitespace around and between the tags is tolerated and
+    the self-closing form counts, because the model produces both; the element inside a longer
+    reply, or discussed in prose, is a normal reply that must still be posted."""
+    assert is_silence_sentinel(SILENCE_SENTINEL)
+    assert is_silence_sentinel(f"  {SILENCE_SENTINEL}\n")
+    assert is_silence_sentinel("<response>   </response>")
+    assert is_silence_sentinel("<response>\n</response>")
+    assert is_silence_sentinel("<response/>")
+    assert is_silence_sentinel("<response />")
+    assert not is_silence_sentinel("")
+    assert not is_silence_sentinel("   ")
+    assert not is_silence_sentinel(f"Nothing further from me. {SILENCE_SENTINEL}")
+    assert not is_silence_sentinel(f"{SILENCE_SENTINEL} {SILENCE_SENTINEL}")
+    assert not is_silence_sentinel(
+        f"Send `{SILENCE_SENTINEL}` when the message is not for you — that is the whole delivery."
+    )
+    assert not is_silence_sentinel("<response>no</response>")
+    assert not is_silence_sentinel("<responses></responses>")
+
+
+async def test_a_surface_that_delivered_nothing_settles_the_writeback(
+    db: None, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A silent turn is delivered, not retried and not failed: nothing was owed, so the row closes
+    with no reply ref recorded and no attachment phase — there is no message to attach to. A `None`
+    ref instead of the explicit outcome would read as "not posted yet" and re-post every drain."""
+    workspace_id, _, _ = await _seed()
+    turn_id = await _seed_turn(workspace_id, "CQUIET:1.0", "done", SILENCE_SENTINEL)
+    poller, surface = _poller(workspace_id, SilentSurface(), FilesystemBlobStore(root=tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await poller.drain()
+        await poller.drain()
+
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref is None
+    assert row.last_error is None
+    assert surface.posted == [turn_id]
+    assert surface.attached == []
+    reported = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "surface.writeback_nothing_delivered"
+    )
+    assert reported.__dict__["ufo"]["turn_id"] == str(turn_id)
 
 
 def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:

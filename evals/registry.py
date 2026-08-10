@@ -23,6 +23,7 @@ from evals import (
     site_build,
     skill_routing,
     slack_message_block,
+    slack_silence,
     tool_calling,
     web_research,
 )
@@ -39,6 +40,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task("response_register", response_register.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task("slack_silence", slack_silence.CASES),
     capability_task(
         "response_formatting", response_formatting.CASES, judge_model=SEMANTIC_JUDGE_MODEL
     ),
