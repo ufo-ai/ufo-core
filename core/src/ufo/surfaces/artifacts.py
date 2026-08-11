@@ -124,7 +124,12 @@ async def _refreshed_for_member(
             owner = (
                 await connection.execute(
                     sa.select(tables.shared_artifact.c.workspace_id)
-                    .where(tables.shared_artifact.c.blob_key == claims.blob_key)
+                    .where(
+                        sa.or_(
+                            tables.shared_artifact.c.blob_key == claims.blob_key,
+                            tables.shared_artifact.c.preview_blob_key == claims.blob_key,
+                        )
+                    )
                     .limit(1)
                 )
             ).scalar_one_or_none()

@@ -426,6 +426,63 @@ test("artifacts slot renders durable shared outputs with their download metadata
   expect(
     document.querySelector('aside img[src="/artifacts/preview/chart.png?token=signed"]'),
   ).toBeTruthy();
+  // The picture is already on the row, so the row offers no disclosure to open it again.
+  expect(screen.queryByText("Preview")).toBeNull();
+});
+
+test("a text artifact reads its bounded body into the slot and a binary one offers no preview", async () => {
+  const notes = "https://ufo.example/artifacts/notes.md?token=signed";
+  let bodyReads = 0;
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "notes.md",
+            subject: "The written summary",
+            media_type: "text/markdown",
+            size_bytes: 24,
+            created_at: "2026-08-06T12:00:00Z",
+            url: notes,
+            preview: null,
+          },
+          {
+            filename: "deck.pdf",
+            subject: null,
+            media_type: "application/pdf",
+            size_bytes: 4096,
+            created_at: "2026-08-06T11:00:00Z",
+            url: "https://ufo.example/artifacts/deck.pdf?token=signed",
+            preview: null,
+          },
+        ],
+        truncated: false,
+      }),
+    [notes]: () => {
+      bodyReads += 1;
+      return new Response("# Findings\n\nThe number moved.");
+    },
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 2 },
+        ],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Artifacts 2" }));
+  expect(await screen.findByText("The written summary")).toBeTruthy();
+  // One disclosure, on the text artifact — the PDF's row offers none, and neither row has read
+  // a byte of its body until the member opens it.
+  expect(screen.getAllByText("Preview")).toHaveLength(1);
+  expect(bodyReads).toBe(0);
+
+  await userEvent.click(screen.getByText("Preview"));
+  expect(await screen.findByText(/The number moved\./)).toBeTruthy();
+  expect(bodyReads).toBe(1);
 });
 
 test("tasks slot renders durable checklist progress and task status", async () => {

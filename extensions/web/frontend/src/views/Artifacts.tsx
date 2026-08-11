@@ -1,13 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import type { ListingSpec } from "@/kernel/listing";
 import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
 import { formatSize } from "@/lib/size";
 import { Sheet } from "@/components/ui/sheet";
-
-const VIEWER_TEXT_BYTES = 64 * 1024;
 
 type Artifact = {
   filename: string;
@@ -29,7 +28,7 @@ function isImage(entry: Artifact): boolean {
 }
 
 function isText(entry: Artifact): boolean {
-  return entry.media_type.startsWith("text/") || entry.media_type === "application/json";
+  return isTextMedia(entry.media_type);
 }
 
 export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
@@ -80,7 +79,7 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       {isImage(entry) ? (
         <FullImage entry={entry} />
       ) : isText(entry) ? (
-        <TextPreview url={entry.url} />
+        <ArtifactText url={entry.url} />
       ) : (
         <div className="font-mono text-small opacity-(--muted)">
           No preview for this file type. Download it to open it.
@@ -106,67 +105,5 @@ function FullImage({ entry }: { entry: Artifact }) {
       onError={() => setFailed(true)}
       className="max-h-[var(--media-tall)] max-w-full object-contain"
     />
-  );
-}
-
-function TextPreview({ url }: { url: string | null }) {
-  const [body, setBody] = useState<string | null>(null);
-  const [bounded, setBounded] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!url) return;
-    let live = true;
-    (async () => {
-      try {
-        const res = await fetch(url, { credentials: "same-origin" });
-        if (!res.ok) {
-          if (live) setMessage("Error " + res.status + " — reload to retry.");
-          return;
-        }
-        const reader = res.body!.getReader();
-        const chunks: Uint8Array[] = [];
-        let read = 0;
-        let ended = false;
-        while (!ended && read <= VIEWER_TEXT_BYTES) {
-          const step = await reader.read();
-          if (step.done) ended = true;
-          else {
-            chunks.push(step.value);
-            read += step.value.length;
-          }
-        }
-        if (!ended) await reader.cancel();
-        const bytes = new Uint8Array(read);
-        let at = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, at);
-          at += chunk.length;
-        }
-        if (!live) return;
-        setBody(new TextDecoder().decode(bytes.slice(0, VIEWER_TEXT_BYTES)));
-        setBounded(read > VIEWER_TEXT_BYTES);
-      } catch {
-        if (live) setMessage("Network error — try again.");
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [url]);
-
-  if (message) return <div className="font-mono text-small opacity-(--muted)">{message}</div>;
-  if (body === null) return <div>Loading…</div>;
-  return (
-    <>
-      <pre className="m-0 max-h-[var(--media-tall)] overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
-        {body}
-      </pre>
-      {bounded ? (
-        <div className="font-mono text-small opacity-(--muted)">
-          First {formatSize(VIEWER_TEXT_BYTES)} shown.
-        </div>
-      ) : null}
-    </>
   );
 }

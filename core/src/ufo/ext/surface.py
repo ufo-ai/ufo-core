@@ -317,13 +317,20 @@ class ListedArtifact:
 class SharedArtifact:
     """A file a turn shared, as the writeback poller hands it to a surface's `attach`: the blob key
     to stream from, the download name, an optional human caption (`subject`), and its media type and
-    size — the size lets a chunked-upload API reserve the exact length up front."""
+    size — the size lets a chunked-upload API reserve the exact length up front.
+
+    `preview_*` names a second blob holding the rendered picture of a file that is not itself one —
+    a document's first page, rasterized in the sandbox at share time. A file that is already an
+    image carries none: it is its own preview, minted off `blob_key`."""
 
     blob_key: str
     filename: str
     subject: str | None
     media_type: str
     size_bytes: int
+    preview_blob_key: str | None = None
+    preview_media_type: str | None = None
+    preview_size_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1035,22 +1042,36 @@ class SurfaceContext:
         return f"{self._public_base_url.rstrip('/')}{path}"
 
     def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
-        """A signed raster-preview link, or None when its type, size, or delivery is ineligible."""
+        """A signed raster-preview link, or None when its type, size, or delivery is ineligible.
+
+        Two files reach this: one that is already an image, previewed off its own bytes, and one the
+        sandbox rasterized a first page for at share time, previewed off that second blob. Either
+        way the grant names a raster type and an exact size, so the route serves the bytes inline
+        only after they prove to be that picture."""
         if not self._artifact_token_secret or not self._public_base_url:
             return None
-        media_type = raster_image_media_type(artifact.filename)
+        if artifact.preview_blob_key is not None:
+            blob_key = artifact.preview_blob_key
+            declared = artifact.preview_media_type
+            size_bytes = artifact.preview_size_bytes
+        else:
+            blob_key = artifact.blob_key
+            declared = artifact.media_type
+            size_bytes = artifact.size_bytes
+        media_type = raster_image_media_type(blob_key)
         if (
             media_type is None
-            or media_type != artifact.media_type
-            or artifact.size_bytes > IMAGE_PREVIEW_MAX_BYTES
+            or media_type != declared
+            or size_bytes is None
+            or size_bytes > IMAGE_PREVIEW_MAX_BYTES
         ):
             return None
         expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
         path = mint_artifact_url(
             self._artifact_token_secret,
-            artifact.blob_key,
+            blob_key,
             expires_at,
-            preview=ImagePreviewGrant(media_type=media_type, size_bytes=artifact.size_bytes),
+            preview=ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes),
         )
         return f"{self._public_base_url.rstrip('/')}{path}"
 
@@ -1827,6 +1848,9 @@ class SurfaceContext:
                 tables.shared_artifact.c.subject,
                 tables.shared_artifact.c.media_type,
                 tables.shared_artifact.c.size_bytes,
+                tables.shared_artifact.c.preview_blob_key,
+                tables.shared_artifact.c.preview_media_type,
+                tables.shared_artifact.c.preview_size_bytes,
                 tables.shared_artifact.c.created_at,
             )
             .select_from(
@@ -1855,6 +1879,9 @@ class SurfaceContext:
                     subject=row.subject,
                     media_type=row.media_type,
                     size_bytes=row.size_bytes,
+                    preview_blob_key=row.preview_blob_key,
+                    preview_media_type=row.preview_media_type,
+                    preview_size_bytes=row.preview_size_bytes,
                 ),
                 created_at=row.created_at,
             )

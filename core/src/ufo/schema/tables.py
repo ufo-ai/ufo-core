@@ -436,9 +436,18 @@ shared_artifact = sa.Table(
     sa.Column("subject", sa.Text, nullable=True),
     sa.Column("media_type", sa.Text, nullable=False),
     sa.Column("size_bytes", sa.BigInteger, nullable=False),
+    sa.Column("preview_blob_key", sa.Text, nullable=True),
+    sa.Column("preview_media_type", sa.Text, nullable=True),
+    sa.Column("preview_size_bytes", sa.BigInteger, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("size_bytes >= 0", name="shared_artifact_size"),
+    sa.CheckConstraint(
+        "(preview_blob_key IS NULL) = (preview_media_type IS NULL) "
+        "AND (preview_blob_key IS NULL) = (preview_size_bytes IS NULL) "
+        "AND (preview_size_bytes IS NULL OR preview_size_bytes >= 0)",
+        name="shared_artifact_preview",
+    ),
 )
 
 ext_store = sa.Table(

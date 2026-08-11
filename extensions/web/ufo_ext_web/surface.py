@@ -1482,15 +1482,20 @@ async def _project_slot_context(
         for artifact_entry in listed_artifacts[:CONVERSATION_ARTIFACTS_MAX]:
             try:
                 artifact_url = ctx.artifact_link(artifact_entry.artifact)
-                artifact_media_type = raster_image_media_type(artifact_entry.artifact.filename)
                 artifact_preview = None
                 artifact_preview_url = ctx.artifact_preview_link(artifact_entry.artifact)
-                if artifact_preview_url is not None and artifact_media_type is not None:
+                # The link is minted only for bytes that are a raster of a declared type — the
+                # file's own where it is a picture, its rendered first page where it is a document —
+                # so the picture's type is read off the blob the link serves, never off the
+                # member's filename, which for a document names the document.
+                if artifact_preview_url is not None:
                     parsed = urlsplit(artifact_preview_url)
-                    artifact_preview = ImagePreview(
-                        media_type=artifact_media_type,
-                        url=urlunsplit(("", "", parsed.path, parsed.query, "")),
-                    )
+                    preview_media_type = raster_image_media_type(parsed.path)
+                    if preview_media_type is not None:
+                        artifact_preview = ImagePreview(
+                            media_type=preview_media_type,
+                            url=urlunsplit(("", "", parsed.path, parsed.query, "")),
+                        )
                 artifacts.append(
                     ConversationArtifact(
                         filename=artifact_entry.artifact.filename,

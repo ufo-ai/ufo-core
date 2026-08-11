@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
@@ -388,37 +389,53 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
   return (
     <div className="flex min-w-0 flex-col gap-xl">
       {payload.artifacts.map((artifact, index) => (
-        <article
+        <SharedArtifact
           key={[artifact.created_at, artifact.filename, index].join(":")}
-          className="min-w-0 rounded-panel border border-edge p-lg"
-        >
-          {artifact.preview ? (
-            <img
-              loading="lazy"
-              alt=""
-              src={artifact.preview.url}
-              className="mb-md max-h-(--media-card) max-w-full rounded-sm border border-edge object-contain"
-            />
-          ) : null}
-          <h2 className="m-0 break-all font-mono text-label font-strong">
-            {artifact.url ? (
-              <a href={artifact.url} download={artifact.filename}>
-                {artifact.filename}
-              </a>
-            ) : (
-              artifact.filename
-            )}
-          </h2>
-          {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
-          <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
-            {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
-          </p>
-        </article>
+          artifact={artifact}
+        />
       ))}
       {payload.truncated ? (
         <p className="m-0 opacity-(--muted-soft)">Some artifacts may not be shown.</p>
       ) : null}
     </div>
+  );
+}
+
+function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
+  const [opened, setOpened] = useState(false);
+  const textUrl = isTextMedia(artifact.media_type) ? artifact.url : null;
+  return (
+    <article className="min-w-0 rounded-panel border border-edge p-lg">
+      {artifact.preview ? (
+        <img
+          loading="lazy"
+          alt=""
+          src={artifact.preview.url}
+          className="mb-md max-h-(--media-card) max-w-full rounded-sm border border-edge object-contain"
+        />
+      ) : null}
+      <h2 className="m-0 break-all font-mono text-label font-strong">
+        {artifact.url ? (
+          <a href={artifact.url} download={artifact.filename}>
+            {artifact.filename}
+          </a>
+        ) : (
+          artifact.filename
+        )}
+      </h2>
+      {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
+      <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+        {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
+      </p>
+      {textUrl ? (
+        <details className="mt-sm" onToggle={(event) => setOpened(event.currentTarget.open)}>
+          <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
+            Preview
+          </summary>
+          <div className="mt-sm">{opened ? <ArtifactText url={textUrl} /> : null}</div>
+        </details>
+      ) : null}
+    </article>
   );
 }
 

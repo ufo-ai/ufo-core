@@ -229,6 +229,8 @@ class ArtifactObjects:
                 raise ValueError(f"artifact {name!r} lost a version while deleting")
         for share in shares:
             await ctx.blob.delete(share.blob_key)
+            if share.preview_blob_key is not None:
+                await ctx.blob.delete(share.preview_blob_key)
 
     def _unchanged_visible(self, ctx: ToolContext, latest: sa.Row) -> sa.Select:
         return sa.select(tables.conversation.c.id).where(
@@ -256,6 +258,7 @@ class ArtifactObjects:
                         tables.shared_artifact.c.subject,
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.preview_blob_key,
                         tables.shared_artifact.c.created_at,
                         tables.turn.c.conversation_id,
                         tables.conversation.c.audience,

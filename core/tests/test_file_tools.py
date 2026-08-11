@@ -555,6 +555,108 @@ async def test_share_file_text_preflight_and_download_url(
     assert await ctx.blob.get(claims.blob_key) == body
 
 
+async def _shared_row(blob_key: str) -> sa.Row:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.preview_blob_key,
+                    tables.shared_artifact.c.preview_media_type,
+                    tables.shared_artifact.c.preview_size_bytes,
+                ).where(tables.shared_artifact.c.blob_key == blob_key)
+            )
+        ).one()
+
+
+@pytest.mark.parametrize(
+    ("filename", "build"),
+    [
+        (
+            "deck.pptx",
+            "python3 - <<'PY'\n"
+            "from pptx import Presentation\n"
+            "p = Presentation()\n"
+            "slide = p.slides.add_slide(p.slide_layouts[5])\n"
+            "slide.shapes.title.text = 'Quarterly review'\n"
+            "p.save('/workspace/deck.pptx')\n"
+            "PY\n",
+        ),
+        (
+            "brief.docx",
+            "python3 - <<'PY'\n"
+            "from docx import Document\n"
+            "d = Document()\n"
+            "d.add_heading('Quarterly review')\n"
+            "d.add_paragraph('The number moved.')\n"
+            "d.save('/workspace/brief.docx')\n"
+            "PY\n",
+        ),
+        (
+            "notes.pdf",
+            "python3 - <<'PY'\n"
+            "from pptx import Presentation\n"
+            "p = Presentation()\n"
+            "p.slides.add_slide(p.slide_layouts[6])\n"
+            "p.save('/workspace/notes.pptx')\n"
+            "PY\n"
+            "soffice --headless --convert-to pdf --outdir /workspace /workspace/notes.pptx\n",
+        ),
+    ],
+)
+async def test_share_file_renders_a_document_first_page_beside_its_bytes(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+    filename: str,
+    build: str,
+) -> None:
+    """A shared document carries a picture of itself: the sandbox's own soffice/pdftoppm render
+    its first page while the container is up, and it lands as a second blob the row names."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    built = await ctx.sandbox.bash(build, timeout_s=180)
+    assert built.exit_code == 0, built.stderr
+    result = await _run("share_file", ctx, file_path=filename)
+    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    row = await _shared_row(claims.blob_key)
+    assert row.preview_blob_key is not None and row.preview_blob_key != claims.blob_key
+    assert row.preview_media_type == "image/png"
+    rendered = await ctx.blob.get(row.preview_blob_key)
+    assert rendered.startswith(b"\x89PNG")
+    assert row.preview_size_bytes == len(rendered)
+
+
+async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+) -> None:
+    """Only a document earns a render. A text file has nothing to rasterize, and an image is
+    already its own preview — minted off its own bytes, never a second blob."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    await ctx.sandbox.write_file("report.txt", b"the produced report\n")
+    result = await _run("share_file", ctx, file_path="report.txt")
+    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    row = await _shared_row(claims.blob_key)
+    assert row.preview_blob_key is None
+    assert row.preview_media_type is None
+    assert row.preview_size_bytes is None
+
+
+async def test_share_file_shares_a_document_whose_render_fails(
+    file_ctx: tuple[ToolContext, Path],
+    db: None,
+) -> None:
+    """A file that names itself a document but holds nothing renderable still shares: the member's
+    bytes are already stored, and a picture that cannot be drawn is not a reason to lose them."""
+    ctx, _ = file_ctx
+    await _seed_turn_rows(ctx.turn)
+    await ctx.sandbox.write_file("broken.pdf", b"not a pdf at all\n")
+    result = await _run("share_file", ctx, file_path="broken.pdf")
+    claims = _download_claims(json.loads(result.content[0].text)["url"])
+    assert await ctx.blob.get(claims.blob_key) == b"not a pdf at all\n"
+    assert (await _shared_row(claims.blob_key)).preview_blob_key is None
+
+
 async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
     file_ctx: tuple[ToolContext, Path],
     s3_store: S3BlobStore,

@@ -32,6 +32,7 @@ import json
 import mimetypes
 import shlex
 from base64 import b64encode
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
@@ -50,7 +51,9 @@ from ufo.artifacts import artifact_object_names
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
+from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.members import ADD_MEMBER_TOOL_DEF
+from ufo.o11y import log
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
@@ -74,6 +77,29 @@ SHA256_DIGEST_PREFIX = "sha256:"
 ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
 ARTIFACT_PUT_TTL_SECONDS = 900
 ARTIFACT_PUT_TIMEOUT_SECONDS = 900
+ARTIFACT_PREVIEW_SUFFIXES = frozenset((".docx", ".pdf", ".pptx"))
+ARTIFACT_PREVIEW_MEDIA_TYPE = "image/png"
+ARTIFACT_PREVIEW_DPI = 100
+ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 180
+ARTIFACT_PREVIEW_DETAIL_CHARS = 500
+# One page, one raster: `soffice` reaches PDF from the Office formats and `pdftoppm` reaches a
+# picture from the PDF, so a `.pdf` skips the first step and every type shares the second.
+# `-singlefile` fixes the output at `<stem>.png` — a page-numbered name would have to be guessed
+# back. The convert writes into the engine's own offload dir, never beside the member's file.
+ARTIFACT_PREVIEW_PROG = """
+set -e
+source={source}
+stem={stem}
+if [ "${{source##*.}}" = "pdf" ]; then
+  pdf="$source"
+else
+  soffice --headless --convert-to pdf --outdir "$(dirname "$stem")" "$source" >/dev/null
+  pdf="$(dirname "$stem")/$(basename "${{source%.*}}").pdf"
+fi
+test -f "$pdf"
+pdftoppm -png -r {dpi} -f 1 -l 1 -singlefile "$pdf" "$stem"
+test -f "$stem.png"
+"""
 
 SHARE_PREFLIGHT_PROG = """
 import hashlib, json, sys
@@ -562,6 +588,64 @@ async def _store_artifact(
             raise RuntimeError(f"unsupported artifact store: {type(ctx.blob).__name__}")
 
 
+@dataclass(frozen=True)
+class ArtifactPreview:
+    """The rendered picture of a shared document, as a second blob beside the file's own bytes."""
+
+    blob_key: str
+    media_type: str
+    size_bytes: int
+
+
+async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> ArtifactPreview | None:
+    """Rasterize the first page of a shared document so a member sees the file rather than its name.
+
+    The renderers are the sandbox's own — `soffice` for the Office formats and `pdftoppm` for the
+    PDF they convert to, the same pair the `read` builtin shows the agent — so nothing new is
+    installed beside the engine and the picture a member gets is the picture the agent saw. This
+    runs while the sandbox is still up and the file is still local, which is the only moment both
+    are true: the artifact outlives its conversation, and a later render would have to rebuild a
+    container to reach a renderer.
+
+    A render that fails, times out, or comes back oversize yields no preview and never the share:
+    the member's file is already stored, and a missing picture is not a reason to lose it. The
+    reason is logged, so a format that never renders is visible rather than merely absent."""
+    if PurePosixPath(safe_name).suffix.lower() not in ARTIFACT_PREVIEW_SUFFIXES:
+        return None
+    await ctx.sandbox.ensure_tool_output_dir()
+    stem = f"{TOOL_OUTPUT_DIR}/preview-{uuid4().hex}"
+    render = await ctx.sandbox.bash(
+        ARTIFACT_PREVIEW_PROG.format(
+            source=shlex.quote(scoped), stem=shlex.quote(stem), dpi=ARTIFACT_PREVIEW_DPI
+        ),
+        timeout_s=ARTIFACT_PREVIEW_TIMEOUT_SECONDS,
+    )
+    rendered = f"{stem}.png"
+    if render.exit_code != 0:
+        log(
+            "share_file.preview.refused",
+            filename=safe_name,
+            detail=(render.stderr.strip() or render.stdout.strip())[:ARTIFACT_PREVIEW_DETAIL_CHARS],
+        )
+        return None
+    preflight = await ctx.sandbox.python(
+        SHARE_PREFLIGHT_PROG, rendered, WORKSPACE_DIR, timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS
+    )
+    if preflight.exit_code != 0:
+        log("share_file.preview.unmeasured", filename=safe_name)
+        return None
+    stat = json.loads(preflight.stdout)
+    size_bytes = int(stat["size"])
+    if size_bytes == 0 or size_bytes > IMAGE_PREVIEW_MAX_BYTES:
+        log("share_file.preview.oversize", filename=safe_name, size_bytes=size_bytes)
+        return None
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(safe_name).stem}.png"
+    await _store_artifact(ctx, rendered, key, size_bytes, str(stat["digest"]))
+    return ArtifactPreview(
+        blob_key=key, media_type=ARTIFACT_PREVIEW_MEDIA_TYPE, size_bytes=size_bytes
+    )
+
+
 async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResult:
     """Land a produced workspace file in the artifact store under `artifacts/<uuid>/<name>`, record
     it as a shared_artifact of this turn, and mint a TTL download token core's artifact route
@@ -594,6 +678,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await _store_artifact(ctx, scoped, key, int(stat["size"]), str(stat["digest"]))
     media_type = artifact_media_type(safe_name)
+    preview = await _shared_preview(ctx, scoped, safe_name)
     shared_at = datetime.now(UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -606,6 +691,9 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                 subject=args.subject,
                 media_type=media_type,
                 size_bytes=stat["size"],
+                preview_blob_key=None if preview is None else preview.blob_key,
+                preview_media_type=None if preview is None else preview.media_type,
+                preview_size_bytes=None if preview is None else preview.size_bytes,
                 created_at=shared_at,
                 updated_at=shared_at,
             )
