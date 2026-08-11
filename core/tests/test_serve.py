@@ -31,7 +31,6 @@ CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
 ANTHROPIC_KEY = "sk-ant-test"
 LEAF_PEM_PREFIX = "-----BEGIN CERTIFICATE-----"
 OWNER_LIBPQ_DSN = "postgresql://ufo_owner:pw@db.test/ufo"
-OWNER_ASYNCPG_DSN = "postgresql+asyncpg://ufo_owner:pw@db.test/ufo"
 RUN_TOKENS = RunTokenCodec(b"serve-test-run-token-secret")
 
 
@@ -356,14 +355,15 @@ def test_local_proxy_mints_an_ephemeral_ca_and_needs_no_shared_ca_env(
     assert endpoint.ca_cert.startswith(LEAF_PEM_PREFIX)
 
 
-def test_shared_owner_dsn_from_env_pins_the_async_driver(
+def test_shared_owner_dsn_prefers_the_env_over_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shared service opens owner_tx's engine from UFO_OWNER_DSN. The value's
-    contract is a plain libpq URL; serve pins the asyncpg driver its subject engine also dials so
-    the owner engine bypasses RLS through the table owner rather than falling back to it."""
+    """The shared service opens owner_tx's engine from UFO_OWNER_DSN, whose contract is a plain
+    libpq URL. This resolves which DSN to use and nothing else — the async driver is pinned by
+    `init_owner_db`, at the one place the URL is registered, so no caller can hold a form the async
+    engine cannot build."""
     monkeypatch.setenv(OWNER_DSN_ENV, OWNER_LIBPQ_DSN)
-    assert serve._shared_owner_dsn(_local_config()) == OWNER_ASYNCPG_DSN
+    assert serve._shared_owner_dsn(_local_config()) == OWNER_LIBPQ_DSN
 
 
 def test_shared_owner_dsn_falls_back_to_config_owner_url(
@@ -375,7 +375,7 @@ def test_shared_owner_dsn_falls_back_to_config_owner_url(
         blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
         sandbox=SandboxConfig(backend="local", proxy_port=0),
     )
-    assert serve._shared_owner_dsn(config) == OWNER_ASYNCPG_DSN
+    assert serve._shared_owner_dsn(config) == OWNER_LIBPQ_DSN
 
 
 def test_shared_owner_dsn_fails_loud_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

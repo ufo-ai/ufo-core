@@ -182,11 +182,16 @@ def init_owner_db(url: str) -> None:
     secret the shared proxy opens). Its role owns the tables and is never FORCEd RLS, so it reads
     across every workspace — the one cross-tenant path. `serve` always sets it; `ufoctl ingress`,
     `ufoctl proxy`, and one-shot verbs set no owner URL, so `owner_tx` falls to the app pool and
-    that URL's own role scopes it."""
+    that URL's own role scopes it.
+
+    The driver is normalized here rather than by each caller. A secret store hands this DSN out in
+    libpq form (`postgresql://`), which SQLAlchemy resolves to the sync psycopg2 dialect — a banned
+    import that is not installed — so an engine built from it raises before any query runs. Doing it
+    where the URL is registered leaves no caller holding the unusable form."""
     global _owner_url
     if _owner_url is not None:
         raise RuntimeError("owner db already initialized")
-    _owner_url = url
+    _owner_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 async def verify_db_reachable() -> None:

@@ -8,9 +8,10 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from ufo import o11y
 from ufo.cancellation import cancel_one_turn
-from ufo.db import workspace_tx
+from ufo.db import owner_tx, workspace_tx
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
+from ufo.workspace import ws
 
 
 @dataclass
@@ -236,3 +237,41 @@ async def test_a_cancel_that_transitioned_nothing_counts_no_terminal(
     assert await cancel_one_turn(_RacingClient(), turn_id) is False
     assert await _status(turn_id) == "done"
     assert _terminal_counts(reader) == []
+
+
+async def test_the_operator_verb_cancels_a_wedged_turn_in_its_own_workspace(db: None) -> None:
+    """`ufoctl turn cancel` is the only end an operator has for a turn no member can end — one
+    waiting in-turn on work that will not finish, or one a rollout keeps recovering. The verb finds
+    which workspace owns the id through the cross-workspace path, then cancels bound to that
+    workspace, so a deploy serving many tenants can still be given one turn id and act on it.
+    """
+    workspace_id, agent_id = await _workspace_agent()
+    other_workspace, other_agent = await _workspace_agent()
+    wedged = await _turn(workspace_id, agent_id, "running")
+    untouched = await _turn(other_workspace, other_agent, "running")
+    client = _RecordingClient()
+
+    async with owner_tx() as connection:
+        found = (
+            await connection.execute(
+                sa.select(tables.turn.c.workspace_id).where(tables.turn.c.id == wedged)
+            )
+        ).scalar_one()
+    assert found == workspace_id
+
+    with ws(found):
+        assert await cancel_one_turn(client, wedged) is True
+    assert client.cancelled == [str(wedged)]
+
+    async with workspace_tx() as connection:
+        statuses = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                        tables.turn.c.id.in_([wedged, untouched])
+                    )
+                )
+            ).all()
+        )
+    assert statuses[wedged] == "cancelled"
+    assert statuses[untouched] == "running"

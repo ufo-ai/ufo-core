@@ -373,7 +373,7 @@ def _shared_owner_dsn(config: Config) -> str:
             "owner_tx bypasses RLS with the owner role to enumerate every workspace the job sweeps "
             "fan across; without it the enumeration reads an unset app.workspace_id GUC and crashes"
         )
-    return dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return dsn
 
 
 def _launch_jobs(

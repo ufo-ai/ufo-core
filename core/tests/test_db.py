@@ -1860,3 +1860,26 @@ def test_a_migrated_sqlite_file_needs_no_journal_conversion_from_its_readers(
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_a_libpq_owner_dsn_registers_as_the_async_driver() -> None:
+    """The owner DSN arrives from a secret store in libpq form. SQLAlchemy resolves that to the sync
+    psycopg2 dialect — a banned import that is not installed — so an engine built from it raises
+    before any query runs, and every `owner_tx` caller fails at its first read. Normalizing where
+    the URL is registered is what keeps a caller that passes the secret through verbatim working.
+    """
+    ufo.db._owner_url = None
+    try:
+        init_owner_db("postgresql://ufo_owner:secret@db.internal:5432/ufo")
+        assert ufo.db._owner_url == "postgresql+asyncpg://ufo_owner:secret@db.internal:5432/ufo"
+    finally:
+        ufo.db._owner_url = None
+
+
+def test_an_owner_dsn_that_already_names_its_driver_is_untouched() -> None:
+    ufo.db._owner_url = None
+    try:
+        init_owner_db("postgresql+asyncpg://ufo_owner:secret@db.internal:5432/ufo")
+        assert ufo.db._owner_url == "postgresql+asyncpg://ufo_owner:secret@db.internal:5432/ufo"
+    finally:
+        ufo.db._owner_url = None

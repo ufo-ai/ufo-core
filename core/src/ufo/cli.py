@@ -21,13 +21,15 @@ import click
 import httpx
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from dbos import DBOSClient
 
 from ufo.accounting import SpendReport, SpendRollup
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.bundle import Bundle, wheel_name
+from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
-from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.db import apply_migrations, dispose_db, init_db, init_owner_db, owner_tx, workspace_tx
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, workspace_grant_summaries
@@ -40,6 +42,7 @@ from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
 from ufo.serve import home_surface
 from ufo.serve import run as serve_run
+from ufo.workspace import ws
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
 TURN_REQUEST_TIMEOUT_SECONDS = 90.0
@@ -1046,3 +1049,48 @@ def bundle(out: Path) -> None:
     )
     for pin in result.pins:
         click.echo(f"  {pin.name} {pin.version} {pin.digest}")
+
+
+@main.group(name="turn")
+def turn() -> None:
+    """Act on a single turn."""
+
+
+@turn.command(name="cancel")
+@click.argument("turn_id")
+def turn_cancel(turn_id: str) -> None:
+    """Cancel one turn: cancel its durable workflow, then commit its cancelled terminal.
+
+    The operator's only end for a turn no member can end — one waiting in-turn on work that will not
+    finish, or one a rollout keeps recovering without ever completing, which leaves its conversation
+    silent and its queue partition held. A turn that already reached its own terminal is untouched.
+    Descendants are the cancel reconciler's, as they are for every other cancel path.
+    """
+    config = load_config()
+    cancelled = asyncio.run(_cancel_turn(config, UUID(turn_id)))
+    click.echo(f"cancelled {turn_id}" if cancelled else f"{turn_id} was already terminal")
+
+
+async def _cancel_turn(config: Config, turn_id: UUID) -> bool:
+    """The turn's workspace is read through `owner_tx` and nothing else is: a cancel names one turn
+    by id, and finding which tenant owns it is exactly the identifier that path exists to yield.
+    The cancel itself runs bound to that workspace, so it goes through the same RLS every other
+    write does."""
+    init_db(config.database.url)
+    owner_dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    if owner_dsn:
+        init_owner_db(owner_dsn)
+    try:
+        async with owner_tx() as connection:
+            workspace_id = (
+                await connection.execute(
+                    sa.select(tables.turn.c.workspace_id).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one_or_none()
+        if workspace_id is None:
+            raise click.ClickException(f"no turn {turn_id}")
+        client = DBOSClient(system_database_url=config.database.system_url)
+        with ws(workspace_id):
+            return await cancel_one_turn(client, turn_id)
+    finally:
+        await dispose_db()
