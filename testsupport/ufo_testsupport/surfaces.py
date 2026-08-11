@@ -1,8 +1,13 @@
-"""Inert dependencies for tests that mount surfaces without exercising the skills view or the
-subagent roster — `_mount_shared_surfaces` requires a skill registry and a subagent registry, so a
-test that reads neither passes something real and empty."""
+"""Inert dependencies for tests that mount surfaces without exercising the skills view, the subagent
+roster, or the ambient reply decision — a surface context requires all three, so a test that reads
+none of them passes something real and empty."""
 
+import asyncio
+from dataclasses import dataclass, field
+
+from ufo.ambient_reply import AmbientDecision, AmbientReplyClassifier
 from ufo.loop.subagents import SubagentRegistry
+from ufo.models.interface import ModelRequest
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 
 EMPTY_SKILL_REGISTRY = SkillRegistry({})
@@ -11,3 +16,28 @@ NO_SUBAGENTS = SubagentRegistry(())
 
 async def no_user_skills() -> tuple[RuntimeSkill, ...]:
     return ()
+
+
+@dataclass(frozen=True)
+class FixedDecisionModel:
+    """The provider leg of the ambient reply decision, fixed to one answer and recording the payload
+    it was asked about — so a test drives ingest either way and reads back the thread the surface
+    built, never the prompt around it. A test whose surface should reach no model at all leaves
+    `decision` empty, and a call raises. A `gate` holds the answer until the test sets it, so a test
+    can assert what the surface did while the decision was still outstanding."""
+
+    decision: AmbientDecision | None = None
+    asked: list[str] = field(default_factory=list)
+    model: str = "fixed-decision"
+    gate: asyncio.Event | None = None
+
+    async def complete(self, request: ModelRequest) -> str:
+        if self.decision is None:
+            raise AssertionError("this surface reaches no model")
+        self.asked.append(str(request.messages[-1].content))
+        if self.gate is not None:
+            await self.gate.wait()
+        return self.decision
+
+
+UNREACHED_AMBIENT_REPLY = AmbientReplyClassifier(model=FixedDecisionModel())

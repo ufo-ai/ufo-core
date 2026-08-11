@@ -69,13 +69,20 @@ def _openai(
 
 
 def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[ModelSpec, ...]:
-    """Core's direct backends, built with the key-env names the deploy configured. `gpt-5.6-terra`
-    is called on the Responses surface (`api_surface="responses"`) — it rejects `tools` +
-    `reasoning_effort` together on `/v1/chat/completions` (#568), so it declares the surface that
-    renders the legal request rather than tripping a mid-turn 400. `claude-opus-5` carries the
-    1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8. Every
-    Anthropic `cache_write` is the 1h-TTL rate — 2x base input — because `AnthropicClient` requests
-    `ttl: 1h` on every breakpoint; cache reads are 0.1x base input."""
+    """Core's direct backends, built with the key-env names the deploy configured. The GPT-5.6
+    models are called on the Responses surface (`api_surface="responses"`) — each rejects `tools` +
+    `reasoning_effort` together on `/v1/chat/completions` (#568), so they declare the surface that
+    renders the legal request rather than tripping a mid-turn 400 — with `cache_write` at 1.25x base
+    input, the rate OpenAI bills a GPT-5.6 cache write at, and cache reads at 0.1x. `claude-opus-5`
+    carries the 1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8.
+    Every Anthropic `cache_write` is the 1h-TTL rate — 2x base input — because `AnthropicClient`
+    requests `ttl: 1h` on every breakpoint; cache reads are 0.1x base input.
+
+    The GPT-5.6 family accepts 1,050,000 tokens, but a request whose input passes 272,000 is billed
+    at 2x input and 1.5x output for the whole request, which one rate per token class cannot
+    express. `context_window` is what the turn loop compacts against, so these rows carry the
+    272,000 the registered rate is true at rather than the window the provider accepts: a larger
+    number would let a turn grow into a tier this table bills at half price."""
     return (
         _anthropic(
             "claude-fable-5",
@@ -128,7 +135,14 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
         ),
         _openai(
             "gpt-5.6-terra",
-            ModelPrice(2_500_000, 15_000_000, 250_000, 3_125_000),
+            ModelPrice(2_000_000, 12_000_000, 200_000, 2_500_000),
+            "2026-02",
+            openai_key_env,
+            api_surface="responses",
+        ),
+        _openai(
+            "gpt-5.6-luna",
+            ModelPrice(200_000, 1_200_000, 20_000, 250_000),
             "2026-02",
             openai_key_env,
             api_surface="responses",

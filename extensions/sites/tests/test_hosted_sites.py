@@ -48,7 +48,12 @@ from ufo_ext_sites.tools import (
     PUBLISH_WEBSITE_TOOL,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
@@ -192,6 +197,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
             PUBLIC_BASE_URL,
             ingress_public_url,
             DEPLOY_MODELS,
+            ambient_reply=UNREACHED_AMBIENT_REPLY,
             skills=EMPTY_SKILL_REGISTRY,
             user_skills=no_user_skills,
             subagents=NO_SUBAGENTS,

@@ -10,9 +10,9 @@ second-hand, from an admin asking about someone else.
 
 | Symptom | What to say and do |
 | --- | --- |
-| "It ignores us in the channel" | You answer when addressed — a direct message or an @-mention — and you have to be in the channel. Once a mention has started a thread, every reply in that thread reaches you, mentioned or not. Have them invite you and mention you once. |
+| "It ignores us in the channel" | You answer when addressed — a direct message or an @-mention — and you have to be in the channel. Once a mention has started a thread, you read every reply in that thread, mentioned or not. Have them invite you and mention you once. |
 | "It answered in a thread instead of the channel" | The thread is the conversation. Expected; say so and carry on. |
-| "It said nothing when we were talking in its thread" | Every reply in a thread you have joined reaches you, but you only answer the ones that ask you something: two people talking to each other get no reply, by design. If one of those messages was for you, they can mention you and you will pick it up. |
+| "It said nothing when we were talking in its thread" | You read every reply in a thread you have joined and answer the ones that ask you something: two people talking to each other get no reply, by design. If one of those messages was for you, they can mention you and you will pick it up. |
 | "My teammate messaged it and got nothing back" | A first message resolves by the email Slack confirms for them: a teammate on the workspace's email domain joins from that message alone, someone on another domain does not. Check which address their Slack account carries. |
 | The install link fails after they approve it | Mint a fresh one. Links are short-lived and single-purpose, so one from an earlier message will fail. |
 

@@ -5,7 +5,7 @@ import os
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -20,6 +20,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.activity import SKILL_LOAD_TOOL
+from ufo.ambient_reply import AmbientReplyClassifier
 from ufo.bearer import LOGIN_PATH
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import CdpProvider
@@ -41,7 +42,7 @@ from ufo.db import (
     init_owner_db,
     verify_db_reachable,
 )
-from ufo.ext.context import CredentialAccess
+from ufo.ext.context import CredentialAccess, ModelAccess
 from ufo.ext.context import context_for as extension_context_for
 from ufo.ext.conversation_slots import BoundConversationSlot
 from ufo.ext.loader import (
@@ -297,6 +298,9 @@ def run() -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        ambient_reply=AmbientReplyClassifier(
+            model=ModelAccess(replace(registry, auto_model=config.models.ambient_reply_model))
+        ),
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         subagents=runtime.subagents,
@@ -788,6 +792,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    ambient_reply: AmbientReplyClassifier,
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
     subagents: SubagentRegistry,
@@ -875,6 +880,7 @@ def _mount_shared_surfaces(
             _user_skills=user_skills,
             _subagents=subagent_roster,
             _declared_slots=slots,
+            _ambient_reply=ambient_reply,
             _object_schemas=kind_schemas,
             _memory=memory,
             _objects=objects or {},

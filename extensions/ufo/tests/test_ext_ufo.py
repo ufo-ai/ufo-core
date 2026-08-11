@@ -31,7 +31,12 @@ from ufo_ext_ufo.surface import (
     stream_directives,
 )
 from ufo_testsupport.invoker import invoker_factory
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.artifact_url import verify_artifact_url
 from ufo.blob import FilesystemBlobStore
@@ -611,6 +616,7 @@ async def ufo(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,
@@ -644,6 +650,7 @@ async def shared_ufo(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,
@@ -806,6 +813,7 @@ async def ufo_delivering_artifacts(
         ARTIFACT_BASE_URL,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,
@@ -1041,6 +1049,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,

@@ -28,6 +28,7 @@ from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
+from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
 from ufo.accounting import record_egress_request, record_sandbox_tokens, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
@@ -229,6 +230,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=DEPLOY_SKILLS,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         subagents=PORTAL_SUBAGENTS,

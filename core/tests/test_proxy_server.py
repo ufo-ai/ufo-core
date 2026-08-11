@@ -2202,7 +2202,7 @@ async def test_a_responses_shaped_body_is_metered_rather_than_billed_nothing(db:
         int(row.cache_read_tokens),
         int(row.priced_micro_usd),
         row.model,
-    ) == ("sandbox_tokens", 100_500, 100_000, 90_000, 55_000, "gpt-5.6-terra")
+    ) == ("sandbox_tokens", 100_500, 100_000, 90_000, 44_000, "gpt-5.6-terra")
 
 
 async def test_model_host_relay_skips_when_no_usage_is_reported(db: None) -> None:

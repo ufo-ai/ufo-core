@@ -10,7 +10,12 @@ from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import blob_store_for
@@ -97,6 +102,7 @@ def _site_link_app(tmp_path: Path, ingress_public_url: str | None) -> FastAPI:
         None,
         ingress_public_url,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,
@@ -133,6 +139,7 @@ def _app(tmp_path: Path) -> FastAPI:
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,
@@ -166,6 +173,7 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,

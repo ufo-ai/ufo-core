@@ -18,7 +18,11 @@ from ufo_ext_web.audience import (
 )
 from ufo_ext_web.manifest import NAME
 from ufo_ext_web.surface import SURFACE_WEB, _open_conversation
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -140,6 +144,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         _ingress_public_url=None,
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )
 
 

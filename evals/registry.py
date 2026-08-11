@@ -26,7 +26,6 @@ from evals import (
     site_build,
     skill_routing,
     slack_message_block,
-    slack_silence,
     tool_calling,
     web_research,
 )
@@ -40,6 +39,8 @@ from evals.harness.registry import (
 from evals.scenario_env import frontier, lookups, multistep, restraint, writes
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
 from evals.skill_loading.runner import skill_loading_task
+from evals.slack_silence import CASES as SLACK_SILENCE_CASES
+from evals.slack_silence import slack_silence_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
@@ -49,7 +50,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task("response_register", response_register.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
-    capability_task("slack_silence", slack_silence.CASES),
+    slack_silence_task(SLACK_SILENCE_CASES),
     capability_task(
         "response_formatting", response_formatting.CASES, judge_model=SEMANTIC_JUDGE_MODEL
     ),

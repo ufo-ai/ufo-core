@@ -93,9 +93,10 @@ class ModelRegistry:
 def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry:
     """Core's direct specs followed by every extension-contributed spec, indexed by id, and the
     price table their entries build. A duplicate id — two specs claiming one slug — fails loud, so a
-    contributed model never silently shadows a core one, and so does an `auto_model` naming no
-    registered spec: an agent that defers its model resolves through that knob every turn, so a typo
-    there is one boot failure rather than a mid-turn failure per workspace."""
+    contributed model never silently shadows a core one, and so does a configured model naming no
+    registered spec: an agent that defers its model resolves through `auto_model` every turn and
+    every ambient reply decision resolves through `ambient_reply_model`, so a typo in either is one
+    boot failure rather than a mid-turn failure per workspace."""
     core = core_model_specs(config.models.anthropic_api_key_env, config.models.openai_api_key_env)
     specs: dict[str, ModelSpec] = {}
     for spec in (*core, *(spec for manifest in manifests for spec in manifest.models)):
@@ -106,6 +107,11 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
         raise ValueError(
             f"models.auto_model {config.models.auto_model!r} is not a registered model id — "
             "every agent that defers its model resolves through it"
+        )
+    if config.models.ambient_reply_model not in specs:
+        raise ValueError(
+            f"models.ambient_reply_model {config.models.ambient_reply_model!r} is not a registered "
+            "model id — every ambient reply decision resolves through it"
         )
     return ModelRegistry(
         specs=specs,

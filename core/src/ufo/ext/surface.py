@@ -15,7 +15,9 @@ gets back and thus in how much of the one context each uses:
 - A **durable** surface (Slack) is delivered to — its member is elsewhere. Declaring a two-phase
   delivery (`post` then best-effort `attach`) is what marks it durable; core runs the
   `WritebackPoller` that delivers at-least-once from the durable terminal frame (the hub is lossy,
-  so never from a live frame). It declares one route (its ingest) and never tails.
+  so never from a live frame). It declares one route (its ingest) and never tails. Its ingest admits
+  ambient traffic too — a thread reply addressed to nobody — so it asks `ambient_reply_wanted`
+  first, and a message the agent is not wanted in founds no turn at all.
 - A **live** surface (web; core's built-in CLI is the twin) holds the member's connection open and
   tails the turn's frames off the hub as they publish, so no poller row is written for its
   conversations. It declares its own routes (page, admit, SSE tail, spend) and reaches the hub
@@ -50,6 +52,7 @@ from starlette.responses import Response
 
 from ufo.accounting import AgentSpendReport, MemberSpendReport, SpendReport, SpendRollup
 from ufo.agent_scope import agent as bind_agent
+from ufo.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
 from ufo.audience import (
     Audience,
@@ -87,7 +90,7 @@ from ufo.image_previews import (
     raster_image_media_type,
 )
 from ufo.listings import page_of, page_query
-from ufo.o11y import log
+from ufo.o11y import log, warn
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
@@ -171,23 +174,6 @@ _MEMBER_MESSAGE_RE = re.compile(
     rf"(?P<said>.*)\n</{MEMBER_MESSAGE_ELEMENT}_(?P=marker)>",
     re.DOTALL,
 )
-
-SILENCE_SENTINEL = "<response></response>"
-"""The whole delivery of a turn whose opening message asked nothing of the agent: an empty response
-element, which cannot occur in prose the way a bare word can. The prompt shows it literally and
-`is_silence_sentinel` is the only reader, so the token changes in these two places alone."""
-_SILENCE_NAME = SILENCE_SENTINEL.removeprefix("<").partition(">")[0]
-_SILENCE_RE = re.compile(rf"<{_SILENCE_NAME}>\s*</{_SILENCE_NAME}>|<{_SILENCE_NAME}\s*/>")
-
-
-def is_silence_sentinel(answer: str) -> bool:
-    """Whether a final answer is the silence delivery and nothing else.
-
-    Strict about the whole answer: whitespace-stripped, it is the empty response element — the
-    paired form with any whitespace between the tags, or the self-closing one, since the model
-    produces both. An answer that merely contains the element among other text is a normal reply and
-    is posted as written, because silence is only ever the whole delivery."""
-    return _SILENCE_RE.fullmatch(answer.strip()) is not None
 
 
 def mint_marker() -> str:
@@ -366,6 +352,7 @@ class Writeback:
     connect_request: ConnectRequest | None
 
 
+AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
 TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
@@ -862,6 +849,7 @@ class SurfaceContext:
     _user_skills: Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]
     _subagents: tuple[SubagentDetail, ...]
     _declared_slots: tuple[DeclaredSlot, ...]
+    _ambient_reply: AmbientReplyClassifier
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _memory: "MemorySearch | None" = None
@@ -1350,6 +1338,39 @@ class SurfaceContext:
         if bound is not None:
             return bound.agent_id
         return await _main_agent(self.workspace_id)
+
+    async def ambient_reply_wanted(
+        self, message: AmbientMessage, history: tuple[AmbientMessage, ...]
+    ) -> bool:
+        """Whether one un-addressed message in a thread the agent converses in earns a turn — the
+        decision a durable surface makes before it admits ambient traffic, on the deploy's ambient
+        reply model with the thread's recent messages as its evidence.
+
+        Fails open, bounded by `AMBIENT_REPLY_TIMEOUT_SECONDS`: a provider that errors, stalls, or
+        answers something unreadable admits the turn. The two outcomes are not symmetric — an
+        unwanted reply costs one line, while a decision this seam gets wrong in the other direction
+        drops a member's request with nothing to show them — so every failure resolves to the
+        expensive outcome. Only a decision this seam actually read holds a message back."""
+        try:
+            decision = await asyncio.wait_for(
+                self._ambient_reply.decide(message, history), AMBIENT_REPLY_TIMEOUT_SECONDS
+            )
+        except Exception as error:
+            warn(
+                "surface.ambient_reply_undecided",
+                surface=self.surface,
+                model=self._ambient_reply.model.model,
+                error=repr(error),
+            )
+            return True
+        log(
+            "surface.ambient_reply",
+            surface=self.surface,
+            model=self._ambient_reply.model.model,
+            decision=decision,
+            history=len(history),
+        )
+        return decision != NO_REPLY
 
     async def admit(
         self,
@@ -2936,19 +2957,8 @@ class SurfaceAuth:
             return await self._credentials.get(workspace_id, slot)
 
 
-@dataclass(frozen=True)
-class NothingDelivered:
-    """What a durable surface's `post` returns when the delivery was to send nothing at all — a turn
-    whose answer is the silence sentinel. There is no message to reference, so no `reply_ref` is
-    recorded and `attach` never runs; the writeback is still marked delivered, because nothing is
-    what the turn owed. An explicit outcome rather than a `None` reply ref, which the poller reads
-    as "not posted yet" and would re-post forever."""
-
-
-NOTHING_DELIVERED = NothingDelivered()
-
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
-PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str | NothingDelivered]]
+PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
 WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response | None]]
 SurfaceContextFactory = Callable[[UUID, str], SurfaceContext]
@@ -2994,9 +3004,7 @@ class SurfaceSpec:
     bound to the surface's `SurfaceContext`. A **durable** surface also declares its two-phase
     writeback delivery: `post` sends the reply and returns its durable reference (recorded before
     any upload, so recovery skips the re-post), then `attach` uploads the turn's shared files into
-    that reply. A `post` returning `NOTHING_DELIVERED` sent no message at all: no reference is
-    recorded and `attach` never runs, and the turn is delivered rather than retried.
-    Recovery repeats `attach`: attachment delivery is at-least-once because a crash
+    that reply. Recovery repeats `attach`: attachment delivery is at-least-once because a crash
     after upload but before the delivered commit cannot distinguish the completed upload. A
     surface may make individual files best effort so one rejection does not block its siblings.
     The poller drives these for every turn its ingest admitted with writeback. A **live**
@@ -3291,17 +3299,9 @@ class WritebackPoller:
         context = self.context_for(workspace_id, surface_name)
         if reply_ref is None:
             try:
-                posted = await spec.post(context, writeback)
+                reply_ref = await spec.post(context, writeback)
             except Exception as error:
                 raise _WritebackDeliveryFailed("post", error) from error
-            if isinstance(posted, NothingDelivered):
-                log(
-                    "surface.writeback_nothing_delivered",
-                    turn_id=str(turn_id),
-                    surface=surface_name,
-                )
-                return
-            reply_ref = posted
             await self._record_ref(turn_id, reply_ref)
         try:
             await spec.attach(context, writeback, reply_ref)

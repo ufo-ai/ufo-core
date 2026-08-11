@@ -11,7 +11,11 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
@@ -92,6 +96,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         _ingress_public_url=None,
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )
 
 

@@ -138,7 +138,7 @@ from evals.response_register import (
 from ufo.accounting import Pricing
 from ufo.agents import AGENT_KIND
 from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.config import DEFAULT_AMBIENT_REPLY_MODEL, BlobConfig, Config, DatabaseConfig
 from ufo.credentials import (
     CredentialRequests,
     CredentialSlotUnset,
@@ -263,12 +263,15 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["closing_message"].simulator_model is None
     assert tasks["onboarding_help"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["onboarding_help"].simulator_model is None
+    assert tasks["slack_silence"].judge_model == DEFAULT_AMBIENT_REPLY_MODEL
+    assert tasks["slack_silence"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
         if name
         not in {
             "semantic_quality",
+            "slack_silence",
             "scenario_smoke",
             "scenario_env",
             "object_tools",
@@ -300,6 +303,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "handback",
         "ab_reversal",
         "red_after_green",
+        "slack_silence",
     }
 
 

@@ -24,7 +24,12 @@ from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import SESSION_COOKIE
 from ufo_testsupport.invoker import invoker_factory
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
@@ -195,6 +200,7 @@ async def memory_web(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,

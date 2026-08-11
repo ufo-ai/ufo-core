@@ -54,7 +54,12 @@ from ufo_ext_web.surface import (
 )
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.accounting import record_egress_request, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
@@ -734,6 +739,7 @@ async def web(
         "https://web",
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=lambda: turn_runtime_skills(
             (skill_create_manifest(),),
@@ -5640,6 +5646,7 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,

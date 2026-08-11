@@ -20,7 +20,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_debugger import surface as debugger_surface
 from ufo_ext_debugger.manifest import manifest as debugger_manifest
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    NO_SUBAGENTS,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -99,6 +104,7 @@ async def debug(
         None,
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=EMPTY_SKILL_REGISTRY,
         user_skills=no_user_skills,
         subagents=NO_SUBAGENTS,

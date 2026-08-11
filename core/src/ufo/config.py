@@ -15,6 +15,7 @@ DEFAULT_CONFIG_PATH = Path("ufo.toml")
 IN_PROCESS_BACKEND = "in_process"
 DEFAULT_CDP_PROVIDER = "sandbox_chrome"
 DEFAULT_AUTO_MODEL = "claude-opus-5"
+DEFAULT_AMBIENT_REPLY_MODEL = "gpt-5.6-luna"
 DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
 
@@ -79,17 +80,25 @@ class BlobConfig(BaseModel):
 
 class ModelsConfig(BaseModel):
     """`auto_model` is the concrete model an agent authored with `model = "auto"` resolves to at
-    turn time, so an agent stays model-agnostic and the deploy pins the backend."""
+    turn time, so an agent stays model-agnostic and the deploy pins the backend.
+    `ambient_reply_model` is the cheap model the pre-admission ambient-reply decision runs on, one
+    call per un-addressed thread reply ahead of any turn — pinned separately because it is priced
+    against the turn it prevents, not against the answer an agent gives."""
 
     model_config = ConfigDict(extra="forbid")
     anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
     openai_api_key_env: str = "OPENAI_API_KEY"
     auto_model: str = DEFAULT_AUTO_MODEL
+    ambient_reply_model: str = DEFAULT_AMBIENT_REPLY_MODEL
 
     @model_validator(mode="after")
-    def _auto_model_concrete(self) -> "ModelsConfig":
+    def _models_concrete(self) -> "ModelsConfig":
         if not self.auto_model or self.auto_model == AUTO_MODEL:
             raise ValueError("models.auto_model must be a concrete model id, not empty or 'auto'")
+        if not self.ambient_reply_model or self.ambient_reply_model == AUTO_MODEL:
+            raise ValueError(
+                "models.ambient_reply_model must be a concrete model id, not empty or 'auto'"
+            )
         return self
 
 

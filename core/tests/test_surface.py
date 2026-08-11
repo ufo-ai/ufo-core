@@ -17,9 +17,14 @@ import lz4.frame
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, no_user_skills
+from ufo_testsupport.surfaces import (
+    EMPTY_SKILL_REGISTRY,
+    UNREACHED_AMBIENT_REPLY,
+    no_user_skills,
+)
 
 import ufo.ext.surface as surface_module
+from ufo.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
 from ufo.audience import (
     SHARED_AUDIENCE,
     conversation_audience,
@@ -39,17 +44,14 @@ from ufo.credentials import (
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
     MAX_CONVERSATION_SPEAKERS,
-    NOTHING_DELIVERED,
     OPENING_MESSAGE_CHARS,
     OPERATOR_EMAIL_DOMAIN,
-    SILENCE_SENTINEL,
     TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
     WRITEBACK_WORKSPACE_BATCH,
-    NothingDelivered,
     SharedArtifact,
     SurfaceContext,
     SurfaceDeliveryError,
@@ -59,14 +61,13 @@ from ufo.ext.surface import (
     WritebackPoller,
     fence_member_message,
     inbox_name,
-    is_silence_sentinel,
     mint_marker,
     record_transcript_access,
     writeback_workspaces,
 )
 from ufo.hub import InProcessHub
 from ufo.loop.queue import _load_turn
-from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.models.interface import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.containment import ContainmentError
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_host import parse_site_label
@@ -144,16 +145,6 @@ class RecordingSurface:
         self.attached.append(
             (writeback.turn_id, reply_ref, tuple(a.filename for a in writeback.artifacts))
         )
-
-
-@dataclass
-class SilentSurface(RecordingSurface):
-    """A surface whose delivery for this turn was to send nothing — the shape Slack takes when a
-    turn's whole answer is the silence sentinel."""
-
-    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> NothingDelivered:
-        self.posted.append(writeback.turn_id)
-        return NOTHING_DELIVERED
 
 
 @dataclass
@@ -268,6 +259,7 @@ def _context(
         _ingress_public_url="https://sites.example.test",
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        _ambient_reply=UNREACHED_AMBIENT_REPLY,
     )
 
 
@@ -1085,54 +1077,89 @@ async def test_write_workspace_file_streams_into_the_conversation_workspace(
     assert landed.read_bytes() == b"hello world"
 
 
-def test_the_silence_sentinel_is_the_whole_answer_or_it_is_not_silence() -> None:
-    """The predicate is the only reader of the token, and it decides whether a member sees nothing
-    at all — so both directions are pinned. Whitespace around and between the tags is tolerated and
-    the self-closing form counts, because the model produces both; the element inside a longer
-    reply, or discussed in prose, is a normal reply that must still be posted."""
-    assert is_silence_sentinel(SILENCE_SENTINEL)
-    assert is_silence_sentinel(f"  {SILENCE_SENTINEL}\n")
-    assert is_silence_sentinel("<response>   </response>")
-    assert is_silence_sentinel("<response>\n</response>")
-    assert is_silence_sentinel("<response/>")
-    assert is_silence_sentinel("<response />")
-    assert not is_silence_sentinel("")
-    assert not is_silence_sentinel("   ")
-    assert not is_silence_sentinel(f"Nothing further from me. {SILENCE_SENTINEL}")
-    assert not is_silence_sentinel(f"{SILENCE_SENTINEL} {SILENCE_SENTINEL}")
-    assert not is_silence_sentinel(
-        f"Send `{SILENCE_SENTINEL}` when the message is not for you — that is the whole delivery."
+@dataclass
+class _Decides:
+    answer: str
+    model: str = "decider"
+
+    async def complete(self, request: ModelRequest) -> str:
+        return self.answer
+
+
+@dataclass
+class _Raises:
+    model: str = "decider"
+
+    async def complete(self, request: ModelRequest) -> str:
+        raise RuntimeError("provider is down")
+
+
+@dataclass
+class _Stalls:
+    model: str = "decider"
+
+    async def complete(self, request: ModelRequest) -> str:
+        await asyncio.sleep(30)
+        return "REPLY"
+
+
+def _ambient_context(tmp_path: Path, model: MeteredModel) -> SurfaceContext:
+    return replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _ambient_reply=AmbientReplyClassifier(model=model),
     )
-    assert not is_silence_sentinel("<response>no</response>")
-    assert not is_silence_sentinel("<responses></responses>")
 
 
-async def test_a_surface_that_delivered_nothing_settles_the_writeback(
-    db: None, tmp_path, caplog: pytest.LogCaptureFixture
+async def test_a_decided_ambient_reply_is_the_answer_the_surface_gets(
+    tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A silent turn is delivered, not retried and not failed: nothing was owed, so the row closes
-    with no reply ref recorded and no attachment phase — there is no message to attach to. A `None`
-    ref instead of the explicit outcome would read as "not posted yet" and re-post every drain."""
-    workspace_id, _, _ = await _seed()
-    turn_id = await _seed_turn(workspace_id, "CQUIET:1.0", "done", SILENCE_SENTINEL)
-    poller, surface = _poller(workspace_id, SilentSurface(), FilesystemBlobStore(root=tmp_path))
+    """Only a decision this seam actually read holds a message back, and the record says which model
+    read it — the one place an operator can see what the deploy is spending its ambient decisions
+    on."""
+    message = AmbientMessage(speaker="U2", text="nice, thanks for chasing that")
+    history = (AmbientMessage(speaker="UBOT", text="here it is", own=True),)
 
     with caplog.at_level(logging.INFO, logger="ufo"):
-        await poller.drain()
-        await poller.drain()
+        assert not await _ambient_context(tmp_path, _Decides("NO_REPLY")).ambient_reply_wanted(
+            message, history
+        )
+        assert await _ambient_context(tmp_path, _Decides("REPLY")).ambient_reply_wanted(
+            message, history
+        )
 
-    row = await _writeback(turn_id)
-    assert row.status == WRITEBACK_DELIVERED
-    assert row.reply_ref is None
-    assert row.last_error is None
-    assert surface.posted == [turn_id]
-    assert surface.attached == []
-    reported = next(
-        record
-        for record in caplog.records
-        if record.getMessage() == "surface.writeback_nothing_delivered"
-    )
-    assert reported.__dict__["ufo"]["turn_id"] == str(turn_id)
+    decided = [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
+    assert [(r.__dict__["ufo"]["decision"], r.__dict__["ufo"]["history"]) for r in decided] == [
+        ("NO_REPLY", 1),
+        ("REPLY", 1),
+    ]
+    assert {r.__dict__["ufo"]["model"] for r in decided} == {"decider"}
+
+
+async def test_an_undecided_ambient_reply_admits_the_turn(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail open, every way the decision can fail to arrive: a provider that errors, one whose
+    answer is unreadable, and one that never comes back inside the bound. The two outcomes are not
+    symmetric — an unwanted line costs one line, while a dropped request costs the member their
+    answer with nothing to show them — so an undecided message is admitted and the operator gets the
+    record."""
+    monkeypatch.setattr(surface_module, "AMBIENT_REPLY_TIMEOUT_SECONDS", 0.01)
+    message = AmbientMessage(speaker="U2", text="how many rows did the others come back with?")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        for model in (_Raises(), _Decides("maybe?"), _Stalls()):
+            assert await _ambient_context(tmp_path, model).ambient_reply_wanted(message, ())
+
+    undecided = [
+        r.__dict__["ufo"]["error"]
+        for r in caplog.records
+        if r.getMessage() == "surface.ambient_reply_undecided"
+    ]
+    assert len(undecided) == 3
+    assert "provider is down" in undecided[0]
+    assert "unreadable" in undecided[1]
+    assert "TimeoutError" in undecided[2]
+    assert not [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
 
 
 def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:
