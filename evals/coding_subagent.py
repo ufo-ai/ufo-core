@@ -17,11 +17,7 @@ BACKGROUND_FLAG = TypeAdapter(bool)
 def parallel_checkout_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         spawns: list[tuple[int, str, bool]] = []
-        waits: list[int] = []
         for index, call in enumerate(output.calls):
-            if call.name == "wait_for_subagents" and call.succeeded:
-                waits.append(index)
-                continue
             if call.name != "spawn_subagent" or not call.succeeded:
                 continue
             match call.input:
@@ -37,7 +33,7 @@ def parallel_checkout_scorer() -> Grader:
         clone = "clone https://github.com/octocat/Hello-World into "
         if not spawns or clone not in spawns[0][1]:
             return CapabilityVerdict(False, "the first coding spawn does not create the checkout")
-        setup_index, setup, setup_background = spawns[0]
+        _, setup, setup_background = spawns[0]
         if (
             "verify the checkout, report the checked-out branch as the base, then finish without "
             "task work" not in setup
@@ -52,12 +48,9 @@ def parallel_checkout_scorer() -> Grader:
         workers = [spawn for spawn in spawns[1:] if marker in spawn[1]]
         if len(workers) < 2:
             return CapabilityVerdict(False, "fewer than two workers use local checkouts")
-        first_worker_index = workers[0][0]
-        if setup_background and not any(
-            setup_index < wait_index < first_worker_index for wait_index in waits
-        ):
+        if setup_background:
             return CapabilityVerdict(
-                False, "the backgrounded setup spawn is not awaited before the first worker"
+                False, "the setup spawn every worker depends on is backgrounded, not foreground"
             )
         tails = [objective.split(marker, 1)[1] for _, objective, _ in workers]
         if any(" with git" not in tail for tail in tails):

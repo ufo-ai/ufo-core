@@ -14,6 +14,9 @@ TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
 ReasoningEffort = Literal["auto", "off", "low", "medium", "high"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "auto"
 NON_TERMINAL_STATUSES: tuple[TurnStatus, ...] = ("queued", "running", "parked")
+ResultDelivery = Literal["pending", "delivered"]
+DELIVERY_PENDING: ResultDelivery = "pending"
+DELIVERY_DELIVERED: ResultDelivery = "delivered"
 WritebackStatus = Literal["pending", "claimed", "delivered", "failed"]
 WRITEBACK_PENDING: WritebackStatus = "pending"
 WRITEBACK_CLAIMED: WritebackStatus = "claimed"
@@ -26,6 +29,7 @@ MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 INTENT_ADMISSION: TurnAdmissionSource = "intent"
+SUBAGENT_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
 
 
@@ -226,6 +230,7 @@ class Turn(BaseModel):
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
+    result_delivery: ResultDelivery | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
 

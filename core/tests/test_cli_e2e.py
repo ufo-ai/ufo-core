@@ -32,6 +32,7 @@ from fastapi import FastAPI
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
+from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 from ufo_testsupport.tables import reset_workspace_data
 
@@ -560,6 +561,7 @@ def chat_server(
                 connectors=ConnectorRegistry(entries={}),
                 run_tokens=RunTokenCodec(TOKEN_SECRET.encode()),
                 dbos=dbos_client,
+                invoker_for=invoker_factory(dbos_client),
                 subagents=SubagentRegistry(()),
                 subagent_grants={},
                 manifests=(),

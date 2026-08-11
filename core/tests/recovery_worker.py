@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions
 from ufo_ext_index_default import DefaultIndex
+from ufo_testsupport.invoker import invoker_factory
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -205,6 +206,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )
+    recovery_dbos = DBOSClient(system_database_url=env.system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
@@ -222,7 +224,8 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"recovery-worker-test-secret"),
-            dbos=DBOSClient(system_database_url=env.system_url),
+            dbos=recovery_dbos,
+            invoker_for=invoker_factory(recovery_dbos),
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),

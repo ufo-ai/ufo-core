@@ -85,12 +85,14 @@ from ufo.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_f
 from ufo.hub import Hub, InProcessHub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.jobs import (
+    InvokerFactory,
     JobRunner,
     PageChangeRunner,
     TurnDispatcher,
     bindings_from,
     core_jobs,
 )
+from ufo.loop.delivery import DeliverySweep
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagent_catalog import subagent_catalog_skill
@@ -198,6 +200,11 @@ def run() -> None:
     )
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
+    admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
+
+    def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
+        return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
+
     runtime = Runtime(
         config=config,
         blob=blob,
@@ -217,6 +224,7 @@ def run() -> None:
         connectors=connectors,
         run_tokens=run_tokens,
         dbos=dbos_client,
+        invoker_for=invoker_for,
         subagents=subagents,
         subagent_grants=turn_subagent_grants(manifests),
         manifests=manifests,
@@ -275,7 +283,7 @@ def run() -> None:
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
     )
     page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, sync_driver, page_feed)
+    _launch_jobs(runtime, invoker_for, sync_driver, page_feed)
     _mount_ext_routes(app, manifests, credentials, index, embed)
     _mount_shared_surfaces(
         app,
@@ -366,21 +374,18 @@ def _shared_owner_dsn(config: Config) -> str:
 
 def _launch_jobs(
     runtime: Runtime,
+    invoker_for: InvokerFactory,
     sync_driver: SyncDriver,
     page_feed: CorePageFeed,
 ) -> None:
-    """Register this workspace's jobs — core's own (the source sync driver and the turn dispatcher
-    that recovers queued turns and re-admits parked turns) plus every
+    """Register this workspace's jobs — core's own (the source sync driver, the turn dispatcher
+    that recovers queued turns and re-admits parked turns, and the delivery sweep that hands back
+    the delegated children their own execution could not) plus every
     installed extension's (the memory extension's memory-index and page-index jobs among them) — as
     DBOS schedules and one-shot enqueues, after
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
-    admission = Admission(dbos=runtime.dbos, durable_surfaces=durable_surfaces(runtime.manifests))
-
-    def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
-        return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -397,6 +402,7 @@ def _launch_jobs(
             sync_driver,
             TurnDispatcher(client=runtime.dbos),
             page_change_runner,
+            DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
         ),
     )
     JobRunner(

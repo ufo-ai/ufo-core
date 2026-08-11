@@ -171,7 +171,6 @@ def test_registry_schemas_cover_every_tool() -> None:
         "request_credentials",
         "load_skill",
         "connect_account",
-        "wait_for_subagents",
         "cancel_subagent",
         "message_subagent",
     }
@@ -652,24 +651,6 @@ async def test_load_skill_unknown_name_fails_loud(tmp_path: Path) -> None:
         await _load_skill(ctx, "nope")
 
 
-async def test_wait_for_subagents_awaits_each_child_and_reports_status(tmp_path: Path) -> None:
-    child = uuid4()
-    control = StubSubagentControl(
-        statuses={child: SubagentStatus(turn_id=child, status="done", text='{"result": "ok"}')}
-    )
-    ctx = make_context(FakeSandbox(), tmp_path, subagents=control)
-    result = await run("wait_for_subagents", ctx, subagent_ids=[str(child)], user_description="x")
-    assert control.waited == [(child,)]
-    reported = json.loads(result.content[0].text)["subagents"]
-    assert reported == [{"subagent_id": str(child), "status": "done", "output": '{"result": "ok"}'}]
-
-
-async def test_wait_for_subagents_without_control_fails_loud(tmp_path: Path) -> None:
-    ctx = make_context(FakeSandbox(), tmp_path)
-    with pytest.raises(RuntimeError, match="subagent control is not available"):
-        await run("wait_for_subagents", ctx, subagent_ids=[str(uuid4())], user_description="x")
-
-
 async def test_cancel_subagent_cancels_and_reports_status(tmp_path: Path) -> None:
     child = uuid4()
     control = StubSubagentControl()
@@ -780,15 +761,16 @@ async def test_spawn_subagent_unknown_profile_is_an_error_naming_the_valid_profi
 
 
 async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
-    recorded: list[str | None] = []
+    recorded: list[tuple[str | None, bool]] = []
 
     async def _record(
         profile: str,
         payload: dict[str, object],
         background: bool = False,
         dedup_key: str | None = None,
+        delivers_result: bool = False,
     ) -> SpawnResult:
-        recorded.append(dedup_key)
+        recorded.append((dedup_key, delivers_result))
         return SpawnResult(turn_id=uuid4(), output=None)
 
     assert REGISTRY.get("spawn_subagent").side_effecting is True
@@ -804,8 +786,17 @@ async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_pa
         background=True,
         user_description="handing off the research",
     )
-    assert recorded == ["turn-1/spawn_subagent/call-1"]
+    assert recorded == [("turn-1/spawn_subagent/call-1", True)]
     assert not result.is_error
+
+    await run(
+        "spawn_subagent",
+        ctx,
+        profile="research",
+        payload={"task": "x"},
+        user_description="handing off the research",
+    )
+    assert recorded[1] == ("turn-1/spawn_subagent/call-1", False)
 
 
 SEAL_MEMBER = UUID("11111111-1111-1111-1111-111111111111")

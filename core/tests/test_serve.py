@@ -168,6 +168,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         blob=object(),
         registry=registry,
         sandboxes=object(),
+        subagents=object(),
     )
 
     def page_change_runner(**kwargs: object) -> object:
@@ -192,7 +193,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         serve, "model_registry", lambda *args: pytest.fail("model registry built twice")
     )
 
-    serve._launch_jobs(runtime, object(), object())
+    serve._launch_jobs(runtime, object(), object(), object())
 
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry

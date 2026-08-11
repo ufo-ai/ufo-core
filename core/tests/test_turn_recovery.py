@@ -27,6 +27,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
+from ufo_testsupport.invoker import invoker_factory
 
 from ufo import o11y
 from ufo.blob import FilesystemBlobStore
@@ -207,6 +208,7 @@ async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID, UUID]:
 
 
 def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Path) -> None:
+    recovery_dbos = DBOSClient(system_database_url=config.database.system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
@@ -224,7 +226,8 @@ def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Pa
             search_provider=None,
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"turn-recovery-test-secret"),
-            dbos=DBOSClient(system_database_url=config.database.system_url),
+            dbos=recovery_dbos,
+            invoker_for=invoker_factory(recovery_dbos),
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),

@@ -145,6 +145,9 @@ from ufo.sandbox.conversation import (
     WorkspaceFile as WorkspaceFile,
 )
 from ufo.schema.records import (
+    MEMBER_ADMISSION as MEMBER_ADMISSION,
+)
+from ufo.schema.records import (
     AskQuestion as AskQuestion,
 )
 from ufo.schema.records import (

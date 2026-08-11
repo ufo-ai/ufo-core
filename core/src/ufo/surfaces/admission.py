@@ -84,6 +84,20 @@ class _ScheduledInvocationSuperseded(Exception):
     pass
 
 
+def _refused(
+    holds_work_already_done: bool, message: str
+) -> tuple[TurnStatus, TerminalFrame | None]:
+    """What a refusal does to a turn the workspace has already paid for. A member's next message can
+    be turned away and they can read why and decide what to do; a turn carrying a finished
+    subagent's result holds work the ledger has already booked, and cancelling it discards that
+    output with no one to tell — the member paid for the run and would simply never hear it. So the
+    refusal holds the turn instead, and the dispatcher's own re-decision releases it when the cap
+    is raised or the window rolls."""
+    if holds_work_already_done:
+        return PARKED, None
+    return CANCELLED, TerminalFrame(status=CANCELLED, text=message)
+
+
 @dataclass(frozen=True)
 class Admission:
     dbos: DBOSClient
@@ -124,7 +138,13 @@ class Admission:
         body: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
     ) -> UUID:
+        """Admit an internal turn. `on_behalf_of_member_id` carries forward the authority the work
+        already held — a subagent hands its result back to the conversation that delegated it, and
+        a turn woken to read that result must not be able to do less than the turn that spawned it,
+        or the shortfall surfaces later as a refusal no member can place."""
         admitted = await self._admit(
             workspace_id,
             conversation_id,
@@ -135,6 +155,8 @@ class Admission:
             context,
             None,
             None,
+            on_behalf_of_member_id,
+            holds_work_already_done=holds_work_already_done,
         )
         return admitted.turn_id
 
@@ -194,6 +216,7 @@ class Admission:
         scheduled_task: ScheduledTask | None,
         on_behalf_of_member_id: UUID | None = None,
         intent: ToolIntent | None = None,
+        holds_work_already_done: bool = False,
     ) -> Admitted:
         dispatch_now = False
         opened_run = False
@@ -593,16 +616,18 @@ class Admission:
                     else INTERNAL_ADMISSION
                 )
                 gate = gate_member(speaker_member_id, admission_source, on_behalf_of_member_id)
+                terminal: TerminalFrame | None
                 if (
                     gate is None
                     and pending_pause is not None
                     and await Seats(workspace_id).gated(connection)
                 ):
-                    status = CANCELLED
-                    terminal = TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE)
+                    status, terminal = (
+                        CANCELLED,
+                        TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
+                    )
                 elif gate is not None and not await Seats(workspace_id).admits(connection, gate):
-                    status = CANCELLED
-                    terminal = TerminalFrame(status=CANCELLED, text=SEAT_REFUSAL_MESSAGE)
+                    status, terminal = _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
                 else:
                     decision = await SpendEvaluator(
                         workspace_id, conversation.member_id, agent_id
@@ -613,8 +638,7 @@ class Admission:
                         case "park":
                             status, terminal = PARKED, None
                         case _:
-                            status = CANCELLED
-                            terminal = TerminalFrame(status=CANCELLED, text=decision.message)
+                            status, terminal = _refused(holds_work_already_done, decision.message)
                 await connection.execute(
                     sa.insert(tables.turn).values(
                         id=turn_id,
@@ -788,6 +812,8 @@ class AdmissionInvoker:
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
     ) -> UUID:
         return await self.admission.invoke(
             self.workspace_id,
@@ -796,6 +822,8 @@ class AdmissionInvoker:
             message,
             idempotency_key=idempotency_key,
             context=context,
+            on_behalf_of_member_id=on_behalf_of_member_id,
+            holds_work_already_done=holds_work_already_done,
         )
 
     async def invoke_scheduled(

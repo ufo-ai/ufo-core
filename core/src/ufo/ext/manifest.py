@@ -490,8 +490,9 @@ class SubagentProfile:
     a model distinct from its parent — possibly a different provider — while `None` inherits the
     parent's; a spawn resolves and bills the child under whichever model answers it.
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
-    parties): every path that returns it to a parent — spawn_subagent, wait_for_subagents — walls
-    it as data, exactly as an untrusted tool's own result is walled. `isolated_tools` makes
+    parties): every path that returns it to a parent — a foreground spawn_subagent, and the
+    arrival a background child delivers — walls it as data, exactly as an untrusted tool's own
+    result is walled. `isolated_tools` makes
     `tool_names` exact by excluding cross-extension grants and subagent defaults."""
 
     name: str

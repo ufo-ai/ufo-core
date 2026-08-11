@@ -819,3 +819,63 @@ async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(
         ).one()
     assert timer.inbound == "resume the plan"
     assert timer.status == "queued"
+
+
+async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None) -> None:
+    """A member's next message can be turned away — they read why and decide what to do. A turn
+    carrying a finished subagent's result holds work the ledger already booked, and cancelling it
+    discards that output with nobody to tell: the member paid for the run and would never hear it.
+    So the same reject cap that cancels an ordinary invoke parks this one, for the dispatcher to
+    release when the cap is raised or its window rolls."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="workspace",
+                subject_id=None,
+                window_seconds=3600,
+                limit_micro_usd=1,
+                on_breach="reject",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=first.turn_id,
+                dimension="tokens",
+                amount=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    turned_away = await admission.invoke(workspace_id, conversation_id, agent_id, "ordinary")
+    delivered = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<subagent_result …>",
+        "subagent-result:held",
+        holds_work_already_done=True,
+    )
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id.in_([turned_away, delivered])
+                )
+            )
+        ).all()
+    state = {row.id: (row.status, row.terminal) for row in rows}
+    assert state[turned_away][0] == "cancelled"
+    assert state[delivered] == ("parked", None)

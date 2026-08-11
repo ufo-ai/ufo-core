@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
+from ufo_testsupport.invoker import invoker_factory
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -82,6 +83,7 @@ async def live_runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"live-model-test-secret"),
             dbos=runtime_dbos,
+            invoker_for=invoker_factory(runtime_dbos),
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),

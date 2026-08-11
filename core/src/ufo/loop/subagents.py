@@ -4,7 +4,8 @@ A profile names a prompt, a tool subset, and an input/output schema. `spawn` val
 against the input schema, admits a child turn linked to its parent (`parent_turn_id`) on its own
 conversation, and enqueues it on the turn queue — a distinct partition, so the parent may await it
 without the queue serializing them into a deadlock. Foreground awaits the child's terminal and
-returns its schema-validated output; background returns the child turn id at once."""
+returns its schema-validated output; background returns the child turn id at once and the child
+delivers its own result through `SubagentResult` when it finishes."""
 
 import asyncio
 from collections.abc import Sequence
@@ -22,6 +23,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.audience import Audience, audience_member
 from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
+from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.prompts.render import (
     CITATION_BLOCK,
@@ -36,7 +38,10 @@ from ufo.o11y import current_traceparent, log
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    DELIVERY_DELIVERED,
+    DELIVERY_PENDING,
     INTERNAL_ADMISSION,
+    SUBAGENT_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
@@ -51,8 +56,20 @@ from ufo.tools.context import (
     UnknownSubagentProfile,
     UntrustedContentError,
 )
+from ufo.untrusted import wall
 
 SUBAGENT_POLL_SECONDS = 0.1
+RESULT_OPEN = '<subagent_result profile="{profile}" subagent_id="{subagent_id}" status="{status}">'
+RESULT_CLOSE = "</subagent_result>"
+RESULT_CLOSE_ESCAPE = "&lt;/subagent_result&gt;"
+RESULT_UNKNOWN_PROFILE = (
+    "The subagent's profile is no longer registered, so its answer could not be checked "
+    "against a schema and is withheld."
+)
+RESULT_INVALID = (
+    "The subagent's final answer does not match its output schema, so it was dropped rather than "
+    "delivered. Failures: {faults}"
+)
 PRELOAD_PROMPT_CHAR_BOUND = 200_000
 FINISH_CONTRACT = (
     "End the turn by calling the `finish` tool with your final answer — its input schema is the "
@@ -153,6 +170,7 @@ class Subagents:
         payload: dict[str, Any],
         background: bool = False,
         dedup_key: str | None = None,
+        delivers_result: bool = False,
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -168,7 +186,9 @@ class Subagents:
             else uuid4()
         )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
-        if await self._admit(conversation_id, turn_id, profile, typed_input.model_dump_json()):
+        if await self._admit(
+            conversation_id, turn_id, profile, typed_input.model_dump_json(), delivers_result
+        ):
             await self._enqueue(turn_id, conversation_id)
         if background:
             return SpawnResult(turn_id=turn_id, output=None)
@@ -194,10 +214,11 @@ class Subagents:
         return SpawnResult(turn_id=turn_id, output=output, untrusted=resolved.untrusted_output)
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
-        """Await each background child's terminal and report its status and final text — the parent
-        ends its own turn and calls this when it has no other independent work, completing the
-        background-spawn loop. Each id is polled through the same terminal read a foreground spawn
-        awaits, so a child that has already finished returns at once."""
+        """Hold this turn until each named child has committed a terminal, and report status and
+        final text. This is for a tool that must answer with its child's result inside its own
+        call and bounds the hold itself — the browser task, which times out and cancels. A parent
+        with nothing to do but wait ends its turn instead: the child delivers its own output
+        through `SubagentResult`, so waiting is never how a result is collected."""
         profiles: dict[UUID, str] = {}
         for turn_id in turn_ids:
             profiles[turn_id] = await self._require_child(turn_id)
@@ -251,6 +272,7 @@ class Subagents:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.subagent_profile,
+                        tables.turn.c.result_delivery,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
@@ -301,6 +323,9 @@ class Subagents:
                         on_behalf_of_member_id=self.acting_member_id,
                         terminal=None,
                         parent_turn_id=self.parent.id,
+                        result_delivery=(
+                            None if child.result_delivery is None else DELIVERY_PENDING
+                        ),
                         subagent_profile=child.subagent_profile,
                         traceparent=current_traceparent(),
                         created_at=sa.func.now(),
@@ -346,6 +371,11 @@ class Subagents:
             return True
 
     async def _require_child(self, turn_id: UUID) -> str:
+        """The profile of a child this conversation delegated, or a refusal. A child that hands its
+        result back wakes a *later* turn, and that turn is the one holding the id the result named —
+        gated on the spawning turn alone it could never message or cancel the very child that woke
+        it. So a sibling turn of the same conversation qualifies, and the authority check, which is
+        what actually walls one member's child off from another's, is unchanged."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -356,16 +386,29 @@ class Subagents:
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
-        if (
-            row is None
-            or row.parent_turn_id != self.parent.id
-            or row.on_behalf_of_member_id != self.acting_member_id
-        ):
-            raise ValueError(f"{turn_id} is not a subagent this turn spawned")
+            spawned_here = row is not None and row.parent_turn_id == self.parent.id
+            if row is not None and not spawned_here:
+                spawned_here = (
+                    await connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(tables.turn)
+                        .where(
+                            tables.turn.c.id == row.parent_turn_id,
+                            tables.turn.c.conversation_id == self.parent.conversation_id,
+                        )
+                    )
+                ).scalar_one() == 1
+        if row is None or not spawned_here or row.on_behalf_of_member_id != self.acting_member_id:
+            raise ValueError(f"{turn_id} is not a subagent this conversation spawned")
         return row.subagent_profile
 
     async def _admit(
-        self, conversation_id: UUID, turn_id: UUID, profile: str, inbound: str
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        profile: str,
+        inbound: str,
+        delivers_result: bool = False,
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
         traceparent so the child's span joins the parent's trace, and with the spawning turn's own
@@ -410,6 +453,7 @@ class Subagents:
                     on_behalf_of_member_id=self.acting_member_id,
                     terminal=None,
                     parent_turn_id=self.parent.id,
+                    result_delivery=DELIVERY_PENDING if delivers_result else None,
                     subagent_profile=profile,
                     traceparent=current_traceparent(),
                     created_at=sa.func.now(),
@@ -480,3 +524,96 @@ class Subagents:
             if row.terminal is not None:
                 return TerminalFrame.model_validate(row.terminal)
             await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+
+
+@dataclass(frozen=True)
+class SubagentResult:
+    """A finished child's output delivered to the conversation that spawned it. The parent takes it
+    as an ordinary arrival — folded into its live turn at the next round boundary, or admitted as
+    its next turn once that turn has ended — so a parent never holds a turn open waiting on a
+    child. Delivery is keyed on the child turn, so a recovery re-run of the delivering execution
+    settles on the arrival already posted rather than a second one, and it carries the same
+    schema-validated output a foreground spawn returns: a child that ended any way but `done`, or
+    whose final answer does not match its profile's schema, arrives as that failure rather than as
+    prose the parent would read as an answer.
+
+    The arrival is posted first and the child stamped `delivered` after, both here and in the sweep
+    that finds what this path missed: a crash between the two leaves the child `pending` and the
+    next pass re-posts under the same key, which admits nothing. Stamping first would let that same
+    crash retire a delivery no parent ever received."""
+
+    invoker: TurnInvoker
+    registry: SubagentRegistry
+
+    async def deliver(self, child: Turn) -> None:
+        if child.result_delivery != DELIVERY_PENDING or child.parent_turn_id is None:
+            return
+        if child.subagent_profile is None:
+            raise RuntimeError("a delivering child turn carries no subagent profile")
+        if child.terminal is None:
+            raise RuntimeError("a subagent result is delivered only from a committed terminal")
+        async with workspace_tx() as connection:
+            parent = (
+                await connection.execute(
+                    sa.select(tables.turn.c.conversation_id, tables.turn.c.agent_id).where(
+                        tables.turn.c.id == child.parent_turn_id,
+                        tables.turn.c.workspace_id == child.workspace_id,
+                    )
+                )
+            ).one()
+        await self.invoker.invoke(
+            parent.conversation_id,
+            parent.agent_id,
+            self._body(child.subagent_profile, child.id, child.terminal),
+            f"{SUBAGENT_RESULT_KEY_PREFIX}{child.id}",
+            on_behalf_of_member_id=child.on_behalf_of_member_id,
+            holds_work_already_done=True,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(result_delivery=DELIVERY_DELIVERED, updated_at=sa.func.now())
+                .where(
+                    tables.turn.c.id == child.id,
+                    tables.turn.c.result_delivery == DELIVERY_PENDING,
+                )
+            )
+
+    def _body(self, profile: str, child_id: UUID, terminal: TerminalFrame) -> str:
+        """The child's answer inside the envelope naming which child answered. A profile no longer
+        registered still delivers: the parent learns its child ended and with what, which is the
+        whole reason it ended its own turn, and an unresolvable profile walls the payload rather
+        than reaching the parent as prose. `RESULT_CLOSE` is escaped inside the payload for the
+        same reason the wall escapes its own: content that closes the element holding it continues
+        as instructions to the parent."""
+        resolved = next((known for known in self.registry.profiles if known.name == profile), None)
+        payload, status = self._payload(resolved, terminal)
+        if resolved is None or resolved.untrusted_output:
+            payload = wall(profile, payload)
+        return (
+            RESULT_OPEN.format(profile=profile, subagent_id=child_id, status=status)
+            + f"\n{payload.replace(RESULT_CLOSE, RESULT_CLOSE_ESCAPE)}\n"
+            + RESULT_CLOSE
+        )
+
+    def _payload(
+        self, resolved: SubagentProfile | None, terminal: TerminalFrame
+    ) -> tuple[str, str]:
+        if terminal.status != "done":
+            diagnostic = ": ".join(
+                part
+                for part in (terminal.error_class, terminal.error_message or terminal.text)
+                if part
+            )
+            return diagnostic, terminal.status
+        if resolved is None:
+            return RESULT_UNKNOWN_PROFILE, "invalid"
+        model = resolved.output_model
+        try:
+            return model.model_validate_json(terminal.text).model_dump_json(), "done"
+        except ValidationError as error:
+            faults = "; ".join(
+                f"{'.'.join(str(part) for part in fault['loc']) or model.__name__}: {fault['msg']}"
+                for fault in error.errors(include_url=False, include_input=False)
+            )
+            return RESULT_INVALID.format(faults=faults), "invalid"

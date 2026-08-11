@@ -30,6 +30,7 @@ from ufo_ext_ufo.surface import (
     resolve_workspace,
     stream_directives,
 )
+from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.artifact_url import verify_artifact_url
@@ -570,6 +571,7 @@ def runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"ufo-test-run-token-secret"),
             dbos=dbos_client,
+            invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),

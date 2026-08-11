@@ -23,6 +23,7 @@ from ufo_ext_memory import manifest as memory_manifest_module
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory_item
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import SESSION_COOKIE
+from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.bearer import mint_token
@@ -147,6 +148,7 @@ def memory_runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"memory-correction-run-token"),
             dbos=dbos_client,
+            invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(memory_manifest_module.manifest(),),

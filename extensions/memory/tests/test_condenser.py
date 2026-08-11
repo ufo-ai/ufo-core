@@ -50,6 +50,8 @@ from ufo.ext.manifest import (
 )
 from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, Hit, IndexScope, TextChunker
 from ufo.jobs import PageChangeRunner, TurnDispatcher, core_jobs
+from ufo.loop.delivery import DeliverySweep
+from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import (
     ModelClient,
@@ -1646,6 +1648,7 @@ def test_memory_registers_two_independent_page_change_consumers(tmp_path: object
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         TurnDispatcher(client=None),
         runner,
+        DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
     )
     page_change = {spec.name for spec in specs if spec.name.startswith("page_change:")}
     assert page_change == {

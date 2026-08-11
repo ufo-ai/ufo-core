@@ -97,9 +97,7 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     for name in ("bash", "read", "write", "edit", "glob", "grep"):
         assert name in profile.tool_names and name in builtin_names
     assert "js_repl" in profile.tool_names
-    assert {"ask_user", "spawn_subagent", "wait_for_subagents", "cancel_subagent"}.isdisjoint(
-        profile.tool_names
-    )
+    assert {"ask_user", "spawn_subagent", "cancel_subagent"}.isdisjoint(profile.tool_names)
 
 
 def test_coding_profile_leaves_member_delivery_to_the_parent() -> None:

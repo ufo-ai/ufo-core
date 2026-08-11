@@ -433,7 +433,14 @@ class TurnInvoker(Protocol):
     idempotency collapses a redelivered invocation to the turn already admitted."""
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
     ) -> UUID: ...
 
 

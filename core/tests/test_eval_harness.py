@@ -2510,29 +2510,12 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         "done",
         True,
     )
-    wait = ToolInvocation("wait_for_subagents", {"subagent_ids": ["setup"]}, "done", True)
-    errored_wait = ToolInvocation(
-        "wait_for_subagents", {"subagent_ids": ["setup"]}, "failed", True, True
-    )
     grader = coding_subagent.parallel_checkout_scorer()
 
     assert (await grader(CapabilityOutput("done", (unrelated, setup, first, second)))).passed
-    assert (await grader(CapabilityOutput("done", (background_setup, wait, first, second)))).passed
-    assert (
-        await grader(CapabilityOutput("done", (coerced_background_setup, wait, first, second)))
-    ).passed
     assert not (await grader(CapabilityOutput("done", (background_setup, first, second)))).passed
     assert not (
         await grader(CapabilityOutput("done", (coerced_background_setup, first, second)))
-    ).passed
-    assert not (
-        await grader(CapabilityOutput("done", (wait, background_setup, first, second)))
-    ).passed
-    assert not (
-        await grader(CapabilityOutput("done", (background_setup, first, wait, second)))
-    ).passed
-    assert not (
-        await grader(CapabilityOutput("done", (background_setup, errored_wait, first, second)))
     ).passed
     for truthy in (1, "yes", "on", "1"):
         truthy_setup = ToolInvocation(
@@ -2542,7 +2525,6 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
             True,
         )
         assert not (await grader(CapabilityOutput("done", (truthy_setup, first, second)))).passed
-        assert (await grader(CapabilityOutput("done", (truthy_setup, wait, first, second)))).passed
     for falsey in (0, "false", "no", "off", "0"):
         falsey_setup = ToolInvocation(
             "spawn_subagent",

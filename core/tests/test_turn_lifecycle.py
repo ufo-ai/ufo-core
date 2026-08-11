@@ -16,6 +16,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_index_default import DefaultIndex
+from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 
 from evals.driver import WorkspaceDriver
@@ -154,6 +155,8 @@ PINNED_PROFILE = SubagentProfile(
 FORCED_ECHO = -1
 FOLLOWUP_INBOUND = "continue"
 FOLLOWUP_ECHO = 99
+WAKE_DEADLINE_SECONDS = 30.0
+WAKE_POLL_SECONDS = 0.05
 
 
 class ExtendInput(BaseModel):
@@ -283,6 +286,15 @@ class StandInModel:
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
+        if isinstance(inbound, str) and "spawn-background" in inbound:
+            yield ToolCallStart(id="s7", name="spawn_subagent")
+            yield ToolCallDelta(
+                id="s7",
+                partial_json='{"profile": "roundtrip", "payload": {"value": 21}, '
+                '"background": true, "user_description": "handing off the research"}',
+            )
+            yield Usage(input_tokens=4, output_tokens=4)
+            return
         if isinstance(inbound, str) and "spawn-preload" in inbound:
             yield ToolCallStart(id="s6", name="spawn_subagent")
             yield ToolCallDelta(
@@ -354,6 +366,7 @@ def dbos_runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"turn-lifecycle-test-secret"),
             dbos=dbos_client,
+            invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(
                 (
                     ROUNDTRIP_PROFILE,
@@ -1396,6 +1409,112 @@ async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:
     )
     assert RoundTripOutput.model_validate_json(tool_result.content).echoed == 21
     assert tool_result.is_error is False
+
+
+async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: Turns) -> None:
+    """The whole chain on the real turn loop: the parent backgrounds a child and ends its turn,
+    freeing the conversation's partition; the child runs on its own partition and, on committing
+    its terminal, admits the parent's next turn carrying its schema-validated output. No parent
+    ever holds a turn open waiting, and the result still reaches the conversation that asked."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    parent_id = await surface.admit(seed, "spawn-background")
+    _, terminal = await surface.consume(seed, parent_id)
+    assert terminal["status"] == "done"
+
+    _, conversation_id = await _turn_row(parent_id)
+    async with workspace_tx() as connection:
+        parent_row = (
+            await connection.execute(
+                sa.select(tables.turn).where(tables.turn.c.id == UUID(parent_id))
+            )
+        ).one()
+        child_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.parent_turn_id == UUID(parent_id))
+            )
+        ).scalar_one()
+    parent = Turn(
+        id=parent_row.id,
+        workspace_id=parent_row.workspace_id,
+        conversation_id=parent_row.conversation_id,
+        agent_id=parent_row.agent_id,
+        seq=parent_row.seq,
+        status=parent_row.status,
+        inbound=parent_row.inbound,
+        created_at=parent_row.created_at,
+        terminal=TerminalFrame.model_validate(parent_row.terminal),
+    )
+    subagents = Subagents(
+        client=runtime.dbos,
+        registry=runtime.subagents,
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    (finished,) = await subagents.wait((child_id,))
+    assert finished.status == "done"
+
+    async def _woken() -> list[sa.Row[tuple[int, str, str]]]:
+        async with workspace_tx() as connection:
+            return list(
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.turn.c.seq,
+                            tables.turn.c.inbound,
+                            tables.turn.c.admission_source,
+                        )
+                        .where(
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.id != UUID(parent_id),
+                        )
+                        .order_by(tables.turn.c.seq)
+                    )
+                ).all()
+            )
+
+    deadline = asyncio.get_running_loop().time() + WAKE_DEADLINE_SECONDS
+    woken = await _woken()
+    while not woken and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(WAKE_POLL_SECONDS)
+        woken = await _woken()
+    assert [row.seq for row in woken] == [2]
+    assert woken[0].admission_source == "internal"
+    assert f'subagent_id="{child_id}"' in woken[0].inbound
+    assert '{"echoed":21}' in woken[0].inbound
+
+
+async def test_a_foreground_child_does_not_also_arrive_as_a_message(surface: Turns) -> None:
+    """A parent that awaited its child already holds the answer as the spawn's tool result.
+    Delivering it again would put the same output in the window twice, so an awaited child
+    declares no delivery and the parent's conversation stays at the one turn it ran."""
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    _, conversation_id = await _turn_row(parent)
+    async with workspace_tx() as connection:
+        arrivals = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.body).where(
+                    tables.inbound_message.c.conversation_id == conversation_id
+                )
+            )
+        ).all()
+        turns = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.seq).where(
+                        tables.turn.c.conversation_id == conversation_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [row.body for row in arrivals] == [], f"DUPLICATE ARRIVALS: {[r.body for r in arrivals]}"
+    assert sorted(turns) == [1], f"EXTRA TURNS: {sorted(turns)}"
 
 
 async def test_subagent_runs_at_the_parent_agents_reasoning_effort(surface: Turns) -> None:

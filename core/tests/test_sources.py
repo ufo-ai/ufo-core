@@ -42,6 +42,7 @@ from ufo.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_CURSOR_KEY,
     PAGE_CHANGE_JOB,
+    RESULT_DELIVERY_JOB,
     TURN_DISPATCH_JOB,
     JobRunner,
     PageChangeConsumer,
@@ -50,6 +51,8 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
+from ufo.loop.delivery import DeliverySweep
+from ufo.loop.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sources import rest, sync
@@ -2869,11 +2872,17 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         driver,
         TurnDispatcher(client=None),
         runner,
+        DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
     )
-    assert [spec.name for spec in specs] == [SOURCE_SYNC_JOB, TURN_DISPATCH_JOB]
+    assert [spec.name for spec in specs] == [
+        SOURCE_SYNC_JOB,
+        TURN_DISPATCH_JOB,
+        RESULT_DELIVERY_JOB,
+    ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
     assert keys == {
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
+        f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
     }

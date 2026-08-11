@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from ufo.credentials import (
     slot_is_set,
 )
 from ufo.db import workspace_tx
+from ufo.ext.context import TurnInvoker
 from ufo.ext.loader import (
     connector_clis,
     injecting_slots,
@@ -43,7 +44,12 @@ from ufo.loop.engine import (
     _claim_turn_with_handoff,
 )
 from ufo.loop.prompts.render import render_system_prompt, rendered_prompt
-from ufo.loop.subagents import SubagentRegistry, Subagents, subagent_system_prompt
+from ufo.loop.subagents import (
+    SubagentRegistry,
+    SubagentResult,
+    Subagents,
+    subagent_system_prompt,
+)
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
@@ -113,6 +119,7 @@ class Runtime:
     connectors: ConnectorRegistry
     run_tokens: RunTokenCodec
     dbos: DBOSClient
+    invoker_for: Callable[[UUID], TurnInvoker]
     subagents: SubagentRegistry
     subagent_grants: dict[str, frozenset[str]]
     manifests: tuple[Manifest, ...]
@@ -172,12 +179,49 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                     )
                 ).scalar_one()
             with agent(agent_id):
-                return await _run_turn(runtime, turn_id)
+                status = await _run_turn(runtime, turn_id)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await _commit_failed_terminal(runtime.hub, turn_uuid, error)
-            return "failed"
+            status = "failed"
+        await _deliver_to_parent(runtime, turn_uuid)
+        return status
+
+
+async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None:
+    """Hand a finished child's output to the conversation that spawned it. Read back rather than
+    taken from the execution that just ran, so the terminal delivered is the one that is durable —
+    a turn this execution found already claimed elsewhere, or already terminal, delivers exactly
+    what stands, and a child that parked mid-run delivers nothing until the resume that finishes
+    it. The delivery is keyed on the child, so the executions that both observe one terminal post
+    one arrival between them.
+
+    It runs outside the turn's own failure handling and swallows its own fault. The child's
+    terminal already stands: letting a delivery error reach the handler above would re-label a
+    finished turn as failed, and letting it raise from the handler would escape the workflow into
+    a recovery loop that fails identically every time. What is lost by swallowing is latency, not
+    the result — the sweep finds any child whose delivery did not land."""
+    async with workspace_tx() as connection:
+        row = (
+            (await connection.execute(sa.select(tables.turn).where(tables.turn.c.id == turn_id)))
+            .mappings()
+            .one()
+        )
+    if row["parent_turn_id"] is None or row["terminal"] is None:
+        return
+    try:
+        await SubagentResult(
+            invoker=runtime.invoker_for(row["workspace_id"]), registry=runtime.subagents
+        ).deliver(Turn.model_validate(dict(row)))
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        log_error(
+            "subagent.delivery_deferred",
+            turn_id=str(turn_id),
+            error_class=type(error).__name__,
+        )
 
 
 async def _enqueue_handoff(
@@ -491,6 +535,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.terminal,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
+                    tables.turn.c.result_delivery,
                     tables.conversation.c.sandbox_conversation_id,
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
@@ -526,6 +571,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
+        result_delivery=row.result_delivery,
         sandbox_conversation_id=row.sandbox_conversation_id,
         traceparent=row.traceparent,
     )

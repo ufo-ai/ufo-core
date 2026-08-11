@@ -38,6 +38,8 @@ from ufo.jobs import (
     bindings_from,
     core_jobs,
 )
+from ufo.loop.delivery import DeliverySweep
+from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.registry import ModelRegistry
 from ufo.schema import tables
@@ -184,6 +186,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
         TurnDispatcher(client=None),
         runner,
+        DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]
     assert page_change == [

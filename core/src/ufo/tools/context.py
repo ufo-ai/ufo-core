@@ -126,7 +126,11 @@ class Spawn(Protocol):
     that already finished is awaited, not recomputed. Every tool-step caller derives its key from
     `ctx.idempotency_key`: the recorded round freezes call ids, so distinct model calls still get
     distinct children while a re-executed step reconnects. A keyless spawn mints a fresh child per
-    execution — on recovery that is a duplicate doing the same work."""
+    execution — on recovery that is a duplicate doing the same work.
+
+    `delivers_result` says nobody will await this child: it hands its own output to the parent's
+    conversation when it finishes. A caller that awaits — foreground, or background bounded by its
+    own timeout — leaves it false, or the parent reads the same answer twice."""
 
     async def __call__(
         self,
@@ -134,15 +138,18 @@ class Spawn(Protocol):
         payload: dict[str, Any],
         background: bool = False,
         dedup_key: str | None = None,
+        delivers_result: bool = False,
     ) -> SpawnResult: ...
 
 
 class SubagentControl(Protocol):
     """Lifecycle operations on already-spawned background subagents, keyed by the child turn id a
-    background `spawn` returns: await their terminals, cancel a running one, or message one a
-    follow-up that runs as its next turn. `message`'s `dedup_key` makes the follow-up's admission
-    idempotent, mirroring `spawn` — a re-executed tool step reconnects to the follow-up it already
-    admitted. Threaded onto the ToolContext from the same Subagents workflow that backs `spawn`."""
+    background `spawn` returns: cancel a running one, or message one a follow-up that runs as its
+    next turn. `message`'s `dedup_key` makes the follow-up's admission idempotent, mirroring
+    `spawn` — a re-executed tool step reconnects to the follow-up it already admitted. `wait` is
+    for a tool that must answer with its child's result inside its own call and bounds the hold
+    itself; a child's output otherwise arrives on the parent's conversation when the child ends.
+    Threaded onto the ToolContext from the same Subagents workflow that backs `spawn`."""
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]: ...
 

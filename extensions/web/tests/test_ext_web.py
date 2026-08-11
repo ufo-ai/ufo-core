@@ -54,6 +54,7 @@ from ufo_ext_web.surface import (
     _subagent_output,
     load_assets,
 )
+from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
@@ -628,6 +629,7 @@ def dbos_runtime(
             connectors=ConnectorRegistry(entries={}),
             run_tokens=RunTokenCodec(b"web-test-run-token-secret"),
             dbos=dbos_client,
+            invoker_for=invoker_factory(dbos_client),
             subagents=PORTAL_SUBAGENTS,
             subagent_grants={},
             manifests=(
@@ -5924,6 +5926,7 @@ async def _seed_listed_turn(
                 seq=seq,
                 status="done",
                 inbound=inbound,
+                admission_source="internal" if subagent_profile else "member",
                 terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
                 parent_turn_id=parent_turn_id,
                 subagent_profile=subagent_profile,
@@ -8031,3 +8034,68 @@ async def test_subagent_work_stays_behind_the_agent_wall(
     granted = await client.get(path, headers=cookie)
     assert [entry["id"] for entry in granted.json()["conversations"]] == [str(walled)]
     assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 200
+
+
+def test_projection_draws_no_member_bubble_for_a_delivered_subagent_result() -> None:
+    """A background child hands its output back as a turn on the parent's conversation, and its
+    prompt is the wire's element around the child's answer. Drawn as a member bubble it reads as
+    words the member typed; the reply that answers it is what the member actually gets."""
+    delivered = "11111111-1111-1111-1111-111111111111"
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {delivered}\n</context>\n"
+                '<subagent_result profile="general_purpose" subagent_id="c7" status="done">\n'
+                '{"result":"a joke"}\n</subagent_result>',
+            ),
+            Message(role="assistant", content="Here is the joke: a joke"),
+        ),
+        None,
+        frozenset({delivered}),
+        frozenset({delivered}),
+    )
+    assert rendered == [{"role": "assistant", "text": "Here is the joke: a joke"}]
+
+
+def test_projection_draws_no_member_bubble_for_a_scheduled_firing() -> None:
+    """The same rule reaches the cron envelope: a firing carries `<scheduled_task>` in front of the
+    instruction the member stored once, and no member spoke it into this conversation."""
+    fired = "22222222-2222-2222-2222-222222222222"
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {fired}\n</context>\n"
+                "<scheduled_task>\nscheduled_fire: 2026-08-11T09:00:00Z\n</scheduled_task>\n"
+                "Digest the investor email.",
+            ),
+            Message(role="assistant", content="Nothing new since yesterday."),
+        ),
+        None,
+        frozenset({fired}),
+        frozenset({fired}),
+    )
+    assert rendered == [{"role": "assistant", "text": "Nothing new since yesterday."}]
+
+
+def test_projection_keeps_the_bubble_for_what_a_member_spoke() -> None:
+    """The set names only what no member spoke, so a ref it does not carry keeps the bubble it
+    always had — a projection that misses one shows the message rather than hiding it."""
+    spoken = "33333333-3333-3333-3333-333333333333"
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {spoken}\n</context>\nask a subagent for a joke",
+            ),
+            Message(role="assistant", content="Handing that off."),
+        ),
+        None,
+        frozenset({spoken}),
+        frozenset(),
+    )
+    assert rendered == [
+        {"role": "user", "text": "ask a subagent for a joke"},
+        {"role": "assistant", "text": "Handing that off."},
+    ]

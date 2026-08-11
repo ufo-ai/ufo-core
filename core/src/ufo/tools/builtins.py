@@ -1,6 +1,6 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn_subagent,
 ask_user, request_credentials, load_skill, connect_account,
-wait_for_subagents, cancel_subagent, message_subagent.
+cancel_subagent, message_subagent.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
@@ -23,9 +23,9 @@ values privately and fulfillment lands them in the encrypted store, never the tr
 `load_skill` mounts a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
 into the workspace, and returns each one's workflow followed by one tree of everything mounted; the
 system prompt's `<available_skills>` block is its complete per-turn index.
-`wait_for_subagents`, `cancel_subagent`, and `message_subagent` reach `ctx.subagents`, the same
-Subagents workflow that backs `spawn`, to await a background child's terminal, cancel a running one,
-or queue it a follow-up message that runs as its next turn — scoped to the children this turn
+`cancel_subagent` and `message_subagent` reach `ctx.subagents`, the same
+Subagents workflow that backs `spawn`, to cancel a running child or queue it a follow-up message
+that runs as its next turn — scoped to the children this turn
 spawned."""
 
 import json
@@ -307,15 +307,6 @@ class AskUserCall(AskUserInput):
 
     user_description: str = Field(
         description="What you are checking with them, in plain language for the activity timeline."
-    )
-
-
-class WaitForSubagentsInput(BaseModel):
-    subagent_ids: tuple[str, ...] = Field(
-        min_length=1, description="List of subagent IDs to wait for. Must always be specified."
-    )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
     )
 
 
@@ -665,7 +656,11 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
 async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> ToolResult:
     try:
         result = await ctx.spawn(
-            args.profile, args.payload, args.background, dedup_key=ctx.idempotency_key
+            args.profile,
+            args.payload,
+            args.background,
+            dedup_key=ctx.idempotency_key,
+            delivers_result=args.background,
         )
     except UnknownSubagentProfile as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
@@ -760,22 +755,6 @@ async def request_credentials_handler(
     request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)
     return ToolResult(
         content=(TextContent(text=f"{REQUEST_CREDENTIALS_DIRECTIVE}\n{request.model_dump_json()}"),)
-    )
-
-
-async def wait_for_subagents_handler(ctx: ToolContext, args: WaitForSubagentsInput) -> ToolResult:
-    """Await each background subagent's terminal and report its status and final answer. A malformed
-    id raises a recoverable tool error; a control surface that is not wired fails loud."""
-    if ctx.subagents is None:
-        raise RuntimeError("subagent control is not available in this context")
-    statuses = await ctx.subagents.wait(tuple(UUID(raw) for raw in args.subagent_ids))
-    done = [
-        {"subagent_id": str(status.turn_id), "status": status.status, "output": status.text}
-        for status in statuses
-    ]
-    return ToolResult(
-        content=(TextContent(text=json.dumps({"subagents": done})),),
-        untrusted=any(status.untrusted for status in statuses),
     )
 
 
@@ -966,16 +945,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=request_credentials_handler,
     ),
     ToolDef(
-        name="wait_for_subagents",
-        description=(
-            "End your turn and wait for background subagent results. Call this after spawning "
-            "subagents when you have no other independent work to do. You are automatically woken "
-            "when all awaited subagents complete or when the user sends a message."
-        ),
-        input_model=WaitForSubagentsInput,
-        handler=wait_for_subagents_handler,
-    ),
-    ToolDef(
         name="cancel_subagent",
         description=(
             "Cancel a running subagent. Sets its status to 'cancelled'. If the subagent has "
@@ -989,7 +958,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description=(
             "Send a follow-up message to a background subagent. It runs as the subagent's next "
             "turn against its accumulated context once its current turn ends; the returned id "
-            "addresses that follow-up for a later wait_for_subagents."
+            "addresses that follow-up when its result is delivered."
         ),
         input_model=MessageSubagentInput,
         handler=message_subagent_handler,

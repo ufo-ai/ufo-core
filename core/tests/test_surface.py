@@ -82,6 +82,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
+    SUBAGENT_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
     TerminalFrame,
@@ -2380,6 +2381,8 @@ async def _seed_conversation_turn(
     subagent_profile: str | None = None,
     speaker_member_id: UUID | None = None,
     context: TurnContext | None = None,
+    admission_source: str = "member",
+    idempotency_key: str | None = None,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -2390,6 +2393,8 @@ async def _seed_conversation_turn(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 seq=seq,
+                admission_source=admission_source,
+                idempotency_key=idempotency_key,
                 status="done",
                 inbound=inbound,
                 terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
@@ -3018,3 +3023,55 @@ async def test_conversation_subagent_turns_nest_transitively(db: None, tmp_path)
         grandchild_turn
     ]
     assert await context.conversation_subagent_turns(grandchild_conversation) == ()
+
+
+async def test_agent_origin_refs_names_only_the_machine_envelopes(db: None, tmp_path) -> None:
+    """The seam the portal's no-bubble rule rests on. A firing and a delivered subagent result are
+    envelopes the member cannot read; an extension's invoke sends prose it is meant to read, and a
+    member's own words must never be named here — the one direction this must not fail in."""
+    workspace_id, agent_id, member_id = await _seed()
+    conversation_id = await _seed_conversation(
+        workspace_id, agent_id, queue_key="root", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    spoke = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound="find the flaky test",
+        speaker_member_id=member_id,
+    )
+    fired = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="<scheduled_task>…</scheduled_task>\ndigest",
+        admission_source="scheduled",
+    )
+    invoked = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=3,
+        inbound="Review this exact pull-request comparison.",
+        admission_source="internal",
+    )
+    delivered = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=4,
+        inbound='<subagent_result profile="x" subagent_id="y" status="done">…</subagent_result>',
+        admission_source="internal",
+        idempotency_key=f"{SUBAGENT_RESULT_KEY_PREFIX}{uuid4()}",
+    )
+
+    refs = await _context(
+        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path / "blobs")
+    ).agent_origin_refs(conversation_id)
+
+    assert str(fired) in refs
+    assert str(delivered) in refs
+    assert str(spoke) not in refs
+    assert str(invoked) not in refs

@@ -168,6 +168,7 @@ turn = sa.Table(
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
     sa.Column("subagent_profile", sa.Text, nullable=True),
+    sa.Column("result_delivery", sa.Text, nullable=True),
     sa.Column("traceparent", sa.Text, nullable=True),
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
@@ -191,6 +192,7 @@ turn = sa.Table(
         "(connect_authorization_url is null) = (connect_authorized_at is null)",
         name="turn_connect_authorization",
     ),
+    sa.CheckConstraint("result_delivery in ('pending', 'delivered')", name="turn_result_delivery"),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
     sa.Index("turn_conversation_activity", "conversation_id", "updated_at"),
     sa.Index(
@@ -204,6 +206,12 @@ turn = sa.Table(
         "parent_turn_id",
         postgresql_where=sa.text("parent_turn_id is not null"),
         sqlite_where=sa.text("parent_turn_id is not null"),
+    ),
+    sa.Index(
+        "turn_result_pending",
+        "workspace_id",
+        postgresql_where=sa.text("result_delivery = 'pending'"),
+        sqlite_where=sa.text("result_delivery = 'pending'"),
     ),
 )
 

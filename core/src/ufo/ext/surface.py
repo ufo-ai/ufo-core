@@ -107,6 +107,8 @@ from ufo.sandbox.ingress_token import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    SCHEDULED_ADMISSION,
+    SUBAGENT_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
@@ -2633,6 +2635,43 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return tuple(self._turn_record(row) for row in reversed(rows))
+
+    async def agent_origin_refs(self, conversation_id: UUID) -> frozenset[str]:
+        """The `message_ref`s in this conversation whose inbound is a machine envelope rather than
+        words: a scheduled task's firing, wrapped in its cron element, and a subagent result,
+        wrapped in the element naming the child that answered. A transcript projection renders a
+        member's own words as their bubble, and neither of these is words.
+
+        Both are named by what produced them — the firing by its admission source, the delivery by
+        the key it admits under — never by reading the body. An extension invoking a turn sends the
+        member prose they are meant to read (which sources changed, which pull request to review),
+        so it is deliberately not here: `internal` alone would take those prompts away and leave an
+        answer to nothing. Both id spaces answer, because a turn's founding inbound is referenced by
+        the turn and a drained arrival by its queue row."""
+        machine = sa.or_(
+            tables.turn.c.admission_source == SCHEDULED_ADMISSION,
+            tables.turn.c.idempotency_key.startswith(SUBAGENT_RESULT_KEY_PREFIX),
+        )
+        async with workspace_tx() as connection:
+            refs = (
+                await connection.execute(
+                    sa.union_all(
+                        sa.select(tables.turn.c.id).where(
+                            tables.turn.c.workspace_id == self.workspace_id,
+                            tables.turn.c.conversation_id == conversation_id,
+                            machine,
+                        ),
+                        sa.select(tables.inbound_message.c.id).where(
+                            tables.inbound_message.c.workspace_id == self.workspace_id,
+                            tables.inbound_message.c.conversation_id == conversation_id,
+                            tables.inbound_message.c.idempotency_key.startswith(
+                                SUBAGENT_RESULT_KEY_PREFIX
+                            ),
+                        ),
+                    )
+                )
+            ).scalars()
+        return frozenset(str(ref) for ref in refs)
 
     async def turn_detail(self, turn_id: UUID) -> TurnDetail | None:
         """One turn with its accounting rows and the subagent turns it spawned, or None when no

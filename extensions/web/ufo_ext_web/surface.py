@@ -771,7 +771,13 @@ def _rendered_messages(
     messages: tuple[Message, ...],
     subagents: SubagentRuns | None = None,
     turn_ids: frozenset[str] = frozenset(),
+    agent_origin: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
+    """The transcript as the portal draws it. A user-role message is the member's own bubble, so
+    one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
+    delivered subagent result carries the wire's element around the child's output, and both would
+    otherwise read as words the member typed. The reply that answers it still renders — the member
+    reads the agent coming back to them, which is what happened."""
     subagents = subagents or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
@@ -825,6 +831,8 @@ def _rendered_messages(
             current_turn_id = turn_id
         else:
             flush_reply(False)
+        if turn_id in agent_origin:
+            continue
         rendered.append({"role": "user", "text": text})
     flush_reply(True)
     return rendered
@@ -843,8 +851,14 @@ async def _conversation_messages(
     A turn writes the transcript when it ends, so a turn still running is absent from it: the
     conversation's newest turn rides back with the messages, and its prompt is appended as the
     message it is — the live chat attaches to that turn's frames, a read-only pane states what has
-    landed."""
-    recorded = await ctx.read_transcript(conversation_id)
+    landed. A prompt that is a machine envelope rather than words draws no bubble and is not
+    appended — a scheduled firing carries its cron element, a delivered subagent result the element
+    naming the child that answered — and one set decides it for the settled turns and the running
+    one alike, so the live chat and a transcript read back never disagree about a message."""
+    recorded, agent_origin = await asyncio.gather(
+        ctx.read_transcript(conversation_id),
+        ctx.agent_origin_refs(conversation_id),
+    )
     if recorded is None:
         rendered: list[dict[str, object]] = []
     else:
@@ -856,12 +870,13 @@ async def _conversation_messages(
             recorded.messages,
             await _subagent_nodes(ctx, spawned),
             frozenset(str(turn.id) for turn in turns),
+            agent_origin,
         )
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
     if detail is None:
         return rendered, None
-    if detail.turn.terminal is None:
+    if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
         rendered.append({"role": "user", "text": member_message_text(detail.turn.inbound)})
     return rendered, detail.turn
 

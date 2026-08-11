@@ -63,6 +63,16 @@ class JobInvoker(TurnInvoker, ScheduleInvoker, Protocol):
     pass
 
 
+class ResultDeliverer(Protocol):
+    """The subagent hand-back sweep as this role sees it. The work is the turn loop's — it reads a
+    finished child and posts its arrival — so it lives there, and the jobs role names and schedules
+    it through this structural type rather than importing across the boundary."""
+
+    async def run(self) -> None: ...
+
+    async def candidate_workspaces(self) -> tuple[UUID, ...]: ...
+
+
 InvokerFactory = Callable[[UUID], JobInvoker]
 
 JOB_QUEUE_NAME = "jobs"
@@ -73,6 +83,8 @@ TURN_DISPATCH_JOB = "turn_dispatch"
 TURN_DISPATCH_SCHEDULE = "0 * * * * *"
 TURN_DISPATCH_GRACE_SECONDS = 300
 TURN_DISPATCH_BATCH_TURNS = 100
+RESULT_DELIVERY_JOB = "result_delivery"
+RESULT_DELIVERY_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_CURSOR_KEY = "page_change_cursor"
@@ -478,13 +490,16 @@ def core_jobs(
     sync_driver: SyncDriver,
     turn_dispatcher: TurnDispatcher,
     page_change_runner: PageChangeRunner,
+    delivery_sweep: ResultDeliverer,
 ) -> tuple[JobSpec, ...]:
     """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
-    spend enforcement, and the page-change fan-out are core. The sync driver polls each source and
-    lands its pages; the page-change runner contributes one `page_change:<ext>:<hook>` job per
-    registered consumer, each replaying those pages to that consumer's hook off its own cursor as
-    its own workflow (the memory page indexer and fact deriver among them); the turn dispatcher
-    recovers queued outbox rows and re-admits parked turns their caps now allow. None fires on its
+    spend enforcement, the page-change fan-out, and the subagent loop are core. The sync driver
+    polls each source and lands its pages; the page-change runner contributes one
+    `page_change:<ext>:<hook>` job per registered consumer, each replaying those pages to that
+    consumer's hook off its own cursor as its own workflow (the memory page indexer and fact deriver
+    among them); the turn dispatcher recovers queued outbox rows and re-admits parked turns their
+    caps now allow; the delivery sweep hands back the delegated children whose own execution could
+    not — a cancelled one above all, whose terminal is committed from outside it. None fires on its
     own writes. (Memory-item indexing stays the memory extension's own job; page derivation is a
     page_change hook this runner drives. Reclaiming a container is the carrier's own business, never
     core's — the workspace lives inside the sandbox, so only a carrier knows whether dropping its
@@ -495,6 +510,9 @@ def core_jobs(
 
     async def _dispatch_turns(context: ExtensionContext) -> None:
         await turn_dispatcher.run()
+
+    async def _deliver_results(context: ExtensionContext) -> None:
+        await delivery_sweep.run()
 
     def _drive_consumer(
         consumer: PageChangeConsumer,
@@ -532,6 +550,12 @@ def core_jobs(
             schedule=TURN_DISPATCH_SCHEDULE,
             handler=_dispatch_turns,
             candidates=turn_dispatcher.candidate_workspaces,
+        ),
+        JobSpec(
+            name=RESULT_DELIVERY_JOB,
+            schedule=RESULT_DELIVERY_SCHEDULE,
+            handler=_deliver_results,
+            candidates=delivery_sweep.candidate_workspaces,
         ),
     )
 
