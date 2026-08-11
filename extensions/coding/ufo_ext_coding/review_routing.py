@@ -1,4 +1,4 @@
-"""Pull-request source changes routed into one configured review conversation."""
+"""Pull-request source changes routed into one conversation of the agent that reviews them."""
 
 import hashlib
 from dataclasses import dataclass
@@ -54,7 +54,7 @@ class ConfigureReviewInboxInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: str = Field(
-        description="The GitHub source object whose pull_requests stream this conversation owns."
+        description="The GitHub source object whose pull_requests stream this agent reviews."
     )
     user_description: str = Field(description="That you are configuring automatic code review.")
 
@@ -381,7 +381,9 @@ async def configure_review_inbox(ctx: ToolContext, args: ConfigureReviewInboxInp
             TextContent(
                 text=(
                     f"New pull-request comparisons from {args.source} open a review conversation "
-                    f"with this agent. Pages through source revision {baseline} are baselined."
+                    f"with this agent, each carrying the instructions for reviewing it — this "
+                    f"agent needs no review prompt of its own. Pages through source revision "
+                    f"{baseline} are baselined."
                 )
             ),
         )

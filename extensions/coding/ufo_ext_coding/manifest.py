@@ -13,8 +13,9 @@ to that child.
 The pack also declares the git credential slot, because a checkout is the work it routes: a
 workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
 with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox.
-Its configured review inbox turns changed pull-request source pages into exact-checkout reviewer
-children and publishes their typed result as an advisory GitHub Check."""
+A source bound to a review agent turns each changed pull-request head into one conversation of that
+agent, which reviews it through an exact-checkout child and publishes the typed result as an
+advisory GitHub Check."""
 
 import os
 from pathlib import Path
@@ -163,8 +164,9 @@ def manifest() -> Manifest:
             *CODE_REVIEW_TOOLS,
             ToolDef(
                 name="configure_review_inbox",
-                description="Make this conversation the automatic review inbox for one shared "
-                "GitHub pull-request source. Existing pages become the baseline. Admin-only.",
+                description="Review one shared GitHub pull-request source as this agent: every "
+                "later head opens its own conversation here. Existing pages become the baseline. "
+                "Admin-only.",
                 input_model=ConfigureReviewInboxInput,
                 handler=configure_review_inbox,
                 side_effecting=True,
