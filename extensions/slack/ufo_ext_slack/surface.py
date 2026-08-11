@@ -679,6 +679,10 @@ STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
 PROGRESS_BASE_SECONDS = 600.0
+PROGRESS_CHANNEL_BASE_SECONDS = 45.0
+"""The first-post interval for a channel turn. A channel thread is not an agent thread, so Slack
+renders no status in it and the progress post is the only sign the turn is running: it lands inside
+a minute, where a DM leaves the first ten to the status the member is already watching."""
 PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_NARRATION_LIMIT = 600
 PROGRESS_ACTIVITY_LIMIT = 200
@@ -1401,9 +1405,9 @@ async def ingest(ctx: SurfaceContext, request: Request) -> Response:
         context=_turn_context(sender, source),
         speaker_member_id=member_id,
     )
-    _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts)
     if admitted.opened_run:
-        _track_progress(ctx, admitted.turn_id, inbound.queue_key)
+        _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts, inbound.is_dm)
+        _track_progress(ctx, admitted.turn_id, inbound.queue_key, inbound.is_dm)
     return JSONResponse({"ok": True})
 
 
@@ -1837,6 +1841,13 @@ class ThreadStatus:
     turn_id: UUID
     channel: str
     thread_ts: str
+    is_dm: bool
+
+    @property
+    def thread_kind(self) -> str:
+        """The container every write event names, because only an agent thread renders a status: it
+        is what separates a write a member could not see from a write that never happened."""
+        return "im" if self.is_dm else "channel"
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -1891,6 +1902,7 @@ class ThreadStatus:
                 turn=str(self.turn_id),
                 channel=self.channel,
                 thread_ts=self.thread_ts,
+                thread_kind=self.thread_kind,
                 status_text=status,
                 error=repr(error),
             )
@@ -1900,6 +1912,7 @@ class ThreadStatus:
             turn=str(self.turn_id),
             channel=self.channel,
             thread_ts=self.thread_ts,
+            thread_kind=self.thread_kind,
             status_text=status,
         )
         return True
@@ -1952,19 +1965,37 @@ _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
 _THREAD_WRITERS: dict[tuple[UUID, str, str], UUID] = {}
 
 
-def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None:
-    """Spawn one ThreadStatus task per admitted turn — Slack redelivers events and admission dedupes
-    them to the same turn id, so a redelivery must not double the tail work. The status anchors to
-    the conversation's thread — the root in a channel, the member's own message in a DM (a DM
-    conversation has no root, and the status API demands a thread) — and the new turn takes over as
-    the thread's writer. Best-effort by design: a failure only logs, and the task always ends
-    because the tail ends on the durable terminal state."""
+def _track_status(
+    ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str, is_dm: bool
+) -> None:
+    """Spawn one ThreadStatus task per run of a turn, for a DM alone: `assistant.threads.setStatus`
+    is state on an agent thread, which is what a DM with the app is, so a write against a channel
+    thread is accepted and rendered nowhere — the channel reports through its progress posts
+    instead, and the skip is an event rather than a silence. Callers gate on `Admitted.opened_run`,
+    which admission decides under the conversation-row lock, so exactly one delivery reaches here
+    per run however many Slack sends and whichever replicas take them — a channel mention arrives
+    as both `app_mention` and `message.channels` — while `_STATUS_TASKS`, which knows only this
+    process, keeps the redelivered event from doubling the tail work within it. The status anchors
+    to the conversation's thread — its root where the queue key carries one, the member's own
+    message where it does not (a plain DM is keyed by its channel alone, and the status API demands
+    a thread) — and the new turn takes over as the thread's writer. Best-effort by design: a failure
+    only logs, and the task always ends because the tail ends on the durable terminal state."""
+    if not is_dm:
+        log(
+            "slack.thread_status.skipped",
+            turn=str(turn_id),
+            queue_key=queue_key,
+            reason="not_an_agent_thread",
+        )
+        return
     if turn_id in _STATUS_TASKS:
         return
     channel, separator, root_ts = queue_key.partition(":")
     thread = (channel, root_ts if separator else message_ts)
     writer = (ctx.workspace_id, *thread)
-    status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=thread[0], thread_ts=thread[1])
+    status = ThreadStatus(
+        ctx=ctx, turn_id=turn_id, channel=thread[0], thread_ts=thread[1], is_dm=is_dm
+    )
     _THREAD_WRITERS[writer] = turn_id
     task = asyncio.create_task(_run_status(status))
     _STATUS_TASKS[turn_id] = task
@@ -2229,13 +2260,15 @@ class ThreadProgress:
 _PROGRESS_TASKS: dict[UUID, asyncio.Task[None]] = {}
 
 
-def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
+def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str, is_dm: bool) -> None:
     """Spawn one ThreadProgress task per run of a turn. Callers gate on `Admitted.opened_run`, which
     admission decides under the conversation-row lock, so exactly one delivery reaches here per run
     however many Slack sends and whichever replicas take them — the guard is the durable admission
     itself, never this dict, which knows only this process. The dict holds the task's strong
     reference and keeps one live reporter per turn id, so the second run of a twice-parked turn
-    starts its reporter once its predecessor has ended on the park."""
+    starts its reporter once its predecessor has ended on the park. The delivery's own kind picks
+    the cadence, so a channel turn — which has no status to carry the wait — reports on the short
+    one."""
     if turn_id in _PROGRESS_TASKS:
         return
     progress = ThreadProgress(
@@ -2243,7 +2276,8 @@ def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
         turn_id=turn_id,
         queue_key=queue_key,
         cadence=ProgressCadence(
-            base_seconds=PROGRESS_BASE_SECONDS, cap_seconds=PROGRESS_CAP_SECONDS
+            base_seconds=PROGRESS_BASE_SECONDS if is_dm else PROGRESS_CHANNEL_BASE_SECONDS,
+            cap_seconds=PROGRESS_CAP_SECONDS,
         ),
     )
     task = asyncio.create_task(_run_progress(progress))
@@ -2377,9 +2411,9 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 context=TurnContext(source=answered_at),
                 speaker_member_id=member_id,
             )
-            _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts)
             if admitted.opened_run:
-                _track_progress(ctx, admitted.turn_id, click.queue_key)
+                _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts, click.is_dm)
+                _track_progress(ctx, admitted.turn_id, click.queue_key, click.is_dm)
             if await ctx.admitted_body(answer_key) == body:
                 _rewrite_in_background(bot_token, click)
     return JSONResponse({"ok": True})
