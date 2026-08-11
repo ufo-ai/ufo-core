@@ -101,13 +101,14 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   repeat load re-mounts the files and names the skill in one line. A result the engine offloaded or
   truncated cut the workflow off, so that one loads again.
 - **Typed subagents** — a registry of profiles (name, prompt, tool subset, input/output schema);
-  spawn = child turn with parent linkage; foreground awaits and returns the child's
-  schema-validated output; background returns an id at once and the child delivers that same
-  validated output to the parent's conversation when it finishes — an arrival, folded into the
-  parent's live turn at the next round boundary or admitted as its next turn, so no parent holds
-  a turn open waiting on a child. Only the caller knows whether anyone will await, so the choice
-  is written onto the child at admission. A woken turn reads the durable record, never the
-  ending turn's working memory. Two payload
+  spawn = child turn with parent linkage; foreground awaits its validated output; background
+  returns its identity at once and may deliver that same validated output to the
+  parent's conversation when it finishes — an arrival folded into the live turn or admitted as the
+  next turn, so no parent holds a turn open waiting on a child. The caller records whether anyone
+  will await. Subagent control reads a finished child of that conversation as its exact identity,
+  terminal, and validated output. A forced close records `incomplete_reason=round_budget` on the
+  terminal beside its schema-shaped answer. A woken turn reads the durable record, never the ending
+  turn's working memory. Two payload
   knobs any profile may declare: `preload_skills` mounts the named skills with their `depends`
   closure and injects their instructions before the child's first round; `extended_context` lifts
   its round budget to the
@@ -314,10 +315,10 @@ The coding extension reviews GitHub pull requests from the existing `pull_reques
 |---|---|
 | Registration | A workspace admin designates one existing conversation as the inbox for one shared GitHub pull-request source. The source's current revision is the baseline. |
 | Trigger | A later `page_change` for an open, non-draft pull request creates one automatic run per `(workspace, repository, pull request, base SHA, head SHA)`. Closed, draft, tombstoned, baselined, and metadata-only changes create none. |
-| Wake | The coding hook invokes the registered inbox with the run id and exact repository, pull request, base SHA, and head SHA. The inbox turn spawns exactly one background `code_review` child and ends, so the inbox conversation is free for its next turn while the review runs; the child's validated result wakes that conversation again and the woken turn publishes it. |
+| Wake | The coding hook invokes the registered inbox with the run id and exact repository, pull request, base SHA, and head SHA. The inbox turn spawns exactly one background `code_review` child and ends, so the inbox conversation is free for its next turn while the review runs. The child's validated result wakes that conversation with its child id; the woken turn passes that id to `publish_code_review`. |
 | Review | The child starts a fresh conversation and records that conversation on the run when it takes the checkout, clones the base repository, fetches `refs/pull/<number>/head`, verifies both SHAs, detaches at the head, removes every remote, and reads the complete binary `base...head` diff. Its exact tools are checkout plus review-specific text read, tracked-path glob, and tracked-text grep; each derives this turn's verified checkout rather than accepting another root, and every result enters its context as untrusted data. It cannot ask a question, read binary model content, write, run arbitrary commands, browse, or read review material through an API. |
 | Finding | A finding publishes only when the changed code causes a concrete reachable severe defect, a specific supported input or execution path triggers it, and its impact is a security or workspace-boundary breach; data loss, corruption, or wrong-target mutation; production outage, deadlock, or permanently unfinished work; a supported operation that fails or cannot complete for valid input; a materially incorrect result or state for a supported workflow; a substantial availability, reliability, or performance regression; a feature that cannot function in its supported production configuration; or failed build or required CI. Every finding is merge-blocking and carries path, line, title, trigger, failure, and impact. There are no severities or suggestions; an empty list means no severe defect found. |
-| Publication | A host-side tool resolves the run from its opaque id under the inbox conversation and publishes a completed `ufo review` GitHub Check on the stored head: `success` with no severe defect, `action_required` with any finding. The check's details link and a closing summary line carry the portal page of the reviewer child's run under its profile, the one page that opens a subagent conversation; a deploy with no public base URL, and a run no reviewer recorded, publish neither. Its GitHub App installation token requests only Contents and Checks write permission and fails at minting when the installation lacks either. The repository ruleset requires `ufo review`; no GitHub Actions review workflow exists. |
+| Publication | `publish_code_review` resolves the opaque run under the inbox conversation and reads the named child through subagent control, which admits only a finished child spawned by that conversation and returns its exact conversation, terminal, and validated output. The tool verifies that child took the checkout and publishes a completed `ufo review` GitHub Check on the stored head. Only a complete review with no finding is `success`; a missing checkout, invalid output, incomplete terminal, or any finding is `action_required`, retaining partial findings. The model relays only the child id, never the review payload. The check links the reviewer child's portal page when the deploy has a public base URL. Its GitHub App installation token requests Contents and Checks write permission and fails at minting when the installation lacks either. The repository ruleset requires `ufo review`; no GitHub Actions review workflow exists. |
 
 ### Extension store
 

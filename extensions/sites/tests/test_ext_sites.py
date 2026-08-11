@@ -154,7 +154,11 @@ async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path
         captured["profile"] = profile
         captured["payload"] = payload
         captured["dedup_key"] = dedup_key
-        return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=WebsiteBuildingResult(result="built"),
+        )
 
     ctx = replace(
         _context(FakeSandbox(), tmp_path),
@@ -190,7 +194,11 @@ async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
         dedup_key: str | None = None,
     ) -> SpawnResult:
         captured["payload"] = payload
-        return SpawnResult(turn_id=uuid4(), output=WebsiteBuildingResult(result="built"))
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=WebsiteBuildingResult(result="built"),
+        )
 
     ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
     await _build_website(

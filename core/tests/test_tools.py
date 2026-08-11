@@ -756,7 +756,7 @@ async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_pa
         delivers_result: bool = False,
     ) -> SpawnResult:
         recorded.append((dedup_key, delivers_result))
-        return SpawnResult(turn_id=uuid4(), output=None)
+        return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
 
     assert REGISTRY.get("spawn_subagent").side_effecting is True
     ctx = replace(

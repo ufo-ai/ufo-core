@@ -1612,8 +1612,11 @@ async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent
             )
         ).one()
     assert child.status == "done"
-    child_output = TerminalFrame.model_validate(child.terminal).text
-    assert RoundTripOutput.model_validate_json(child_output).echoed == 99
+    parent_terminal = TerminalFrame.model_validate(terminal)
+    child_terminal = TerminalFrame.model_validate(child.terminal)
+    assert parent_terminal.incomplete_reason is None
+    assert child_terminal.incomplete_reason == "round_budget"
+    assert RoundTripOutput.model_validate_json(child_terminal.text).echoed == 99
 
 
 async def test_subagent_bills_under_its_profile_model_not_the_parents(

@@ -55,7 +55,7 @@ class RecordingSpawn:
         self.spawned.append((profile, payload, background, dedup_key))
         name = payload.get("task_name")
         output = None if background else _Result(result=f"did {name}")
-        return SpawnResult(turn_id=uuid4(), output=output)
+        return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=output)
 
 
 @dataclass

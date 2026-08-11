@@ -1161,6 +1161,48 @@ async def test_spawn_and_wait_carry_the_profiles_untrusted_output_declaration(
     assert status.untrusted is True
 
 
+@pytest.mark.parametrize(
+    ("terminal_text", "expected_output"),
+    (
+        ('{"finding": "partial"}', _Finding(finding="partial")),
+        ('{"wrong": "shape"}', None),
+    ),
+)
+async def test_result_returns_the_exact_child_terminal(
+    db: None,
+    dbos_launched: Config,
+    terminal_text: str,
+    expected_output: _Finding | None,
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("review"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn("review", {"task": "acme"}, background=True, dedup_key="review")
+    terminal = TerminalFrame(
+        status="done",
+        text=terminal_text,
+        incomplete_reason="round_budget",
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="done", terminal=terminal.model_dump(mode="json"))
+            .where(tables.turn.c.id == spawned.turn_id)
+        )
+
+    result = await subagents.result(spawned.turn_id)
+
+    assert result.turn_id == spawned.turn_id
+    assert result.conversation_id == spawned.conversation_id
+    assert result.terminal == terminal
+    assert result.output == expected_output
+
+
 async def test_untrusted_profile_validation_failure_raises_a_walled_error(
     db: None, dbos_launched: Config
 ) -> None:

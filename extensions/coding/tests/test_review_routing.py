@@ -1,11 +1,15 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from ufo_ext_coding.github_app import GIT_SLOT
+from ufo_ext_coding.review_checkout import CodeReviewOutput
+from ufo_ext_coding.review_publish import UNFINISHED_NOTICE, CodeReviewWorkflow
 from ufo_ext_coding.review_routing import (
     GITHUB_PROVIDER,
     PULL_REQUEST_STREAM,
@@ -23,13 +27,21 @@ from ufo.agent_scope import agent
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.schema import tables
-from ufo.schema.records import SUBAGENT_SURFACE, Agent, Turn
+from ufo.schema.records import (
+    SUBAGENT_SURFACE,
+    Agent,
+    IncompleteReason,
+    TerminalFrame,
+    TerminalStatus,
+    Turn,
+)
 from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
 from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.tools.context import SpawnResult, SubagentStatus
 from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
@@ -277,6 +289,8 @@ async def test_activation_baselines_existing_pages_and_wakes_exact_inbox(db: Non
     assert f"Head SHA: {'a' * 40}" in turn["inbound"]
     assert "Spawn exactly one `code_review` subagent in the background" in turn["inbound"]
     assert "end the turn without publishing" in turn["inbound"]
+    assert "call `publish_code_review`" in turn["inbound"]
+    assert "subagent id named by that message" in turn["inbound"]
     async with workspace_tx() as connection:
         inbox = (
             (
@@ -381,6 +395,97 @@ async def test_the_conversation_that_ran_the_review_is_recorded_on_its_run(db: N
     assert reviewed.review_conversation_id == reviewer
     assert unmatched is not None
     assert unmatched.review_conversation_id == reviewer
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "incomplete_reason", "has_output", "records_checkout", "conclusion"),
+    (
+        ("done", None, True, True, "success"),
+        ("done", "round_budget", True, True, "action_required"),
+        ("done", None, True, False, "action_required"),
+        ("done", None, False, True, "action_required"),
+        ("failed", None, False, True, "action_required"),
+    ),
+)
+async def test_publish_code_review_reads_the_exact_child_outcome(
+    db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: TerminalStatus,
+    incomplete_reason: IncompleteReason | None,
+    has_output: bool,
+    records_checkout: bool,
+    conclusion: str,
+) -> None:
+    state = await _workspace()
+    await _activate(state)
+    await _route(state, _hook_context(state), _change(state, revision=1))
+    reviewer = await _reviewer_conversation(state)
+    target = ReviewTarget(
+        repository="metalcraftai/ufo",
+        pull_request_number=1237,
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+    )
+    async with workspace_tx() as connection:
+        run_id = (
+            await connection.execute(
+                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+            )
+        ).scalar_one()
+    ext = context_for("coding", frozenset({GIT_SLOT}))
+
+    subagent_id = uuid4()
+
+    class ResultControl:
+        async def result(self, turn_id: UUID) -> SpawnResult:
+            assert turn_id == subagent_id
+            if records_checkout:
+                await record_review_conversation(ext, target, reviewer)
+            terminal = TerminalFrame(
+                status=terminal_status, text="{}", incomplete_reason=incomplete_reason
+            )
+            return SpawnResult(
+                turn_id=turn_id,
+                conversation_id=reviewer,
+                output=CodeReviewOutput() if has_output else None,
+                terminal=terminal,
+                untrusted=True,
+            )
+
+        async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
+            raise AssertionError(turn_ids)
+
+        async def cancel(self, turn_id: UUID) -> SubagentStatus:
+            raise AssertionError(turn_id)
+
+        async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+            raise AssertionError((turn_id, text, dedup_key))
+
+    requests: list[httpx.Request] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(201, json={"id": 91})
+
+    monkeypatch.setenv(GIT_SLOT.upper(), "secret")
+    context = replace(
+        _tool_context(state),
+        subagents=ResultControl(),
+        ext=ext,
+        public_base_url="https://app.example.com",
+    )
+    with ws(state.id):
+        await CodeReviewWorkflow(context, httpx.MockTransport(github)).run(run_id, subagent_id)
+
+    body = json.loads(requests[1].content)
+    assert body["conclusion"] == conclusion
+    if conclusion == "action_required":
+        assert body["output"]["summary"].startswith(UNFINISHED_NOTICE)
+    else:
+        assert body["output"]["summary"].startswith("No severe defect found.")
+    assert ("details_url" in body) is records_checkout
 
 
 async def test_review_run_refuses_another_workspaces_turn(db: None) -> None:

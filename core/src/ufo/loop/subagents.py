@@ -191,7 +191,7 @@ class Subagents:
         ):
             await self._enqueue(turn_id, conversation_id)
         if background:
-            return SpawnResult(turn_id=turn_id, output=None)
+            return SpawnResult(turn_id=turn_id, conversation_id=conversation_id, output=None)
         terminal = await self._await_terminal(turn_id)
         if terminal.status != "done":
             diagnostic = ": ".join(
@@ -211,7 +211,50 @@ class Subagents:
                     f"subagent {profile!r} returned output that failed validation: {error}"
                 ) from error
             raise
-        return SpawnResult(turn_id=turn_id, output=output, untrusted=resolved.untrusted_output)
+        return SpawnResult(
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            output=output,
+            terminal=terminal,
+            untrusted=resolved.untrusted_output,
+        )
+
+    async def result(self, turn_id: UUID) -> SpawnResult:
+        """Read the exact terminal and validated output of a finished child this conversation
+        spawned. A failed child or invalid output returns no output, so a host-side consumer can
+        represent that terminal without trusting the model to relay its result."""
+        profile = await self._require_child(turn_id)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.conversation_id, tables.turn.c.terminal).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one()
+        if row.terminal is None:
+            raise ValueError(f"subagent {turn_id} has not finished")
+        terminal = TerminalFrame.model_validate(row.terminal)
+        try:
+            resolved = self.registry.get(profile)
+        except UnknownSubagentProfile:
+            output = None
+        else:
+            try:
+                output = (
+                    resolved.output_model.model_validate_json(terminal.text)
+                    if terminal.status == "done"
+                    else None
+                )
+            except ValidationError:
+                output = None
+        return SpawnResult(
+            turn_id=turn_id,
+            conversation_id=row.conversation_id,
+            output=output,
+            terminal=terminal,
+            untrusted=self._untrusted_output(profile),
+        )
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
         """Hold this turn until each named child has committed a terminal, and report status and

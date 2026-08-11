@@ -47,7 +47,11 @@ class RecordingSpawn:
         dedup_key: str | None = None,
     ) -> SpawnResult:
         self.spawned.append((profile, payload, dedup_key))
-        return SpawnResult(turn_id=uuid4(), output=_Result(result=f"did {payload['objective']}"))
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=_Result(result=f"did {payload['objective']}"),
+        )
 
 
 @dataclass

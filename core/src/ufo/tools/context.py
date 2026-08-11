@@ -46,7 +46,7 @@ from ufo.grants import ConnectUnavailable, Grant, GrantStore
 from ufo.o11y import log
 from ufo.sandbox.session import SandboxSession
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, TerminalFrame, Turn
 from ufo.search import SearchProvider
 from ufo.seats import member_is_admin
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
@@ -92,13 +92,14 @@ class ToolResult(BaseModel):
 
 @dataclass(frozen=True)
 class SpawnResult:
-    """What a spawn hands back: the child turn's id, plus the validated typed output when the
-    parent awaited it (foreground). A background spawn returns the id and no output yet.
-    `untrusted` carries the profile's `untrusted_output` declaration, so the returning tool result
-    is walled as data."""
+    """The exact child and, once finished, its terminal and validated output. A background spawn
+    has neither terminal nor output yet. `untrusted` carries the profile's `untrusted_output`
+    declaration, so the returning tool result is walled as data."""
 
     turn_id: UUID
+    conversation_id: UUID
     output: BaseModel | None
+    terminal: TerminalFrame | None = None
     untrusted: bool = False
 
 
@@ -143,13 +144,13 @@ class Spawn(Protocol):
 
 
 class SubagentControl(Protocol):
-    """Lifecycle operations on already-spawned background subagents, keyed by the child turn id a
-    background `spawn` returns: cancel a running one, or message one a follow-up that runs as its
-    next turn. `message`'s `dedup_key` makes the follow-up's admission idempotent, mirroring
-    `spawn` — a re-executed tool step reconnects to the follow-up it already admitted. `wait` is
-    for a tool that must answer with its child's result inside its own call and bounds the hold
-    itself; a child's output otherwise arrives on the parent's conversation when the child ends.
-    Threaded onto the ToolContext from the same Subagents workflow that backs `spawn`."""
+    """Operations on already-spawned background subagents, keyed by child turn id. `result` reads
+    a finished child's exact terminal and validated output; `wait` bounds a hold inside one tool;
+    `cancel` stops a running child; `message` admits an idempotent follow-up. A child's output
+    otherwise arrives on the parent's conversation when the child ends. Threaded onto ToolContext
+    from the same Subagents workflow that backs `spawn`."""
+
+    async def result(self, turn_id: UUID) -> SpawnResult: ...
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]: ...
 

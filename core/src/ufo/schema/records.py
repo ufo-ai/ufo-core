@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, JsonValue, field_validator, model_validat
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
+IncompleteReason = Literal["round_budget"]
 TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
 ReasoningEffort = Literal["auto", "off", "low", "medium", "high"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "auto"
@@ -25,6 +26,7 @@ WRITEBACK_FAILED: WritebackStatus = "failed"
 RUNNING: TurnStatus = "running"
 PARKED: TurnStatus = "parked"
 CANCELLED: TerminalStatus = "cancelled"
+ROUND_BUDGET_INCOMPLETE: IncompleteReason = "round_budget"
 MEMBER_ADMISSION: TurnAdmissionSource = "member"
 INTERNAL_ADMISSION: TurnAdmissionSource = "internal"
 SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
@@ -162,6 +164,7 @@ TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
 class TerminalFrame(BaseModel):
     status: TerminalStatus
     text: str = ""
+    incomplete_reason: IncompleteReason | None = None
     error_class: str | None = None
     error_message: str | None = None
     tokens: int = 0

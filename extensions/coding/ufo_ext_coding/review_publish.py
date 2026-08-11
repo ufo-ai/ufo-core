@@ -19,6 +19,7 @@ CHECKS_TIMEOUT_SECONDS = 30
 CHECKS_PAGE_SIZE = 100
 CHECKS_PAGE_LIMIT = 10
 CHECK_SUMMARY_MAX_CHARS = 60_000
+UNFINISHED_NOTICE = "Review incomplete. The comparison was not fully reviewed."
 CheckConclusion = Literal["success", "action_required"]
 
 
@@ -26,8 +27,8 @@ class PublishCodeReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: UUID = Field(description="Review run from the source-change wake.")
-    review: CodeReviewOutput
-    user_description: str = Field(description="That you are publishing the completed review.")
+    subagent_id: UUID = Field(description="Subagent id from the delivered review result.")
+    user_description: str = Field(description="That you are publishing the delivered review.")
 
 
 class CheckOutput(BaseModel):
@@ -76,7 +77,16 @@ def review_conversation_url(public_base_url: str | None, run: StoredReviewRun) -
     )
 
 
-def render_check_summary(review: CodeReviewOutput, conversation_url: str | None = None) -> str:
+def check_conclusion(review: CodeReviewOutput, incomplete: bool) -> CheckConclusion:
+    return "action_required" if review.findings or incomplete else "success"
+
+
+def render_check_summary(
+    review: CodeReviewOutput,
+    conversation_url: str | None = None,
+    incomplete: bool = False,
+) -> str:
+    sections = [UNFINISHED_NOTICE] if incomplete else []
     if review.findings:
         parts = ["Severe defects"]
         for finding in review.findings:
@@ -89,9 +99,10 @@ def render_check_summary(review: CodeReviewOutput, conversation_url: str | None 
                     f"  Impact: {finding.impact[0].upper()}{finding.impact[1:]}.",
                 )
             )
-    else:
-        parts = ["No severe defect found."]
-    body = "\n".join(parts)
+        sections.append("\n".join(parts))
+    elif not incomplete:
+        sections.append("No severe defect found.")
+    body = "\n\n".join(sections)
     if conversation_url is None:
         return body[:CHECK_SUMMARY_MAX_CHARS]
     link = f"\n\n{REVIEW_CONVERSATION_LABEL} {conversation_url}"
@@ -104,12 +115,15 @@ class GitHubCheckPublisher:
     conversation_url: str | None = None
     transport: httpx.AsyncBaseTransport | None = None
 
-    async def publish(self, run: StoredReviewRun, review: CodeReviewOutput) -> int:
+    async def publish(
+        self, run: StoredReviewRun, review: CodeReviewOutput, incomplete: bool = False
+    ) -> int:
         external_id = str(run.run_id)
         output = CheckOutput(
-            title=CHECK_TITLE, summary=render_check_summary(review, self.conversation_url)
+            title=CHECK_TITLE,
+            summary=render_check_summary(review, self.conversation_url, incomplete),
         )
-        conclusion: CheckConclusion = "action_required" if review.findings else "success"
+        conclusion = check_conclusion(review, incomplete)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self.token}",
@@ -198,23 +212,58 @@ class GitHubCheckPublisher:
         return response
 
 
-async def publish_code_review(ctx: ToolContext, args: PublishCodeReviewInput) -> ToolResult:
-    if ctx.ext is None:
-        raise RuntimeError("review publication requires the coding extension context")
-    run = await review_run_for(ctx.ext, args.run_id, ctx.turn.conversation_id)
-    if run is None:
-        raise ValueError("review run does not belong to this conversation")
-    token = await ctx.ext.credentials.resolve(GIT_SLOT)
-    check_id = await GitHubCheckPublisher(
-        token, review_conversation_url(ctx.public_base_url, run)
-    ).publish(run, args.review)
-    return ToolResult(
-        content=(
-            TextContent(
-                text=(
-                    f"Published {CHECK_NAME} for {run.repository}#{run.pull_request_number} "
-                    f"at {run.head_sha} as check {check_id}."
-                )
-            ),
+@dataclass(frozen=True)
+class CodeReviewWorkflow:
+    ctx: ToolContext
+    transport: httpx.AsyncBaseTransport | None = None
+
+    async def run(self, run_id: UUID, subagent_id: UUID) -> ToolResult:
+        if self.ctx.ext is None:
+            raise RuntimeError("code review requires the coding extension context")
+        if self.ctx.subagents is None:
+            raise RuntimeError("code review requires subagent control")
+        run = await review_run_for(self.ctx.ext, run_id, self.ctx.turn.conversation_id)
+        if run is None:
+            raise ValueError("review run does not belong to this conversation")
+        result = await self.ctx.subagents.result(subagent_id)
+        if result.terminal is None:
+            raise RuntimeError("delivered code review returned no terminal")
+        reviewed = await review_run_for(self.ctx.ext, run_id, self.ctx.turn.conversation_id)
+        if reviewed is None:
+            raise RuntimeError("review run disappeared")
+        review = (
+            CodeReviewOutput()
+            if result.output is None
+            else CodeReviewOutput.model_validate(result.output)
         )
-    )
+        checkout_matches = reviewed.review_conversation_id == result.conversation_id
+        incomplete = (
+            result.terminal.status != "done"
+            or result.terminal.incomplete_reason is not None
+            or result.output is None
+            or not checkout_matches
+        )
+        token = await self.ctx.ext.credentials.resolve(GIT_SLOT)
+        check_id = await GitHubCheckPublisher(
+            token,
+            review_conversation_url(self.ctx.public_base_url, reviewed)
+            if checkout_matches
+            else None,
+            self.transport,
+        ).publish(reviewed, review, incomplete)
+        conclusion = check_conclusion(review, incomplete)
+        return ToolResult(
+            content=(
+                TextContent(
+                    text=(
+                        f"Published {CHECK_NAME} for {reviewed.repository}"
+                        f"#{reviewed.pull_request_number} at {reviewed.head_sha} as check "
+                        f"{check_id}, concluded {conclusion}."
+                    )
+                ),
+            )
+        )
+
+
+async def publish_code_review(ctx: ToolContext, args: PublishCodeReviewInput) -> ToolResult:
+    return await CodeReviewWorkflow(ctx).run(args.run_id, args.subagent_id)

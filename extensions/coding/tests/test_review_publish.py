@@ -12,6 +12,7 @@ from ufo_ext_coding.review_publish import (
     CHECK_NAME,
     CHECK_SUMMARY_MAX_CHARS,
     CHECKS_PAGE_SIZE,
+    UNFINISHED_NOTICE,
     GitHubCheckPublisher,
     render_check_summary,
     review_conversation_url,
@@ -121,6 +122,38 @@ async def test_publisher_reconciles_existing_run_by_external_id() -> None:
     )
     assert body["details_url"] == REVIEW_URL
     assert "head_sha" not in body
+
+
+async def test_incomplete_review_blocks_and_keeps_partial_findings() -> None:
+    requests: list[httpx.Request] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(201, json={"id": 55})
+
+    await GitHubCheckPublisher("secret", REVIEW_URL, transport=httpx.MockTransport(github)).publish(
+        _run(),
+        CodeReviewOutput(
+            findings=(
+                CodeReviewFinding(
+                    path="core/review.py",
+                    line=17,
+                    title="Wrong comparison",
+                    trigger="Publish after the pull request head changes.",
+                    failure="The published SHA differs from the reviewed SHA.",
+                    impact="materially incorrect result or state for a supported workflow",
+                ),
+            )
+        ),
+        incomplete=True,
+    )
+
+    body = json.loads(requests[1].content)
+    assert body["conclusion"] == "action_required"
+    assert body["output"]["summary"].startswith(f"{UNFINISHED_NOTICE}\n\nSevere defects")
+    assert "`core/review.py:17` Wrong comparison" in body["output"]["summary"]
 
 
 async def test_publisher_sends_no_link_when_no_conversation_ran_the_review() -> None:

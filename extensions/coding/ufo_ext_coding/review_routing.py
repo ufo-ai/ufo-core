@@ -105,8 +105,9 @@ class ReviewTarget:
             f"Head SHA: {self.head_sha}\n"
             "Spawn exactly one `code_review` subagent in the background with these values, then "
             "end the turn without publishing. Its validated result arrives on this conversation "
-            f"as a later message: publish that result with review run {run_id}, then end that "
-            "turn. Do not ask the user a question."
+            f"as a later message: call `publish_code_review` with review run {run_id} and the "
+            "subagent id named by that message, even when its status is not done, then end that "
+            "turn. Do not copy the review into the tool call or ask the user a question."
         )
 
     @property

@@ -171,8 +171,8 @@ def manifest() -> Manifest:
             ),
             ToolDef(
                 name="publish_code_review",
-                description="Publish a completed typed review as an advisory ufo review Check on "
-                "the exact stored head for this conversation's review run.",
+                description="Publish the exact delivered review result as an advisory ufo review "
+                "Check on the stored head for this conversation's review run.",
                 input_model=PublishCodeReviewInput,
                 handler=publish_code_review,
                 side_effecting=True,

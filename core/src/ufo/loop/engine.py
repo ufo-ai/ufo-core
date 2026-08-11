@@ -91,6 +91,7 @@ from ufo.schema.records import (
     INTERNAL_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
+    ROUND_BUDGET_INCOMPLETE,
     RUNNING,
     SCHEDULED_ADMISSION,
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
@@ -98,6 +99,7 @@ from ufo.schema.records import (
     AskUserInput,
     ConnectRequest,
     CredentialRequest,
+    IncompleteReason,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -739,6 +741,7 @@ class _TurnMeter:
     profile: str
     rounds: int = 0
     ended: bool = False
+    incomplete_reason: IncompleteReason | None = None
 
     def exited(self, status: str) -> None:
         if self.ended:
@@ -1325,6 +1328,7 @@ class TurnEngine:
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
+        meter.incomplete_reason = ROUND_BUDGET_INCOMPLETE
         messages, text = await self._force_final(messages, usage_events, system, requesters)
         return messages, text, None, None, None
 
@@ -1486,9 +1490,9 @@ class TurnEngine:
         subagent that exhausts its smaller budget closes through a forced finish call instead — a
         best-effort `done` answer that keeps its output schema; only a forced call that still
         violates the schema ends the turn `failed`, which the parent's spawn receives as an
-        ordinary tool error, never a crash. Exhaustion is a distinct terminal shape — a metric
-        and log fire so an operator can spot an agent chronically hitting its ceiling (a prompt or
-        tool-loop bug) that a plain `done` would hide."""
+        ordinary tool error, never a crash. Exhaustion is a distinct terminal shape: its
+        `incomplete_reason` travels with the answer, and a metric and log let an operator spot an
+        agent chronically hitting its ceiling (a prompt or tool-loop bug) that `done` would hide."""
         emit_metric("turn_round_budget_exhausted_total", profile=self.profile)
         log("turn.force_final", turn_id=str(self.turn.id), rounds=self.max_rounds)
         await self._enforce_spend(usage_events, requesters)
@@ -2164,6 +2168,7 @@ class TurnEngine:
                     connect_request,
                     unless_arrivals,
                     absorbed,
+                    meter.incomplete_reason,
                 )
                 break
             except Exception as commit_error:
@@ -2223,6 +2228,7 @@ class TurnEngine:
         connect_request: ConnectRequest | None,
         unless_arrivals: bool,
         absorbed: tuple[UUID, ...],
+        incomplete_reason: IncompleteReason | None,
     ) -> tuple[TerminalFrame | None, bool]:
         usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
@@ -2273,6 +2279,7 @@ class TurnEngine:
             frame = TerminalFrame(
                 status=status,
                 text=answer,
+                incomplete_reason=incomplete_reason,
                 error_class=error_class,
                 error_message=(
                     error_message[:TERMINAL_ERROR_MESSAGE_MAX_CHARS]
