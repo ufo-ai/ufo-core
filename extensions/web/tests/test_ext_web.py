@@ -7808,3 +7808,27 @@ def test_projection_keeps_the_bubble_for_what_a_member_spoke() -> None:
         {"role": "user", "text": "ask a subagent for a joke"},
         {"role": "assistant", "text": "Handing that off."},
     ]
+
+
+def test_a_members_bubble_carries_no_recalled_memory() -> None:
+    """`user_prompt_submit` appends what memory recall retrieved to the message the model reads.
+    The member never typed it, so their bubble must not carry it — rendered as their own words it
+    reads as though they pasted their own stored memories into the chat, and a recall about someone
+    else's work would appear over their name."""
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=(
+                    "<context>\nmessage_ref: 11111111-1111-1111-1111-111111111111\n</context>\n"
+                    "hi\n\n<injected_context>\nRelevant memory:\n- a template Marshall stored\n"
+                    "</injected_context>"
+                ),
+            ),
+            Message(role="assistant", content="Hello."),
+        ),
+    )
+    assert rendered == [
+        {"role": "user", "text": "hi"},
+        {"role": "assistant", "text": "Hello."},
+    ]

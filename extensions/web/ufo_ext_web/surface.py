@@ -168,6 +168,7 @@ STATIC_ETAGS = {
     name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in STATIC_ASSETS.items()
 }
 CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
+INJECTED_CONTEXT = re.compile(r"\s*<injected_context>.*?</injected_context>\s*\Z", re.S)
 MESSAGE_REF = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)", re.S)
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9._-]+")
 
@@ -649,6 +650,7 @@ def _rendered_text(message: Message) -> str:
             )
     if message.role == "user":
         rendered = CONTEXT_TAG.sub("", rendered, count=1)
+        rendered = INJECTED_CONTEXT.sub("", rendered, count=1)
     return rendered.strip()
 
 
