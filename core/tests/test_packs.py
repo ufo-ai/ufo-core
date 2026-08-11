@@ -48,6 +48,19 @@ def test_assistant_packs_mount_the_member_portal() -> None:
         assert [surface.name for surface in web.surfaces] == ["web"]
 
 
+def test_assistant_packs_activate_durable_objectives() -> None:
+    for pack in (assistant, assistant_hosted):
+        manifests = load_manifests(pack.NAME)
+        objectives = next(manifest for manifest in manifests if manifest.name == "objectives")
+        assert {tool.name for tool in objectives.tools} == {
+            "plan_objective",
+            "read_objective",
+            "record_step",
+        }
+        assert [section.name for section in objectives.prompt_sections] == ["objectives"]
+        assert [hook.event for hook in objectives.hooks] == ["user_prompt_submit"]
+
+
 def test_assistant_billing_pack_is_the_local_bundle_plus_metronome() -> None:
     """The opt-in local billing bundle: everything the assistant pack has, plus the one extension
     that owns the billing chain — so `manage_billing` and the activation job exist on a laptop

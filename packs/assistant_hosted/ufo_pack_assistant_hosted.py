@@ -4,8 +4,8 @@ Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistan
 memory and recall, Exa research, brokered connectors (Composio's open namespace plus the Pipedream
 allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
 the browser/computer-use tools,
-website building and the code REPL, document generation, todos, scheduled tasks, member-authored
-skills, the ufo terminal
+website building and the code REPL, document generation, todos, durable objectives, scheduled
+tasks, member-authored skills, the ufo terminal
 surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
 model providers, Metronome plan provisioning, usage and seat metering, and the coding
 subagent — but over managed backends instead
@@ -30,6 +30,7 @@ EXTENSIONS = (
     "turbopuffer",
     "exa",
     "todos",
+    "objectives",
     "ufo",
     "web",
     "debugger",
