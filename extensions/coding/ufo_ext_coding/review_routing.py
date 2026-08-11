@@ -26,7 +26,6 @@ review_inbox = sa.Table(
     _metadata,
     sa.Column("workspace_id", sa.Uuid, primary_key=True),
     sa.Column("source_id", sa.Uuid, primary_key=True),
-    sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("baseline_revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -82,8 +81,10 @@ class PullRequestPage(BaseModel):
 
 @dataclass(frozen=True)
 class ReviewInbox:
+    """Which agent reviews the comparisons one shared pull-request source produces. The agent is
+    the binding, not a conversation: every comparison opens its own."""
+
     source_id: UUID
-    conversation_id: UUID
     agent_id: UUID
     baseline_revision: int
 
@@ -210,7 +211,6 @@ class ReviewRouting:
                     .values(
                         workspace_id=workspace_id,
                         source_id=source_id,
-                        conversation_id=ctx.turn.conversation_id,
                         agent_id=ctx.turn.agent_id,
                         baseline_revision=baseline,
                         created_at=sa.func.now(),
@@ -219,7 +219,6 @@ class ReviewRouting:
                     .on_conflict_do_update(
                         index_elements=[review_inbox.c.workspace_id, review_inbox.c.source_id],
                         set_={
-                            "conversation_id": ctx.turn.conversation_id,
                             "agent_id": ctx.turn.agent_id,
                             "updated_at": sa.func.now(),
                         },
@@ -292,7 +291,6 @@ class ReviewRouting:
         return {
             row["source_id"]: ReviewInbox(
                 source_id=row["source_id"],
-                conversation_id=row["conversation_id"],
                 agent_id=row["agent_id"],
                 baseline_revision=row["baseline_revision"],
             )
@@ -300,8 +298,14 @@ class ReviewRouting:
         }
 
     async def _invoke(self, inbox: ReviewInbox, target: ReviewTarget) -> None:
+        """One comparison, one conversation of the review agent. The conversation is keyed by the
+        comparison, so a replayed batch reopens the one it opened rather than a second, and it is
+        the review's whole context: one child spawned in it, one result delivered to it, one check
+        published from it. A review agent holding every comparison in one conversation is what
+        makes a delivered result pairable with the wrong run at all."""
         workspace_id = self.ext.store.workspace_id
         candidate_run_id = uuid4()
+        conversation_id = await self.ext.open_conversation(inbox.agent_id, target.idempotency_key)
         async with self.ext.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
@@ -314,7 +318,7 @@ class ReviewRouting:
                     base_sha=target.base_sha,
                     head_sha=target.head_sha,
                     run_id=candidate_run_id,
-                    conversation_id=inbox.conversation_id,
+                    conversation_id=conversation_id,
                     agent_id=inbox.agent_id,
                     turn_id=None,
                     review_conversation_id=None,
@@ -376,8 +380,8 @@ async def configure_review_inbox(ctx: ToolContext, args: ConfigureReviewInboxInp
         content=(
             TextContent(
                 text=(
-                    f"This conversation reviews new pull-request comparisons from {args.source}. "
-                    f"Pages through source revision {baseline} are baselined."
+                    f"New pull-request comparisons from {args.source} open a review conversation "
+                    f"with this agent. Pages through source revision {baseline} are baselined."
                 )
             ),
         )

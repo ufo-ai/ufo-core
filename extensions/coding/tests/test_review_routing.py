@@ -151,14 +151,16 @@ async def _workspace() -> Workspace:
     )
 
 
-def _tool_context(state: Workspace, *, speaker_id: UUID | None = None) -> ToolContext:
+def _tool_context(
+    state: Workspace, *, speaker_id: UUID | None = None, conversation_id: UUID | None = None
+) -> ToolContext:
     return ToolContext(
         sandbox=None,
         blob=None,
         turn=Turn(
             id=uuid4(),
             workspace_id=state.id,
-            conversation_id=state.conversation_id,
+            conversation_id=conversation_id or state.conversation_id,
             agent_id=state.agent_id,
             seq=1,
             status="running",
@@ -238,14 +240,18 @@ async def _route(state: Workspace, ext: object, *changes: PageChange) -> None:
 
 
 async def _turns(state: Workspace) -> list[sa.RowMapping]:
+    """Every review turn: the ones the router opened a conversation for, never the conversation the
+    admin configured the source in."""
     async with workspace_tx() as connection:
         return list(
             (
                 await connection.execute(
-                    sa.select(tables.turn).where(
+                    sa.select(tables.turn)
+                    .where(
                         tables.turn.c.workspace_id == state.id,
-                        tables.turn.c.conversation_id == state.conversation_id,
+                        tables.turn.c.conversation_id != state.conversation_id,
                     )
+                    .order_by(tables.turn.c.created_at)
                 )
             ).mappings()
         )
@@ -322,17 +328,17 @@ async def test_activation_baselines_existing_pages_and_wakes_exact_inbox(db: Non
             .mappings()
             .one()
         )
-    assert inbox["conversation_id"] == state.conversation_id
     assert inbox["agent_id"] == state.agent_id
     assert inbox["baseline_revision"] == 1
     assert run["turn_id"] == turn["id"]
     assert str(run["run_id"]) in turn["inbound"]
     with ws(state.id):
-        stored = await review_run_for(_hook_context(state), run["run_id"], state.conversation_id)
+        stored = await review_run_for(_hook_context(state), run["run_id"], turn["conversation_id"])
         wrong_conversation = await review_run_for(_hook_context(state), run["run_id"], uuid4())
     assert stored is not None
     assert stored.repository == "metalcraftai/ufo"
-    assert stored.conversation_id == state.conversation_id
+    assert stored.conversation_id == turn["conversation_id"]
+    assert turn["conversation_id"] != state.conversation_id
     assert wrong_conversation is None
 
 
@@ -349,7 +355,8 @@ async def test_only_new_open_ready_comparisons_wake_once(db: None) -> None:
     await _route(state, ext, _change(state, revision=6, source_id=uuid4()))
 
     turns = await _turns(state)
-    assert len(turns) == 1
+    assert len(turns) == 2
+    assert len({turn["conversation_id"] for turn in turns}) == 2
     async with workspace_tx() as connection:
         runs = (
             (
@@ -363,7 +370,8 @@ async def test_only_new_open_ready_comparisons_wake_once(db: None) -> None:
             .all()
         )
     assert [run["head_sha"] for run in runs] == ["a" * 40, "c" * 40]
-    assert {run["turn_id"] for run in runs} == {turns[0]["id"]}
+    assert {run["turn_id"] for run in runs} == {turn["id"] for turn in turns}
+    assert {run["conversation_id"] for run in runs} == {turn["conversation_id"] for turn in turns}
 
 
 async def test_the_conversation_that_ran_the_review_is_recorded_on_its_run(db: None) -> None:
@@ -378,16 +386,18 @@ async def test_the_conversation_that_ran_the_review_is_recorded_on_its_run(db: N
         head_sha="a" * 40,
     )
     async with workspace_tx() as connection:
-        run_id = (
+        run_id, review_conversation = (
             await connection.execute(
-                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+                sa.select(review_run.c.run_id, review_run.c.conversation_id).where(
+                    review_run.c.workspace_id == state.id
+                )
             )
-        ).scalar_one()
+        ).one()
 
     with ws(state.id):
-        ordered = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+        ordered = await review_run_for(_hook_context(state), run_id, review_conversation)
         await record_review_conversation(_hook_context(state), target, reviewer)
-        reviewed = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+        reviewed = await review_run_for(_hook_context(state), run_id, review_conversation)
         await record_review_conversation(
             _hook_context(state),
             ReviewTarget(
@@ -398,10 +408,10 @@ async def test_the_conversation_that_ran_the_review_is_recorded_on_its_run(db: N
             ),
             uuid4(),
         )
-        unmatched = await review_run_for(_hook_context(state), run_id, state.conversation_id)
+        unmatched = await review_run_for(_hook_context(state), run_id, review_conversation)
 
     assert ordered is not None
-    assert ordered.conversation_id == state.conversation_id
+    assert ordered.conversation_id == review_conversation
     assert ordered.review_conversation_id is None
     assert reviewed is not None
     assert reviewed.review_conversation_id == reviewer
@@ -439,11 +449,13 @@ async def test_publish_code_review_reads_the_exact_child_outcome(
         head_sha="a" * 40,
     )
     async with workspace_tx() as connection:
-        run_id = (
+        run_id, review_conversation = (
             await connection.execute(
-                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+                sa.select(review_run.c.run_id, review_run.c.conversation_id).where(
+                    review_run.c.workspace_id == state.id
+                )
             )
-        ).scalar_one()
+        ).one()
     ext = context_for("coding", frozenset({GIT_SLOT}))
 
     subagent_id = uuid4()
@@ -483,7 +495,7 @@ async def test_publish_code_review_reads_the_exact_child_outcome(
 
     monkeypatch.setenv(GIT_SLOT.upper(), "secret")
     context = replace(
-        _tool_context(state),
+        _tool_context(state, conversation_id=review_conversation),
         subagents=ResultControl(),
         ext=ext,
         public_base_url="https://app.example.com",
@@ -507,11 +519,13 @@ async def _publish_fixture(
     output: CodeReviewOutput | None,
 ) -> tuple[ToolContext, UUID, UUID, list[httpx.Request], httpx.MockTransport]:
     async with workspace_tx() as connection:
-        run_id = (
+        run_id, review_conversation = (
             await connection.execute(
-                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+                sa.select(review_run.c.run_id, review_run.c.conversation_id).where(
+                    review_run.c.workspace_id == state.id
+                )
             )
-        ).scalar_one()
+        ).one()
     subagent_id = uuid4()
 
     class ResultControl:
@@ -543,7 +557,7 @@ async def _publish_fixture(
 
     monkeypatch.setenv(GIT_SLOT.upper(), "secret")
     context = replace(
-        _tool_context(state),
+        _tool_context(state, conversation_id=review_conversation),
         subagents=ResultControl(),
         ext=context_for("coding", frozenset({GIT_SLOT})),
         public_base_url="https://app.example.com",

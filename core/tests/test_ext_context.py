@@ -8,6 +8,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo.audience import SHARED_AUDIENCE
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
@@ -760,3 +761,55 @@ async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Pat
         "2026-07-26T00:04.jsonl",
     ]
     assert (root / str(conversation_id) / "log-sibling/keep.jsonl").exists()
+
+
+async def test_open_conversation_is_the_agents_own_and_keyed_by_its_trigger(db: None) -> None:
+    """A conversation a trigger opens belongs to the agent that does the work and to no member, so
+    it lists under that agent and reaches no member's rail; the key is the event's identity, so a
+    replayed batch reopens the one it opened rather than a second."""
+    workspace_id = await _workspace()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        ext = context_for("coding", frozenset())
+        opened = await ext.open_conversation(agent_id, "code-review:abc")
+        replayed = await ext.open_conversation(agent_id, "code-review:abc")
+        other = await ext.open_conversation(agent_id, "code-review:def")
+    assert replayed == opened
+    assert other != opened
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.agent_id,
+                    tables.conversation.c.member_id,
+                    tables.conversation.c.surface,
+                    tables.conversation.c.queue_key,
+                    tables.conversation.c.audience,
+                    tables.conversation.c.sandbox_conversation_id,
+                ).where(tables.conversation.c.id == opened)
+            )
+        ).one()
+    assert row.agent_id == agent_id
+    assert row.member_id is None
+    assert row.surface == "coding"
+    assert row.queue_key == "code-review:abc"
+    assert row.audience == str(SHARED_AUDIENCE)
+    assert row.sandbox_conversation_id is None
+
+
+async def test_open_conversation_refuses_an_agent_of_another_workspace(db: None) -> None:
+    workspace_id = await _workspace()
+    other_workspace = await _workspace()
+    async with workspace_tx() as connection:
+        stranger = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == other_workspace)
+            )
+        ).scalar_one()
+    with ws(workspace_id), pytest.raises(ValueError, match="not an agent of this workspace"):
+        await context_for("coding", frozenset()).open_conversation(stranger, "code-review:abc")

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from pydantic import BaseModel
@@ -727,6 +727,64 @@ class ExtensionContext:
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
+
+    async def open_conversation(self, agent_id: UUID, key: str) -> UUID:
+        """Get-or-create the conversation this extension keys by `key`, held by `agent_id` and by
+        no member — the conversation a trigger opens rather than a member does. The work an event
+        starts is one conversation of the agent that does that work: it lists under that agent,
+        reaches no member's rail (which reads the conversations a member opened on a member
+        surface), holds its own queue partition, and takes its own sandbox, so two of them neither
+        serialize against each other nor share a checkout tree.
+
+        The key is the event's own identity — a comparison, a schedule firing, a delivery id — so
+        a replayed batch reopens the conversation it already opened rather than a second one, and
+        the extension's name is the surface, so one extension's keys can never collide with
+        another's. The audience is the workspace's, since no member delegated it. `invoke` admits
+        the turns; this only opens the room they run in, and an agent of another workspace fails
+        loud rather than binding a conversation nothing can reach."""
+        workspace_id = self.store.workspace_id
+        async with workspace_tx() as connection:
+            known = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.id == agent_id,
+                    )
+                )
+            ).one_or_none()
+            if known is None:
+                raise ValueError(f"agent {agent_id} is not an agent of this workspace")
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.conversation)
+                .values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface=self.store.extension,
+                    queue_key=key,
+                    member_id=None,
+                    audience=str(SHARED_AUDIENCE),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.conversation.c.workspace_id,
+                        tables.conversation.c.surface,
+                        tables.conversation.c.queue_key,
+                    ]
+                )
+            )
+            return (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id,
+                        tables.conversation.c.surface == self.store.extension,
+                        tables.conversation.c.queue_key == key,
+                    )
+                )
+            ).scalar_one()
 
     async def agent_name(self) -> str:
         """The bound agent's stable name — the `agent` object kind's own object name, so an
