@@ -34,12 +34,6 @@ from ufo.ext.conversation_slots import (
     CONVERSATION_AUTOMATIONS_MAX as CONVERSATION_AUTOMATIONS_MAX,
 )
 from ufo.ext.conversation_slots import (
-    CONVERSATION_CHANGE_PATCH_MAX_CHARS as CONVERSATION_CHANGE_PATCH_MAX_CHARS,
-)
-from ufo.ext.conversation_slots import (
-    CONVERSATION_CHANGES_MAX as CONVERSATION_CHANGES_MAX,
-)
-from ufo.ext.conversation_slots import (
     CONVERSATION_FILES_MAX as CONVERSATION_FILES_MAX,
 )
 from ufo.ext.conversation_slots import (
@@ -61,16 +55,10 @@ from ufo.ext.conversation_slots import (
     AutomationsSlotPayload as AutomationsSlotPayload,
 )
 from ufo.ext.conversation_slots import (
-    ChangesSlotPayload as ChangesSlotPayload,
-)
-from ufo.ext.conversation_slots import (
     ConversationArtifact as ConversationArtifact,
 )
 from ufo.ext.conversation_slots import (
     ConversationAutomation as ConversationAutomation,
-)
-from ufo.ext.conversation_slots import (
-    ConversationChange as ConversationChange,
 )
 from ufo.ext.conversation_slots import (
     ConversationFile as ConversationFile,
@@ -224,4 +212,16 @@ from ufo.image_previews import (
 )
 from ufo.image_previews import (
     raster_image_media_type as raster_image_media_type,
+)
+from ufo.workspace_changes import (
+    WORKSPACE_CHANGE_PATCH_MAX_CHARS as WORKSPACE_CHANGE_PATCH_MAX_CHARS,
+)
+from ufo.workspace_changes import (
+    WORKSPACE_CHANGES_MAX as WORKSPACE_CHANGES_MAX,
+)
+from ufo.workspace_changes import (
+    WorkspaceChange as WorkspaceChange,
+)
+from ufo.workspace_changes import (
+    WorkspaceChanges as WorkspaceChanges,
 )

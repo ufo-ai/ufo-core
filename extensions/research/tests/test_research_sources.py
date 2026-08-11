@@ -156,7 +156,6 @@ async def test_retrieved_results_become_one_conversation_sources_slot(db: None) 
             agent_id=agent_id,
             audience=SHARED_AUDIENCE,
             messages=(),
-            compacted=False,
             public_base_url=None,
         )
         assert await SOURCES_SLOT.summarize(slot_context) == 2
@@ -191,7 +190,6 @@ async def test_sources_slot_is_absent_without_retrieved_results(db: None) -> Non
             agent_id=agent_id,
             audience=SHARED_AUDIENCE,
             messages=(),
-            compacted=False,
             public_base_url=None,
         )
         assert await SOURCES_SLOT.summarize(slot_context) is None

@@ -15,9 +15,8 @@ from ufo.ext.context import ExtensionContext
 from ufo.image_previews import RasterImageMediaType
 from ufo.models.interface import Message
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
+from ufo.workspace_changes import WorkspaceChanges
 
-CONVERSATION_CHANGE_PATCH_MAX_CHARS = 25_000
-CONVERSATION_CHANGES_MAX = 100
 CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS = 500
 CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS = 2_000
 CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS = 200
@@ -66,22 +65,6 @@ class ImagePreview(BaseModel):
         ):
             raise ValueError("image preview URL must be same-origin and root-relative")
         return value
-
-
-class ConversationChange(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
-    patch: str = Field(max_length=CONVERSATION_CHANGE_PATCH_MAX_CHARS)
-    truncated: bool
-
-
-class ChangesSlotPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["changes"] = "changes"
-    changes: tuple[ConversationChange, ...] = Field(max_length=CONVERSATION_CHANGES_MAX)
-    truncated: bool
 
 
 class ConversationArtifact(BaseModel):
@@ -263,7 +246,7 @@ class AutomationsSlotPayload(BaseModel):
 ConversationSlotPayload = (
     AutomationsSlotPayload
     | ArtifactsSlotPayload
-    | ChangesSlotPayload
+    | WorkspaceChanges
     | FilesSlotPayload
     | SitesSlotPayload
     | SourcesSlotPayload
@@ -272,7 +255,7 @@ ConversationSlotPayload = (
 SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
     AutomationsSlotPayload,
     ArtifactsSlotPayload,
-    ChangesSlotPayload,
+    WorkspaceChanges,
     FilesSlotPayload,
     SitesSlotPayload,
     SourcesSlotPayload,
@@ -294,7 +277,6 @@ class ConversationSlotContext:
     agent_id: UUID
     audience: Audience
     messages: tuple[Message, ...]
-    compacted: bool
     public_base_url: str | None = None
     visible_items: tuple[ConversationSlotItem, ...] = ()
     projection: ConversationSlotPayload | None = None

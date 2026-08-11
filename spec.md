@@ -601,7 +601,10 @@ HTML in a reply renders as visible text, never as elements; links open in a new 
 `noopener noreferrer`; and an image renders only from the portal's own origin, so a reply can
 never direct the member's browser to fetch an attacker-chosen host. A reply the parser cannot
 handle renders as its raw text rather than failing the page. A conversation's Changes view renders
-bounded file deltas from its durable tool results. `surface_identity` and `conversation.surface`
+what git reports uncommitted in the checkouts under its workspace, scanned in the sandbox when a
+turn commits and recorded against the conversation that owns that sandbox — so a subagent's edits,
+a shell command's, and a script's all answer on the parent's screen, and a file outside a checkout
+is not a change. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
 Slack renders links to the exact web conversation and its agent configuration as the reply's final
 context block for every workspace when the deploy has a public base URL. In the operator's own

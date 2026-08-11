@@ -145,7 +145,7 @@ NPM_PACKAGES = (
 # carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
 # every exec's envs, since e2b commands do not inherit the template ENV.
 # The scripts baked into the image, with a version bumped on any content change so the digest moves.
-SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 4))
+SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 5))
 # Importable modules baked beside them: a script's own directory is `sys.path[0]`, so a sibling here
 # is what `sbxfs` imports, under every carrier, with no installed package inside the sandbox.
 SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)

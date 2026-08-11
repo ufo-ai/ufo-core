@@ -6,13 +6,10 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.ext.conversation_slots import (
     CONVERSATION_ARTIFACTS_MAX,
-    CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
     CONVERSATION_TASKS_MAX,
     ArtifactsSlotPayload,
-    ChangesSlotPayload,
     ConversationArtifact,
-    ConversationChange,
     ConversationFile,
     ConversationSlotContext,
     ConversationSlotProvider,
@@ -24,14 +21,15 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.manifest import Manifest, conversation_slot_declarations
 from ufo.image_previews import raster_image_media_type
+from ufo.workspace_changes import WORKSPACE_CHANGES_MAX, WorkspaceChange, WorkspaceChanges
 
 
 async def _summary(_ctx: ConversationSlotContext) -> int:
     return 0
 
 
-async def _read(_ctx: ConversationSlotContext) -> ChangesSlotPayload:
-    return ChangesSlotPayload(changes=(), truncated=False)
+async def _read(_ctx: ConversationSlotContext) -> WorkspaceChanges:
+    return WorkspaceChanges(changes=(), truncated=False)
 
 
 def _provider(slot_id: str = "changes") -> ConversationSlotProvider:
@@ -39,7 +37,7 @@ def _provider(slot_id: str = "changes") -> ConversationSlotProvider:
         id=slot_id,
         label="Changes",
         icon="diff",
-        content=ChangesSlotPayload,
+        content=WorkspaceChanges,
         summarize=_summary,
         read=_read,
     )
@@ -79,7 +77,7 @@ def test_conversation_slot_declarations_reject_unknown_payloads() -> None:
         id="unknown",
         label="Unknown",
         icon="artifact",
-        content=cast(type[ChangesSlotPayload], UnknownPayload),
+        content=cast(type[WorkspaceChanges], UnknownPayload),
         summarize=_summary,
         read=_read,
     )
@@ -90,11 +88,11 @@ def test_conversation_slot_declarations_reject_unknown_payloads() -> None:
 
 
 def test_changes_payload_bounds_its_collection() -> None:
-    change = ConversationChange(path="file.py", patch="+new", truncated=False)
+    change = WorkspaceChange(path="file.py", patch="+new", truncated=False)
 
     with pytest.raises(ValidationError, match="too_long"):
-        ChangesSlotPayload(
-            changes=(change,) * (CONVERSATION_CHANGES_MAX + 1),
+        WorkspaceChanges(
+            changes=(change,) * (WORKSPACE_CHANGES_MAX + 1),
             truncated=True,
         )
 

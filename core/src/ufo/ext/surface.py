@@ -136,6 +136,11 @@ from ufo.transcript import (
     transcript_key,
 )
 from ufo.workspace import ws, ws_current
+from ufo.workspace_changes import (
+    NOTHING_CHANGED,
+    WorkspaceChanges,
+    recorded_workspace_changes,
+)
 from ufo.workspace_file_preview_token import (
     WORKSPACE_FILE_PREVIEW_TTL_SECONDS,
     WorkspaceFilePreviewTokenError,
@@ -2766,6 +2771,14 @@ class SurfaceContext:
         if not await self._owned_conversation(conversation_id):
             return ()
         return await self._sandboxes.entries(conversation_id)
+
+    async def conversation_changes(self, conversation_id: UUID) -> WorkspaceChanges:
+        """What git last reported changed in the conversation's checkouts, recorded when a turn of
+        its own — or of a subagent sharing its sandbox — committed. Nothing for a conversation that
+        is not this workspace's."""
+        if not await self._owned_conversation(conversation_id):
+            return NOTHING_CHANGED
+        return await recorded_workspace_changes(conversation_id)
 
     def workspace_file_preview_token(
         self, conversation_id: UUID, file: WorkspaceFile

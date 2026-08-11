@@ -131,7 +131,6 @@ async def test_sample_conversation_slot_callbacks_are_typed() -> None:
         agent_id=uuid4(),
         audience=audience,
         messages=(),
-        compacted=False,
         public_base_url=None,
     )
 

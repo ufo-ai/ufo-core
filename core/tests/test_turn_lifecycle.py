@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import subprocess
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -69,6 +70,7 @@ from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 from ufo.transcript import Conversation
 from ufo.workspace import ws
+from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
 STREAM_TIMEOUT_SECONDS = 30
 TRUNCATION_MESSAGE = (
@@ -608,6 +610,71 @@ async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:
     stored = await _read_transcript(blob, conversation_id, 1)
     assert stored.seq == 1
     assert _bodies(stored) == ["ping", "echo:1"]
+
+
+async def test_a_committed_turn_records_what_git_reports_in_its_workspace(
+    surface: Turns,
+) -> None:
+    """The projection is written by the turn, not by the tool that wrote the file: the checkout is
+    changed by neither, and the scan still lands. A conversation whose workspace holds no checkout
+    records an empty scan rather than nothing, so a member reads `no changes` from a fact."""
+    seed = await _bootstrap()
+    STREAM_GATE.arm()
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    workspace = runtime.sandboxes.workspace_root / str(seed.conversation_id)
+    checkout = workspace / "checkout"
+    checkout.mkdir(parents=True)
+    _init_repository(checkout, {"mod.py": "x = 1\n"})
+    (checkout / "mod.py").write_text("x = 2\n")
+    (workspace / "findings.md").write_text("what I found\n")
+
+    turn_id = await surface.admit(seed, "ping")
+    await surface.consume(seed, turn_id)
+
+    scan = await _await_scan(seed.conversation_id)
+    assert WorkspaceChanges.model_validate(scan) == WorkspaceChanges(
+        changes=(
+            WorkspaceChange(
+                path="checkout/mod.py",
+                patch="--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+                truncated=False,
+            ),
+        ),
+        truncated=False,
+    )
+
+
+async def _await_scan(conversation_id: UUID) -> object:
+    """The scan is recorded once the terminal frame is already published — the member has their
+    reply before the workspace is read — so a reader waits on the row rather than on the turn."""
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        while True:
+            async with workspace_tx() as connection:
+                scan = (
+                    await connection.execute(
+                        sa.select(tables.conversation_change.c.scan).where(
+                            tables.conversation_change.c.conversation_id == conversation_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            if scan is not None:
+                return scan
+            await asyncio.sleep(0.05)
+
+
+def _init_repository(path: Path, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        (path / name).write_text(text)
+    for args in (
+        ("init", "-q", "."),
+        ("add", "-A"),
+        ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"),
+    ):
+        completed = subprocess.run(
+            ["git", "-C", str(path), *args], capture_output=True, text=True, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
 
 
 async def test_auto_model_resolves_to_the_configured_default(surface: Turns) -> None:

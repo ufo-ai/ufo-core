@@ -345,7 +345,6 @@ async def test_automations_slot_rejects_a_recreated_task_generation(db: None) ->
             agent_id=agent_id,
             audience=conversation_audience(None),
             messages=(),
-            compacted=False,
             visible_items=(ConversationSlotItem(original.name, original.id, True),),
         )
         await store.cancel(original)

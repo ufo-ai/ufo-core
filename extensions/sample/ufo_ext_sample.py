@@ -47,7 +47,6 @@ from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.listings import ListingCursor, ListingPage
 from ufo.sdk.manifest import (
     CdpProviderSpec,
-    ChangesSlotPayload,
     ConnectorProvider,
     ConversationSlotContext,
     ConversationSlotProvider,
@@ -76,6 +75,7 @@ from ufo.sdk.manifest import (
     Stop,
     SubagentProfile,
     SubagentToolGrant,
+    WorkspaceChanges,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
@@ -1113,8 +1113,8 @@ async def _conversation_slot_summary(_ctx: ConversationSlotContext) -> None:
     return None
 
 
-async def _conversation_slot_read(_ctx: ConversationSlotContext) -> ChangesSlotPayload:
-    return ChangesSlotPayload(changes=(), truncated=False)
+async def _conversation_slot_read(_ctx: ConversationSlotContext) -> WorkspaceChanges:
+    return WorkspaceChanges(changes=(), truncated=False)
 
 
 def manifest() -> Manifest:
@@ -1282,7 +1282,7 @@ def manifest() -> Manifest:
                 id=CONVERSATION_SLOT,
                 label="Sample changes",
                 icon="diff",
-                content=ChangesSlotPayload,
+                content=WorkspaceChanges,
                 summarize=_conversation_slot_summary,
                 read=_conversation_slot_read,
             ),

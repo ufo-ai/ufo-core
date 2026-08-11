@@ -63,14 +63,11 @@ from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_AUTOMATIONS_MAX,
-    CONVERSATION_CHANGES_MAX,
     CONVERSATION_FILES_MAX,
     CONVERSATION_SITES_MAX,
     ArtifactsSlotPayload,
     AutomationsSlotPayload,
-    ChangesSlotPayload,
     ConversationArtifact,
-    ConversationChange,
     ConversationFile,
     ConversationSlotContext,
     ConversationSlotItem,
@@ -79,10 +76,8 @@ from ufo.sdk.manifest import (
     FilesSlotPayload,
     ImagePreview,
     SitesSlotPayload,
+    WorkspaceChanges,
     raster_image_media_type,
-)
-from ufo.sdk.manifest import (
-    CONVERSATION_CHANGE_PATCH_MAX_CHARS as SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -107,7 +102,7 @@ from ufo.sdk.surfaces import (
     inbox_name,
     member_message_text,
 )
-from ufo.sdk.tools import FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
+from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_overview, submit_intent
 
@@ -135,8 +130,6 @@ SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 SUBAGENT_NOTE_MAX_CHARS = 500
 SUBAGENT_OUTPUT_MAX_CHARS = 2_000
-CONVERSATION_CHANGE_PATCH_MAX_CHARS = SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS
-CONVERSATION_CHANGES_RESPONSE_MAX_BYTES = 256_000
 CHAT_STORE_PREFIX = "chat/"
 NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
@@ -1346,70 +1339,6 @@ async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-def _conversation_changes_payload(
-    changes: tuple[ConversationChange, ...], truncated: bool
-) -> ChangesSlotPayload:
-    return ChangesSlotPayload(changes=changes, truncated=truncated)
-
-
-def _conversation_changes(
-    messages: tuple[Message, ...],
-) -> tuple[tuple[ConversationChange, ...], bool]:
-    changes: list[ConversationChange] = []
-    total = 0
-    accepting = True
-    encoded_bytes = len(
-        json.dumps(
-            _conversation_changes_payload((), False).model_dump(mode="json"),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
-    )
-    for message in messages:
-        if isinstance(message.content, str):
-            continue
-        for result in message.content:
-            if not isinstance(result, ToolResultBlock) or result.is_error:
-                continue
-            if not isinstance(result.content, str):
-                continue
-            try:
-                payload = json.loads(result.content)
-            except (ValueError, RecursionError):
-                continue
-            if not isinstance(payload, dict) or payload.get("type") != FILE_CHANGE_RESULT_TYPE:
-                continue
-            total += 1
-            try:
-                detail = payload.get("change")
-                path = payload.get("path")
-                if not isinstance(detail, dict) or not isinstance(path, str):
-                    raise ValueError("change envelope is malformed")
-                change = ConversationChange.model_validate({**detail, "path": path})
-            except (ValidationError, ValueError):
-                continue
-            if not accepting:
-                continue
-            if len(changes) == CONVERSATION_CHANGES_MAX:
-                accepting = False
-                continue
-            encoded_change = json.dumps(
-                change.model_dump(mode="json"),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode()
-            separator_bytes = int(bool(changes))
-            if (
-                encoded_bytes + separator_bytes + len(encoded_change)
-                > CONVERSATION_CHANGES_RESPONSE_MAX_BYTES
-            ):
-                accepting = False
-                continue
-            changes.append(change)
-            encoded_bytes += separator_bytes + len(encoded_change)
-    return tuple(changes), total > len(changes)
-
-
 @dataclass(frozen=True)
 class SlotViewer:
     member_id: UUID
@@ -1460,14 +1389,12 @@ async def _slot_context(
     if audience is None:
         return None
     recorded = await ctx.read_transcript(target.conversation_id)
-    compacted = bool(await ctx.list_compactions(target.conversation_id))
     return ConversationSlotContext(
         ext=replace(ext, audience=audience),
         conversation_id=target.conversation_id,
         agent_id=target.agent_id,
         audience=audience,
         messages=() if recorded is None else recorded.messages,
-        compacted=compacted,
         public_base_url=ctx.public_base_url,
     )
 
@@ -1480,6 +1407,11 @@ async def _project_slot_context(
     root_conversation_id: UUID | None,
     viewer: SlotViewer,
 ) -> ConversationSlotContext:
+    if extension == "web" and content is WorkspaceChanges:
+        return replace(
+            slot_context,
+            projection=await ctx.conversation_changes(slot_context.conversation_id),
+        )
     if extension == "web" and content is FilesSlotPayload:
         listed_files = await ctx.list_workspace_files(slot_context.conversation_id)
         files: list[ConversationFile] = []
@@ -1716,21 +1648,25 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload.model_dump(mode="json"))
 
 
-async def _read_changes(ctx: ConversationSlotContext) -> ChangesSlotPayload:
-    changes, truncated = _conversation_changes(ctx.messages)
-    return _conversation_changes_payload(changes, truncated or ctx.compacted)
+def _changes_projection(ctx: ConversationSlotContext) -> WorkspaceChanges:
+    if not isinstance(ctx.projection, WorkspaceChanges):
+        raise RuntimeError("changes slot needs the host workspace projection")
+    return ctx.projection
+
+
+async def _read_changes(ctx: ConversationSlotContext) -> WorkspaceChanges:
+    return _changes_projection(ctx)
 
 
 async def _summarize_changes(ctx: ConversationSlotContext) -> int | None:
-    changes, _truncated = _conversation_changes(ctx.messages)
-    return len(changes) or None
+    return len(_changes_projection(ctx).changes) or None
 
 
 CHANGES_SLOT = ConversationSlotProvider(
     id="changes",
     label="Changes",
     icon="diff",
-    content=ChangesSlotPayload,
+    content=WorkspaceChanges,
     summarize=_summarize_changes,
     read=_read_changes,
 )

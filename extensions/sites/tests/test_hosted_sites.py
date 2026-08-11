@@ -1520,7 +1520,6 @@ async def test_sites_slot_bounds_its_durable_rows(db: None) -> None:
                 agent_id=workspace.agent_id,
                 audience=SHARED_AUDIENCE,
                 messages=(),
-                compacted=False,
                 public_base_url=PUBLIC_BASE_URL,
                 visible_items=tuple(
                     ConversationSlotItem(
@@ -1556,7 +1555,6 @@ async def test_sites_slot_rejects_stale_visibility_and_recreated_row_grants(db: 
             agent_id=workspace.agent_id,
             audience=SHARED_AUDIENCE,
             messages=(),
-            compacted=False,
             public_base_url=PUBLIC_BASE_URL,
             visible_items=(
                 ConversationSlotItem(

@@ -598,3 +598,17 @@ page = sa.Table(
     sa.Index("page_feed", "workspace_id", "revision", "id"),
     sa.Index("page_source", "source_id"),
 )
+
+conversation_change = sa.Table(
+    "conversation_change",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("scan", sa.JSON(none_as_null=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+        ondelete="CASCADE",
+    ),
+    sa.PrimaryKeyConstraint("workspace_id", "conversation_id"),
+)

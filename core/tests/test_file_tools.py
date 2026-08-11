@@ -388,16 +388,45 @@ async def test_write_creates_and_reports_size_and_lines(
 ) -> None:
     ctx, workspace = file_ctx
     result = await _run("write", ctx, file_path="new.txt", content="hello\nworld\n")
-    payload = json.loads(result.content[0].text)
-    payload.pop("change")
-    assert payload == {
-        "type": "ufo.file_change",
+    assert json.loads(result.content[0].text) == {
         "path": "new.txt",
         "created": True,
         "size_bytes": 12,
         "lines": 2,
     }
     assert (workspace / "new.txt").read_text() == "hello\nworld\n"
+
+
+async def test_changes_reports_what_the_shell_did_to_a_checkout(
+    file_ctx: tuple[ToolContext, Path],
+) -> None:
+    """The whole reason git is the producer: nothing here goes through a file tool. The container's
+    own shell edits a tracked file and drops a note beside the checkout — the shape a subagent
+    sharing this sandbox, or a script the agent ran, leaves behind — and the change comes back
+    anyway, while the note does not."""
+    ctx, _ = file_ctx
+    prepared = await ctx.sandbox.bash(
+        "set -e\n"
+        "git init -q /workspace/checkout\n"
+        "cd /workspace/checkout\n"
+        "printf 'x = 1\\n' > mod.py\n"
+        "git add -A\n"
+        "git -c user.email=t@t -c user.name=t commit -qm base\n"
+        "printf 'x = 2\\n' > mod.py\n"
+        "printf 'what I found\\n' > /workspace/findings.md\n"
+    )
+    assert prepared.exit_code == 0, prepared.stderr
+
+    assert await ctx.sandbox.run_sbxfs("changes", {}) == {
+        "changes": [
+            {
+                "path": "checkout/mod.py",
+                "patch": "--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+                "truncated": False,
+            }
+        ],
+        "truncated": False,
+    }
 
 
 async def test_write_guard_refuses_overwriting_an_unread_file(

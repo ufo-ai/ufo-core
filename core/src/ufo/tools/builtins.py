@@ -62,7 +62,7 @@ from ufo.tools.context import (
     ToolResult,
     UnknownSubagentProfile,
 )
-from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS, FILE_CHANGE_RESULT_TYPE
+from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.tools.registry import ToolDef
 
 GREP_HEAD_LIMIT = 100
@@ -473,16 +473,14 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
     ]
     result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
     result["path"] = args.file_path
-    if not isinstance(result.get("change"), dict):
-        raise RuntimeError("sbxfs edit returned no file change")
     return _file_tool_result(result)
 
 
 def _file_tool_result(result: dict[str, object]) -> ToolResult:
-    result["type"] = FILE_CHANGE_RESULT_TYPE
-    change = result.get("change")
-    if not isinstance(change, dict):
-        raise RuntimeError("file tool returned no change")
+    """A write's or an edit's result, bounded. What the file now says is the model's own to recall
+    or to read back, so the result states what landed and where — never a diff of it, which is a
+    question the workspace answers once for every writer rather than one tool answering per call.
+    The edit snippet is the one part that can outgrow the bound, and it goes first."""
     content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     if len(content) <= FILE_TOOL_RESULT_MAX_CHARS:
         return ToolResult(content=(TextContent(text=content),))
@@ -490,13 +488,6 @@ def _file_tool_result(result: dict[str, object]) -> ToolResult:
     if "message" in result:
         result["message"] = f"{result.get('replacements', 0)} replacements"
     content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    if len(content) > FILE_TOOL_RESULT_MAX_CHARS:
-        change["truncated"] = True
-        patch = change.get("patch")
-        excess = len(content) - FILE_TOOL_RESULT_MAX_CHARS
-        if excess > 0 and isinstance(patch, str):
-            change["patch"] = patch[: max(0, len(patch) - excess)]
-            content = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     if len(content) > FILE_TOOL_RESULT_MAX_CHARS:
         raise RuntimeError("file tool result exceeds its limit")
     return ToolResult(content=(TextContent(text=content),))

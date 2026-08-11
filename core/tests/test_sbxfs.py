@@ -1,4 +1,5 @@
 import base64
+import subprocess
 import sys
 from contextlib import contextmanager
 from importlib.machinery import SourceFileLoader
@@ -78,9 +79,7 @@ def test_write_pins_the_checked_parent_directory(tmp_path: Path) -> None:
         }
     )
 
-    assert result["change"]["patch"] == (
-        "--- before\n+++ after\n@@ -1 +1 @@\n-workspace-old\n+workspace-new\n"
-    )
+    assert result == {"created": False}
     assert (moved / "app.py").read_text() == "workspace-new\n"
     assert (outside / "app.py").read_text() == "outside-old\n"
     assert not staged.exists()
@@ -118,9 +117,7 @@ def test_edit_pins_the_checked_parent_directory(tmp_path: Path) -> None:
         }
     )
 
-    assert result["change"]["patch"] == (
-        "--- before\n+++ after\n@@ -1 +1 @@\n-workspace-old\n+workspace-new\n"
-    )
+    assert result["replacements"] == 1
     assert (moved / "app.py").read_text() == "workspace-new\n"
     assert (outside / "app.py").read_text() == "outside-old\n"
 
@@ -515,3 +512,84 @@ def test_write_through_an_in_root_symlinked_directory_lands_on_the_canonical_ino
     assert result["created"] is True
     assert (workspace / "real" / "new.txt").read_text() == "landed\n"
     assert (workspace / "dir").is_symlink()
+
+
+def _repository(path: Path, files: dict[str, str]) -> None:
+    """A checkout at `path` holding `files`, committed — the state a change is measured against."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q", ".")
+    for name, text in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(text)
+    _git(path, "add", "-A")
+    _git(path, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+
+
+def _git(path: Path, *args: str) -> None:
+    completed = subprocess.run(
+        ["git", "-C", str(path), *args], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def _changes(module: ModuleType, workspace: Path) -> dict[str, str]:
+    result = module.op_changes({"workspace": str(workspace)})
+    assert result["truncated"] is False
+    return {change["path"]: change["patch"] for change in result["changes"]}
+
+
+def test_changes_reports_every_checkout_and_nothing_outside_one(tmp_path: Path) -> None:
+    """What a change is, and whose. git counts a modification, a deletion and an untracked add in
+    any checkout under the workspace, however the file got that way — no tool result is consulted —
+    and it counts nothing beside a checkout, which is what a note the agent wrote itself is."""
+    workspace = tmp_path / "workspace"
+    committed = {"pkg/mod.py": "x = 1\ny = 2\nz = 3\n", "gone.txt": "old\n"}
+    _repository(workspace / "checkout", committed)
+    _repository(workspace / "deep/nested", {"kept.py": "a\n"})
+    (workspace / "checkout" / "pkg" / "mod.py").write_text("x = 1\ny = 9\nz = 3\n")
+    (workspace / "checkout" / "gone.txt").unlink()
+    (workspace / "checkout" / "pkg" / "new.py").write_text("brand new\n")
+    (workspace / "findings.md").write_text("what I found\n")
+    module = _sbxfs()
+
+    changes = _changes(module, workspace)
+
+    assert sorted(changes) == ["checkout/gone.txt", "checkout/pkg/mod.py", "checkout/pkg/new.py"]
+    assert changes["checkout/pkg/mod.py"] == (
+        "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n@@ -1,3 +1,3 @@\n x = 1\n-y = 2\n+y = 9\n z = 3\n"
+    )
+    assert changes["checkout/gone.txt"] == "--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+    assert changes["checkout/pkg/new.py"] == (
+        "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1 @@\n+brand new\n"
+    )
+
+
+def test_changes_reads_a_checkout_that_has_no_commit_yet(tmp_path: Path) -> None:
+    """An unborn HEAD has nothing to diff against, so git answers no patch at all and every file is
+    read off its own contents instead — the same path an untracked file takes."""
+    workspace = tmp_path / "workspace"
+    (workspace / "fresh").mkdir(parents=True)
+    _git(workspace / "fresh", "init", "-q", ".")
+    (workspace / "fresh" / "staged.py").write_text("staged\n")
+    (workspace / "fresh" / "a file.py").write_text("spaced\n")
+    _git(workspace / "fresh", "add", "staged.py")
+    module = _sbxfs()
+
+    changes = _changes(module, workspace)
+
+    assert changes == {
+        "fresh/staged.py": "--- /dev/null\n+++ b/staged.py\n@@ -0,0 +1 @@\n+staged\n",
+        "fresh/a file.py": "--- /dev/null\n+++ b/a file.py\n@@ -0,0 +1 @@\n+spaced\n",
+    }
+
+
+def test_changes_bounds_a_patch_and_says_so(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _repository(workspace / "checkout", {"big.py": "old\n"})
+    (workspace / "checkout" / "big.py").write_text("line\n" * 4_000)
+    module = _sbxfs()
+
+    result = module.op_changes({"workspace": str(workspace)})
+
+    assert [change["truncated"] for change in result["changes"]] == [True]
+    assert len(result["changes"][0]["patch"]) == module.CHANGES_PATCH_MAX_CHARS

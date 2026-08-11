@@ -252,7 +252,7 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
         )
 
 
-async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
+async def test_write_and_edit_land_bounded_results_through_the_guard(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(
@@ -272,11 +272,11 @@ async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
         content="old /workspace path\n",
         user_description="writing notes",
     )
-    written_payload = json.loads(written.content[0].text)
-    assert written_payload["type"] == "ufo.file_change"
-    assert written_payload["change"] == {
-        "patch": "--- /dev/null\n+++ after\n@@ -0,0 +1 @@\n+old /workspace path\n",
-        "truncated": False,
+    assert json.loads(written.content[0].text) == {
+        "created": True,
+        "path": "notes.txt",
+        "size_bytes": 20,
+        "lines": 1,
     }
     assert (workspace / "notes.txt").read_text() == "old /workspace path\n"
 
@@ -288,8 +288,8 @@ async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
         user_description="editing notes",
     )
     edited_payload = json.loads(edited.content[0].text)
-    assert edited_payload["type"] == "ufo.file_change"
-    assert "-old /workspace path\n+old /workspace/final path\n" in edited_payload["change"]["patch"]
+    assert edited_payload["replacements"] == 1
+    assert "old /workspace/final path" in edited_payload["snippet"]
     assert (workspace / "notes.txt").read_text() == "old /workspace/final path\n"
 
     await ctx.sandbox.write_file("large.txt", b"old\n" * 10_000)
@@ -301,8 +301,7 @@ async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
         content="new\n" * 10_000,
         user_description="writing a large file",
     )
-    large_payload = json.loads(large.content[0].text)
-    assert large_payload["change"]["truncated"] is True
+    assert json.loads(large.content[0].text)["size_bytes"] == 40_000
     assert len(large.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
     assert (workspace / "large.txt").read_text() == "new\n" * 10_000
 
@@ -340,8 +339,8 @@ async def test_write_and_edit_return_sbxfs_changes(tmp_path: Path) -> None:
         content="safe\n",
         user_description="writing a file",
     )
-    injected_patch = json.loads(injected.content[0].text)["change"]["patch"]
-    assert injected_patch == "--- /dev/null\n+++ after\n@@ -0,0 +1 @@\n+safe\n"
+    assert json.loads(injected.content[0].text)["path"] == "name\n+++ injected"
+    assert (workspace / "name\n+++ injected").read_text() == "safe\n"
 
 
 async def test_sbxfs_write_waits_for_the_shared_filesystem_lock(tmp_path: Path) -> None:
@@ -387,8 +386,7 @@ async def test_sbxfs_write_waits_for_the_shared_filesystem_lock(tmp_path: Path) 
             await asyncio.wait_for(asyncio.shield(pending), 0.1)
         assert (workspace / "shared.txt").read_text() == "old\n"
         fcntl.flock(lock, fcntl.LOCK_UN)
-    payload = json.loads((await pending).content[0].text)
-    assert "-old\n+new\n" in payload["change"]["patch"]
+    assert json.loads((await pending).content[0].text)["created"] is False
     assert (workspace / "shared.txt").read_text() == "new\n"
 
 
@@ -396,30 +394,17 @@ def test_file_tool_result_bounds_escaped_paths() -> None:
     path = "/".join(["\\" * 200] * 20 + ["\\" * 73])
     result = _file_tool_result(
         {
-            "type": "ufo.file_change",
             "path": path,
             "message": f"{path}: 1 replacements",
             "replacements": 1,
             "snippet": "\\" * 2_000,
-            "change": {"patch": "+" + "z" * 10_000, "truncated": False},
         }
     )
     payload = json.loads(result.content[0].text)
-    assert payload["type"] == "ufo.file_change"
+    assert payload["path"] == path
+    assert payload["message"] == "1 replacements"
     assert len(result.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
-    assert len(payload["change"]["patch"]) == 10_001
     assert "snippet" not in payload
-
-
-def test_file_tool_result_assigns_the_public_result_type() -> None:
-    result = _file_tool_result(
-        {
-            "path": "notes.txt",
-            "change": {"patch": "+new\n", "truncated": False},
-        }
-    )
-
-    assert json.loads(result.content[0].text)["type"] == "ufo.file_change"
 
 
 def test_file_tool_paths_bound_the_serialized_envelope() -> None:

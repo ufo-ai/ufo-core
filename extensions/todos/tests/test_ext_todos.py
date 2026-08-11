@@ -127,7 +127,6 @@ async def test_update_status_round_trips_through_the_store(db: None, tmp_path: P
             agent_id=ctx.turn.agent_id,
             audience=ctx.audience,
             messages=(),
-            compacted=False,
         )
         assert await todos.TASKS_SLOT.summarize(slot_context) == 2
         payload = await todos.TASKS_SLOT.read(slot_context)
@@ -149,7 +148,6 @@ async def test_tasks_slot_distinguishes_no_board_from_an_empty_board(
         agent_id=ctx.turn.agent_id,
         audience=ctx.audience,
         messages=(),
-        compacted=False,
     )
     with ws(workspace_id):
         assert await todos.TASKS_SLOT.summarize(slot_context) is None
@@ -182,7 +180,6 @@ async def test_tasks_slot_bounds_the_projection_without_changing_its_source_coun
         agent_id=ctx.turn.agent_id,
         audience=ctx.audience,
         messages=(),
-        compacted=False,
     )
     task_count = todos.CONVERSATION_TASKS_MAX + 1
     with ws(workspace_id):

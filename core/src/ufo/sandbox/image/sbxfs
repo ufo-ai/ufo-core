@@ -6,7 +6,7 @@ pulls whole files across the boundary to loop over them. Invoked as:
 
     sbxfs <op> '<json-params>'
 
-ops: read, write, edit, grep, glob. Output is a single JSON object on stdout — the
+ops: read, write, edit, grep, glob, changes. Output is a single JSON object on stdout — the
 result on success, or {"error": "..."} (exit 1) on a handled failure. Every op that takes a
 caller-supplied path runs it through `containment`, the shared guard baked beside this script, so a
 read, a write and an enumeration are confined by one set of checks instead of each their own; the
@@ -249,9 +249,15 @@ SKIP_DIRS = frozenset(
 
 EDIT_SNIPPET_CONTEXT = 4
 EDIT_SNIPPET_MAX_CHARS = 2_000
-FILE_CHANGE_INPUT_MAX_CHARS = 20_000
-FILE_CHANGE_INPUT_MAX_LINES = 2_000
-FILE_CHANGE_PATCH_MAX_CHARS = 10_000
+CHANGES_INPUT_MAX_CHARS = 20_000
+CHANGES_INPUT_MAX_LINES = 2_000
+CHANGES_PATCH_MAX_CHARS = 10_000
+CHANGES_CONTEXT_LINES = 3
+GIT_DIR = ".git"
+UNTRACKED_STATUS = "??"
+CHANGES_MAX_REPOSITORIES = 10
+CHANGES_MAX_FILES = 100
+CHANGES_TOTAL_MAX_CHARS = 250_000
 
 
 class FsError(RuntimeError):
@@ -550,49 +556,6 @@ def _file_lock(path: Path):
         os.close(descriptor)
 
 
-def _diff_lines(text: str | None) -> tuple[list[str], bool]:
-    if text is None:
-        return [], False
-    bounded = text[:FILE_CHANGE_INPUT_MAX_CHARS]
-    lines = bounded.splitlines(keepends=True)
-    truncated = len(text) > FILE_CHANGE_INPUT_MAX_CHARS
-    if len(lines) > FILE_CHANGE_INPUT_MAX_LINES:
-        lines = lines[:FILE_CHANGE_INPUT_MAX_LINES]
-        truncated = True
-    return lines, truncated
-
-
-def _file_change(
-    before: str | None,
-    after: str,
-    truncated: bool = False,
-) -> dict:
-    before_lines, before_truncated = _diff_lines(before)
-    after_lines, after_truncated = _diff_lines(after)
-    patch_parts = []
-    for line in difflib.unified_diff(
-        before_lines,
-        after_lines,
-        fromfile="/dev/null" if before is None else "before",
-        tofile="after",
-        n=3,
-        lineterm="\n",
-    ):
-        patch_parts.append(line)
-        if line.startswith(("+", "-", " ")) and not line.endswith("\n"):
-            patch_parts.append("\n\\ No newline at end of file\n")
-    patch = "".join(patch_parts)
-    return {
-        "patch": patch[:FILE_CHANGE_PATCH_MAX_CHARS],
-        "truncated": (
-            truncated
-            or before_truncated
-            or after_truncated
-            or len(patch) > FILE_CHANGE_PATCH_MAX_CHARS
-        ),
-    }
-
-
 def _decode_text(encoded: object) -> str:
     if not isinstance(encoded, str):
         raise FsError("text must be base64 encoded")
@@ -614,20 +577,10 @@ def op_write(params: dict) -> dict:
                         raise FsError(f"file {target.path} must be read before it is written")
                     if staged.lstat() is None:
                         raise FsError(f"{staged.path} not found")
-                    before = (
-                        None
-                        if existing is None
-                        else target.read_text(FILE_CHANGE_INPUT_MAX_CHARS + 1)
-                    )
-                    after = staged.read_text(FILE_CHANGE_INPUT_MAX_CHARS + 1)
-                    change = _file_change(before, after)
                     if existing is not None:
                         staged.chmod(existing.st_mode)
                     target.replace_with(staged)
-                    return {
-                        "created": existing is None,
-                        "change": change,
-                    }
+                    return {"created": existing is None}
             finally:
                 staged.unlink()
 
@@ -684,21 +637,175 @@ def op_edit(params: dict) -> dict:
             if existing is None:
                 raise FsError(f"{path} not found")
             edits = _edit_list(params)
-            before = target.read_text(existing.st_size + 1)
-            text = before
+            text = target.read_text(existing.st_size + 1)
             total = 0
             for edit in edits:
                 text, count = _apply_edit(text, edit)
                 total += count
-            result = {
+            target.replace_text(text, existing.st_mode)
+            return {
                 "path": str(path),
                 "message": f"{path}: {total} replacements",
                 "replacements": total,
                 "snippet": _edit_snippet(text, edits[0]["new_string"])[:EDIT_SNIPPET_MAX_CHARS],
-                "change": _file_change(before, text),
             }
-            target.replace_text(text, existing.st_mode)
-            return result
+
+
+def op_changes(params: dict) -> dict:
+    """Every uncommitted change in every checkout under the workspace, one entry per file.
+
+    git is the only thing that knows what a change is here. It counts what any writer did — a file
+    tool, a shell command, a subagent sharing this sandbox — where replaying one conversation's tool
+    results counts only its own; it reports deletions and renames, which no tool result carries; it
+    states the file's whole distance from HEAD rather than each edit that got it there; and it
+    counts nothing outside a checkout, so a note the agent wrote itself is not a change to answer
+    for."""
+    root = contained_root(params["workspace"])
+    changes: list[dict] = []
+    budget = CHANGES_TOTAL_MAX_CHARS
+    for repository in _repositories(root):
+        prefix = repository.relative_to(root)
+        patches = _tracked_patches(repository)
+        for status, name in _status_entries(repository):
+            if len(changes) >= CHANGES_MAX_FILES or budget <= 0:
+                return {"changes": changes, "truncated": True}
+            change = _repository_change(repository, root, status, name, patches)
+            changes.append({"path": str(prefix / name), **change})
+            budget -= len(change["patch"])
+    return {"changes": changes, "truncated": False}
+
+
+def _repositories(root: Path) -> list[Path]:
+    """Each checkout under the workspace, outermost first, never descending into one it found: a
+    submodule's own changes are what the checkout above it already reports."""
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(contained_dir(root, root)):
+        if len(found) >= CHANGES_MAX_REPOSITORIES:
+            break
+        if GIT_DIR in dirnames or GIT_DIR in filenames:
+            found.append(Path(dirpath))
+            dirnames[:] = []
+            continue
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+    return found
+
+
+def _status_entries(repository: Path) -> list[tuple[str, str]]:
+    """The repository's changed paths and their status codes, in git's own order. `-z` is what makes
+    the parse exact: a path with a space or a quote arrives as itself rather than quoted, and
+    `--no-renames` leaves a moved file as the delete and the add it is, so no entry carries a second
+    path the reader has to know about."""
+    listed, ok = _git(repository, "status", "--porcelain=v1", "-z", "--no-renames", "-uall")
+    if not ok:
+        return []
+    entries = []
+    for entry in listed.split("\0"):
+        if len(entry) > 3:
+            entries.append((entry[:2], entry[3:]))
+    return entries
+
+
+def _tracked_patches(repository: Path) -> dict[str, str]:
+    """One `git diff HEAD` for the whole repository, split into a patch per path — one process
+    however many files changed. Each patch keeps git's own `---`/`+++` pair as its first two lines
+    and drops the machine header above them, which is the shape the portal renders. An unborn HEAD
+    has nothing to diff against and answers empty: every file in it is new, and the caller reads
+    those off their own contents."""
+    diff, ok = _git(repository, "diff", "HEAD", "--no-renames", f"-U{CHANGES_CONTEXT_LINES}")
+    if not ok:
+        return {}
+    patches: dict[str, str] = {}
+    for section in diff.split("\ndiff --git "):
+        lines = section.split("\n")
+        header = next((index for index, line in enumerate(lines) if line.startswith("--- ")), None)
+        if header is None or not lines[header + 1].startswith("+++ "):
+            continue
+        patch = "\n".join(lines[header:])
+        for line in lines[header : header + 2]:
+            name = _diff_path(line)
+            if name is not None:
+                patches[name] = patch if patch.endswith("\n") else patch + "\n"
+    return patches
+
+
+def _diff_path(line: str) -> str | None:
+    """The path a `---`/`+++` header names, without its `a/`/`b/` prefix. git quotes a name holding
+    a space, a quote or a control character and leaves every other byte alone under
+    `core.quotePath=false`, so an unquoted one is already the path."""
+    value = line[4:]
+    if value == "/dev/null":
+        return None
+    if value.startswith('"') and value.endswith('"'):
+        value = value[1:-1].encode().decode("unicode_escape").encode("latin-1").decode()
+    return value[2:] if value[:2] in {"a/", "b/"} else value
+
+
+def _repository_change(
+    repository: Path, root: Path, status: str, name: str, patches: dict[str, str]
+) -> dict:
+    """One file's patch, bounded. A path git holds no diff for is one it has no HEAD version of —
+    untracked, or added under an unborn HEAD — so its own contents are the addition. A binary or
+    unreadable one still lists, with no patch: that the file changed is the fact the member came
+    for."""
+    patch = patches.get(name)
+    if patch is not None:
+        return {
+            "patch": patch[:CHANGES_PATCH_MAX_CHARS],
+            "truncated": len(patch) > CHANGES_PATCH_MAX_CHARS,
+        }
+    added = status == UNTRACKED_STATUS or status.startswith("A")
+    text = _added_text(repository / name, root) if added else None
+    return _added_patch(name, text) if text is not None else {"patch": "", "truncated": False}
+
+
+def _added_text(path: Path, root: Path) -> str | None:
+    """The contents of a file git holds no HEAD version of, read off a pinned parent fd and bounded
+    by the cap every other diff input takes. None where the file is binary, gone by the time this
+    reads it, or not one the guard vouches for."""
+    if _has_binary_extension(path):
+        return None
+    try:
+        with contained_file(path, root) as target:
+            if target.lstat() is None:
+                return None
+            return target.read_text(CHANGES_INPUT_MAX_CHARS + 1)
+    except ContainmentError:
+        return None
+
+
+def _added_patch(name: str, text: str) -> dict:
+    """The patch for a file with nothing to diff against — every line an addition, under the same
+    two-line header git writes, so one reader renders every entry in the list the same way."""
+    lines, input_truncated = _diff_lines(text)
+    parts = []
+    for line in difflib.unified_diff(
+        [], lines, fromfile="/dev/null", tofile=f"b/{name}", n=CHANGES_CONTEXT_LINES, lineterm="\n"
+    ):
+        parts.append(line)
+        if line.startswith(("+", "-", " ")) and not line.endswith("\n"):
+            parts.append("\n\\ No newline at end of file\n")
+    patch = "".join(parts)
+    return {
+        "patch": patch[:CHANGES_PATCH_MAX_CHARS],
+        "truncated": input_truncated or len(patch) > CHANGES_PATCH_MAX_CHARS,
+    }
+
+
+def _diff_lines(text: str) -> tuple[list[str], bool]:
+    lines = text[:CHANGES_INPUT_MAX_CHARS].splitlines(keepends=True)
+    truncated = len(text) > CHANGES_INPUT_MAX_CHARS
+    if len(lines) > CHANGES_INPUT_MAX_LINES:
+        return lines[:CHANGES_INPUT_MAX_LINES], True
+    return lines, truncated
+
+
+def _git(repository: Path, *args: str) -> tuple[str, bool]:
+    proc = subprocess.run(
+        ["git", "-C", str(repository), "-c", "core.quotePath=false", *args],
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout, proc.returncode == 0
 
 
 def _walk(path: Path, root: Path):
@@ -1053,6 +1160,7 @@ OPS = {
     "edit": op_edit,
     "grep": op_grep,
     "glob": op_glob,
+    "changes": op_changes,
 }
 
 
