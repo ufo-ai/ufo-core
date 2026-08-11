@@ -106,7 +106,7 @@ test("a terminal subagent event nests its work under the reply", async () => {
   await userEvent.click(summary);
   const card = screen.getByRole("link", { name: /Subagent · general_purpose/ });
   expect(card.getAttribute("href")).toBe(
-    "#/subagents/general_purpose/conversations/" + conversationId,
+    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
   );
   expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
 });

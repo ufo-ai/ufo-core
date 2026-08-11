@@ -18,8 +18,13 @@ export type Subagent = { name: string; model: string | null };
 
 export type Member = { id?: string; email: string; admin: boolean; seated?: boolean };
 
+/** The agent a conversation ran under, carried by a read that spans every agent the member
+ *  reaches and null by one taken inside a single agent's namespace. */
+export type ConversationAgent = { id: string; name: string };
+
 export type Conversation = {
   id: string;
+  agent: ConversationAgent | null;
   surface: string;
   member_email: string | null;
   description: string;
@@ -30,6 +35,10 @@ export type Conversation = {
   readable: boolean;
   disclosable: boolean;
 };
+
+/** A conversation a read spanning every agent answers with: the row names the agent that ran it,
+ *  since the pane it lands in names none. */
+export type OwnedConversation = Conversation & { agent: ConversationAgent };
 
 /** What the create act draws its form from: the `agent` kind's own spec schema and the model ids
  *  this deploy serves. The boot read carries it for a workspace admin and null for everyone else —

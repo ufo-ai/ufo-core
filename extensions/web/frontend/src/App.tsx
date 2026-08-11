@@ -21,7 +21,6 @@ import {
   stampIso,
   type ChatRow,
   type ChatsPayload,
-  type LinkedConversation,
 } from "@/lib/rail";
 import {
   AGENT_TABS,
@@ -48,7 +47,7 @@ import {
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
-import type { Agent, Member, NewAgentForm, Subagent } from "@/lib/types";
+import type { Agent, Member, NewAgentForm, OwnedConversation, Subagent } from "@/lib/types";
 
 export type AppProps = {
   agents: Agent[];
@@ -76,7 +75,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
-  const [linked, setLinked] = useState<Record<string, LinkedConversation>>({});
+  const [linked, setLinked] = useState<Record<string, OwnedConversation>>({});
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
   routeRef.current = route;
@@ -395,7 +394,7 @@ function Pane({
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceCustomize: (view: CustomizeTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: Readonly<Record<string, Sought>>;
-  linked: Readonly<Record<string, LinkedConversation>>;
+  linked: Readonly<Record<string, OwnedConversation>>;
 }) {
   if (route.kind === "admin") return <Admin />;
   if (route.kind === "bad-link") return <PaneNote>This conversation link is not valid.</PaneNote>;
@@ -461,6 +460,7 @@ function Pane({
         tabs={SUBAGENT_TABS}
         onTab={(tab) => onOpenSubagent(subagent.name, tab)}
         conversationId={route.conversationId}
+        rootConversationId={route.rootConversationId}
       />
     );
   }
@@ -493,7 +493,7 @@ function Pane({
     const row = rail.rows.find((entry) => entry.conversation_id === route.conversationId);
     const linkedConversation = linked[route.conversationId];
     if (!row && linkedConversation) {
-      const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent_id);
+      const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
       if (!linkedAgent) return <PaneNote>No such agent.</PaneNote>;
       if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
       return (
@@ -558,7 +558,7 @@ function LinkedPane({
   onOpenAgent,
 }: {
   agent: Agent;
-  conversation: LinkedConversation;
+  conversation: OwnedConversation;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);

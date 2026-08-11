@@ -1,4 +1,4 @@
-import type { Conversation } from "@/lib/types";
+import type { OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
   conversation_id: string;
@@ -8,9 +8,9 @@ export type ChatRow = {
   last_at: string;
 };
 
-export type LinkedConversation = Conversation & { agent_id: string };
-
-export type ChatsPayload = { chats: ChatRow[]; conversation?: LinkedConversation };
+/** The rail, and — for a permalink to a conversation another surface holds, which has no chat row
+ *  to route by — that conversation, naming the agent it ran under. */
+export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
 
 export type RailGroup = { label: string; rows: ChatRow[] };
 

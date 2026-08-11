@@ -69,95 +69,85 @@ test("a subagent inheriting its parent's model says so rather than naming one", 
   expect(fact("Answer to parent")).toBe("Trusted content");
 });
 
-const RUN_DETAIL = {
-  run: {
-    id: RUN_ID,
-    agent_name: "assistant",
-    member_email: "member@example.com",
-    turn_count: 1,
-    last_turn_at: "2026-08-02T09:05:00Z",
-    readable: true,
-  },
+const RUN = {
+  id: RUN_ID,
+  agent: { id: AGENT.id, name: "assistant" },
+  surface: "subagent",
+  member_email: "member@example.com",
+  description: "Find the filing deadline",
+  speakers: [],
+  turn_count: 1,
+  created_at: "2026-08-02T09:00:00Z",
+  last_turn_at: "2026-08-02T09:05:00Z",
+  readable: true,
+  disclosable: false,
 };
 
-test("the conversations tab lists this subagent's runs and opens one as a turn tree", async () => {
+const WALLED_RUN = {
+  ...RUN,
+  id: "88888888-8888-4888-8888-888888888888",
+  agent: { id: "99999999-9999-4999-8999-999999999999", name: "ops" },
+  member_email: null,
+  description: "",
+  turn_count: 3,
+  last_turn_at: "2026-08-01T09:30:00Z",
+  readable: false,
+};
+
+const NESTED_ID = "55555555-5555-4555-8555-555555555555";
+
+const RUN_TRANSCRIPT = {
+  run: RUN,
+  messages: [
+    { role: "user", text: "Find the filing deadline" },
+    {
+      role: "assistant",
+      text: "March 31",
+      events: [{ kind: "tool", name: "fetch_url", preview: "", description: "Reading the filing" }],
+      subagents: [
+        {
+          profile: "general_purpose",
+          conversation_id: NESTED_ID,
+          events: [{ kind: "note", text: "Checking the state site." }],
+          output: "The state confirms March 31.",
+          subagents: [],
+        },
+      ],
+    },
+  ],
+};
+
+test("the conversations tab lists this subagent's runs as rows that name the agent", async () => {
   wire({
-    ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
-      json({
-        ...RUN_DETAIL,
-        turns: [
-          {
-            id: "77777777-7777-4777-8777-777777777777",
-            agent_id: AGENT.id,
-            conversation_id: RUN_ID,
-            seq: 2,
-            status: "done",
-            created_at: "2026-08-02T09:00:00Z",
-            inbound: "Find the filing deadline",
-            outcome: "March 31",
-            error_class: null,
-            subagent_profile: "deep_research",
-            parent_turn_id: null,
-          },
-        ],
-        subagent_turns: [],
-      }),
-    "/subagents/deep_research/conversations": () =>
-      json({
-        conversations: [
-          {
-            id: RUN_ID,
-            agent_name: "assistant",
-            member_email: "member@example.com",
-            turn_count: 1,
-            last_turn_at: "2026-08-02T09:05:00Z",
-            readable: true,
-          },
-          {
-            id: "88888888-8888-4888-8888-888888888888",
-            agent_name: "ops",
-            member_email: null,
-            turn_count: 3,
-            last_turn_at: "2026-08-01T09:30:00Z",
-            readable: false,
-          },
-        ],
-      }),
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () => json(RUN_TRANSCRIPT),
+    "/subagents/deep_research/conversations": () => json({ conversations: [RUN, WALLED_RUN] }),
     "/subagents/deep_research/overview": () => json(OVERVIEW),
   });
   location.hash = "#/subagents/deep_research/conversations";
   portal({});
 
   const panel = within(await screen.findByTestId("panel"));
-  expect(await panel.findByText("member@example.com")).toBeTruthy();
-  const rows = panel.getAllByRole("row").slice(1);
-  expect(rows.map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent))).toEqual([
-    ["assistant", "member@example.com", "1", "Aug 2 2026", "Open"],
-    ["ops", "Channel or room · 88888888", "3", "Aug 1 2026", "not shared with you"],
-  ]);
+  const row = await panel.findByRole("button", { name: /Find the filing deadline/ });
+  expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Find the filing deadline");
+  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("assistant · 1 turn");
+  expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 2 2026");
 
-  await userEvent.click(panel.getByRole("link", { name: "Open" }));
+  const walled = panel.getByText(/Not shared with you/).closest("li")!;
+  expect(walled.querySelector("[data-part='meta']")!.textContent).toBe(
+    "ops · 3 turns · Not shared with you",
+  );
+  expect(walled.getAttribute("role")).toBeNull();
+
+  await userEvent.click(row);
   expect(location.hash).toBe("#/subagents/deep_research/conversations/" + RUN_ID);
   expect(await screen.findByText("Find the filing deadline")).toBeTruthy();
   expect(screen.getByText("March 31")).toBeTruthy();
-  expect(screen.queryByRole("link", { name: /^Changes from/ })).toBeNull();
+  expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
 });
 
-test("a search over the runs holds the table and states that nothing matched", async () => {
+test("a search over the runs states that nothing matched", async () => {
   wire({
-    "/subagents/deep_research/conversations": () =>
-      json({
-        conversations: [
-          {
-            id: RUN_ID,
-            agent_name: "assistant",
-            member_email: "member@example.com",
-            turn_count: 1,
-            last_turn_at: "2026-08-02T09:05:00Z",
-            readable: true,
-          },
-        ],
-      }),
+    "/subagents/deep_research/conversations": () => json({ conversations: [RUN] }),
     "/subagents/deep_research/overview": () => json(OVERVIEW),
   });
   location.hash = "#/subagents/deep_research/conversations";
@@ -166,40 +156,20 @@ test("a search over the runs holds the table and states that nothing matched", a
   const panel = within(await screen.findByTestId("panel"));
   await userEvent.type(await panel.findByLabelText("Search"), "ops");
 
-  expect(panel.getByText("No run matches this search.")).toBeTruthy();
-  expect(panel.getByRole("table")).toBeTruthy();
-  expect(panel.queryByText("member@example.com")).toBeNull();
+  expect(panel.getByText("No conversation matches this search.")).toBeTruthy();
+  expect(panel.queryByText("Find the filing deadline")).toBeNull();
 });
 
 test("a run permalink opened cold titles the page without reading the listing", async () => {
   const { calls } = wire({
-    ["/subagents/deep_research/conversations/" + RUN_ID]: () =>
-      json({
-        ...RUN_DETAIL,
-        turns: [
-          {
-            id: "77777777-7777-4777-8777-777777777777",
-            agent_id: AGENT.id,
-            conversation_id: RUN_ID,
-            seq: 2,
-            status: "done",
-            created_at: "2026-08-02T09:00:00Z",
-            inbound: "Find the filing deadline",
-            outcome: "March 31",
-            error_class: null,
-            subagent_profile: "deep_research",
-            parent_turn_id: null,
-          },
-        ],
-        subagent_turns: [],
-      }),
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () => json(RUN_TRANSCRIPT),
     "/subagents/deep_research/overview": () => json(OVERVIEW),
   });
   location.hash = "#/subagents/deep_research/conversations/" + RUN_ID;
   portal({});
 
-  expect(await screen.findByText("assistant · member@example.com")).toBeTruthy();
-  expect(screen.getByText("Find the filing deadline")).toBeTruthy();
+  expect(await screen.findByText("assistant · Find the filing deadline")).toBeTruthy();
+  expect(screen.getByText("March 31")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Conversations" }).getAttribute("aria-selected")).toBe(
     "true",
   );
@@ -207,6 +177,41 @@ test("a run permalink opened cold titles the page without reading the listing", 
     "#/subagents/deep_research/conversations",
   );
   expect(calls.filter((url) => url.endsWith("/conversations"))).toEqual([]);
+});
+
+test("a run's own page nests the work of the runs it spawned, each rooted at it", async () => {
+  wire({
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () => json(RUN_TRANSCRIPT),
+    "/subagents/deep_research/overview": () => json(OVERVIEW),
+  });
+  location.hash = "#/subagents/deep_research/conversations/" + RUN_ID;
+  portal({});
+
+  const summary = await screen.findByText("Checking the state site.");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(screen.queryByText("Reading the filing")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("Reading the filing")).toBeTruthy();
+  expect(screen.getByText("The state confirms March 31.")).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: /Subagent · general_purpose/ }).getAttribute("href"),
+  ).toBe("#/subagents/general_purpose/conversations/" + NESTED_ID + "?root=" + RUN_ID);
+});
+
+test("a run opened from the conversation that spawned it reads through that conversation", async () => {
+  const parent = "44444444-4444-4444-8444-444444444444";
+  const { calls } = wire({
+    ["/subagents/deep_research/conversations/" + RUN_ID]: () => json(RUN_TRANSCRIPT),
+    "/subagents/deep_research/overview": () => json(OVERVIEW),
+  });
+  location.hash = "#/subagents/deep_research/conversations/" + RUN_ID + "?root=" + parent;
+  portal({});
+
+  expect(await screen.findByText("March 31")).toBeTruthy();
+  expect(calls.some((url) => url.endsWith("/conversations/" + RUN_ID + "?root=" + parent))).toBe(
+    true,
+  );
 });
 
 test("a run the viewer may not read refuses the permalink instead of titling a page", async () => {

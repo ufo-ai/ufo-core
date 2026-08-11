@@ -55,13 +55,13 @@ test("the acknowledgement names the owner and what opening records, and does not
   expect(warning.textContent).toContain("may contain private information");
   expect(warning.textContent).toContain("records your email, theirs, and the time");
   expect(warning.textContent).not.toContain("can read that record");
-  expect(calls.some((url) => url.includes("/turns"))).toBe(false);
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
 });
 
 test("acknowledging posts the transcript intent and opens the conversation it named", async () => {
   const bodies: string[] = [];
   wire({
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/transcript": () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     ...conversations([PRIVATE]),
     "/intents": (_url, init) => {
@@ -80,7 +80,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
     kind: "transcript",
     conversation_id: "c1",
   });
-  expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "slack · owner@example.com" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
@@ -88,7 +88,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
 test("leaving mid-acknowledgement does not open the transcript when the answer lands", async () => {
   let release: ((value: Response) => void) | null = null;
   wire({
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/transcript": () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     ...conversations([PRIVATE]),
     "/intents": () =>
@@ -106,14 +106,14 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   release!(Response.json({ applied: true, message: "Recorded." }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  expect(screen.queryByText("No turns in this conversation yet.")).toBeNull();
+  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
   expect(screen.getByRole("button", { name: /Private/ })).toBeTruthy();
 });
 
 test("an acknowledgement in flight for one conversation never opens over another", async () => {
   let release: ((value: Response) => void) | null = null;
   wire({
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/transcript": () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     ...conversations([PRIVATE, { ...WALLED, disclosable: true }]),
     "/intents": () => {
@@ -136,7 +136,7 @@ test("an acknowledgement in flight for one conversation never opens over another
   release!(Response.json({ applied: true, message: "Recorded." }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  expect(screen.queryByText("No turns in this conversation yet.")).toBeNull();
+  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
   expect(screen.getByRole("button", { name: "Open transcript" })).toBeTruthy();
 });
 
@@ -151,28 +151,28 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
   await refusedNotice("Only an admin may read it.");
-  expect(calls.some((url) => url.includes("/turns"))).toBe(false);
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
 });
 
 test("a permalink to another member's conversation offers the listing's acknowledgement", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  const linked = { ...PRIVATE, id: CONVO_ID, agent_id: AGENT.id };
+  const linked = { ...PRIVATE, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name } };
   const { calls } = wire({
     "/api/chats": (url) =>
       url.includes("conversation=")
         ? json({ chats: [], conversation: linked })
         : json({ chats: [] }),
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    "/transcript": () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     "/intents": () => json({ applied: true, message: "Recorded." }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText(/private to owner@example.com/)).toBeTruthy();
-  expect(calls.some((url) => url.includes("/turns"))).toBe(false);
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
-  expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(
     screen.getByText("This conversation is read-only here. Reply in slack to continue it."),
   ).toBeTruthy();
@@ -180,7 +180,7 @@ test("a permalink to another member's conversation offers the listing's acknowle
 
 test("a permalink to a conversation naming no member is unshared, not missing", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  const linked = { ...WALLED, id: CONVO_ID, agent_id: AGENT.id, member_email: null };
+  const linked = { ...WALLED, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name }, member_email: null };
   wire({
     "/api/chats": (url) =>
       url.includes("conversation=")

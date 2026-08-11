@@ -8,7 +8,7 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
 import { Notice } from "@/kernel/panel";
-import { TurnLine } from "@/views/Conversations";
+import { MessageLog } from "@/kernel/messages";
 
 import { CHAT_ROW, CONVO_ID, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
 
@@ -130,26 +130,17 @@ test("a table keeps its height inside a scrolling panel instead of collapsing", 
 test("a transcript bubble wraps an unbreakable string instead of widening the pane", () => {
   const blob = '{"pull_number":1269,"head_sha":"e8beb82515566586de252fdc5a411db2526057e1"}';
   render(
-    <TurnLine
-      turn={{
-        id: TURN_ID,
-        agent_id: AGENT.id,
-        conversation_id: CONVO_ID,
-        seq: 1,
-        status: "done",
-        created_at: "2026-08-06T09:00:00Z",
-        inbound: blob,
-        outcome: blob,
-        error_class: null,
-        subagent_profile: "code_review",
-        parent_turn_id: null,
-      }}
-      depth={0}
+    <MessageLog
+      messages={[
+        { role: "user", text: blob },
+        { role: "assistant", text: blob },
+      ]}
+      conversationId={CONVO_ID}
     />,
   );
 
   for (const bubble of screen.getAllByText(blob)) {
-    expect(bubble.className).toContain("wrap-anywhere");
+    expect(bubble.closest("[data-role]")!.className).toContain("wrap-anywhere");
   }
   // `anywhere` rather than `break-word`: only `anywhere` lowers the intrinsic minimum width, so a
   // shrink-to-fit bubble resolves to the pane instead of to its 70ch maximum and overflowing it.

@@ -321,7 +321,7 @@ test("a 404 usage read says it is not shared", async () => {
 test("a workspace-shared conversation reads as shared, in its row and its detail heading", async () => {
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({
@@ -358,7 +358,7 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
 test("a conversation row names what it is about and who spoke, and the keyboard opens it", async () => {
   const opened = "8f2c1d40-0000-4000-8000-000000000004";
   wire({
-    "/turns": () => json({ turns: [], subagent_turns: [] }),
+    ["/conversations/" + opened + "/transcript"]: () => json({ messages: [] }),
     "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({
@@ -390,7 +390,7 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
     "can you take a look at the failing deploy",
   );
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
-    "Mel Okafor (mel@example.com), pat@example.com · slack · 4 turns",
+    "slack · Mel Okafor (mel@example.com), pat@example.com · 4 turns",
   );
   expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 7 2026");
 
@@ -398,67 +398,42 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
   expect(document.activeElement).toBe(row);
   await userEvent.keyboard("{Enter}");
 
-  expect(await screen.findByText("No turns in this conversation yet.")).toBeTruthy();
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(
     screen.getByRole("heading", { name: "slack · can you take a look at the failing deploy" }),
   ).toBeTruthy();
 });
 
-test("conversations open a turn tree that nests a subagent under the turn that spawned it", async () => {
-  const rootConversation = "11111111-1111-4111-8111-111111111111";
+test("a conversation opened here reads as chat, with the reply's whole activity behind it", async () => {
+  const held = "7c4a1e90-0000-4000-8000-000000000005";
+  const child = "9d2b7f31-0000-4000-8000-000000000006";
   wire({
-    ["/conversations/" + rootConversation + "/turns"]: () =>
+    ["/conversations/" + held + "/transcript"]: () =>
       json({
-        turns: [
+        messages: [
+          { role: "user", text: "parent ask" },
           {
-            id: "t1",
-            agent_id: AGENT_ID,
-            conversation_id: rootConversation,
-            seq: 2,
-            status: "done",
-            created_at: "2026-07-30T10:00:00",
-            inbound: "parent ask",
-            outcome: "parent answer",
-            error_class: null,
-            subagent_profile: null,
-            parent_turn_id: null,
-          },
-          {
-            id: "t3",
-            agent_id: AGENT_ID,
-            conversation_id: rootConversation,
-            seq: 3,
-            status: "done",
-            created_at: "2026-07-30T10:00:02",
-            inbound: "parent follow-up",
-            outcome: "follow-up answer",
-            error_class: null,
-            subagent_profile: null,
-            parent_turn_id: null,
-          },
-        ],
-        subagent_turns: [
-          {
-            id: "t2",
-            agent_id: AGENT_ID,
-            conversation_id: "22222222-2222-4222-8222-222222222222",
-            seq: 1,
-            status: "done",
-            created_at: "2026-07-30T10:00:01",
-            inbound: "child ask",
-            outcome: "child answer",
-            error_class: null,
-            subagent_profile: "research",
-            parent_turn_id: "t1",
+            role: "assistant",
+            text: "**parent answer**",
+            events: [{ kind: "tool", name: "bash", preview: "ls", description: "" }],
+            subagents: [
+              {
+                profile: "research",
+                conversation_id: child,
+                events: [{ kind: "note", text: "Reading the deploy job." }],
+                output: "It runs nightly.",
+                subagents: [],
+              },
+            ],
           },
         ],
       }),
-    ["/conversations/" + rootConversation + "/files"]: () => json({ files: [] }),
+    ["/conversations/" + held + "/files"]: () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [
           {
-            id: rootConversation,
+            id: held,
             surface: "web",
             member_email: "member@example.com",
             description: "Rename the deploy job",
@@ -477,11 +452,18 @@ test("conversations open a turn tree that nests a subagent under the turn that s
   await userEvent.click(await screen.findByRole("button", { name: /Rename the deploy job/ }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
-  expect(screen.getByText("child answer")).toBeTruthy();
-  const parent = screen.getByText(/^turn 2 ·/);
-  const child = screen.getByText(/^subagent research ·/);
-  expect(parent.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(screen.queryByRole("link", { name: /^Changes from/ })).toBeNull();
+  expect(screen.getByText("parent answer").tagName).toBe("STRONG");
+  const summary = screen.getByText("Reading the deploy job.");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(screen.queryByText("bash ls")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("bash ls")).toBeTruthy();
+  expect(screen.getByText("It runs nightly.")).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: /Subagent · research/ }).getAttribute("href"),
+  ).toBe("#/subagents/research/conversations/" + child + "?root=" + held);
+  expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
   expect(await screen.findByText("No files in this conversation's workspace.")).toBeTruthy();
 });
 
@@ -758,7 +740,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
 
 test("a conversation the member may not read says so instead of reporting a status code", async () => {
   wire({
-    "/turns": () => new Response("no", { status: 404 }),
+    "/conversations/c1/transcript": () => new Response("no", { status: 404 }),
     "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({

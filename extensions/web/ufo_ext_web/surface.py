@@ -830,15 +830,48 @@ def _rendered_messages(
     return rendered
 
 
-async def transcript(ctx: SurfaceContext, request: Request) -> Response:
-    """One conversation of the member's with this agent, as the portal renders it on load: the
-    engine's `<context>` framing stripped and tool results elided — a projection of the durable
-    transcript, never a second store. The `conversation` parameter names which one, gated to the
-    member's own like the chat POST that writes it.
+async def _conversation_messages(
+    ctx: SurfaceContext, conversation_id: UUID
+) -> tuple[list[dict[str, object]], Turn | None]:
+    """One conversation as every portal surface renders it — the live chat, the read-only
+    transcript an agent's conversations open, and a subagent run's own page: the engine's
+    `<context>` framing stripped, tool results elided, and each reply carrying the work it did,
+    down to what the runs it spawned did in turn. A projection of the durable transcript, never a
+    second store, and one projection, so no screen shows a conversation another screen would show
+    differently.
 
-    A turn writes the transcript when it ends, so a turn still running is absent from it: the read
-    carries that turn's prompt as the message it is and names the turn, and the page attaches to
-    its live frames instead of drawing an empty conversation."""
+    A turn writes the transcript when it ends, so a turn still running is absent from it: the
+    conversation's newest turn rides back with the messages, and its prompt is appended as the
+    message it is — the live chat attaches to that turn's frames, a read-only pane states what has
+    landed."""
+    recorded = await ctx.read_transcript(conversation_id)
+    if recorded is None:
+        rendered: list[dict[str, object]] = []
+    else:
+        turns, spawned = await asyncio.gather(
+            ctx.list_turns(conversation_id),
+            ctx.conversation_subagent_turns(conversation_id),
+        )
+        rendered = _rendered_messages(
+            recorded.messages,
+            await _subagent_nodes(ctx, spawned),
+            frozenset(str(turn.id) for turn in turns),
+        )
+    latest = await ctx.latest_turn(conversation_id)
+    detail = None if latest is None else await ctx.turn_detail(latest)
+    if detail is None:
+        return rendered, None
+    if detail.turn.terminal is None:
+        rendered.append({"role": "user", "text": member_message_text(detail.turn.inbound)})
+    return rendered, detail.turn
+
+
+async def transcript(ctx: SurfaceContext, request: Request) -> Response:
+    """One conversation of the member's with this agent, as the portal renders it on load. The
+    `conversation` parameter names which one, gated to the member's own like the chat POST that
+    writes it. A turn still running names itself, so the page attaches to its live frames instead
+    of drawing an empty conversation, and a settled one carries what it still asks of the
+    member."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -855,31 +888,11 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         return Response("no such conversation", status_code=404)
     if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
         return Response("no such conversation", status_code=404)
-    recorded = await ctx.read_transcript(conversation_id)
-    if recorded is None:
-        rendered = []
-    else:
-        turns, spawned = await asyncio.gather(
-            ctx.list_turns(conversation_id),
-            ctx.conversation_subagent_turns(conversation_id),
-        )
-        rendered = _rendered_messages(
-            recorded.messages,
-            await _subagent_nodes(ctx, spawned),
-            frozenset(str(turn.id) for turn in turns),
-        )
-    latest = await ctx.latest_turn(conversation_id)
-    detail = None if latest is None else await ctx.turn_detail(latest)
-    if detail is None:
+    rendered, turn = await _conversation_messages(ctx, conversation_id)
+    if turn is None:
         return JSONResponse({"messages": rendered})
-    turn = detail.turn
     if turn.terminal is None:
-        return JSONResponse(
-            {
-                "messages": [*rendered, {"role": "user", "text": turn.inbound}],
-                "turn": str(turn.id),
-            }
-        )
+        return JSONResponse({"messages": rendered, "turn": str(turn.id)})
     return JSONResponse({"messages": rendered, **await _open_handoffs(ctx, turn.id, turn.terminal)})
 
 
@@ -1003,10 +1016,11 @@ async def _resolve_chat(
     return JSONResponse(
         {
             "chats": [],
-            "conversation": {
-                **_conversation_row(listed[0], titles.get(listed[0].summary.id)),
-                "agent_id": str(target_agent.id),
-            },
+            "conversation": _conversation_row(
+                listed[0],
+                titles.get(listed[0].summary.id),
+                {"id": str(target_agent.id), "name": target_agent.name},
+            ),
         }
     )
 
@@ -1232,15 +1246,21 @@ async def _chat_titles(store: ScopedStore, listed: Sequence[ListedConversation])
     return titles
 
 
-def _conversation_row(entry: ListedConversation, title: str | None) -> dict[str, object]:
+def _conversation_row(
+    entry: ListedConversation, title: str | None, agent: dict[str, str] | None = None
+) -> dict[str, object]:
     """One conversation as the panel lists it. `description` is what the conversation is called:
     the title this surface stored when it opened the chat — the same string the rail shows, so an
     index row and a rail row never name one conversation two ways — else that same cut taken from
     the words that opened it, which is how a conversation another surface holds gets a name at
     all. A row this viewer may not read carries neither a description nor a speaker: core withholds
-    the content, and the title of a chat it did not open is that content by another route."""
+    the content, and the title of a chat it did not open is that content by another route.
+
+    `agent` names the owner of a row read across every agent, and is null for a read taken inside
+    one agent's namespace, where the pane names it once instead of every row naming it again."""
     return {
         "id": str(entry.summary.id),
+        "agent": agent,
         "surface": entry.summary.surface,
         "member_email": entry.summary.member_email,
         "description": (title or _chat_title(entry.opening_message, ())) if entry.readable else "",
@@ -1276,40 +1296,17 @@ async def _readable_conversation(
     return agent_id, conversation_id, SlotViewer(member_id, audience.admin)
 
 
-def _turn_row(turn: Turn) -> dict[str, object]:
-    """The transcript view renders `inbound` as the member's own bubble, so it carries the words the
-    member wrote and never the elements a surface named around them."""
-    return {
-        "id": str(turn.id),
-        "agent_id": str(turn.agent_id),
-        "conversation_id": str(turn.conversation_id),
-        "seq": turn.seq,
-        "status": turn.status,
-        "inbound": member_message_text(turn.inbound),
-        "created_at": _iso(turn.created_at),
-        "parent_turn_id": None if turn.parent_turn_id is None else str(turn.parent_turn_id),
-        "subagent_profile": turn.subagent_profile,
-        "outcome": None if turn.terminal is None else turn.terminal.text,
-        "error_class": None if turn.terminal is None else turn.terminal.error_class,
-    }
-
-
-async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
-    """One conversation's turns as the portal's transcript view renders them, and beneath them the
-    turns each spawned — a subagent runs in its own conversation carrying this one's audience, so
-    the same gate authorizes both and the page nests by `parent_turn_id`."""
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response:
+    """One conversation read rather than continued — another member's the admin acknowledged, one
+    another surface holds — as the same messages the chat draws. Each reply names the children it
+    spawned, and a child carries this conversation's audience, so the card opens that run through
+    this conversation and the one gate here authorizes both."""
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
     _agent_id, conversation_id, _viewer = authorized
-    turns = await ctx.list_turns(conversation_id)
-    spawned = await ctx.conversation_subagent_turns(conversation_id)
-    return JSONResponse(
-        {
-            "turns": [_turn_row(turn) for turn in turns],
-            "subagent_turns": [_turn_row(turn) for turn in spawned],
-        }
-    )
+    rendered, _turn = await _conversation_messages(ctx, conversation_id)
+    return JSONResponse({"messages": rendered})
 
 
 async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
@@ -1878,44 +1875,44 @@ async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Respo
 
 
 def _subagent_run_row(run: SubagentRun) -> dict[str, object]:
-    """One subagent run as both its listing row and the header its own page titles with."""
-    return {
-        "id": str(run.id),
-        "agent_name": run.agent_name,
-        "member_email": run.member_email,
-        "turn_count": run.turn_count,
-        "last_turn_at": _iso(run.last_turn_at),
-        "readable": run.readable,
-    }
+    """One subagent run as both its listing row and the header its own page titles with — the same
+    conversation row every other portal index draws, naming the agent that ran it because this read
+    spans every agent the viewer reaches."""
+    return _conversation_row(
+        run.conversation, None, {"id": str(run.agent_id), "name": run.agent_name}
+    )
 
 
-async def subagent_conversation_turns(ctx: SurfaceContext, request: Request) -> Response:
-    """One subagent conversation's turns, and beneath them the turns it spawned in turn — the same
-    transcript the spawning conversation nests, read here scoped to the profile that ran it and to
-    the agents this viewer's audience reaches. A row the listing shows unreadable refuses here. The
-    run itself rides the response, so a permalink opened cold titles its page from this one read."""
+async def subagent_conversation(ctx: SurfaceContext, request: Request) -> Response:
+    """One subagent run's own transcript, as the same messages every other conversation reads back
+    as, scoped to the profile that ran it and to the agents this viewer's audience reaches. A row
+    the listing shows unreadable refuses here. `root` names the conversation the run was spawned
+    from, the way the changes and files of a child are already read through it: a member opening
+    the card in a transcript they may read reads the run behind it, and that is the one route by
+    which an admin's acknowledgement reaches a child. The run itself rides the response, so a
+    permalink opened cold titles its page from this one read."""
     gated = await _subagent_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, audience, profile = gated
+    root = request.query_params.get("root")
     try:
         conversation_id = UUID(request.path_params["conversation_id"])
+        root_conversation_id = None if root is None else UUID(root)
     except ValueError:
         return Response("no such conversation", status_code=404)
     run = await ctx.readable_subagent_conversation(
-        conversation_id, profile.name, member_id, _reachable_agents(audience)
+        conversation_id,
+        profile.name,
+        member_id,
+        _reachable_agents(audience),
+        root_conversation_id=root_conversation_id,
+        admin=audience.admin,
     )
     if run is None:
         return Response("no such conversation", status_code=404)
-    turns = await ctx.list_turns(conversation_id)
-    spawned = await ctx.conversation_subagent_turns(conversation_id)
-    return JSONResponse(
-        {
-            "run": _subagent_run_row(run),
-            "turns": [_turn_row(turn) for turn in turns],
-            "subagent_turns": [_turn_row(turn) for turn in spawned],
-        }
-    )
+    rendered, _turn = await _conversation_messages(ctx, conversation_id)
+    return JSONResponse({"run": _subagent_run_row(run), "messages": rendered})
 
 
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
@@ -2495,12 +2492,12 @@ ROUTES = (
     SurfaceRoute(
         method="GET",
         path="subagents/{subagent}/conversations/{conversation_id}",
-        handler=subagent_conversation_turns,
+        handler=subagent_conversation,
     ),
     SurfaceRoute(
         method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/turns",
-        handler=conversation_turns,
+        path="agents/{agent_id}/conversations/{conversation_id}/transcript",
+        handler=conversation_transcript,
     ),
     SurfaceRoute(
         method="GET",

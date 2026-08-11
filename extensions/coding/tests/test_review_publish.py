@@ -17,7 +17,7 @@ from ufo_ext_coding.review_publish import (
     review_conversation_url,
 )
 from ufo_ext_coding.review_routing import StoredReviewRun
-from ufo_ext_web.surface import PORTAL_PATH, ROUTES, subagent_conversation_turns
+from ufo_ext_web.surface import PORTAL_PATH, ROUTES, subagent_conversation
 
 REVIEW_BASE_URL = "https://app.example.com"
 REVIEW_CONVERSATION = UUID("63edf3d9-f12c-4ceb-aed1-1bb41312a8ad")
@@ -168,7 +168,7 @@ def test_the_published_link_opens_the_portal_read_that_serves_the_reviewer_run()
         and (opened := compile_path(f"/{route.path}")[0].fullmatch(fragment))
     ] == [
         (
-            subagent_conversation_turns,
+            subagent_conversation,
             {"subagent": CODE_REVIEW_PROFILE_NAME, "conversation_id": str(REVIEW_CONVERSATION)},
         )
     ]

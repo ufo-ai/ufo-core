@@ -243,6 +243,26 @@ agent either way — the detail opens under it, the row's delete posts to its la
 act asks which agent runs the new row, drawn only in the section and only where the audience holds
 more than one, since a select with one option states a choice the member does not have.
 
+A conversation the member reads rather than continues draws the chat's own log, `MessageLog`
+(`kernel/messages.tsx`): the member's words in a bubble, the agent's as markdown, the files listed,
+and under each reply the whole activity disclosure below — down to the work of the runs it spawned.
+The live chat hands it the turn it is streaming and puts a composer under it; a read-only pane hands
+it none and heads itself with the conversation's title. A second renderer for the same messages is a
+second answer to what a conversation looks like, and the copy the member reads least often is the
+one that drifts. Its section carries no act: a transcript reads no diff state, so a `Changes` link
+drawn there stands over conversations that changed no file, which is why the slot strip — the one
+place that knows the count — is where changes are reached. A run's link is rooted at the
+conversation that spawned it: the one being read for a run under a reply, that run's own for the
+runs it spawned in turn — which is the conversation the read behind the link authorizes against.
+
+Conversations answer the same rule from one component: `ConversationList` (`views/Conversations.tsx`)
+draws an agent's own conversations and a subagent's runs alike, and the read decides what each row
+says about where it came from. A read spanning every agent carries the agent on the row; a read
+inside one agent's namespace carries none, and the row states the surface it came in on instead —
+one slot, holding the fact the pane the member is standing in does not already state. The heading
+over the opened conversation states that same fact, so a row and the record it opens never name one
+conversation two ways.
+
 Content whose length the member cannot predict is held at the fold. `Reveal`
 (`components/ui/reveal.tsx`) draws the same card, clips to `--size-reveal`, fades the last line
 into the surface, and puts one `Show more`/`Show less` in a footer row under the card's rule. The
@@ -251,10 +271,11 @@ measurement is held rather than retaken — an expanded block always fits its ow
 re-measuring would take its own control away. An agent's prompt runs for screens: left unheld it
 buries every section under it, and the member who came for what is below never learns it is there.
 
-A reply states what the agent did as one line and opens onto the rest. The disclosure is a native
-`<details>` (`Activity` in `views/Chat.tsx`) — its own marker, its own keyboard, its own announced
-state, and so no fourth glyph — and its summary is the *latest* activity, never a count: a member
-reading a settled reply wants what it just did, and `3 tool calls` says only that there were three.
+A reply states what the agent did as one line and opens onto the rest, in the live chat and in every
+transcript read back, since one component draws a reply wherever it is drawn. The disclosure is a
+native `<details>` (`Activity` in `kernel/messages.tsx`) — its own marker, its own keyboard, its own
+announced state, and so no fourth glyph — and its summary is the *latest* activity, never a count: a
+member reading a settled reply wants what it just did, and `3 tool calls` says only there were three.
 While the turn runs that same line is the running activity and carries the working pulse, so the
 collapsed state reads the same whether the turn is going or gone. The body mounts only while open.
 Inside it, a subagent's own calls, the lines it wrote between them, and what it answered nest under
@@ -566,9 +587,11 @@ Copy a known-good implementation instead of composing from rules:
 - `components/ui/filter.tsx` — the one segmented filter every listing narrows with.
 - `views/SubagentPane.tsx` — a subject's own pane: its facts as a column, its prompt behind the
   fold, its runs and skills in headed sections.
-- `views/Conversations.tsx` — an index of row lines whose row is itself the control that opens a
-  record inside the pane: one way back above the record, the record's own heading, and its
-  sections beneath.
+- `views/Conversations.tsx` — the one conversation list every screen draws, and an index of row
+  lines whose row is itself the control that opens a record inside the pane: one way back above the
+  record, the record's own heading, and its sections beneath.
+- `kernel/messages.tsx` — the message log the live chat and every read-only transcript draw, and
+  the activity disclosure a reply opens onto.
 - `kernel/rows.tsx` — the row-line list both the declared listings and the bespoke sections draw.
 - `kernel/row.ts` — the one way a record's whole row becomes the control that opens it.
 - `components/ui/facts.tsx` — the labelled column a pane states its subject's facts in.

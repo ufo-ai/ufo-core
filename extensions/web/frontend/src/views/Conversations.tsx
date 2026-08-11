@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { Td } from "@/components/ui/table";
 import { day } from "@/lib/moments";
-import { formatSize } from "@/views/Chat";
+import { MessageLog } from "@/kernel/messages";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -19,48 +19,12 @@ import {
 import { RowLines } from "@/kernel/rows";
 import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
-import type { Agent, Conversation } from "@/lib/types";
+import { formatSize } from "@/lib/size";
+import type { Agent, Conversation, Message } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
 
-export type Turn = {
-  id: string;
-  agent_id: string;
-  conversation_id: string;
-  seq: number;
-  status: string;
-  created_at: string;
-  inbound: string;
-  outcome: string | null;
-  error_class: string | null;
-  subagent_profile: string | null;
-  parent_turn_id: string | null;
-};
-
 type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
-
-export function turnTree(
-  turns: Turn[],
-  spawned: Turn[],
-): { turn: Turn; depth: number }[] {
-  const children = new Map<string | null, Turn[]>();
-  for (const turn of spawned) {
-    const siblings = children.get(turn.parent_turn_id) ?? [];
-    siblings.push(turn);
-    children.set(turn.parent_turn_id, siblings);
-  }
-  const rows: { turn: Turn; depth: number }[] = [];
-  const placed = new Set<string>();
-  const walk = (turn: Turn, depth: number) => {
-    rows.push({ turn, depth });
-    placed.add(turn.id);
-    for (const child of children.get(turn.id) ?? []) walk(child, depth + 1);
-  };
-  for (const turn of turns) walk(turn, 0);
-  for (const turn of spawned) if (!placed.has(turn.id)) walk(turn, 0);
-  return rows;
-}
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
 function Back({ onBack }: { onBack: () => void }) {
@@ -115,7 +79,7 @@ export function Disclose({
   return (
     <>
       <Back onBack={onBack} />
-      <Section title={title(conversation)}>
+      <Section title={conversationTitle(conversation)}>
         <p className="m-0 max-w-hint">
           This conversation is private to {owner} and may contain private information. Opening it
           records your email, theirs, and the time.
@@ -148,11 +112,19 @@ function subject(conversation: Conversation): string {
   return conversation.description || who(conversation);
 }
 
-/** One conversation names itself the same way on every screen that opens it — the surface it came
- *  in on, then what it is about. A row states its surface in its own meta line; a heading standing
- *  alone above a transcript has nowhere else to put it. */
-function title(conversation: Conversation): string {
-  return conversation.surface + " · " + subject(conversation);
+/** Where a conversation came from, in the one slot a row and a heading each keep for it: the agent
+ *  that ran it where the read spans every agent, else the surface it came in on. One fact, and it
+ *  is the one the pane the member is standing in does not already state — a subagent's page names
+ *  the profile and needs the agent, an agent's page names the agent and needs the surface. */
+function origin(conversation: Conversation): string {
+  return conversation.agent ? conversation.agent.name : conversation.surface;
+}
+
+/** One conversation names itself the same way on every screen that opens it — where it came from,
+ *  then what it is about. A row states its origin in its own meta line; a heading standing alone
+ *  above a transcript has nowhere else to put it. */
+export function conversationTitle(conversation: Conversation): string {
+  return origin(conversation) + " · " + subject(conversation);
 }
 
 /** What a member may do with a row they cannot simply open. `Private` reads on another member's
@@ -168,14 +140,77 @@ function turns(count: number): string {
 }
 
 function matches(entry: Conversation, query: string): boolean {
-  const stated = [subject(entry), who(entry), entry.surface, ...entry.speakers].join(" ");
+  const stated = [subject(entry), who(entry), origin(entry), ...entry.speakers].join(" ");
   return stated.toLowerCase().includes(query.toLowerCase());
+}
+
+/** Every screen that lists conversations draws this one section — an agent's own and a subagent's
+ *  runs alike — so a row reads the same wherever the member met it: the search and `Refresh` on
+ *  the bar, one row line per conversation, and the row itself as the control that opens it. The
+ *  rows decide the rest: one carrying an agent states that agent where one read in a single
+ *  agent's namespace states the surface, and a row nobody may open says which of the two it is. */
+export function ConversationList({
+  rows,
+  blank,
+  onRefresh,
+  onOpen,
+  onDisclose,
+}: {
+  rows: Conversation[];
+  blank: string;
+  onRefresh: () => void;
+  onOpen: (conversation: Conversation) => void;
+  onDisclose?: (conversation: Conversation) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const shown = rows.filter((entry) => matches(entry, query));
+  return (
+    <Section
+      title="Conversations"
+      bar={
+        <>
+          <Input
+            type="search"
+            aria-label="Search"
+            placeholder="Search"
+            className="max-w-control-row"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <Button onClick={onRefresh}>Refresh</Button>
+        </>
+      }
+    >
+      {shown.length ? (
+        <RowLines
+          rows={shown}
+          rowKey={(entry) => entry.id}
+          primary={subject}
+          meta={(entry) => [
+            origin(entry),
+            entry.speakers.join(", "),
+            turns(entry.turn_count),
+            standing(entry),
+          ]}
+          when={(entry) => day(entry.last_turn_at) || day(entry.created_at)}
+          open={(entry) =>
+            entry.readable
+              ? () => onOpen(entry)
+              : entry.disclosable && onDisclose
+                ? () => onDisclose(entry)
+                : null
+          }
+        />
+      ) : (
+        <PanelBlank body={query ? "No conversation matches this search." : blank} />
+      )}
+    </Section>
+  );
 }
 
 export function Conversations({ agent }: { agent: Agent }) {
   const [opened, setOpened] = useState<Conversation | null>(null);
   const [disclosing, setDisclosing] = useState<Conversation | null>(null);
-  const [query, setQuery] = useState("");
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<{ conversations: Conversation[] }>(
     "/agents/" + agent.id + "/conversations",
@@ -201,58 +236,52 @@ export function Conversations({ agent }: { agent: Agent }) {
   }
   return (
     <Panel state={state}>
-      {(payload) => {
-        const shown = payload.conversations.filter((entry) => matches(entry, query));
-        return (
-          <Section
-            title="Conversations"
-            bar={
-              <>
-                <Input
-                  type="search"
-                  aria-label="Search"
-                  placeholder="Search"
-                  className="max-w-control-row"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-                <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-              </>
-            }
-          >
-            {shown.length ? (
-              <RowLines
-                rows={shown}
-                rowKey={(entry) => entry.id}
-                primary={subject}
-                meta={(entry) => [
-                  entry.speakers.join(", "),
-                  entry.surface,
-                  turns(entry.turn_count),
-                  standing(entry),
-                ]}
-                when={(entry) => day(entry.last_turn_at) || day(entry.created_at)}
-                open={(entry) =>
-                  entry.readable
-                    ? () => setOpened(entry)
-                    : entry.disclosable
-                      ? () => setDisclosing(entry)
-                      : null
-                }
-              />
-            ) : (
-              <PanelBlank
-                body={
-                  query
-                    ? "No conversation matches this search."
-                    : "No conversations with " + agent.name + " yet."
-                }
-              />
-            )}
-          </Section>
-        );
-      }}
+      {(payload) => (
+        <ConversationList
+          rows={payload.conversations}
+          blank={"No conversation with " + agent.name + " yet."}
+          onRefresh={() => setReloads((count) => count + 1)}
+          onOpen={setOpened}
+          onDisclose={setDisclosing}
+        />
+      )}
     </Panel>
+  );
+}
+
+/** What a content read that refused says, wherever one is drawn: a conversation this member may
+ *  not read is not a status code. */
+export function unreadable(message: string): ReactNode {
+  return (
+    <PanelEmpty>
+      {message.startsWith("Error 404") ? "This conversation is not shared with you." : message}
+    </PanelEmpty>
+  );
+}
+
+/** One conversation read rather than continued: the same message log the chat draws, headed the
+ *  way the row that opened it named it, and no composer under it. The section carries no act — a
+ *  transcript has no diff state to read, so a Changes link here would be drawn over conversations
+ *  that changed no file. */
+export function ConversationTranscript({
+  conversationId,
+  title,
+  messages,
+}: {
+  conversationId: string;
+  title: string;
+  messages: Message[];
+}) {
+  return (
+    <Section title={title}>
+      {messages.length ? (
+        <div className="flex flex-col gap-md">
+          <MessageLog messages={messages} conversationId={conversationId} />
+        </div>
+      ) : (
+        <PanelBlank body="No messages in this conversation yet." />
+      )}
+    </Section>
   );
 }
 
@@ -266,63 +295,22 @@ export function ConversationDetail({
   onBack: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
-  const state = usePanelRead<{ turns: Turn[]; subagent_turns: Turn[] }>(path + "/turns");
+  const state = usePanelRead<{ messages: Message[] }>(path + "/transcript");
 
   return (
     <>
       <Back onBack={onBack} />
-      <Section title={title(conversation)}>
-        <Panel
-          state={state}
-          failed={(message) => (
-            <PanelEmpty>
-              {message.startsWith("Error 404")
-                ? "This conversation is not shared with you."
-                : message}
-            </PanelEmpty>
-          )}
-        >
-          {(payload) =>
-            payload.turns.length || payload.subagent_turns.length ? (
-              <div className="flex flex-col gap-lg">
-                {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-                  <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
-                ))}
-              </div>
-            ) : (
-              <PanelBlank body="No turns in this conversation yet." />
-            )
-          }
-        </Panel>
-      </Section>
+      <Panel state={state} failed={unreadable}>
+        {(payload) => (
+          <ConversationTranscript
+            conversationId={conversation.id}
+            title={conversationTitle(conversation)}
+            messages={payload.messages}
+          />
+        )}
+      </Panel>
       <ConversationFiles base={path} />
     </>
-  );
-}
-
-export function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
-  const answer = turn.outcome || turn.error_class;
-  const name = turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq;
-  return (
-    <div
-      className={cn(
-        "flex flex-col items-start gap-2xs",
-        depth && "border-l-(length:--marker-width) border-edge-strong pl-md",
-      )}
-      style={{ marginLeft: "calc(var(--spacing-2xl) * " + depth + ")" }}
-    >
-      <div className="flex gap-md font-mono text-mono">
-        <span>{name + " · " + turn.status + " · " + (day(turn.created_at) || "")}</span>
-      </div>
-      <div className="max-w-bubble self-end whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill px-lg py-sm">
-        {turn.inbound}
-      </div>
-      {answer ? (
-        <div className="max-w-bubble self-start whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill-subtle px-lg py-sm">
-          {answer}
-        </div>
-      ) : null}
-    </div>
   );
 }
 

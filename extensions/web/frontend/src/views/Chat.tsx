@@ -3,40 +3,22 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefOb
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
+import { Files, MessageLog, Meta } from "@/kernel/messages";
 import { cn } from "@/lib/cn";
-import { Markdown, StreamingBody } from "@/lib/markdown";
-import { chatState, clearChat, updateChat, useChat, type ActivityEvent } from "@/lib/chatStore";
+import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
-import { subagentConversationHash } from "@/lib/route";
 import {
   answerQuestion,
-  eventLabel,
-  latestActivity,
   refreshTranscript,
   resyncChat,
   sendMessage,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type {
-  Agent,
-  ChatFile,
-  ChatQuestion,
-  Member,
-  QuestionEntry,
-  SubagentRun,
-} from "@/lib/types";
+import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
 
-export function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-  if (bytes >= 1024) return Math.round(bytes / 1024) + " kB";
-  return bytes + " B";
-}
-
 const PIN_THRESHOLD_PX = 40;
-
-const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
 
 export type ChatProps = {
   agent: Agent;
@@ -129,39 +111,11 @@ export function Chat({
         className="flex flex-1 flex-col gap-md overflow-y-auto p-2xl"
         data-testid="log"
       >
-        {(messages ?? []).map((message, index) =>
-          message.role === "error" ? (
-            <Meta key={index}>{message.text}</Meta>
-          ) : (
-            <Speech key={index} mine={message.role === "user"}>
-              {message.role === "user" ? message.text : <Markdown text={message.text} />}
-              {message.role === "user" ? null : (
-                <Activity events={message.events ?? []} runs={message.subagents ?? []} />
-              )}
-              {message.files ? <Files files={message.files} /> : null}
-              {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
-              {message.meta ? <Meta>{message.meta}</Meta> : null}
-            </Speech>
-          ),
-        )}
-        {state.live ? (
-          <Speech mine={false} entering>
-            <StreamingBody text={state.live.text} />
-            <Activity
-              events={state.live.events}
-              runs={state.live.subagents}
-              working={
-                state.live.reconnecting
-                  ? "Reconnecting…"
-                  : (state.live.activity ?? (state.live.text ? undefined : "Thinking…"))
-              }
-            />
-            {state.live.files ? <Files files={state.live.files} /> : null}
-            {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
-            {state.live.meter ? <Meta>{state.live.meter}</Meta> : null}
-            {state.live.meta ? <Meta>{state.live.meta}</Meta> : null}
-          </Speech>
-        ) : null}
+        <MessageLog
+          messages={messages ?? []}
+          live={state.live}
+          conversationId={conversationId}
+        />
         {trailing && trailing.length ? <Files files={trailing} /> : null}
         {credentials ? (
           <Handoff>
@@ -222,122 +176,10 @@ export function Chat({
   );
 }
 
-function Speech({
-  mine,
-  entering = false,
-  children,
-}: {
-  mine: boolean;
-  entering?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div
-      className={cn(
-        "wrap-anywhere [&_a]:text-link",
-        mine
-          ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
-          : "w-full max-w-bubble self-start text-body leading-reading",
-        entering && "animate-appear",
-      )}
-      data-role={mine ? "me" : "agent"}
-    >
-      {children}
-    </div>
-  );
-}
-
-function Meta({ children }: { children: ReactNode }) {
-  return (
-    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">{children}</div>
-  );
-}
-
-function Working({ children }: { children: ReactNode }) {
-  return (
-    <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
-      <span aria-hidden className={PULSE} />
-      {children}
-    </div>
-  );
-}
-
-function Activity({
-  events,
-  runs,
-  working,
-}: {
-  events: ActivityEvent[];
-  runs: SubagentRun[];
-  working?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  if (!events.length && !runs.length) {
-    return working === undefined ? null : <Working>{working}</Working>;
-  }
-  return (
-    <details
-      className="mt-2xs font-mono text-small opacity-(--muted)"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary className="cursor-pointer">
-        {working === undefined ? null : (
-          <span aria-hidden className={cn(PULSE, "mr-sm inline-block align-middle")} />
-        )}
-        {working ?? latestActivity(events, runs)}
-      </summary>
-      {open ? <ActivityTree events={events} runs={runs} /> : null}
-    </details>
-  );
-}
-
-function ActivityTree({ events, runs }: { events: ActivityEvent[]; runs: SubagentRun[] }) {
-  if (!events.length && !runs.length) return null;
-  return (
-    <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
-      {events.map((event, index) => (
-        <li key={index} className="whitespace-pre-wrap">
-          {eventLabel(event, "done")}
-        </li>
-      ))}
-      {runs.map((run) => (
-        <li key={run.conversation_id} className="flex flex-col gap-hair">
-          <a href={subagentConversationHash(run.profile, run.conversation_id)}>
-            Subagent · {run.profile}
-          </a>
-          <ActivityTree events={run.events} runs={run.subagents} />
-          {run.output ? <div className="whitespace-pre-wrap pl-lg">{run.output}</div> : null}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function Handoff({ children }: { children: ReactNode }) {
   return (
     <div className="flex max-w-bubble flex-col gap-sm self-start rounded-bubble border border-edge-control px-lg py-md">
       {children}
-    </div>
-  );
-}
-
-function ConnectLink({ url }: { url: string }) {
-  return (
-    <a href={url} target="_blank" rel="noopener">
-      Connect account
-    </a>
-  );
-}
-
-function Files({ files }: { files: ChatFile[] }) {
-  return (
-    <div className="mt-2xs flex flex-col gap-hair">
-      {files.map((file) => (
-        <div key={file.filename}>
-          {file.url ? <a href={file.url}>{file.filename}</a> : <span>{file.filename}</span>}
-          <span className="font-mono text-mono"> · {formatSize(file.size_bytes)}</span>
-        </div>
-      ))}
     </div>
   );
 }

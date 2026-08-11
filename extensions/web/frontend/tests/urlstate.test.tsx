@@ -169,6 +169,17 @@ test("the subagent conversation hash names its run and lands on the conversation
   });
 });
 
+test("a run reached from the conversation that spawned it carries that conversation", () => {
+  const parent = "44444444-4444-4444-8444-444444444444";
+  expect(parseHash(subagentConversationHash("deep_research", CONVO_ID, parent))).toEqual({
+    kind: "subagent",
+    name: "deep_research",
+    tab: "conversations",
+    conversationId: CONVO_ID,
+    rootConversationId: parent,
+  });
+});
+
 test("a conversation named as a query target boots on that conversation", () => {
   expect(bootRoute("", "?c=" + CONVO_ID)).toEqual({ kind: "chat", conversationId: CONVO_ID });
   expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({ kind: "agents" });

@@ -44,7 +44,13 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
   | { kind: "agent"; agentId: string; tab: AgentTab }
-  | { kind: "subagent"; name: string; tab: SubagentTab; conversationId?: string }
+  | {
+      kind: "subagent";
+      name: string;
+      tab: SubagentTab;
+      conversationId?: string;
+      rootConversationId?: string;
+    }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "customize"; view: CustomizeTab; place: WorkspacePlace }
@@ -61,7 +67,8 @@ const CONVERSATION_SLOT_HASH =
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
 const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
-const SUBAGENT_CONVERSATION_HASH = /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})$/;
+const SUBAGENT_CONVERSATION_HASH =
+  /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})(?:\?root=([0-9a-f-]{36}))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 const CUSTOMIZE_HASH = /^#\/customize\/([\w-]+)(?:\?(.*))?$/;
@@ -151,7 +158,13 @@ export function parseHash(hash: string): Route {
   }
   const run = hash.match(SUBAGENT_CONVERSATION_HASH);
   if (run) {
-    return { kind: "subagent", name: run[1], tab: "conversations", conversationId: run[2] };
+    return {
+      kind: "subagent",
+      name: run[1],
+      tab: "conversations",
+      conversationId: run[2],
+      ...(run[3] ? { rootConversationId: run[3] } : {}),
+    };
   }
   const subagent = hash.match(SUBAGENT_HASH);
   if (subagent) {
@@ -192,8 +205,15 @@ export function subagentHash(name: string, tab: SubagentTab): string {
   return "#/subagents/" + name + (tab === "overview" ? "" : "/" + tab);
 }
 
-export function subagentConversationHash(name: string, conversationId: string): string {
-  return "#/subagents/" + name + "/conversations/" + conversationId;
+/** One subagent run, and — where the member reached it from the conversation that spawned it —
+ *  that conversation, which is the read the run is authorized through. */
+export function subagentConversationHash(
+  name: string,
+  conversationId: string,
+  rootConversationId?: string,
+): string {
+  const root = rootConversationId ? "?root=" + rootConversationId : "";
+  return "#/subagents/" + name + "/conversations/" + conversationId + root;
 }
 
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {

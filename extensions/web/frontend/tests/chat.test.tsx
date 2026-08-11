@@ -184,7 +184,7 @@ test("a live subagent run nests under the reply it produced", async () => {
   await userEvent.click(summary);
   expect(
     screen.getByRole("link", { name: /Subagent · general_purpose/ }).getAttribute("href"),
-  ).toBe("#/subagents/general_purpose/conversations/" + conversationId);
+  ).toBe("#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID);
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
@@ -285,11 +285,11 @@ test("a reloaded conversation nests its subagent work under the reply and still 
 
   const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
   expect(link.getAttribute("href")).toBe(
-    "#/subagents/general_purpose/conversations/" + conversationId,
+    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
   );
   expect(
     screen.getByRole("link", { name: /Subagent · deep_research/ }).getAttribute("href"),
-  ).toBe("#/subagents/deep_research/conversations/" + nestedId);
+  ).toBe("#/subagents/deep_research/conversations/" + nestedId + "?root=" + conversationId);
 
   await userEvent.click(summary);
   expect(screen.queryByText("Fetching the page")).toBeNull();

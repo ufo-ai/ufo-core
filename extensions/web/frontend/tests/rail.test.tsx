@@ -261,7 +261,7 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
             chats: [],
             conversation: {
               id: CONVO_ID,
-              agent_id: AGENT_ID,
+              agent: { id: AGENT_ID, name: AGENT.name },
               surface: "slack",
               member_email: null,
               turn_count: 1,
@@ -272,24 +272,12 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
             },
           })
         : json({ chats: [] }),
-    ["/conversations/" + CONVO_ID + "/turns"]: () =>
+    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
       json({
-        turns: [
-          {
-            id: TURN_ID,
-            agent_id: AGENT_ID,
-            conversation_id: CONVO_ID,
-            seq: 1,
-            status: "done",
-            created_at: "2026-08-01T08:01:00Z",
-            inbound: "from Slack",
-            outcome: "reply in Slack",
-            error_class: null,
-            subagent_profile: null,
-            parent_turn_id: null,
-          },
+        messages: [
+          { role: "user", text: "from Slack" },
+          { role: "assistant", text: "reply in Slack" },
         ],
-        subagent_turns: [],
       }),
     ["/conversations/" + CONVO_ID + "/files"]: () => json({ files: [] }),
   });
@@ -303,7 +291,7 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
-    screen.getByRole("heading", { name: "slack · Shared · " + CONVO_ID.slice(0, 8) }),
+    screen.getByRole("heading", { name: AGENT.name + " · Shared · " + CONVO_ID.slice(0, 8) }),
   ).toBeTruthy();
 });
 

@@ -1,18 +1,21 @@
 import { useState } from "react";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
-import { Hint, Input } from "@/components/ui/field";
+import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { Table, Td, Th } from "@/components/ui/table";
-import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
-import { DataTable } from "@/kernel/table";
+import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import { TabPanel, TabStrip } from "@/kernel/tabs";
-import { TurnLine, turnTree, who, type Turn } from "@/views/Conversations";
-import { day } from "@/lib/moments";
+import {
+  ConversationList,
+  ConversationTranscript,
+  conversationTitle,
+  unreadable,
+} from "@/views/Conversations";
 import { subagentConversationHash, subagentHash, type SubagentTab } from "@/lib/route";
-import type { Subagent } from "@/lib/types";
+import type { Conversation, Message, Subagent } from "@/lib/types";
 
 const TAB_LABELS: Record<SubagentTab, string> = {
   overview: "Overview",
@@ -29,24 +32,23 @@ type Detail = {
   loads_skills: boolean;
 };
 
-type Run = {
-  id: string;
-  agent_name: string;
-  member_email: string | null;
-  turn_count: number;
-  last_turn_at: string;
-  readable: boolean;
-};
-
 export type SubagentPaneProps = {
   subagent: Subagent;
   tab: SubagentTab;
   tabs: readonly SubagentTab[];
   onTab: (tab: SubagentTab) => void;
   conversationId?: string;
+  rootConversationId?: string;
 };
 
-export function SubagentPane({ subagent, tab, tabs, onTab, conversationId }: SubagentPaneProps) {
+export function SubagentPane({
+  subagent,
+  tab,
+  tabs,
+  onTab,
+  conversationId,
+  rootConversationId,
+}: SubagentPaneProps) {
   const base = "/subagents/" + subagent.name;
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
@@ -73,6 +75,7 @@ export function SubagentPane({ subagent, tab, tabs, onTab, conversationId }: Sub
             base={base}
             name={subagent.name}
             conversationId={conversationId}
+            rootConversationId={rootConversationId}
           />
         ) : null}
         {tab === "skills" ? <SubagentSkills base={base} /> : null}
@@ -175,74 +178,40 @@ function SubagentConversations({
   base,
   name,
   conversationId,
+  rootConversationId,
 }: {
   base: string;
   name: string;
   conversationId?: string;
+  rootConversationId?: string;
 }) {
-  const [query, setQuery] = useState("");
   const [reloads, setReloads] = useState(0);
-  const state = usePanelRead<{ conversations: Run[] }>(
+  const state = usePanelRead<{ conversations: Conversation[] }>(
     conversationId ? null : base + "/conversations",
     reloads,
   );
 
   if (conversationId) {
-    return <RunDetail base={base} name={name} conversationId={conversationId} />;
+    return (
+      <RunDetail
+        base={base}
+        name={name}
+        conversationId={conversationId}
+        rootConversationId={rootConversationId}
+      />
+    );
   }
   return (
     <Panel state={state}>
       {(payload) => (
-        <Section
-          title="Runs"
-          bar={
-            <>
-              <Input
-                type="search"
-                aria-label="Search"
-                placeholder="Search"
-                className="max-w-control-row"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-              <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-            </>
-          }
-        >
-          <DataTable
-            columns={["Agent", "Asked By", "Turns", "Last Activity", ""]}
-            rows={payload.conversations.filter((run) =>
-              (run.agent_name + " " + who(run)).toLowerCase().includes(query.toLowerCase()),
-            )}
-            rowKey={(run) => run.id}
-            empty="This subagent has not run yet."
-            note={query ? "No run matches this search." : undefined}
-          >
-            {(run) => (
-              <>
-                <Td>{run.agent_name}</Td>
-                <Td>{who(run)}</Td>
-                <Td>{String(run.turn_count)}</Td>
-                <Td>{day(run.last_turn_at)}</Td>
-                <Td>
-                  {run.readable ? (
-                    <a
-                      href={subagentConversationHash(name, run.id)}
-                      className={cn(
-                        buttonVariants({ variant: "row" }),
-                        "inline-block no-underline",
-                      )}
-                    >
-                      Open
-                    </a>
-                  ) : (
-                    <span className="opacity-(--muted-soft)">not shared with you</span>
-                  )}
-                </Td>
-              </>
-            )}
-          </DataTable>
-        </Section>
+        <ConversationList
+          rows={payload.conversations}
+          blank="No conversation this subagent ran is shared with you."
+          onRefresh={() => setReloads((count) => count + 1)}
+          onOpen={(conversation) => {
+            location.hash = subagentConversationHash(name, conversation.id);
+          }}
+        />
       )}
     </Panel>
   );
@@ -252,13 +221,16 @@ function RunDetail({
   base,
   name,
   conversationId,
+  rootConversationId,
 }: {
   base: string;
   name: string;
   conversationId: string;
+  rootConversationId?: string;
 }) {
-  const state = usePanelRead<{ run: Run; turns: Turn[]; subagent_turns: Turn[] }>(
-    base + "/conversations/" + conversationId,
+  const root = rootConversationId ? "?root=" + rootConversationId : "";
+  const state = usePanelRead<{ run: Conversation; messages: Message[] }>(
+    base + "/conversations/" + conversationId + root,
   );
   return (
     <>
@@ -270,26 +242,13 @@ function RunDetail({
           All conversations
         </a>
       </div>
-      <Panel
-        state={state}
-        failed={(message) => (
-          <PanelEmpty>
-            {message.startsWith("Error 404") ? "This conversation is not shared with you." : message}
-          </PanelEmpty>
-        )}
-      >
+      <Panel state={state} failed={unreadable}>
         {(payload) => (
-          <Section title={payload.run.agent_name + " · " + who(payload.run)}>
-            {payload.turns.length || payload.subagent_turns.length ? (
-              <div className="flex flex-col gap-lg">
-                {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-                  <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
-                ))}
-              </div>
-            ) : (
-              <PanelBlank body="No turns in this run yet." />
-            )}
-          </Section>
+          <ConversationTranscript
+            conversationId={conversationId}
+            title={conversationTitle(payload.run)}
+            messages={payload.messages}
+          />
         )}
       </Panel>
     </>

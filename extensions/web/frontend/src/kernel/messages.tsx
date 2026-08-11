@@ -1,0 +1,199 @@
+import { useState, type ReactNode } from "react";
+
+import { cn } from "@/lib/cn";
+import { Markdown, StreamingBody } from "@/lib/markdown";
+import { subagentConversationHash } from "@/lib/route";
+import { formatSize } from "@/lib/size";
+import { eventLabel, latestActivity } from "@/lib/turnStream";
+import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
+import type { ChatFile, SubagentRun } from "@/lib/types";
+
+const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
+
+/** One conversation's messages, drawn the one way this portal draws them — the member's words in
+ *  a bubble, the agent's as markdown, and under each reply what it did: the subagents it spawned,
+ *  the tools it called, the files it shared, the account it asked to connect, what it cost. The
+ *  live chat hands it the turn it is streaming and puts a composer under it; a transcript read
+ *  back — an agent's conversations, a subagent's runs — hands it none and shows what landed. A
+ *  conversation the member cannot reply to still reads exactly like the one they can.
+ *
+ *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
+ *  under it: a run is opened through the conversation that spawned it, which is the route by which
+ *  a member reading a transcript reaches the run's own record. */
+export function MessageLog({
+  messages,
+  live = null,
+  conversationId,
+}: {
+  messages: Bubble[];
+  live?: LiveTurn | null;
+  conversationId: string | null;
+}) {
+  return (
+    <>
+      {messages.map((message, index) =>
+        message.role === "error" ? (
+          <Meta key={index}>{message.text}</Meta>
+        ) : (
+          <Speech key={index} mine={message.role === "user"}>
+            {message.role === "user" ? message.text : <Markdown text={message.text} />}
+            {message.role === "user" ? null : (
+              <Activity
+                events={message.events ?? []}
+                runs={message.subagents ?? []}
+                root={conversationId}
+              />
+            )}
+            {message.files ? <Files files={message.files} /> : null}
+            {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
+            {message.meta ? <Meta>{message.meta}</Meta> : null}
+          </Speech>
+        ),
+      )}
+      {live ? (
+        <Speech mine={false} entering>
+          <StreamingBody text={live.text} />
+          <Activity
+            events={live.events}
+            runs={live.subagents}
+            root={conversationId}
+            working={
+              live.reconnecting
+                ? "Reconnecting…"
+                : (live.activity ?? (live.text ? undefined : "Thinking…"))
+            }
+          />
+          {live.files ? <Files files={live.files} /> : null}
+          {live.connectUrl ? <ConnectLink url={live.connectUrl} /> : null}
+          {live.meter ? <Meta>{live.meter}</Meta> : null}
+          {live.meta ? <Meta>{live.meta}</Meta> : null}
+        </Speech>
+      ) : null}
+    </>
+  );
+}
+
+function Speech({
+  mine,
+  entering = false,
+  children,
+}: {
+  mine: boolean;
+  entering?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "wrap-anywhere [&_a]:text-link",
+        mine
+          ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
+          : "w-full max-w-bubble self-start text-body leading-reading",
+        entering && "animate-appear",
+      )}
+      data-role={mine ? "me" : "agent"}
+    >
+      {children}
+    </div>
+  );
+}
+
+export function Meta({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">{children}</div>
+  );
+}
+
+function Working({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
+      <span aria-hidden className={PULSE} />
+      {children}
+    </div>
+  );
+}
+
+function Activity({
+  events,
+  runs,
+  root,
+  working,
+}: {
+  events: ActivityEvent[];
+  runs: SubagentRun[];
+  root: string | null;
+  working?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!events.length && !runs.length) {
+    return working === undefined ? null : <Working>{working}</Working>;
+  }
+  return (
+    <details
+      className="mt-2xs font-mono text-small opacity-(--muted)"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer">
+        {working === undefined ? null : (
+          <span aria-hidden className={cn(PULSE, "mr-sm inline-block align-middle")} />
+        )}
+        {working ?? latestActivity(events, runs)}
+      </summary>
+      {open ? <ActivityTree events={events} runs={runs} root={root} /> : null}
+    </details>
+  );
+}
+
+/** A run's link is rooted at the conversation that spawned it: the one being read for a run under
+ *  a reply, and the run's own for the runs it spawned in turn — which is the one generation the
+ *  read behind that link authorizes against. */
+function ActivityTree({
+  events,
+  runs,
+  root,
+}: {
+  events: ActivityEvent[];
+  runs: SubagentRun[];
+  root: string | null;
+}) {
+  if (!events.length && !runs.length) return null;
+  return (
+    <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
+      {events.map((event, index) => (
+        <li key={index} className="whitespace-pre-wrap">
+          {eventLabel(event, "done")}
+        </li>
+      ))}
+      {runs.map((run) => (
+        <li key={run.conversation_id} className="flex flex-col gap-hair">
+          <a href={subagentConversationHash(run.profile, run.conversation_id, root ?? undefined)}>
+            Subagent · {run.profile}
+          </a>
+          <ActivityTree events={run.events} runs={run.subagents} root={run.conversation_id} />
+          {run.output ? <div className="whitespace-pre-wrap pl-lg">{run.output}</div> : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ConnectLink({ url }: { url: string }) {
+  return (
+    <a href={url} target="_blank" rel="noopener">
+      Connect account
+    </a>
+  );
+}
+
+export function Files({ files }: { files: ChatFile[] }) {
+  return (
+    <div className="mt-2xs flex flex-col gap-hair">
+      {files.map((file) => (
+        <div key={file.filename}>
+          {file.url ? <a href={file.url}>{file.filename}</a> : <span>{file.filename}</span>}
+          <span className="font-mono text-mono"> · {formatSize(file.size_bytes)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}

@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
 import { day } from "@/lib/moments";
 import type { Agent } from "@/lib/types";
-import { formatSize } from "@/views/Chat";
+import { formatSize } from "@/lib/size";
 
 export type ConversationSlotSummary = {
   id: string;

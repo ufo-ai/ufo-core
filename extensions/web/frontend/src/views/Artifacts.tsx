@@ -4,7 +4,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import type { ListingSpec } from "@/kernel/listing";
 import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
-import { formatSize } from "@/views/Chat";
+import { formatSize } from "@/lib/size";
 import { Sheet } from "@/components/ui/sheet";
 
 const VIEWER_TEXT_BYTES = 64 * 1024;

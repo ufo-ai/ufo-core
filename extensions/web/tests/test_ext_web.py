@@ -2773,7 +2773,7 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
     assert resolved.json()["chats"] == []
     assert target == {
         "id": str(conversation_id),
-        "agent_id": str(agent_id),
+        "agent": {"id": str(agent_id), "name": "assistant"},
         "surface": "slack",
         "member_email": None,
         "description": "from Slack",
@@ -6168,14 +6168,16 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     assert anonymous.status_code == 401
 
 
-async def test_conversation_turns_nest_subagents_and_fail_closed(
+async def test_conversation_transcript_reads_as_chat_and_fails_closed(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """A readable conversation answers its turns and the turns they spawned — a subagent runs in its
-    own conversation carrying this one's audience — while another member's private conversation,
-    another agent's, a room's, and a guessed id are all not-found, and stay not-found for an admin
-    who has recorded no disclosure against them."""
+    """A readable conversation answers the same messages the chat draws, each reply naming the
+    children it spawned — a subagent runs in its own conversation carrying this one's audience —
+    while another member's private conversation, another agent's, a room's, and a guessed id are
+    all not-found, and stay not-found for an admin who has recorded no disclosure against them."""
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -6226,49 +6228,68 @@ async def test_conversation_turns_nest_subagents_and_fail_closed(
         member_id=member_m,
         surface="subagent",
     )
-    child = await _seed_listed_turn(
+    await _seed_listed_turn(
         workspace_id,
         child_conversation,
         agent_id,
         seq=1,
         inbound="search",
         parent_turn_id=parent,
-        subagent_profile="researcher",
+        subagent_profile="deep_research",
+    )
+    await Transcript(blob=blob, conversation_id=mine).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {parent}\n</context>\nresearch",
+                ),
+                Message(role="assistant", content="found it"),
+            ),
+        )
     )
 
     read = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/turns",
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert read.status_code == 200
-    payload = read.json()
-    assert [entry["id"] for entry in payload["turns"]] == [str(parent)]
-    assert payload["turns"][0]["inbound"] == "research"
-    assert payload["turns"][0]["outcome"] == "ok"
-    assert [entry["id"] for entry in payload["subagent_turns"]] == [str(child)]
-    assert payload["subagent_turns"][0]["agent_id"] == str(agent_id)
-    assert payload["subagent_turns"][0]["conversation_id"] == str(child_conversation)
-    assert payload["subagent_turns"][0]["parent_turn_id"] == str(parent)
-    assert payload["subagent_turns"][0]["subagent_profile"] == "researcher"
+    assert read.json()["messages"] == [
+        {"role": "user", "text": "research"},
+        {
+            "role": "assistant",
+            "text": "found it",
+            "subagents": [
+                {
+                    "profile": "deep_research",
+                    "conversation_id": str(child_conversation),
+                    "events": [],
+                    "output": "ok",
+                    "subagents": [],
+                }
+            ],
+        },
+    ]
 
     for conversation_id in (theirs, room, uuid4()):
         for token in (token_m, token_admin):
             denied = await client.get(
-                f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/turns",
+                f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
                 headers={"cookie": f"{SESSION_COOKIE}={token}"},
             )
             assert denied.status_code == 404
     crossed = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/turns",
+        f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
     )
     assert crossed.status_code == 404
     malformed = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/not-a-uuid/turns",
+        f"/surface/web/agents/{agent_id}/conversations/not-a-uuid/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert malformed.status_code == 404
-    anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/turns")
+    anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/transcript")
     assert anonymous.status_code == 401
 
 
@@ -6320,12 +6341,39 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         seq=1,
         inbound="private child task",
         parent_turn_id=parent_turn,
-        subagent_profile="coding",
+        subagent_profile="deep_research",
+    )
+    await Transcript(blob=blob, conversation_id=theirs).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {parent_turn}\n</context>\nprivate question",
+                ),
+                Message(role="assistant", content="private answer"),
+            ),
+        )
     )
     await Transcript(blob=blob, conversation_id=child_conversation).write(
         Conversation(
             seq=1,
-            messages=_change_messages(1, lambda _index: "+private child change\n"),
+            messages=(
+                *_change_messages(1, lambda _index: "+private child change\n"),
+                Message(
+                    role="assistant",
+                    content=(
+                        TextBlock(text="Reading the private file."),
+                        ToolUseBlock(id="private-call", name="bash", input={"command": "ls"}),
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(tool_use_id="private-call", content="done", activity=True),
+                    ),
+                ),
+            ),
         )
     )
     with ws(workspace_id):
@@ -6338,11 +6386,13 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         audience="shared",
         member_id=None,
     )
-    turns = f"/surface/web/agents/{agent_id}/conversations/{theirs}/turns"
+    transcript_path = f"/surface/web/agents/{agent_id}/conversations/{theirs}/transcript"
+    child_run = f"/surface/web/subagents/deep_research/conversations/{child_conversation}"
     admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
 
-    blocked = await client.get(turns, headers=admin_cookie)
+    blocked = await client.get(transcript_path, headers=admin_cookie)
     assert blocked.status_code == 404
+    assert (await client.get(f"{child_run}?root={theirs}", headers=admin_cookie)).status_code == 404
     child_changes = (
         f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/slots/changes"
     )
@@ -6352,7 +6402,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
     assert (
-        await client.get(turns, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+        await client.get(transcript_path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).status_code == 404
     async with workspace_tx() as connection:
         assert (
@@ -6365,10 +6415,53 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     assert recorded.status_code == 200
     assert recorded.json()["applied"] is True
 
-    opened = await client.get(turns, headers=admin_cookie)
+    opened = await client.get(transcript_path, headers=admin_cookie)
     assert opened.status_code == 200
-    assert [entry["inbound"] for entry in opened.json()["turns"]] == ["private question"]
-    assert [entry["inbound"] for entry in opened.json()["subagent_turns"]] == ["private child task"]
+    assert opened.json()["messages"] == [
+        {"role": "user", "text": "private question"},
+        {
+            "role": "assistant",
+            "text": "private answer",
+            "subagents": [
+                {
+                    "profile": "deep_research",
+                    "conversation_id": str(child_conversation),
+                    "events": [
+                        {"kind": "note", "text": "Reading the private file."},
+                        {
+                            "kind": "tool",
+                            "name": "bash",
+                            "preview": '{"command":"ls"}',
+                            "description": "",
+                        },
+                    ],
+                    "output": "ok",
+                    "subagents": [],
+                }
+            ],
+        },
+    ]
+    assert (await client.get(child_run, headers=admin_cookie)).status_code == 404
+    opened_child = await client.get(f"{child_run}?root={theirs}", headers=admin_cookie)
+    assert opened_child.status_code == 200
+    assert opened_child.json()["run"]["id"] == str(child_conversation)
+    assert opened_child.json()["messages"] == [
+        {
+            "role": "assistant",
+            "text": "Reading the private file.",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "bash",
+                    "preview": '{"command":"ls"}',
+                    "description": "",
+                }
+            ],
+        }
+    ]
+    assert (
+        await client.get(f"{child_run}?root={unrelated}", headers=admin_cookie)
+    ).status_code == 404
     assert (await client.get(child_changes, headers=admin_cookie)).status_code == 404
     rooted_changes = await client.get(f"{child_changes}?root={theirs}", headers=admin_cookie)
     assert rooted_changes.status_code == 200
@@ -6427,17 +6520,17 @@ async def test_losing_admin_closes_an_open_disclosure_window(
         member_id=member_m,
     )
     await _seed_listed_turn(workspace_id, theirs, agent_id, seq=1, inbound="private question")
-    turns = f"/surface/web/agents/{agent_id}/conversations/{theirs}/turns"
+    transcript_path = f"/surface/web/agents/{agent_id}/conversations/{theirs}/transcript"
     admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
     assert (await _acknowledge(client, agent_id, theirs, token_admin)).json()["applied"] is True
-    assert (await client.get(turns, headers=admin_cookie)).status_code == 200
+    assert (await client.get(transcript_path, headers=admin_cookie)).status_code == 200
 
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.member).where(tables.member.c.id == admin_id).values(is_admin=False)
         )
 
-    assert (await client.get(turns, headers=admin_cookie)).status_code == 404
+    assert (await client.get(transcript_path, headers=admin_cookie)).status_code == 404
     assert (
         await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{theirs}/files", headers=admin_cookie
@@ -7730,6 +7823,7 @@ async def test_subagent_page_reads_the_profile_and_refuses_an_unknown_name(
 
 async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     """A spawn copies the spawning conversation's audience onto the child, so a profile's page
     lists the children of this member's own requests and of the workspace-shared ones, never
@@ -7738,6 +7832,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     carries the run itself, identical to the listing row, so a permalink opened cold titles its
     page without the listing in hand."""
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
     admin_id, token_admin = await _seed_member(workspace_id, "admin@example.com", admin=True)
@@ -7782,19 +7877,27 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         inbound="general work",
         subagent_profile="general_purpose",
     )
+    await Transcript(blob=blob, conversation_id=mine).write(
+        Conversation(seq=1, messages=(Message(role="assistant", content="found it"),))
+    )
     path = "/surface/web/subagents/deep_research/conversations"
 
     listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert listed.status_code == 200
     rows = listed.json()["conversations"]
     assert len(rows) == 1
-    assert rows[0] | {"last_turn_at": None} == {
+    assert rows[0] | {"last_turn_at": None, "created_at": None} == {
         "id": str(mine),
-        "agent_name": "assistant",
+        "agent": {"id": str(agent_id), "name": "assistant"},
+        "surface": SUBAGENT_SURFACE,
         "member_email": "m@example.com",
+        "description": "find it",
+        "speakers": [],
         "turn_count": 2,
+        "created_at": None,
         "last_turn_at": None,
         "readable": True,
+        "disclosable": False,
     }
     assert datetime.fromisoformat(rows[0]["last_turn_at"]).tzinfo is not None
 
@@ -7806,7 +7909,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
 
     readable = await client.get(f"{path}/{mine}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert readable.status_code == 200
-    assert [turn["inbound"] for turn in readable.json()["turns"]] == ["find it", "and again"]
+    assert readable.json()["messages"] == [{"role": "assistant", "text": "found it"}]
     assert readable.json()["run"] == rows[0]
 
     for blocked in (theirs, other_profile):
