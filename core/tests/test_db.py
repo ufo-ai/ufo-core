@@ -158,6 +158,14 @@ def downgrade() -> None:
 """
 
 
+def _core_migration_head() -> str:
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert head is not None
+    return head
+
+
 def test_apply_migrations_rejects_duplicate_revision_ids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,7 +202,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         heads = scripts.get_heads()
     assert scripts.get_revision("memory_0008").dependencies == "0049"
     assert {
-        "0077",
+        _core_migration_head(),
         "index_default_0002",
         "objectives_0001",
         "memory_0012",
@@ -242,7 +250,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert "0077" in revisions
+    assert _core_migration_head() in revisions
     assert "knowledge_graph_0001" not in revisions
 
 
