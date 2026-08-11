@@ -3,10 +3,12 @@ import base64
 import hashlib
 import hmac
 import json
+import subprocess
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,6 +23,7 @@ from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_ext_ufo.surface import (
     HOLD_SECONDS,
     PROMPT,
+    SharedFile,
     directive,
     directives_for,
     resolve_workspace,
@@ -189,6 +192,140 @@ async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
     partial = [line async for line in stream_directives(aclosing(frames()), 5.0, token_only)]
     secrets = [line for line in partial if line.startswith(b"secret\t")]
     assert secrets == [b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n"]
+
+
+def test_a_shared_file_renders_after_the_answer_on_every_terminal_status() -> None:
+    """The upload commits during the turn, so a turn that shared a file and then failed or was
+    cancelled still owes the member the link — the silent drop this repairs."""
+    files = (
+        SharedFile(filename="report.pdf", size_bytes=2048, url="https://ufo.test/artifacts/a"),
+        SharedFile(filename="chart.png", size_bytes=91, url="https://ufo.test/artifacts/b"),
+    )
+    done = Terminal(frame=TerminalFrame(status="done", text="here it is"))
+    assert directives_for(done, streamed=False, files=files) == (
+        b"say\there it is\n",
+        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
+        b"file\tchart.png\t91\thttps://ufo.test/artifacts/b\n",
+        b"ask\t>\n",
+    )
+    failed = Terminal(frame=TerminalFrame(status="failed"))
+    assert directives_for(failed, streamed=True, files=files[:1]) == (
+        b"say\tThe agent could not complete the request. Try again.\n",
+        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
+        b"ask\t>\n",
+    )
+    cancelled = Terminal(frame=TerminalFrame(status="cancelled"))
+    assert directives_for(cancelled, streamed=True, files=files[:1]) == (
+        b"say\tcancelled\n",
+        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
+        b"exit\t0\n",
+    )
+    assert directives_for(done, streamed=True) == (b"ask\t>\n",)
+
+
+def test_a_file_with_no_mintable_link_still_names_itself() -> None:
+    """No token secret or no public base URL is the local-dev case: name the file rather than drop
+    it, the way Slack degrades."""
+    unlinked = (SharedFile(filename="notes.md", size_bytes=17, url=""),)
+    done = Terminal(frame=TerminalFrame(status="done", text="t"))
+    assert directives_for(done, streamed=True, files=unlinked) == (
+        b"file\tnotes.md\t17\t\n",
+        b"ask\t>\n",
+    )
+
+
+def test_a_shared_file_precedes_the_secret_and_connect_lines() -> None:
+    """One order for the closing block, so the shell renders the file next to the answer it belongs
+    to rather than after an unrelated prompt."""
+    request = _request()
+    done = Terminal(frame=TerminalFrame(status="done", text="t", credential_request=request))
+    lines = directives_for(
+        done,
+        streamed=True,
+        collect=request.prompts[:1],
+        connect_message="Complete the connection: https://oauth.test/a",
+        files=(SharedFile(filename="k.csv", size_bytes=4, url="https://ufo.test/artifacts/k"),),
+    )
+    assert [line.split(b"\t")[0] for line in lines] == [b"file", b"secret", b"say", b"ask"]
+
+
+async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
+    """The rows land during the turn, so reading before it ends would report a partial set — and a
+    read per streamed token would be one query per delta."""
+    reads = 0
+
+    async def files() -> tuple[SharedFile, ...]:
+        nonlocal reads
+        reads += 1
+        return (SharedFile(filename="one.txt", size_bytes=3, url="https://ufo.test/artifacts/1"),)
+
+    async def frames() -> AsyncIterator[tuple[str, TextDelta | Terminal]]:
+        yield ("c1", TextDelta(text="partial"))
+        yield ("c2", Terminal(frame=TerminalFrame(status="done", text="partial")))
+
+    lines = [line async for line in stream_directives(aclosing(frames()), 5.0, files=files)]
+    assert reads == 1
+    assert lines == [
+        b"txt\tpartial\n",
+        b"file\tone.txt\t3\thttps://ufo.test/artifacts/1\n",
+        b"ask\t>\n",
+    ]
+
+
+CLIENT_RELATIVE = Path("control/src/ufo_control/client/ufo")
+
+
+def _client_script() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / CLIENT_RELATIVE
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(f"{CLIENT_RELATIVE} not found above {__file__}")
+
+
+def _shell_file_arm() -> str:
+    """The `file)` arm lifted out of the shipped client verbatim, so this exercises the script's own
+    parsing rather than a copy of it that could drift."""
+    source = _client_script().read_text()
+    start = source.index("      file)\n")
+    return source[start : source.index("      exit)", start)]
+
+
+def _render_in_shell(line: bytes) -> str:
+    harness = f"""
+TAB=$(printf '\\t')
+FX=0
+DIM='' RESET=''
+line_break() {{ :; }}
+dyn_erase() {{ :; }}
+flush_open() {{ :; }}
+dyn_paint() {{ :; }}
+while IFS="$TAB" read -r verb rest; do
+  case "$verb" in
+{_shell_file_arm()}
+  esac
+done
+"""
+    done = subprocess.run(
+        ["sh", "-c", harness], input=line, capture_output=True, check=True, timeout=30
+    )
+    return done.stdout.decode().strip()
+
+
+def test_the_shell_client_renders_the_file_directive_the_surface_emits() -> None:
+    """Producer and consumer in one assertion: the bytes `directive` writes are fed to the shipped
+    client's own `file)` arm."""
+    linked = directive("file", "report.pdf", "2048", "https://ufo.test/artifacts/download?token=t")
+    assert (
+        _render_in_shell(linked)
+        == "shared report.pdf (2048 bytes) https://ufo.test/artifacts/download?token=t"
+    )
+
+
+def test_the_shell_client_splits_a_linkless_file_without_reading_the_size_as_a_url() -> None:
+    """`read` strips a trailing IFS tab, so an unconfigured link arrives as two fields and a naive
+    third-field split would print the byte count where the URL belongs."""
+    assert _render_in_shell(directive("file", "notes.md", "17", "")) == "shared notes.md (17 bytes)"
 
 
 async def test_stream_privately_renders_a_connect_handoff() -> None:
@@ -634,6 +771,101 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
         "timezone": None,
         "source": "ufo cli (owner@example.com)",
     }
+
+
+ARTIFACT_SECRET = "artifact-token-secret"
+ARTIFACT_BASE_URL = "https://ufo.example.test"
+
+
+@pytest.fixture
+async def ufo_delivering_artifacts(
+    db: None,
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[AsyncClient, UUID]]:
+    """The `ufo` fixture with artifact delivery configured — a token secret and a public base, the
+    two things `artifact_link` needs before it will mint an absolute URL."""
+    config, hub, blob, sandboxes = runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    workspace_id = await _seed_workspace()
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (ufo_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        ARTIFACT_SECRET,
+        ARTIFACT_BASE_URL,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
+        yield client, workspace_id
+    dbos_client.destroy()
+
+
+async def _seed_shared_artifact(workspace_id: UUID, turn_id: UUID, filename: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                workspace_id=workspace_id,
+                blob_key=f"artifacts/{turn_id}/{filename}",
+                filename=filename,
+                subject=None,
+                media_type="application/pdf",
+                size_bytes=2048,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def test_a_shared_file_reaches_the_terminal_as_an_openable_link(
+    ufo_delivering_artifacts: tuple[AsyncClient, UUID],
+) -> None:
+    """The whole chain #884 reports broken: a row in `shared_artifact` becomes a `file` directive on
+    the wire carrying an absolute URL the member can open. Read on the reconnect that re-tails the
+    finished turn, which is how the shell drains a turn that outran its hold."""
+    client, workspace_id = ufo_delivering_artifacts
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    await _post(client, "main", token, b"share the report")
+    turn_id, _status = await _sole_turn(workspace_id)
+    await _seed_shared_artifact(workspace_id, turn_id, "report.pdf")
+
+    lines = await _post(client, "main", token, b"")
+
+    shared = [fields for verb, *fields in lines if verb == "file"]
+    assert len(shared) == 1
+    filename, size_bytes, url = shared[0]
+    assert (filename, size_bytes) == ("report.pdf", "2048")
+    assert url.startswith(f"{ARTIFACT_BASE_URL}/artifacts/download?token=")
+    assert lines[-1] == ["ask", ">"]
+
+
+async def test_a_deploy_that_mints_no_link_still_names_the_shared_file(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The `ufo` fixture configures no artifact secret and no public base, which is the local-dev
+    deploy: the member learns the file exists instead of nothing at all."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    await _post(client, "main", token, b"share the notes")
+    turn_id, _status = await _sole_turn(workspace_id)
+    await _seed_shared_artifact(workspace_id, turn_id, "notes.md")
+
+    lines = await _post(client, "main", token, b"")
+
+    assert [fields for verb, *fields in lines if verb == "file"] == [["notes.md", "2048", ""]]
 
 
 async def test_empty_body_polls_without_admitting_a_turn(ufo: tuple[AsyncClient, UUID]) -> None:

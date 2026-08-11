@@ -589,12 +589,7 @@ do_install() {
 }
 
 post() {
-  if [ -n "${SEND_FILE:-}" ]; then
-    set -- --data-binary "@$SEND_FILE" -H "x-ufo-file: $SEND_FILE" \
-      -H "x-ufo-command: ${SEND_CMD:-}"
-  else
-    set -- --data-binary "$1"
-  fi
+  set -- --data-binary "$1"
   if [ -n "${TOKEN:-}" ]; then
     set -- "$@" -H "authorization: Bearer $TOKEN"
   fi
@@ -631,7 +626,6 @@ turn() {
   spin_start
   post "$1" > "$FIFO" &
   CURL=$!
-  SEND_FILE=''
 
   TAB=$(printf '\t')
   while IFS="$TAB" read -r verb rest; do
@@ -778,9 +772,27 @@ turn() {
         rm -f "$CREDENTIALS" "$SESSION" "$WORKSPACE"
         TOKEN='' SID='' WORKSPACE_URL=''
         ;;
-      sendfile)
-        NEXT=sendfile
-        FILE_PATH=$rest
+      file)
+        STATUS=''
+        F_NAME=${rest%%"$TAB"*}
+        F_TAIL=${rest#*"$TAB"}
+        # `read` strips a trailing IFS tab, so an unconfigured link arrives as two fields, not
+        # three. Split on what is there rather than assuming the third.
+        case $F_TAIL in
+          *"$TAB"*) F_SIZE=${F_TAIL%%"$TAB"*}; F_URL=${F_TAIL#*"$TAB"} ;;
+          *) F_SIZE=$F_TAIL; F_URL='' ;;
+        esac
+        F_LINE="shared $F_NAME ($F_SIZE bytes)"
+        [ -z "$F_URL" ] || F_LINE="$F_LINE $F_URL"
+        if [ "$FX" = 1 ]; then
+          dyn_erase
+          flush_open
+          printf '%s%b%s\n' "$DIM" "$F_LINE" "$RESET"
+          dyn_paint
+        else
+          line_break
+          printf '%s%b%s\n' "$DIM" "$F_LINE" "$RESET"
+        fi
         ;;
       exit)
         NEXT='exit'
@@ -874,14 +886,6 @@ main() {
         ;;
       poll)
         sleep "$SLEEP"
-        input=''
-        ;;
-      sendfile)
-        if [ "$FILE_PATH" != - ] && [ ! -f "$FILE_PATH" ]; then
-          die "No such file: $FILE_PATH"
-        fi
-        SEND_FILE=$FILE_PATH
-        SEND_CMD=$CMD
         input=''
         ;;
       exit)

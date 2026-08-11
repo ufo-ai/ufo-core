@@ -191,6 +191,36 @@ async def test_drain_reports_a_poll_reconnect_and_collects_secret_prompts() -> N
     assert with_secret.secrets == [("sealed-blob", "exa_api_key", "Paste your Exa key")]
 
 
+async def test_drain_renders_a_shared_file_with_and_without_a_link() -> None:
+    """`ufoctl chat` must know `file` or every shared file becomes a hard client error — this client
+    fails loud on an unknown verb where the shell client silently drops it."""
+    out = io.StringIO()
+    display = _TurnDisplay(out=out, err=out, tty=False)
+    pending = await _drain_lines(
+        display,
+        "say\there is the report\n",
+        "file\treport.pdf\t2048\thttps://ufo.test/artifacts/download?token=t\n",
+        "file\tnotes.md\t17\t\n",
+        "ask\t>\n",
+    )
+    display.close()
+    assert pending.poll_seconds is None
+    assert screen(out.getvalue()) == [
+        "here is the report",
+        "shared report.pdf (2048 bytes) https://ufo.test/artifacts/download?token=t",
+        "shared notes.md (17 bytes)",
+        "",
+    ]
+
+
+async def test_drain_fails_loud_on_a_malformed_file_directive() -> None:
+    """A `file` line short of its three fields is protocol drift, not something to render
+    half-rendered — the guard is the arity, matching `secret`."""
+    display = _TurnDisplay(out=io.StringIO(), err=io.StringIO(), tty=False)
+    with pytest.raises(click.ClickException, match="unexpected directive"):
+        await _drain_lines(display, "file\treport.pdf\t2048\n")
+
+
 async def test_drain_fails_loud_on_a_non_200() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, content=b"unauthorized")

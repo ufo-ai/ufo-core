@@ -458,8 +458,8 @@ class _ChatStream:
             return
 
     async def _drain(self, body: str) -> _Pending:
-        """Render one held stream and report how it ended. `txt`/`say`/`note`/`status` render;
-        `secret` collects a prompt to fulfill after the turn; `poll` asks for an empty-body
+        """Render one held stream and report how it ended. `txt`/`say`/`note`/`status`/`file`
+        render; `secret` collects a prompt to fulfill after the turn; `poll` asks for an empty-body
         reconnect; `ask` and `exit` are the terminal directives the stream closes on; any other verb
         fails loud."""
         pending = _Pending()
@@ -482,6 +482,8 @@ class _ChatStream:
                         self.display.activity(fields[0] if fields else "")
                     case "status":
                         self.display.meter(fields[0] if fields else "")
+                    case "file" if len(fields) == 3:
+                        self.display.shared_file(fields[0], fields[1], fields[2])
                     case "secret" if len(fields) == 3:
                         pending.secrets.append((fields[0], fields[1], fields[2]))
                     case "poll":
@@ -568,6 +570,14 @@ class _TurnDisplay:
         first so streamed text is never corrupted, and the stream continues after it."""
         self._close_line()
         click.echo(click.style(note, dim=True), file=self.out)
+
+    def shared_file(self, name: str, size_bytes: str, url: str) -> None:
+        """A file the turn shared. The name and size are dim context; the link stays undimmed
+        because it is the one part the member acts on. A deploy that mints no link names the file
+        alone, so the member learns it exists rather than nothing at all."""
+        self._close_line()
+        label = click.style(f"shared {name} ({size_bytes} bytes)", dim=True)
+        click.echo(f"{label} {url}" if url else label, file=self.out)
 
     def meter(self, text: str) -> None:
         if not self.tty:

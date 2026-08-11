@@ -112,8 +112,9 @@ the activation job provisions the contract on the next tick.
 pytest under the same four settings.
 
 The client is a pure renderer of tab-separated directive lines (`gateway_directives.py`): `say`,
-`ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`,
-`sendfile`, `logout`, `exit`. `install` self-installs the script into `~/.ufo/bin` on first run;
+`ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`, `file`,
+`logout`, `exit`. `file` names one artifact a turn shared and the link that opens it; `install`
+self-installs the script into `~/.ufo/bin` on first run;
 `token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
 token is machine-consumed and never printed.
 

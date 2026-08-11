@@ -517,7 +517,7 @@ CLIENT_MEMBER_COPY = (
     ('say "Run ufo in a terminal to enter: $SS_PROMPT"', 1),
     ('die "Could not fetch $UFO_URL/ufo"', 1),
     ('die "No response from $UFO_URL"', 1),
-    ('die "No such file: $FILE_PATH"', 1),
+    ('F_LINE="shared $F_NAME ($F_SIZE bytes)"', 1),
     ("printf 'ufo: %s\\n'", 1),
     ("printf '%s%s%s (hidden): '", 1),
     ("printf '\\n# added by ufo installer\\n%s\\n'", 1),

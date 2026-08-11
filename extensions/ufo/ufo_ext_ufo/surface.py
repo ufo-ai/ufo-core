@@ -18,6 +18,7 @@ admits nothing and resumes tailing the conversation's latest turn."""
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 from functools import partial
 from uuid import UUID
 
@@ -64,6 +65,31 @@ def directive(verb: str, *fields: str) -> bytes:
     return ("\t".join([verb, *escaped]) + "\n").encode()
 
 
+@dataclass(frozen=True)
+class SharedFile:
+    """One file a turn shared, as the terminal renders it: the download name, its size, and the
+    absolute link a member can open — empty when artifact delivery is unconfigured (no token secret
+    or no public base URL), which names the file without a link the way Slack degrades."""
+
+    filename: str
+    size_bytes: int
+    url: str
+
+
+async def shared_files(ctx: SurfaceContext, turn_id: UUID) -> tuple[SharedFile, ...]:
+    """Every file the turn shared, in share order, each carrying the absolute download link. The
+    link is minted here because only the surface holds the deploy's token secret and public base —
+    `share_file` hands the model a host-less path by design."""
+    return tuple(
+        SharedFile(
+            filename=artifact.filename,
+            size_bytes=artifact.size_bytes,
+            url=ctx.artifact_link(artifact) or "",
+        )
+        for artifact in await ctx.shared_artifacts(turn_id)
+    )
+
+
 async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None:
     """The `SurfaceSpec.identify` the shared fleet calls to scope a request before its handler runs:
     the workspace the request's bearer claims, or None to reject. The same bearer the handler
@@ -79,11 +105,12 @@ def directives_for(
     streamed: bool,
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
+    files: tuple[SharedFile, ...] = (),
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
     activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
     caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
-    names the credential prompts still awaiting values)."""
+    names the credential prompts still awaiting values, `files` the ones it shared)."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
@@ -95,7 +122,7 @@ def directives_for(
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
         case Terminal():
-            return _answer(frame, streamed, collect, connect_message)
+            return _answer(frame, streamed, collect, connect_message, files)
         case Parked():
             return (directive("say", frame.message), directive("ask", PROMPT))
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
@@ -111,13 +138,21 @@ def _answer(
     streamed: bool,
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
+    files: tuple[SharedFile, ...] = (),
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
-    said now, preceded by one `secret` line per still-unanswered credential prompt, so the shell
-    collects exactly the missing values privately; a failure says what to do next and prompts; a
-    cancel says so and ends the client session (`exit`), the conversation resuming on the next
-    `ufo`."""
+    said now, followed by one `file` line per file the turn shared and one `secret` line per
+    still-unanswered credential prompt, so the shell collects exactly the missing values privately;
+    a failure says what to do next and prompts; a cancel says so and ends the client session
+    (`exit`), the conversation resuming on the next `ufo`.
+
+    Files render on every terminal status, not only `done`: the upload committed before the turn
+    reached its end, so a turn that shared a file and then failed or was cancelled still owes the
+    member the link — which is the whole of the silent drop this repairs."""
     frame = terminal.frame
+    shared = tuple(
+        directive("file", file.filename, str(file.size_bytes), file.url) for file in files
+    )
     match frame.status:
         case "done":
             said = () if streamed else _say_lines(frame.text)
@@ -126,7 +161,7 @@ def _answer(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
             )
             connect = () if connect_message is None else (directive("say", connect_message),)
-            return (*said, *secrets, *connect, directive("ask", PROMPT))
+            return (*said, *shared, *secrets, *connect, directive("ask", PROMPT))
         case "failed":
             safe_error = (
                 frame.error_message
@@ -135,10 +170,11 @@ def _answer(
             )
             return (
                 *_say_lines(safe_error or TURN_FAILED_MESSAGE),
+                *shared,
                 directive("ask", PROMPT),
             )
         case "cancelled":
-            return (directive("say", "cancelled"), directive("exit", "0"))
+            return (directive("say", "cancelled"), *shared, directive("exit", "0"))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
 
 
@@ -151,13 +187,16 @@ async def stream_directives(
     hold_seconds: float,
     pending: Callable[[str, str], Awaitable[bool]] | None = None,
     connect: Callable[[], Awaitable[str]] | None = None,
+    files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
     `poll` so the shell reconnects to drain the durable answer. `pending` gates each prompt of a
     terminal frame's credential request, so a fulfilled or expired prompt never re-renders on
-    reconnect while an unanswered sibling keeps asking. The tail's scope is entered here because the
-    route returns its response before a single frame is read."""
+    reconnect while an unanswered sibling keeps asking. `files` reads what the turn shared, once the
+    turn has ended and only then — the rows land during the turn, so reading earlier would report a
+    partial set. The tail's scope is entered here because the route returns its response before a
+    single frame is read."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
@@ -195,7 +234,10 @@ async def stream_directives(
                         connect_message = "Connection request unavailable; ask me to connect again."
                     else:
                         connect_message = f"Complete the connection: {url}"
-            lines = directives_for(frame, streamed, collect, connect_message)
+            shared: tuple[SharedFile, ...] = ()
+            if isinstance(frame, Terminal) and files is not None:
+                shared = await files()
+            lines = directives_for(frame, streamed, collect, connect_message, shared)
             if lines and isinstance(frame, TextDelta):
                 streamed = True
             for line in lines:
@@ -259,6 +301,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
             HOLD_SECONDS,
             ctx.credential_prompt_pending,
             connect,
+            partial(shared_files, ctx, turn_id),
         ),
         media_type="text/plain",
     )
