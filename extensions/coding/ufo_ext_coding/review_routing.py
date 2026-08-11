@@ -50,6 +50,13 @@ review_run = sa.Table(
 )
 
 
+class StopReviewInboxInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(description="The GitHub source object this agent should stop reviewing.")
+    user_description: str = Field(description="That you are stopping automatic code review.")
+
+
 class ConfigureReviewInboxInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -255,6 +262,32 @@ class ReviewRouting:
                 ),
             )
 
+    async def deactivate(self, ctx: ToolContext, source_name: str) -> bool:
+        """Stop reviewing one source, and report whether anything was bound. The gate is the one
+        that bound it: an admin. Resolution is by binding name alone — a source whose grant this
+        agent lost, or whose disclosure narrowed, must still be stoppable, or the only way to end
+        reviews is to delete the feed."""
+        if not await ctx.speaker_is_admin():
+            raise ValueError("only a workspace admin can stop automatic code review")
+        source_ids = tuple(
+            source.id
+            for source in await self.ext.sources(GITHUB_PROVIDER)
+            if binding_name(
+                GITHUB_PROVIDER,
+                ConnectorSourceConfig.model_validate(source.config).account,
+                ConnectorSourceConfig.model_validate(source.config).base_url,
+            )
+            == source_name
+        )
+        async with self.ext.transaction() as connection:
+            stopped = await connection.execute(
+                sa.delete(review_inbox).where(
+                    review_inbox.c.workspace_id == self.ext.store.workspace_id,
+                    review_inbox.c.source_id.in_(source_ids) if source_ids else sa.false(),
+                )
+            )
+        return stopped.rowcount > 0
+
     async def _pull_request_source(self, ctx: ToolContext, source_name: str) -> UUID:
         readable = await self.ext.readable_source_ids(ctx.source_reader())
         matches = []
@@ -395,3 +428,54 @@ async def route_review_pages(ctx: HookContext) -> HookOutcome:
         raise RuntimeError("review routing fired on a non-page_change payload")
     await ReviewRouting(ctx.ext).route(ctx.payload.changes)
     return None
+
+
+def workspaces_with_review_bindings() -> sa.Select[tuple[UUID]]:
+    return sa.select(review_inbox.c.workspace_id).distinct()
+
+
+async def drop_dead_review_bindings(ext: ExtensionContext) -> None:
+    """Forget the sources that no longer exist. Deleting a source is a soft delete, so no foreign
+    key reaches the binding keyed on it: the row outlives the feed it names, invisible because
+    nothing lists it, and armed because registering that source again revives its old baseline and
+    reviews every head changed since. This runs as its own pass rather than inside routing, which
+    is the only other thing that reads these rows — a removed source produces no page change, so
+    routing would never see the binding it needs to forget."""
+    async with ext.transaction() as connection:
+        bound = tuple(
+            (
+                await connection.execute(
+                    sa.select(review_inbox.c.source_id).where(
+                        review_inbox.c.workspace_id == ext.store.workspace_id
+                    )
+                )
+            ).scalars()
+        )
+    removed = await ext.removed_source_ids(bound)
+    if not removed:
+        return
+    async with ext.transaction() as connection:
+        await connection.execute(
+            sa.delete(review_inbox).where(
+                review_inbox.c.workspace_id == ext.store.workspace_id,
+                review_inbox.c.source_id.in_(tuple(removed)),
+            )
+        )
+
+
+async def stop_review_inbox(ctx: ToolContext, args: StopReviewInboxInput) -> ToolResult:
+    if ctx.ext is None:
+        raise RuntimeError("stopping review requires the coding extension context")
+    stopped = await ReviewRouting(ctx.ext).deactivate(ctx, args.source)
+    return ToolResult(
+        content=(
+            TextContent(
+                text=(
+                    f"New pull-request comparisons from {args.source} no longer open a review "
+                    "conversation."
+                    if stopped
+                    else f"No source named {args.source} was being reviewed."
+                )
+            ),
+        )
+    )

@@ -2913,3 +2913,31 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
         f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
     }
+
+
+async def test_removed_source_ids_answers_only_with_positive_evidence(db: None) -> None:
+    """An extension keyed on a source learns of its removal here, and the answer is a row that
+    exists and is removed — never an id the read failed to return. A caller deleting what this
+    names must delete too little when something is wrong rather than everything, so an id this
+    workspace never held is not reported gone."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    with ws(workspace_id):
+        live = await ctx.register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root="/live"),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+        )
+        gone = await ctx.register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root="/gone"),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+        )
+        await ctx.remove_source(gone)
+        stranger = uuid4()
+        answered = await ctx.removed_source_ids((live, gone, stranger))
+        none_asked = await ctx.removed_source_ids(())
+    assert answered == frozenset({gone})
+    assert none_asked == frozenset()

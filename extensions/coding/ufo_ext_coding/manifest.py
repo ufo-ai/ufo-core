@@ -22,6 +22,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
     CredentialSlot,
     HookSpec,
@@ -45,8 +46,12 @@ from ufo_ext_coding.review_checkout import CODE_REVIEW_PROFILE, CODE_REVIEW_TOOL
 from ufo_ext_coding.review_publish import PublishCodeReviewInput, publish_code_review
 from ufo_ext_coding.review_routing import (
     ConfigureReviewInboxInput,
+    StopReviewInboxInput,
     configure_review_inbox,
+    drop_dead_review_bindings,
     route_review_pages,
+    stop_review_inbox,
+    workspaces_with_review_bindings,
 )
 
 NAME = "coding"
@@ -92,6 +97,8 @@ GIT_APP_CLIENT_ID_ENV = "GITHUB_APP_CLIENT_ID"
 GIT_APP_SECRET_ENV = "GITHUB_APP_CLIENT_SECRET"
 GIT_APP_KEY_ENV = "GITHUB_APP_PRIVATE_KEY"
 GIT_HOST = "github.com"
+REVIEW_BINDING_SWEEP = "coding_review_binding_sweep"
+REVIEW_BINDING_SWEEP_SCHEDULE = "0 */5 * * * *"
 GIT_SENTINEL = "UFO_SENTINEL_GIT_GITHUB"
 GIT_BASIC_USER = "x-access-token"
 GIT_INSTALLATION = CredentialSlot(
@@ -172,6 +179,14 @@ def manifest() -> Manifest:
                 side_effecting=True,
             ),
             ToolDef(
+                name="stop_review_inbox",
+                description="Stop reviewing one GitHub pull-request source. Later heads open no "
+                "review conversation; the reviews already published stand. Admin-only.",
+                input_model=StopReviewInboxInput,
+                handler=stop_review_inbox,
+                side_effecting=True,
+            ),
+            ToolDef(
                 name="publish_code_review",
                 description="Publish the exact delivered review result as an advisory ufo review "
                 "Check on the stored head for this conversation's review run.",
@@ -181,6 +196,14 @@ def manifest() -> Manifest:
             ),
         ),
         hooks=(HookSpec(event="page_change", handler=route_review_pages),),
+        jobs=(
+            JobSpec(
+                name=REVIEW_BINDING_SWEEP,
+                schedule=REVIEW_BINDING_SWEEP_SCHEDULE,
+                handler=drop_dead_review_bindings,
+                candidates=owner_candidates(workspaces_with_review_bindings),
+            ),
+        ),
         routes=(
             RouteSpec(
                 method="GET",

@@ -15,12 +15,16 @@ from ufo_ext_coding.review_routing import (
     PULL_REQUEST_STREAM,
     ConfigureReviewInboxInput,
     ReviewTarget,
+    StopReviewInboxInput,
     configure_review_inbox,
+    drop_dead_review_bindings,
     record_review_conversation,
     review_inbox,
     review_run,
     review_run_for,
     route_review_pages,
+    stop_review_inbox,
+    workspaces_with_review_bindings,
 )
 
 from ufo.agent_scope import agent
@@ -36,6 +40,7 @@ from ufo.schema.records import (
     Turn,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE
+from ufo.sdk.jobs import owner_candidates
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.subjects import SHARED_SUBJECT
@@ -673,3 +678,89 @@ async def test_untrusted_page_identity_is_validated_before_wake(
                 .where(review_run.c.workspace_id == state.id)
             )
         ).scalar_one() == 0
+
+
+async def test_stopping_a_source_ends_review_and_is_an_admins(db: None) -> None:
+    """An off switch, so ending automatic review does not mean deleting the feed. Stopping is the
+    admin act that binding it was, a source nobody bound reports so rather than failing, and a
+    stopped source's later heads open nothing."""
+    state = await _workspace()
+    await _activate(state)
+    ext = _hook_context(state)
+    await _route(state, ext, _change(state, revision=1))
+    assert len(await _turns(state)) == 1
+    with ws(state.id), agent(state.agent_id):
+        with pytest.raises(ValueError, match="workspace admin"):
+            await stop_review_inbox(
+                _tool_context(state, speaker_id=state.member_id),
+                StopReviewInboxInput(
+                    source=SOURCE_NAME, user_description="Stopping automatic code review."
+                ),
+            )
+        stopped = await stop_review_inbox(
+            _tool_context(state),
+            StopReviewInboxInput(
+                source=SOURCE_NAME, user_description="Stopping automatic code review."
+            ),
+        )
+        again = await stop_review_inbox(
+            _tool_context(state),
+            StopReviewInboxInput(
+                source=SOURCE_NAME, user_description="Stopping automatic code review."
+            ),
+        )
+    await _route(state, ext, _change(state, revision=2, head="c" * 40))
+    assert "no longer open a review conversation" in stopped.content[0].text
+    assert "was being reviewed" in again.content[0].text
+    assert len(await _turns(state)) == 1
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(review_inbox)
+                .where(review_inbox.c.workspace_id == state.id)
+            )
+        ).scalar_one()
+    assert rows == 0
+
+
+async def test_a_binding_whose_source_is_gone_is_dropped_rather_than_left_armed(db: None) -> None:
+    """Deleting a source is a soft delete, so nothing cascades to the binding keyed on it. Left
+    there, the row is invisible state that re-arms at its old baseline the moment that source is
+    registered again — a burst of reviews nobody asked for. The sweep drops it, and it has to be
+    a sweep: a removed source produces no page change, so routing never sees the binding to forget.
+    A live source's binding is untouched by the same pass."""
+    state = await _workspace()
+    live = await _workspace()
+    await _activate(state)
+    await _activate(live)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(removed_at=NOW, updated_at=NOW)
+            .where(tables.source.c.id == state.source_id)
+        )
+    assert state.id in await owner_candidates(workspaces_with_review_bindings)()
+    with ws(state.id):
+        await drop_dead_review_bindings(_hook_context(state))
+    with ws(live.id):
+        await drop_dead_review_bindings(_hook_context(live))
+    async with workspace_tx() as connection:
+        kept = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(review_inbox)
+                .where(review_inbox.c.workspace_id == live.id)
+            )
+        ).scalar_one()
+    assert kept == 1
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(review_inbox)
+                .where(review_inbox.c.workspace_id == state.id)
+            )
+        ).scalar_one()
+    assert rows == 0
+    assert await _turns(state) == []

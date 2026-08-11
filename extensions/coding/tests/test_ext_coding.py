@@ -55,6 +55,7 @@ def test_coding_manifest_registers_coding_and_review_profiles() -> None:
         "review_glob",
         "review_grep",
         "configure_review_inbox",
+        "stop_review_inbox",
         "publish_code_review",
     ]
     profile = manifest.subagents[0]

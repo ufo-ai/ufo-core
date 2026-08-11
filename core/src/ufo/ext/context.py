@@ -1066,6 +1066,31 @@ class ExtensionContext:
             )
         return source_id
 
+    async def removed_source_ids(self, source_ids: tuple[UUID, ...]) -> frozenset[UUID]:
+        """Which of these sources this workspace has removed. Deleting a source stamps
+        `removed_at` rather than dropping the row, so nothing an extension keyed on a source ever
+        hears about it: the row it holds outlives the feed it names, invisible to every listing and
+        armed if that source is registered again.
+
+        The answer is positive evidence — a row that exists and is removed — never an id this read
+        failed to return. An extension asking "is this gone?" cannot be told yes by a query that
+        narrowed, went stale, or lost a row, so a caller deleting what this names deletes too
+        little when something is wrong rather than everything. Absence is not removal here, and a
+        caller that wants live sources reads `sources`."""
+        if not source_ids:
+            return frozenset()
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.source.c.id).where(
+                        tables.source.c.workspace_id == self.store.workspace_id,
+                        tables.source.c.id.in_(source_ids),
+                        tables.source.c.removed_at.is_not(None),
+                    )
+                )
+            ).scalars()
+        return frozenset(rows)
+
     async def sources(self, backend: str | None = None) -> tuple[SourceRecord, ...]:
         """This workspace's live registered sources, optionally narrowed to one backend — the read
         half of `register_source`, scoped exactly as it is. Removed sources never appear."""
