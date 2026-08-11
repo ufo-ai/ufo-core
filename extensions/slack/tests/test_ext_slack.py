@@ -5057,10 +5057,8 @@ def test_the_progress_cadence_grows_from_the_base_and_settles_at_the_cap() -> No
         slack.ProgressCadence(base_seconds=60.0, cap_seconds=30.0)
 
 
-def test_a_progress_post_carries_the_turns_own_narration_step_and_work() -> None:
-    """The update's body is the turn's real state: the model's own prose from the narration it
-    completed before acting, the step it is inside now, and what it got through since the last post.
-    The text in flight is never quoted — it is the narration unfinished, or the final answer."""
+def test_a_progress_post_keeps_only_the_latest_step() -> None:
+    """Completed narration and prior steps do not accrete around the current work."""
     activity = slack.TurnActivity()
     activity.stream("Checking whether the migration already applied ")
     activity.stream("before rerunning it.")
@@ -5071,23 +5069,18 @@ def test_a_progress_post_carries_the_turns_own_narration_step_and_work() -> None
 
     text = activity.report(725.0)
 
-    assert text is not None
-    assert "> Checking whether the migration already applied before rerunning it." in text
-    assert "*Now:* loading the `postgres/migrations` skill" in text
-    assert (
-        "_12m in · since the last update: inspecting the alembic version table; bash; read file_"
-        in text
-    )
+    assert text == "loading the `postgres/migrations` skill · 12m in"
+    assert "inspecting the alembic version table" not in text
+    assert "read file" not in text
+    assert "Checking whether the migration already applied" not in text
     assert "still working" not in text.lower()
 
     in_flight = "Now I will write the fix"
     activity.stream(in_flight)
     writing = activity.report(725.0)
 
-    assert writing is not None
-    assert f"*Now:* writing — {len(in_flight)} characters so far" in writing
+    assert writing == "Preparing the response · 12m in"
     assert in_flight not in writing
-    assert "> Checking whether the migration already applied before rerunning it." in writing
 
 
 def test_a_progress_post_names_the_work_never_a_tool() -> None:
@@ -5099,30 +5092,20 @@ def test_a_progress_post_names_the_work_never_a_tool() -> None:
     activity.tool("bash", "Reading the deploy log")
     assert activity.current_step() == "Reading the deploy log"
     activity.tool("GITHUB_LIST_PULL_REQUESTS", "")
-    assert (
-        slack.PROGRESS_ACTIVITY_LINE.format(activity=activity.current_step())
-        == "*Now:* github list pull requests"
-    )
+    assert activity.current_step() == "github list pull requests"
     activity.tool("read-file", "   ")
     activity.tool("bash", "Restarting the worker")
 
     text = activity.report(200.0)
 
-    assert text == (
-        "*Now:* Restarting the worker\n"
-        "_3m in · since the last update: Reading the deploy log; github list pull requests; "
-        "read file_"
-    )
+    assert text == "Restarting the worker · 3m in"
     assert "GITHUB_LIST_PULL_REQUESTS" not in text
     assert "`" not in text
     assert not re.search(r"x\s?\d", text)
 
 
-def test_a_progress_summary_keeps_a_handful_of_steps_and_counts_the_rest() -> None:
-    """A busy interval reads as a summary, not a log: the steps that describe the same work count
-    once, the first few stand for the interval in the order they happened — the latest is already
-    the "Now:" line above — and the rest are a count. The summary is the interval's alone, so the
-    next checkpoint starts empty and a turn that has since done nothing says so."""
+def test_repeated_progress_posts_keep_only_the_latest_step() -> None:
+    """A busy interval reads like Codex's work header, not a tool-call log."""
     activity = slack.TurnActivity()
     for description in (
         "Reading the repo",
@@ -5136,23 +5119,12 @@ def test_a_progress_summary_keeps_a_handful_of_steps_and_counts_the_rest() -> No
     ):
         activity.tool("bash", description)
 
-    assert activity.report(1_200.0) == (
-        "*Now:* Pushing the branch\n"
-        "_20m in · since the last update: Reading the repo; Checking the failing tests; "
-        "Patching the fixture; Rerunning the failing test; +1 more_"
-    )
-
-    activity.checkpoint()
-
-    assert activity.report(2_400.0) == (
-        "*Now:* Pushing the branch\n_40m in · no new activity since the last update_"
-    )
+    assert activity.report(1_200.0) == "Pushing the branch · 20m in"
+    assert activity.report(2_400.0) == "Pushing the branch · 40m in"
 
 
-def test_a_progress_post_bounds_the_model_supplied_text_and_the_summary() -> None:
-    """Both halves of the body come from the model, so both are bounded before they reach Slack —
-    the narration, the step, and every step the summary names, which is what keeps the summary line
-    bounded by how many steps it names rather than by how long the model's descriptions ran."""
+def test_a_progress_post_bounds_the_model_supplied_text() -> None:
+    """Only the latest step is bounded before it reaches Slack."""
     activity = slack.TurnActivity()
     activity.stream("a" * 5_000)
     for index in range(6):
@@ -5161,55 +5133,37 @@ def test_a_progress_post_bounds_the_model_supplied_text_and_the_summary() -> Non
     text = activity.report(60.0)
 
     assert text is not None
-    narration, step, summary = text.splitlines()
-    assert len(narration) == len("> ") + slack.PROGRESS_NARRATION_LIMIT
-    assert len(step) == len("*Now:* ") + slack.PROGRESS_ACTIVITY_LIMIT
-    named = slack.PROGRESS_SUMMARY_SEPARATOR.join(
-        f"{index}" * slack.PROGRESS_ACTIVITY_LIMIT for index in range(slack.PROGRESS_SUMMARY_STEPS)
-    )
-    assert summary == slack.PROGRESS_SUMMARY_LINE.format(
-        elapsed="1m", summary=f"{named}{slack.PROGRESS_SUMMARY_SEPARATOR}+1 more"
-    )
+    assert text == f"{'5' * slack.PROGRESS_ACTIVITY_LIMIT} · 1m in"
 
 
-def test_a_progress_step_is_one_bounded_line_without_a_summary_boundary() -> None:
+def test_a_progress_step_is_one_bounded_line() -> None:
     activity = slack.TurnActivity()
     activity.tool("bash", "Ran migrations\nwaited; for the lock")
     activity.tool("read_file", "Checking the schema")
 
-    assert activity.report(60.0) == (
-        "*Now:* Checking the schema\n"
-        "_1m in · since the last update: Ran migrations waited, for the lock_"
-    )
+    assert activity.report(60.0) == "Checking the schema · 1m in"
 
 
 def test_a_single_progress_call_is_not_repeated_below_the_current_step() -> None:
     activity = slack.TurnActivity()
     activity.tool("bash", "applying the migration")
 
-    assert activity.report(60.0) == "*Now:* applying the migration\n_1m in_"
+    assert activity.report(60.0) == "applying the migration · 1m in"
 
 
-def test_every_closing_line_a_tool_free_checkpoint_can_render() -> None:
-    """The three shapes a checkpoint with no new call can close with, each rendered exactly. No
-    signal at all is skipped rather than filled with a placeholder. A turn sitting in one finished
-    step gets the stall answer: naming the step it has sat in for the whole interval is the question
-    that earns the post. A turn writing gets the clock alone — with a growing size on the line above
-    it, a claim of no activity would contradict itself."""
+def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
+    """No signal is skipped; a known latest step or writing state stays current with the clock."""
     assert slack.TurnActivity().report(300.0) is None
 
     stalled = slack.TurnActivity()
     stalled.tool("bash", "running the integration suite")
-    stalled.checkpoint()
 
-    assert stalled.report(4_500.0) == (
-        "*Now:* running the integration suite\n_1h 15m in · no new activity since the last update_"
-    )
+    assert stalled.report(4_500.0) == "running the integration suite · 1h 15m in"
 
     writing = slack.TurnActivity()
     writing.stream("Drafting the summary")
 
-    assert writing.report(300.0) == ("*Now:* writing — 20 characters so far\n_5m in_")
+    assert writing.report(300.0) == "Preparing the response · 5m in"
 
 
 def test_a_checkpoint_on_a_turn_that_settled_on_silence_posts_nothing() -> None:
@@ -5293,8 +5247,9 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
     assert all(post["channel"] == "C1" and post["thread_ts"] == "100.5" for post in posts)
     reporting = [post for post in posts if "applying the migration" in str(post["text"])]
     assert len(reporting) >= 2
+    assert all(str(post["text"]).startswith("applying the migration · ") for post in reporting)
     assert all(
-        "> Rerunning the migration against a clean database." in str(post["text"])
+        "Rerunning the migration against a clean database." not in str(post["text"])
         for post in reporting
     )
     async with workspace_tx() as connection:
@@ -5595,7 +5550,7 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
         while not [
             post
             for post in _progress_posts(recorder)
-            if f"*Now:* {step} step\n" in str(post["text"]) and str(post["text"]).endswith(" in_")
+            if str(post["text"]).startswith(f"{step} step · ")
         ]:
             assert time.monotonic() < deadline, f"the {step} step never posted"
             await asyncio.sleep(0.01)
@@ -5604,10 +5559,7 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
         await asyncio.sleep(0.01)
     posted = [str(post["text"]) for post in _progress_posts(recorder)]
     for step in ("bash", "grep"):
-        matching = [
-            text for text in posted if f"*Now:* {step} step\n" in text and text.endswith(" in_")
-        ]
-        assert len(matching) == 1
+        assert any(text.startswith(f"{step} step · ") for text in posted)
 
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(reporter[turn_id], timeout=10)
@@ -5684,8 +5636,8 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
         await asyncio.sleep(0.01)
 
     reported = str(_progress_posts(recorder)[0]["text"])
-    assert "*Now:* applying the migration" in reported
-    assert reported.endswith(" in_")
+    assert reported.startswith("applying the migration · ")
+    assert reported.endswith(" in")
     assert "1,234" not in reported and "567" not in reported
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)
@@ -5766,23 +5718,23 @@ async def test_a_tool_free_streaming_turn_still_reports(
     secret = "The answer begins here and runs on for a while."
     await hub.publish(turn_id, TextDelta(text=secret))
     deadline = time.monotonic() + 10
-    while not [p for p in _progress_posts(recorder) if "writing" in str(p["text"])]:
+    while not [p for p in _progress_posts(recorder) if "Preparing the response" in str(p["text"])]:
         assert time.monotonic() < deadline, "a streaming turn never reported at all"
         await asyncio.sleep(0.01)
 
-    first = next(p for p in _progress_posts(recorder) if "writing" in str(p["text"]))
-    assert f"*Now:* writing — {len(secret)} characters so far" in str(first["text"])
+    first = next(p for p in _progress_posts(recorder) if "Preparing the response" in str(p["text"]))
+    assert str(first["text"]).startswith("Preparing the response · ")
     assert secret not in str(first["text"])
 
     await hub.publish(turn_id, TextDelta(text=secret))
-    while not [
-        p
-        for p in _progress_posts(recorder)
-        if f"writing — {2 * len(secret)} characters so far" in str(p["text"])
-    ]:
-        assert time.monotonic() < deadline, "the growing answer never moved the reported size"
+    while len(_progress_posts(recorder)) < 2:
+        assert time.monotonic() < deadline, "the growing answer never reached another checkpoint"
         await asyncio.sleep(0.01)
 
+    assert all(
+        str(post["text"]).startswith("Preparing the response · ")
+        for post in _progress_posts(recorder)
+    )
     assert all(secret not in str(post["text"]) for post in _progress_posts(recorder))
     assert not any("no new activity" in str(post["text"]) for post in _progress_posts(recorder))
     emitted = [r for r in caplog.records if r.message.startswith("slack.thread_progress")]
@@ -5796,10 +5748,7 @@ async def test_a_checkpoint_before_any_activity_skips_instead_of_posting(
 ) -> None:
     """The skip rule where it actually fires. A turn queued behind other work, or blocked before the
     model streams anything, reaches its first checkpoint with no signal at all: the thread gets
-    nothing rather than a placeholder, and the skip is recorded so the silence is explicable. Only
-    the first checkpoint can skip — `checkpoint()` clears the interval's steps but keeps the
-    narration and the step — so this asserts the elapsed-only case no later checkpoint can
-    reproduce."""
+    nothing rather than a placeholder, and the skip is recorded so the silence is explicable."""
     caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)

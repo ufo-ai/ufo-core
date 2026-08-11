@@ -680,17 +680,9 @@ STATUS_REFRESH_SECONDS = 90.0
 
 PROGRESS_BASE_SECONDS = 600.0
 PROGRESS_CAP_SECONDS = 1_800.0
-PROGRESS_NARRATION_LIMIT = 600
 PROGRESS_ACTIVITY_LIMIT = 200
-PROGRESS_SUMMARY_STEPS = 4
-PROGRESS_NARRATION_LINE = "> {narration}"
-PROGRESS_ACTIVITY_LINE = "*Now:* {activity}"
-PROGRESS_SUMMARY_LINE = "_{elapsed} in · since the last update: {summary}_"
-PROGRESS_SUMMARY_SEPARATOR = "; "
-PROGRESS_SUMMARY_MORE = "+{count} more"
-PROGRESS_QUIET_LINE = "_{elapsed} in · no new activity since the last update_"
-PROGRESS_ELAPSED_LINE = "_{elapsed} in_"
-PROGRESS_WRITING_STEP = "writing — {characters} characters so far"
+PROGRESS_LINE = "{activity} · {elapsed} in"
+PROGRESS_PREPARING_RESPONSE = "Preparing the response"
 
 ASK_ACTION_ID_PREFIX = "ask:"
 CONNECT_ACTION_ID = "connect"
@@ -2021,63 +2013,41 @@ class ProgressCadence:
 
 @dataclass
 class TurnActivity:
-    """What a turn's tail has seen, reduced to what a progress post says. `narration` is the model's
-    own prose from its latest *completed* narration — text it streamed before calling a tool —
-    never the text in flight, which is either that narration unfinished or the final answer a
-    progress post must not preempt. `activity` is the step it is inside right now, and `steps` is
-    the work it got through since the last post, so a post distinguishes a turn making progress from
-    one wedged inside a single call. A step is the model's own `user_description` of the call — what
-    it is doing for the member, never the tool it reached for; a call that gave none is named by its
-    slug read as words, so no line a member reads carries an internal identifier. A step already in
-    the interval is not repeated: twenty calls describing the same work are one line of it."""
+    """What a turn's tail has seen, reduced to its current member-facing activity. A tool step is
+    the model's own `user_description` of the call — what it is doing for the member, never the tool
+    it reached for; a call that gave none is named by its slug read as words, so no line a member
+    reads carries an internal identifier. Text in flight is only identified as response
+    preparation: its content may be unfinished narration or the final answer this post must not
+    preempt."""
 
-    narration: str = ""
     activity: str = ""
     streaming: list[str] = field(default_factory=list)
-    steps: list[str] = field(default_factory=list)
 
     def tool(self, tool: str, description: str) -> None:
-        self._close_narration()
+        self.streaming.clear()
         humanized = " ".join(tool.replace("_", " ").replace("-", " ").split()).lower()
-        described = " ".join(description.split()).replace(PROGRESS_SUMMARY_SEPARATOR, ", ")
+        described = " ".join(description.split())
         step = (described or humanized)[:PROGRESS_ACTIVITY_LIMIT]
         self.activity = step
-        if step not in self.steps:
-            self.steps.append(step)
 
     def skill(self, skill: str) -> None:
-        self._close_narration()
+        self.streaming.clear()
         self.activity = f"loading the `{skill}` skill"[:PROGRESS_ACTIVITY_LIMIT]
 
     def stream(self, text: str) -> None:
         self.streaming.append(text)
 
-    def checkpoint(self) -> None:
-        self.steps.clear()
-
     def current_step(self) -> str:
-        """The step to report now. Text in flight is the live step and outranks the last tool call,
-        which by then has finished: a turn that runs long purely by streaming — extended reasoning,
-        a long written answer, no tools at all — is working, and reporting it with the size it has
-        reached is what separates it from a stall across checkpoints. The text itself is never
-        quoted; it is the narration unfinished, or the answer this post must not preempt."""
-        writing = sum(len(part) for part in self.streaming)
-        if writing:
-            return PROGRESS_WRITING_STEP.format(characters=f"{writing:,}")
+        """The current step, with text in flight outranking the last completed tool call."""
+        if self.streaming:
+            return PROGRESS_PREPARING_RESPONSE
         return self.activity
-
-    def _close_narration(self) -> None:
-        text = "".join(self.streaming).strip()
-        self.streaming.clear()
-        if text:
-            self.narration = text[:PROGRESS_NARRATION_LIMIT]
 
     def report(self, elapsed_seconds: float) -> str | None:
         """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
         with nothing but the clock behind it is skipped, never filled with a placeholder. One that
         saw no *new* call still posts: naming the step the turn has sat in for the whole interval
-        answers "is it stalled?", the question that earns the post. Every named step is bounded on
-        the way in, so the line is bounded by how many it names.
+        answers "is it stalled?", the question that earns the post.
 
         A turn whose text in flight is the silence sentinel has settled on saying nothing, and a
         progress post about a turn that will deliver no reply is the noise this whole feature
@@ -2085,30 +2055,11 @@ class TurnActivity:
         if is_silence_sentinel("".join(self.streaming)):
             return None
         step = self.current_step()
-        if not self.narration and not step:
+        if not step:
             return None
         hours, minutes = divmod(int(elapsed_seconds // 60), 60)
         elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
-        lines = []
-        if self.narration:
-            lines.append(PROGRESS_NARRATION_LINE.format(narration=self.narration))
-        if step:
-            lines.append(PROGRESS_ACTIVITY_LINE.format(activity=step))
-        if not self.steps:
-            quiet = PROGRESS_ELAPSED_LINE if self.streaming else PROGRESS_QUIET_LINE
-            lines.append(quiet.format(elapsed=elapsed))
-            return "\n".join(lines)
-        prior_steps = [prior for prior in self.steps if prior != step]
-        if not prior_steps:
-            lines.append(PROGRESS_ELAPSED_LINE.format(elapsed=elapsed))
-            return "\n".join(lines)
-        named = prior_steps[:PROGRESS_SUMMARY_STEPS]
-        summary = PROGRESS_SUMMARY_SEPARATOR.join(named)
-        if len(prior_steps) > len(named):
-            more = PROGRESS_SUMMARY_MORE.format(count=len(prior_steps) - len(named))
-            summary = f"{summary}{PROGRESS_SUMMARY_SEPARATOR}{more}"
-        lines.append(PROGRESS_SUMMARY_LINE.format(elapsed=elapsed, summary=summary))
-        return "\n".join(lines)
+        return PROGRESS_LINE.format(activity=step, elapsed=elapsed)
 
 
 @dataclass(frozen=True)
@@ -2120,10 +2071,9 @@ class ThreadProgress:
 
     Posts land each time the elapsed time doubles, measured from admission, so a turn that finishes
     inside the first interval posts nothing at all and a long one reports less often the longer it
-    runs. Each post carries what the tail actually saw — the model's latest completed narration, the
-    step it is inside (text in flight reported by its size, never its content, so a tool-free turn
-    that only streams still reports), what it worked through since the last post in the model's own
-    descriptions of it — and a signalless checkpoint is skipped. Best-effort per checkpoint, never
+    runs. Each post carries only the current step in the model's own description; text in flight is
+    identified as response preparation without exposing its content. A signalless checkpoint is
+    skipped. Best-effort per checkpoint, never
     per turn: a rejected post costs that one update and the next checkpoint posts as usual, because
     a transient rate limit must not silence the rest of a long turn — the silence this exists to
     end. Bounded like the thread status: the tail ends on the durable terminal state (its own poll,
@@ -2154,7 +2104,6 @@ class ThreadProgress:
                         if await self.ctx.turn_is_terminal(self.turn_id):
                             return
                         await self._post(client, bot_token, activity, time.monotonic() - started)
-                        activity.checkpoint()
                         deadline = time.monotonic() + next(intervals)
                         continue
                     try:
