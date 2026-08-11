@@ -4021,6 +4021,34 @@ async def test_an_answer_spanning_artifacts_judges_the_reply_and_its_shared_mark
     assert case.payload()["answerSpansArtifacts"] is True
 
 
+async def test_a_spanning_answer_is_cut_to_the_judge_budget_rather_than_rejected() -> None:
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "recall",
+        "what did we decide",
+        exact_scorer("shared"),
+        rubric=("states the decision",),
+        answer_spans_artifacts=True,
+    )
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget(
+            (SharedArtifact("decision.md", b"D" * (MAX_ANSWER_CHARS * 2)),),
+            judge,
+        ),
+    )
+
+    assert result.passed
+    prompt = judge.messages[0].content
+    assert isinstance(prompt, str)
+    answer = loads(prompt.splitlines()[1])["candidateAnswer"]
+    assert len(answer) <= MAX_ANSWER_CHARS
+    assert answer.startswith("ANSWER: shared")
+    assert answer.endswith("[shared Markdown cut to fit the judge's answer budget]")
+    assert "exceeds" not in result.reason
+
+
 async def test_an_answer_not_spanning_artifacts_judges_only_the_reply() -> None:
     judge = RecordingJudge()
     case = CapabilityCase(

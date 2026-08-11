@@ -28,6 +28,7 @@ from evals.harness.harness import (
 )
 from evals.harness.judge import (
     JUDGE_REVISION,
+    MAX_ANSWER_CHARS,
     CriterionVerdict,
     RubricVerdict,
     rubric_pass,
@@ -54,6 +55,8 @@ ARTIFACT_MEDIA_TYPES = {
 ARTIFACT_MEDIA_DEFAULT = "application/octet-stream"
 MAX_LINKED_ARTIFACT_BYTES = 4 * 1024 * 1024
 MAX_LINKED_TOTAL_BYTES = 12 * 1024 * 1024
+ARTIFACT_JOIN = "\n\n"
+ARTIFACT_CUT = "\n\n[shared Markdown cut to fit the judge's answer budget]"
 
 if TYPE_CHECKING:
     from evals.harness.target import CapabilityTarget, TargetResult
@@ -563,7 +566,7 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
     if case.rubric:
         answer = result.output.response
         if case.answer_spans_artifacts:
-            answer = "\n\n".join((answer, *_markdown_artifacts(result.output.artifacts)))
+            answer = _answer_spanning_artifacts(answer, result.output.artifacts)
         verdicts.append(await rubric_pass(case.message, answer, case.rubric, target.judge))
     if case.artifact_rubric:
         markdown = tuple(
@@ -598,6 +601,22 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
         result.trajectory,
         judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
     )
+
+
+def _answer_spanning_artifacts(response: str, artifacts: tuple[SharedArtifact, ...]) -> str:
+    """The reply followed by the Markdown it defers to, bounded to the judge's answer budget. The
+    reply is never displaced and the files fill what remains, cut at the boundary under a marker the
+    judge can see — an agent that writes a thorough deliverable must not fail on the size of the
+    file it shared rather than on what it answered."""
+    body = "\n\n".join(_markdown_artifacts(artifacts))
+    if not body:
+        return response
+    room = MAX_ANSWER_CHARS - len(response) - len(ARTIFACT_JOIN)
+    if room <= len(ARTIFACT_CUT):
+        return response
+    if len(body) > room:
+        body = body[: room - len(ARTIFACT_CUT)] + ARTIFACT_CUT
+    return response + ARTIFACT_JOIN + body
 
 
 def _markdown_artifacts(artifacts: tuple[SharedArtifact, ...]) -> tuple[str, ...]:
