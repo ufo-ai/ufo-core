@@ -128,8 +128,6 @@ OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
-SUBAGENT_NOTE_MAX_CHARS = 500
-SUBAGENT_OUTPUT_MAX_CHARS = 2_000
 CHAT_STORE_PREFIX = "chat/"
 CHAT_PENDING_PREFIX = "chat_title_pending/"
 TITLE_JOB_NAME = "chat_titles"
@@ -795,30 +793,68 @@ def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
             continue
         for block in message.content:
             if isinstance(block, TextBlock) and block.text.strip():
-                events.append(
-                    {"kind": "note", "text": block.text.strip()[:SUBAGENT_NOTE_MAX_CHARS]}
-                )
+                events.append({"kind": "note", "text": block.text.strip()})
             elif isinstance(block, ToolUseBlock) and block.id in active:
                 events.append(_tool_event(block))
     return events[:SUBAGENT_EVENT_LIMIT]
 
 
-def _subagent_output(terminal: TerminalFrame | None) -> str:
-    """What a subagent answered, as prose. Its terminal text is the finish payload its profile's
-    output schema shaped, so the member reads the fields it wrote and never the JSON that carried
-    them; a run that ended without one answers with whatever text it left."""
-    if terminal is None or not terminal.text:
-        return ""
+def _finish_payload(answer: str) -> dict[str, JsonValue] | None:
+    """The typed object a run's finish call carried, or None when its answer is not one — a run
+    that failed answers with whatever text it left, which is the error to read. The one place an
+    answer is decoded; what a surface then shows of it is that surface's own decision."""
+    if not answer:
+        return None
     try:
-        payload = json.loads(terminal.text)
+        payload = json.loads(answer)
     except json.JSONDecodeError:
-        return terminal.text[:SUBAGENT_OUTPUT_MAX_CHARS]
-    if not isinstance(payload, dict):
-        return terminal.text[:SUBAGENT_OUTPUT_MAX_CHARS]
-    written = "\n\n".join(
-        value for value in payload.values() if isinstance(value, str) and value.strip()
-    )
-    return written[:SUBAGENT_OUTPUT_MAX_CHARS]
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _payload_prose(value: JsonValue) -> str:
+    """One value of a finish payload as a member reads it: prose as itself, a list as its entries
+    an empty line apart, and an object as its fields one to a line, each named the only name it
+    has. An empty list or object says so rather than vanishing — a review that found nothing
+    answered, and a blank page would state that it never ran."""
+    match value:
+        case str():
+            return value.strip()
+        case bool():
+            return "yes" if value else "no"
+        case int() | float():
+            return str(value)
+        case list():
+            rendered = [entry for item in value if (entry := _payload_prose(item))]
+            return "\n\n".join(rendered) if rendered else "none"
+        case dict():
+            fields = [
+                f"**{key.replace('_', ' ').capitalize()}**"
+                + (f"\n{entry}" if "\n" in entry else f" — {entry}")
+                for key, item in value.items()
+                if item is not None and (entry := _payload_prose(item))
+            ]
+            return "\n".join(fields) if fields else "none"
+    return ""
+
+
+def _run_answer(answer: str) -> str:
+    """A run's answer, whole, wherever it is read — the tree under the reply that spawned it and
+    the run's own page state one answer, and how much of it fits on a screen is the fold's business
+    and not this one's. Never the JSON its output schema carried it in: a payload whose single
+    field is prose is that prose, since a label over the one thing a bubble holds says what the
+    bubble already is, and anything else states its fields, so a run answering in findings rather
+    than sentences is read rather than guessed at. A field holding an empty list says so; a payload
+    holding no field at all says nothing, having nothing to say it about."""
+    payload = _finish_payload(answer)
+    if payload is None:
+        return answer
+    if not payload:
+        return ""
+    written = [value for value in payload.values() if isinstance(value, str) and value.strip()]
+    if len(payload) == 1 and len(written) == 1:
+        return written[0].strip()
+    return _payload_prose(payload)
 
 
 async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns:
@@ -838,7 +874,7 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
             profile=profile,
             conversation_id=str(turn.conversation_id),
             events=[],
-            output=_subagent_output(turn.terminal),
+            output=_run_answer("" if turn.terminal is None else turn.terminal.text),
             subagents=[],
         )
     read = sorted(spawned, key=lambda turn: turn.created_at, reverse=True)[:SUBAGENT_ACTIVITY_LIMIT]
@@ -943,7 +979,12 @@ async def _conversation_messages(
     landed. A prompt that is a machine envelope rather than words draws no bubble and is not
     appended — a scheduled firing carries its cron element, a delivered subagent result the element
     naming the child that answered — and one set decides it for the settled turns and the running
-    one alike, so the live chat and a transcript read back never disagree about a message."""
+    one alike, so the live chat and a transcript read back never disagree about a message.
+
+    A run answers its parent by calling finish, and the payload that call carried is what the
+    transcript closes with — so a conversation whose turns ran a profile states its replies as the
+    answer it wrote, whole. Only such a conversation: the same words from a main agent are a reply
+    it composed, and reading them as a payload would drop every field it meant to show."""
     recorded, agent_origin = await asyncio.gather(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
@@ -961,6 +1002,10 @@ async def _conversation_messages(
             frozenset(str(turn.id) for turn in turns),
             agent_origin,
         )
+        if any(turn.subagent_profile is not None for turn in turns):
+            for reply in rendered:
+                if reply["role"] == "assistant":
+                    reply["text"] = _run_answer(str(reply["text"]))
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
     if detail is None:

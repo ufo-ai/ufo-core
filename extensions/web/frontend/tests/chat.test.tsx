@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
@@ -294,6 +294,77 @@ test("a reloaded conversation nests its subagent work under the reply and still 
   await userEvent.click(summary);
   expect(screen.queryByText("Fetching the page")).toBeNull();
   expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
+});
+
+/** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
+function laid(content: number, fold: number) {
+  const held = [
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content),
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(fold),
+  ];
+  return () => held.forEach((spy) => spy.mockRestore());
+}
+
+test("a line longer than the fold opens in place and closes again", async () => {
+  const restore = laid(900, 280);
+  const long = "The changelog is long. ".repeat(60).trim();
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Done.",
+          events: [
+            { kind: "note", text: long },
+            { kind: "tool", name: "grep", preview: "", description: "Reading the tree" },
+          ],
+          subagents: [],
+        },
+      ],
+    }),
+  );
+  open();
+
+  await userEvent.click(await screen.findByText("Reading the tree"));
+  const more = await screen.findByRole("button", { name: "Show more" });
+  const region = document.getElementById(String(more.getAttribute("aria-controls")));
+  expect(more.getAttribute("aria-expanded")).toBe("false");
+  expect(region?.className).toContain("max-h-(--size-reveal)");
+  expect(screen.getByText(long)).toBeTruthy();
+
+  await userEvent.click(more);
+  const less = screen.getByRole("button", { name: "Show less" });
+  expect(less.getAttribute("aria-expanded")).toBe("true");
+  expect(region?.className).not.toContain("max-h-(--size-reveal)");
+
+  await userEvent.click(less);
+  expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
+  restore();
+});
+
+test("a line that fits is offered no control that would do nothing", async () => {
+  const restore = laid(120, 280);
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Done.",
+          events: [
+            { kind: "note", text: "Checked the changelog." },
+            { kind: "tool", name: "grep", preview: "", description: "Reading the tree" },
+          ],
+          subagents: [],
+        },
+      ],
+    }),
+  );
+  open();
+
+  await userEvent.click(await screen.findByText("Reading the tree"));
+  expect(screen.getByText("Checked the changelog.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  restore();
 });
 
 test("a conversation opens its file changes and returns to chat", async () => {

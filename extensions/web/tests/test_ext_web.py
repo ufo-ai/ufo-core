@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
 from pydantic import BaseModel, ValidationError
+from ufo_ext_coding.review_checkout import CodeReviewFinding, CodeReviewOutput
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
@@ -49,9 +50,9 @@ from ufo_ext_web.surface import (
     SESSION_FAULT_HEADER,
     SubagentNode,
     _rendered_messages,
+    _run_answer,
     _sse,
     _subagent_activity,
-    _subagent_output,
     load_assets,
 )
 from ufo_testsupport.invoker import invoker_factory
@@ -322,7 +323,7 @@ def test_a_force_finished_run_states_its_prose_once() -> None:
     durably twice. Work is read from blocks and both are string content, so the tree states the
     call it made and the answer states the prose, each exactly once."""
     events = _subagent_activity(FORCE_FINISHED_RUN)
-    output = _subagent_output(TerminalFrame(status="done", text=FORCE_FINISHED_PAYLOAD))
+    output = _run_answer(FORCE_FINISHED_PAYLOAD)
 
     assert events == [
         {
@@ -336,18 +337,13 @@ def test_a_force_finished_run_states_its_prose_once() -> None:
     assert [event for event in events if event.get("text") == FORCE_FINISHED_PROSE] == []
 
 
-def test_subagent_output_reads_the_fields_a_run_wrote_never_the_json_carrying_them() -> None:
-    assert (
-        _subagent_output(
-            TerminalFrame(status="done", text='{"result": "It shipped Tuesday.", "confidence": 3}')
-        )
-        == "It shipped Tuesday."
+def test_a_run_answer_reads_the_fields_it_wrote_never_the_json_carrying_them() -> None:
+    assert _run_answer('{"result": "It shipped Tuesday."}') == "It shipped Tuesday."
+    assert _run_answer('{"result": "It shipped Tuesday.", "confidence": 3}') == (
+        "**Result** — It shipped Tuesday.\n**Confidence** — 3"
     )
-    assert _subagent_output(TerminalFrame(status="done", text="{}")) == ""
-    assert _subagent_output(TerminalFrame(status="failed", text="ran out of rounds")) == (
-        "ran out of rounds"
-    )
-    assert _subagent_output(None) == ""
+    assert _run_answer("ran out of rounds") == "ran out of rounds"
+    assert _run_answer("") == ""
 
 
 def test_transcript_projection_does_not_move_activity_between_turns() -> None:
@@ -7759,6 +7755,206 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
     )
     assert still_refused.status_code == 404
+
+
+async def test_a_run_page_states_the_prose_a_run_wrote_not_the_payload_it_rode_in(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A run answers by calling finish, and `persist_transcript` closes its conversation with that
+    payload — so its own page would read back the JSON its output schema carried. The page states
+    the fields the run wrote, exactly as the tree under the reply that spawned it does."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    run = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="run",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id, run, agent_id, seq=1, inbound="find it", subagent_profile="deep_research"
+    )
+    await Transcript(blob=blob, conversation_id=run).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content='{"task": "find the deadline"}'),
+                Message(
+                    role="assistant",
+                    content=(
+                        ToolUseBlock(id="c1", name="fetch_url", input={"url": "https://x/y"}),
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="c1", content="…", activity=True),),
+                ),
+                Message(role="assistant", content='{"result": "The deadline is March 31."}'),
+            ),
+        )
+    )
+
+    read = await client.get(
+        f"/surface/web/subagents/deep_research/conversations/{run}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert read.status_code == 200
+    assert read.json()["messages"] == [
+        {
+            "role": "assistant",
+            "text": "The deadline is March 31.",
+            "events": [
+                {
+                    "kind": "tool",
+                    "name": "fetch_url",
+                    "preview": '{"url":"https://x/y"}',
+                    "description": "",
+                }
+            ],
+        }
+    ]
+
+
+CODE_REVIEW_FINDING = CodeReviewFinding(
+    path="core/x.py",
+    line=42,
+    title="Wedged turn",
+    trigger="A cancel lands mid-dispatch",
+    failure="The turn never commits a terminal",
+    impact="production outage, deadlock, or permanently unfinished work",
+)
+
+
+async def test_a_run_page_states_an_answer_that_wrote_no_prose(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A profile whose output is findings rather than sentences carries no prose at the top of its
+    payload. Its page is the record, so it states those findings — reading them off the only names
+    they have — rather than the empty bubble a prose-only reading leaves behind."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    run = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="run",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id, run, agent_id, seq=1, inbound="review it", subagent_profile="deep_research"
+    )
+    await Transcript(blob=blob, conversation_id=run).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content='{"comparison": "pr-1409"}'),
+                Message(
+                    role="assistant",
+                    content=CodeReviewOutput(findings=(CODE_REVIEW_FINDING,)).model_dump_json(),
+                ),
+            ),
+        )
+    )
+
+    read = await client.get(
+        f"/surface/web/subagents/deep_research/conversations/{run}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert read.status_code == 200
+    assert read.json()["messages"] == [
+        {
+            "role": "assistant",
+            "text": (
+                "**Findings**\n"
+                "**Path** — core/x.py\n"
+                "**Line** — 42\n"
+                "**Title** — Wedged turn\n"
+                "**Trigger** — A cancel lands mid-dispatch\n"
+                "**Failure** — The turn never commits a terminal\n"
+                "**Impact** — production outage, deadlock, or permanently unfinished work"
+            ),
+        }
+    ]
+
+
+def test_an_answer_arrives_whole_however_long_and_never_blank() -> None:
+    """One answer, stated once wherever it is read: the surface sends every character it has, and
+    how much of it stands on a screen is the fold's decision at the other end. Never blank — a
+    review that found nothing answered, and a page saying nothing would state it never ran."""
+    long_answer = json.dumps({"result": "word " * 900})
+    findings = CodeReviewOutput(findings=(CODE_REVIEW_FINDING,)).model_dump_json()
+
+    assert _run_answer(long_answer) == ("word " * 900).strip()
+    assert len(_run_answer(long_answer)) > len(long_answer) - 40
+
+    assert _run_answer(findings).startswith("**Findings**\n**Path** — core/x.py")
+    assert _run_answer(CodeReviewOutput().model_dump_json()) == "**Findings** — none"
+    assert _run_answer("{}") == ""
+
+
+def test_a_note_arrives_whole_however_long() -> None:
+    """A line an agent wrote between its calls is prose, and the surface cuts none of it."""
+    written = "The changelog is long. " * 400
+    events = _subagent_activity(
+        (
+            Message(role="user", content="{}"),
+            Message(role="assistant", content=(TextBlock(text=written),)),
+        )
+    )
+
+    assert events == [{"kind": "note", "text": written.strip()}]
+
+
+async def test_an_agents_own_reply_is_never_read_as_a_payload(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A main agent answering with JSON wrote that JSON — reading it the way a run's answer is read
+    would strip it to one field and drop the rest. Only a conversation whose turns ran a profile is
+    a run, so this one is rendered verbatim."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    reply = '{"result": "not a subagent", "rows": [1, 2]}'
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text=reply),
+    )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nGive me the json.",
+                ),
+                Message(role="assistant", content=reply),
+            ),
+        )
+    )
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert read.status_code == 200
+    assert read.json()["messages"] == [
+        {"role": "user", "text": "Give me the json."},
+        {"role": "assistant", "text": reply},
+    ]
 
 
 async def test_subagent_work_stays_behind_the_agent_wall(

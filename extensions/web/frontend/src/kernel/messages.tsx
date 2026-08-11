@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 
+import { Reveal } from "@/components/ui/reveal";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
@@ -161,7 +162,7 @@ function ActivityTree({
     <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
       {events.map((event, index) => (
         <li key={index} className="whitespace-pre-wrap">
-          {eventLabel(event, "done")}
+          {event.kind === "note" ? <Reveal bare>{event.text}</Reveal> : eventLabel(event, "done")}
         </li>
       ))}
       {runs.map((run) => (
@@ -170,7 +171,11 @@ function ActivityTree({
             Subagent · {run.profile}
           </a>
           <ActivityTree events={run.events} runs={run.subagents} root={run.conversation_id} />
-          {run.output ? <div className="whitespace-pre-wrap pl-lg">{run.output}</div> : null}
+          {run.output ? (
+            <div className="whitespace-pre-wrap pl-lg">
+              <Reveal bare>{run.output}</Reveal>
+            </div>
+          ) : null}
         </li>
       ))}
     </ul>

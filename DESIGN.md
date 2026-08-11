@@ -277,6 +277,10 @@ control is drawn only where the content is actually taller than the fold, and wh
 measurement is held rather than retaken — an expanded block always fits its own height, so
 re-measuring would take its own control away. An agent's prompt runs for screens: left unheld it
 buries every section under it, and the member who came for what is below never learns it is there.
+`bare` drops the card and the footer rule, for a fold that stands among mono lines rather than among
+tables — a reply's activity tree has no card beside it, so a bordered block there would state a
+surface its neighbours do not have. The fold is the portal's one answer to length: nothing upstream
+of it cuts text to fit a screen it cannot see.
 
 A reply states what the agent did as one line and opens onto the rest, in the live chat and in every
 transcript read back, since one component draws a reply wherever it is drawn. The disclosure is a
@@ -288,8 +292,25 @@ While the turn runs that same line is the running activity and carries the worki
 collapsed state reads the same whether the turn is going or gone. The body mounts only while open.
 Inside it, a subagent's own calls, the lines it wrote between them, and what it answered nest under
 a link to its conversation, one indent per generation — the run is part of the reply that spawned
-it rather than a card beside it, and the link still reaches the whole record. A run's answer is the
-prose it wrote, never the JSON its profile's output schema carried it in.
+it rather than a card beside it, and the link still reaches the whole record. A run's answer is
+never the JSON its profile's output schema carried it in — a run answers by calling finish, and that
+payload is what its transcript closes with. Only a run's: the same words from a main agent are a
+reply it composed, and reading those as a payload would drop every field it meant to show.
+
+That answer reads one way wherever it is read. A payload whose single field is prose is that prose,
+because a label over the one thing the bubble holds says what the bubble already is; any other
+payload states its fields, one to a line, named the only names it has — a run that answers in
+findings rather than sentences is still read rather than guessed at, and a field holding an empty
+list says `none` rather than vanishing, since a review that found nothing did answer. A payload
+holding no field at all says nothing, having nothing to say it about.
+
+The surface sends every character it has, and how much of it stands on a screen is the fold's
+decision at the other end: a run's answer and the lines an agent wrote between its calls are both
+held at `Reveal`, which is why neither is cut on the way out. Truncating in the projection settles
+on the backend a question only the reader's screen can answer, and the member who wanted the rest
+has nowhere to ask — a cut arrives indistinguishable from an answer that ended. What the backend
+still bounds is how much it *reads and sends*: 40 runs expanded per conversation, 100 events per
+run. Those bound a payload, which is a different question from how much prose a member may see.
 
 A screen whose subject is one number leads with that number as a figure, not as a clause in a
 heading: the card takes the same `rounded-panel border border-edge bg-surface` as a table, holding
