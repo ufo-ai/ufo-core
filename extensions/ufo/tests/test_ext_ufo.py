@@ -9,6 +9,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,6 +32,7 @@ from ufo_ext_ufo.surface import (
 )
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
+from ufo.artifact_url import verify_artifact_url
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
@@ -847,7 +849,18 @@ async def test_a_shared_file_reaches_the_terminal_as_an_openable_link(
     assert len(shared) == 1
     filename, size_bytes, url = shared[0]
     assert (filename, size_bytes) == ("report.pdf", "2048")
-    assert url.startswith(f"{ARTIFACT_BASE_URL}/artifacts/download?token=")
+    assert url.startswith(f"{ARTIFACT_BASE_URL}/artifacts/{turn_id}/report.pdf?")
+    query = parse_qs(urlsplit(url).query)
+    claims = verify_artifact_url(
+        ARTIFACT_SECRET,
+        str(turn_id),
+        "report.pdf",
+        query["exp"][0],
+        query["sig"][0],
+        "",
+        datetime.now(UTC),
+    )
+    assert claims.blob_key == f"artifacts/{turn_id}/report.pdf"
     assert lines[-1] == ["ask", ">"]
 
 
