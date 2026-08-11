@@ -26,11 +26,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.artifact_token import (
-    ARTIFACT_DOWNLOAD_PATH,
-    ARTIFACT_TOKEN_TTL_SECONDS,
-    mint_artifact_token,
-)
+from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
 from ufo.audience import audience_subjects, conversation_audience
 from ufo.blob import BlobNotFound
 from ufo.conversations import CONVERSATION_KIND
@@ -186,11 +182,8 @@ class ArtifactObjects:
             await ctx.sandbox.write_file(path, data)
         url: str | None = None
         if ctx.artifact_token_secret:
-            expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
-            token = mint_artifact_token(
-                ctx.artifact_token_secret, latest.blob_key, latest.filename, expires_at
-            )
-            url = f"{ARTIFACT_DOWNLOAD_PATH}?token={token}"
+            expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+            url = mint_artifact_url(ctx.artifact_token_secret, latest.blob_key, expires_at)
         return {
             "size_bytes": latest.size_bytes,
             "shared_at": latest.created_at.isoformat(),

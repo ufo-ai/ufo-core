@@ -40,11 +40,11 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from pydantic import AfterValidator, BaseModel, Field
 
-from ufo.artifact_token import (
-    ARTIFACT_DOWNLOAD_PATH,
+from ufo.artifact_url import (
     ARTIFACT_KEY_PREFIX,
-    ARTIFACT_TOKEN_TTL_SECONDS,
-    mint_artifact_token,
+    ARTIFACT_URL_TTL_SECONDS,
+    artifact_media_type,
+    mint_artifact_url,
 )
 from ufo.artifacts import artifact_object_names
 from ufo.blob import FilesystemBlobStore, S3BlobStore
@@ -611,7 +611,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
         safe_name += source_suffix
     key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
     await _store_artifact(ctx, scoped, key, int(stat["size"]), str(stat["digest"]))
-    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    media_type = artifact_media_type(safe_name)
     shared_at = datetime.now(UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -640,14 +640,14 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                 .distinct()
             )
         ).all()
-    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
-    token = mint_artifact_token(ctx.artifact_token_secret, key, safe_name, expires_at)
+    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+    url = mint_artifact_url(ctx.artifact_token_secret, key, expires_at)
     return ToolResult(
         content=(
             TextContent(
                 text=json.dumps(
                     {
-                        "url": f"{ARTIFACT_DOWNLOAD_PATH}?token={token}",
+                        "url": url,
                         "name": safe_name,
                         "artifact": artifact_object_names(
                             [(row.conversation_id, row.filename) for row in identities]

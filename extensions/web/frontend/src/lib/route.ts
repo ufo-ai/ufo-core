@@ -54,6 +54,8 @@ export type Route =
 const CHAT_PREFIX = "#/c/";
 const CHAT_HASH = /^#\/c\/([0-9a-f-]{36})(?:\?(.*))?$/;
 const CHAT_TARGET_PARAM = "c";
+const ARTIFACT_TARGET_PARAM = "a";
+const ARTIFACT_PATH_PREFIX = "/artifacts/";
 const CONVERSATION_SLOT_HASH =
   /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
@@ -160,6 +162,11 @@ export function parseHash(hash: string): Route {
     };
   }
   return { kind: "home" };
+}
+
+export function artifactTarget(search: string): string | null {
+  const target = new URLSearchParams(search).get(ARTIFACT_TARGET_PARAM);
+  return target && target.startsWith(ARTIFACT_PATH_PREFIX) ? target : null;
 }
 
 export function bootRoute(hash: string, search: string): Route {

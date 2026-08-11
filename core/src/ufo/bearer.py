@@ -11,7 +11,10 @@ is spelled out here once:
     token        = body + "." + hex(hmac_sha256(secret, body))
 
 The signing secret is `UFO_TOKEN_SECRET` on every party, and it never crosses the sdk: core reads
-it here, so an extension hands over a token and gets claims back without ever holding the key."""
+it here, so an extension hands over a token and gets claims back without ever holding the key.
+
+The session's two fixed addresses live beside the codec: `MEMBER_SESSION_COOKIE` names the cookie
+the bearer rides in a browser, and `LOGIN_PATH` the one sign-in door that lands it there."""
 
 import base64
 import hashlib
@@ -23,6 +26,8 @@ from uuid import UUID
 
 UFO_TOKEN_SECRET_ENV = "UFO_TOKEN_SECRET"
 TOKEN_SEPARATOR = "."
+MEMBER_SESSION_COOKIE = "ufo_session"
+LOGIN_PATH = "/login"
 
 
 def mint_token(

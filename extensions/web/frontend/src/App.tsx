@@ -30,6 +30,7 @@ import {
   SUBAGENT_TABS,
   WORKSPACE_TABS,
   agentHash,
+  artifactTarget,
   bootRoute,
   chatHash,
   customizeHash,
@@ -62,6 +63,10 @@ type Sought =
 
 export function App({ agents, subagents, member }: AppProps) {
   const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
+  useEffect(() => {
+    const target = artifactTarget(location.search);
+    if (target) location.replace(target);
+  }, []);
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});

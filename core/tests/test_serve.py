@@ -508,7 +508,7 @@ def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:
     def _endpoint(_request: object) -> None: ...
 
     app = FastAPI()
-    for path in ("/surface/web", "/v1/connect/callback", "/artifacts/download"):
+    for path in ("/surface/web", "/v1/connect/callback", "/artifacts/{artifact_id}/{filename}"):
         app.add_route(path, _endpoint)
     serve._assert_no_reserved_routes(app)
     app.add_route("/v1/onboard/web", _endpoint)

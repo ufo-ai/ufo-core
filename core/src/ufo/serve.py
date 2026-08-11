@@ -20,6 +20,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ufo.activity import SKILL_LOAD_TOOL
+from ufo.bearer import LOGIN_PATH
 from ufo.blob import BlobStore, blob_store_for
 from ufo.browser import CdpProvider
 from ufo.config import (
@@ -135,7 +136,7 @@ from ufo.surfaces.hub_tail import HubTailer
 from ufo.workspace import init_workspace_credentials, ws
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
-RESERVED_HOST_PREFIXES = ("/login", "/v1/onboard", "/ufo")
+RESERVED_HOST_PREFIXES = (LOGIN_PATH, "/v1/onboard", "/ufo")
 
 
 def _assert_no_reserved_routes(app: FastAPI) -> None:

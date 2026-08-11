@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -36,7 +37,7 @@ import ufo.artifacts as artifacts
 import ufo.conversations as conversations
 from ufo.agent_scope import agent
 from ufo.agents import AGENT_KIND, AGENT_OBJECT, AgentObjects, AgentSpec
-from ufo.artifact_token import verify_artifact_token
+from ufo.artifact_url import verify_artifact_url
 from ufo.artifacts import (
     ARTIFACT_KIND,
     ARTIFACT_OBJECT,
@@ -1588,8 +1589,18 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         assert (workspace_dir / "artifacts" / name / "report.txt").read_bytes() == (
             b"quarterly numbers"
         )
-        token = status["download_url"].split("token=", 1)[1]
-        claims = verify_artifact_token(token, ARTIFACT_TEST_SECRET, datetime.now(UTC))
+        split = urlsplit(status["download_url"])
+        artifact_id, filename = split.path.removeprefix("/artifacts/").split("/")
+        query = parse_qs(split.query)
+        claims = verify_artifact_url(
+            ARTIFACT_TEST_SECRET,
+            artifact_id,
+            filename,
+            query["exp"][0],
+            query["sig"][0],
+            "",
+            datetime.now(UTC),
+        )
         assert claims.filename == "report.txt"
 
         await ctx.sandbox.bash("printf 'revised numbers' > report.txt")

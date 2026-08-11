@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from ufo_ext_docker import DockerCarrier
 
-from ufo.artifact_token import verify_artifact_token
+from ufo.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_artifact_url
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.connectors import ConnectorRegistry
@@ -67,6 +67,23 @@ pytestmark = pytest.mark.docker
 
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
+
+
+def _download_claims(url: str) -> ArtifactClaims:
+    split = urlsplit(url)
+    artifact_id, filename = split.path.removeprefix(f"/{ARTIFACT_KEY_PREFIX}").split("/")
+    query = parse_qs(split.query)
+    return verify_artifact_url(
+        ARTIFACT_SECRET,
+        artifact_id,
+        unquote(filename),
+        query["exp"][0],
+        query["sig"][0],
+        "",
+        datetime.now(UTC),
+    )
+
+
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 CONTAINER_OP_TIMEOUT_S = 180
 
@@ -486,9 +503,8 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     assert shared["size_bytes"] == len(payload)
     assert shared["digest"] == "sha256:" + hashlib.sha256(payload).hexdigest()
     assert shared["is_text"] is False
-    assert shared["url"].startswith("/artifacts/download?token=")
-    token = shared["url"].split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    assert shared["url"].startswith(f"/{ARTIFACT_KEY_PREFIX}")
+    claims = _download_claims(shared["url"])
     assert await ctx.blob.get(claims.blob_key) == payload
 
 
@@ -504,8 +520,7 @@ async def test_share_file_text_preflight_and_download_url(
     shared = json.loads(result.content[0].text)
     assert shared["is_text"] is True
     assert shared["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
-    token = shared["url"].split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    claims = _download_claims(shared["url"])
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and len(parts) == 3 and parts[-1] == "report.txt"
     assert await ctx.blob.get(claims.blob_key) == body
@@ -536,8 +551,7 @@ async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
 
     shared = json.loads(result.content[0].text)
     assert shared["size_bytes"] == len(payload)
-    token = shared["url"].split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    claims = _download_claims(shared["url"])
     assert await s3_store.get(claims.blob_key) == payload
 
 
@@ -577,8 +591,7 @@ async def test_share_file_confines_a_traversal_name(
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("report.txt", b"data")
     result = await _run("share_file", ctx, file_path="report.txt", name="../../conversations/x")
-    token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    claims = _download_claims(json.loads(result.content[0].text)["url"])
     parts = claims.blob_key.split("/")
     assert parts[0] == "artifacts" and ".." not in parts and parts[-1] == "x.txt"
     assert claims.filename == "x.txt"
@@ -595,15 +608,12 @@ async def test_share_file_appends_the_source_extension_to_a_display_name(
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("risk.xlsx", b"PK\x03\x04fake")
     result = await _run("share_file", ctx, file_path="risk.xlsx", name="Q1_Risk_Report")
-    token = json.loads(result.content[0].text)["url"].split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
+    claims = _download_claims(json.loads(result.content[0].text)["url"])
     assert claims.filename == "Q1_Risk_Report.xlsx"
 
     named = await _run("share_file", ctx, file_path="risk.xlsx", name="already_named.xlsx")
-    token = json.loads(named.content[0].text)["url"].split("token=", 1)[1]
-    assert (
-        verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC)).filename
-        == "already_named.xlsx"
+    assert _download_claims(json.loads(named.content[0].text)["url"]).filename == (
+        "already_named.xlsx"
     )
 
 

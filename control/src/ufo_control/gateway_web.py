@@ -125,6 +125,8 @@ const answer = document.getElementById('answer');
 const go = document.getElementById('go');
 const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(
   new URLSearchParams(location.search).get('c') || '');
+const artifactRaw = new URLSearchParams(location.search).get('a') || '';
+const artifact = artifactRaw.startsWith('/artifacts/') ? artifactRaw : null;
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
@@ -159,7 +161,8 @@ function complete() {
   document.getElementById('member-email').textContent = email || '';
   document.getElementById('workspace-url').textContent = workspace;
   const portal = document.getElementById('portal-row');
-  portal.action = workspace + '/surface/web' + (target ? '?c=' + target[0] : '');
+  portal.action = workspace + '/surface/web' +
+    (target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact) : '');
   document.getElementById('portal-token').value = token;
   document.getElementById('curl-line').textContent =
     'curl -fsSL ' + location.origin + '/ufo | sh';

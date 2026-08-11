@@ -152,7 +152,7 @@ LEXICAL_CHECK_METHODS = frozenset({"is_absolute", "normpath"})
 SANDBOX_PROGRAM_SUFFIX = "_PROG"
 PROGRAM_FILESYSTEM_TOKENS = ("open(", "os.", "Path(", "shutil.")
 DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
-    (CORE_SRC / "artifact_token.py", "verify_artifact_token"): (
+    (CORE_SRC / "artifact_url.py", "verify_artifact_url"): (
         "the claim is a blob key, not a host path: the store contains keys at its own root"
     ),
     (CORE_SRC / "blob.py", "_walk"): (

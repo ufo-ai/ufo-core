@@ -145,7 +145,11 @@ def test_login_page_carries_a_clicked_conversation_onto_the_portal_action() -> N
     to that conversation, so the member lands on the conversation they clicked rather than a new
     chat. Only a uuid shape rides along, so nothing else in the query reaches the action."""
     assert "new URLSearchParams(location.search).get('c')" in LOGIN_PAGE
-    assert "workspace + '/surface/web' + (target ? '?c=' + target[0] : '')" in LOGIN_PAGE
+    assert (
+        "(target ? '?c=' + target[0] : artifact ? '?a=' + encodeURIComponent(artifact) : '')"
+        in (LOGIN_PAGE)
+    )
+    assert "artifactRaw.startsWith('/artifacts/')" in LOGIN_PAGE
 
 
 def _grant(dsn: str, object_number: int, email: str) -> None:

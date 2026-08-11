@@ -4,6 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import {
+  artifactTarget,
   bootRoute,
   chatHash,
   conversationSlotHash,
@@ -546,4 +547,13 @@ test("a reloaded memory search prefills the box and fetches the query", async ()
 
   expect(await screen.findByDisplayValue("roadmap")).toBeTruthy();
   expect(calls.some((url) => url.includes("/workspace/memory?q=roadmap"))).toBe(true);
+});
+
+test("an artifact named as a query target is honored only inside its namespace", () => {
+  expect(artifactTarget("?a=%2Fartifacts%2Fabc%2Fchart.png%3Fexp%3D1%26sig%3Dx")).toBe(
+    "/artifacts/abc/chart.png?exp=1&sig=x",
+  );
+  expect(artifactTarget("?a=https%3A%2F%2Fevil.example%2F")).toBeNull();
+  expect(artifactTarget("?a=%2Fsurface%2Fweb")).toBeNull();
+  expect(artifactTarget("")).toBeNull();
 });

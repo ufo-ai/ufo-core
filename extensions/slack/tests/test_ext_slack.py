@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -35,7 +35,7 @@ from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 import ufo.surfaces.hub_tail as hub_tail
-from ufo.artifact_token import verify_artifact_token
+from ufo.artifact_url import verify_artifact_url
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import (
     CredentialRequestState,
@@ -3821,7 +3821,8 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    await blob.put("artifacts/big/huge.bin", b"OVERSIZE")
+    big_key = f"artifacts/{uuid4()}/huge.bin"
+    await blob.put(big_key, b"OVERSIZE")
     turn_id = await _seed_done_turn(
         workspace_id,
         "C5:200.0",
@@ -3829,7 +3830,7 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
         blob,
         artifact=True,
         artifact_name="huge.bin",
-        artifact_key="artifacts/big/huge.bin",
+        artifact_key=big_key,
         artifact_size=slack.SLACK_UPLOAD_MAX_BYTES + 1,
         artifact_media_type="application/octet-stream",
     )
@@ -3843,10 +3844,20 @@ async def test_oversize_artifact_is_delivered_as_a_download_link(
     match = re.search(r"\[huge\.bin\]\((https://[^)]+)\)", reply["text"])
     assert match is not None
     url = match.group(1)
-    assert url.startswith(f"{PUBLIC_BASE_URL}/artifacts/download?token=")
-    token = url.split("token=", 1)[1]
-    claims = verify_artifact_token(token, ARTIFACT_SECRET, datetime.now(UTC))
-    assert claims.blob_key == "artifacts/big/huge.bin"
+    assert url.startswith(f"{PUBLIC_BASE_URL}/artifacts/")
+    split = urlsplit(url)
+    artifact_id, filename = split.path.removeprefix("/artifacts/").split("/")
+    query = parse_qs(split.query)
+    claims = verify_artifact_url(
+        ARTIFACT_SECRET,
+        artifact_id,
+        filename,
+        query["exp"][0],
+        query["sig"][0],
+        "",
+        datetime.now(UTC),
+    )
+    assert claims.blob_key == big_key
     assert claims.filename == "huge.bin"
 
     assert [r for r in recorder if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL] == []

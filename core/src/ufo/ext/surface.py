@@ -50,11 +50,7 @@ from starlette.responses import Response
 
 from ufo.accounting import AgentSpendReport, MemberSpendReport, SpendReport, SpendRollup
 from ufo.agent_scope import agent as bind_agent
-from ufo.artifact_token import (
-    ARTIFACT_DOWNLOAD_PATH,
-    ARTIFACT_TOKEN_TTL_SECONDS,
-    mint_artifact_token,
-)
+from ufo.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
 from ufo.audience import (
     Audience,
     audience_member,
@@ -1055,15 +1051,14 @@ class SurfaceContext:
     def artifact_link(self, artifact: SharedArtifact) -> str | None:
         """A TTL download link for a shared file the surface cannot upload inline, or None when
         artifact delivery is unconfigured (no token secret or no public base URL) — the surface then
-        names the file without a link. Mints the same signed token the web download route verifies,
-        so the link opens for anyone holding it until it expires."""
+        names the file without a link. Mints the same signed URL the web download route verifies:
+        the link opens for anyone holding it until it expires, and after that only for a signed-in
+        member of the workspace that shared it."""
         if not self._artifact_token_secret or not self._public_base_url:
             return None
-        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
-        token = mint_artifact_token(
-            self._artifact_token_secret, artifact.blob_key, artifact.filename, expires_at
-        )
-        return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
+        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+        path = mint_artifact_url(self._artifact_token_secret, artifact.blob_key, expires_at)
+        return f"{self._public_base_url.rstrip('/')}{path}"
 
     def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
         """A signed raster-preview link, or None when its type, size, or delivery is ineligible."""
@@ -1076,15 +1071,14 @@ class SurfaceContext:
             or artifact.size_bytes > IMAGE_PREVIEW_MAX_BYTES
         ):
             return None
-        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_TOKEN_TTL_SECONDS
-        token = mint_artifact_token(
+        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+        path = mint_artifact_url(
             self._artifact_token_secret,
             artifact.blob_key,
-            artifact.filename,
             expires_at,
             preview=ImagePreviewGrant(media_type=media_type, size_bytes=artifact.size_bytes),
         )
-        return f"{self._public_base_url.rstrip('/')}{ARTIFACT_DOWNLOAD_PATH}?token={token}"
+        return f"{self._public_base_url.rstrip('/')}{path}"
 
     def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None:
         """The URL that opens one conversation's sandbox port in a browser at `entry_path`, or None

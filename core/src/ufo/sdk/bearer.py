@@ -4,6 +4,12 @@ signing secret stays core's: every function takes the token and resolves `UFO_TO
 itself, so no extension ever holds the key."""
 
 from ufo.bearer import (
+    LOGIN_PATH as LOGIN_PATH,
+)
+from ufo.bearer import (
+    MEMBER_SESSION_COOKIE as MEMBER_SESSION_COOKIE,
+)
+from ufo.bearer import (
     verified_claims as verified_claims,
 )
 from ufo.bearer import (
