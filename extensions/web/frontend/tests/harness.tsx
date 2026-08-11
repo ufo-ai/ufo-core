@@ -187,7 +187,7 @@ export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["next_run_at", "paused"],
+  fields: ["conversation", "next_run_at", "paused"],
   spec_schema: {
     properties: {
       schedule: { type: "string" },
@@ -237,6 +237,14 @@ export function fact(label: string): string {
   const said = term.nextElementSibling;
   if (!said) throw new Error("no value beside the fact " + label);
   return String(said.textContent);
+}
+
+/** Open a table row's own record. The name is a link to the record's conversation, so the row's
+ *  `View` is what reaches the record — scoped to the row, since every row carries one. */
+export async function openRow(name: string): Promise<void> {
+  const row = (await screen.findByRole("link", { name })).closest("tr");
+  if (!row) throw new Error("no row named " + name);
+  await userEvent.click(within(row).getByRole("button", { name: "View" }));
 }
 
 export async function viewCard(name: string): Promise<HTMLElement> {

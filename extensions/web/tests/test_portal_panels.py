@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
-from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
+from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT, SUMMARY_MAX
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
@@ -343,6 +343,29 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         f"/surface/web/objects/scheduled_task/channel-digest?agent={agent_a}", headers=other_headers
     )
     assert read.json()["spec"]["prompt"] == "post the channel digest"
+
+    sprawling = "Weekly customer and prospect signal digest, proposals only. " * 6
+    with ws(workspace_id):
+        with bind_agent(agent_a):
+            await ScheduleStore().create(
+                shared_conversation,
+                "long-digest",
+                "0 7 * * *",
+                "post the long digest",
+                sprawling,
+                NEXT_RUN,
+                created_by_member_id=creator_id,
+            )
+    sprawled = await client.get(
+        f"/surface/web/objects/scheduled_task/long-digest?agent={agent_a}", headers=other_headers
+    )
+    assert sprawled.status_code == 200
+    assert sprawled.json()["spec"]["description"] == sprawling
+    listed = await client.get(index, headers=other_headers)
+    summary = next(
+        row["summary"] for row in listed.json()["objects"] if row["name"] == "long-digest"
+    )
+    assert len(summary) == SUMMARY_MAX
 
     crossed = await client.get(
         f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=creator_headers

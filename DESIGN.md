@@ -375,6 +375,13 @@ acts — the destructive one as a `ConfirmButton` — so the member neither open
 nor hunts for a control that names the row in its own words. A row the member may not act on leaves
 the cell empty rather than dropping the column, since the column is the table's shape.
 
+A record's conversation is a destination, never a column. A kind declares `conversation` so the
+agent can filter on it, but the value is a uuid — the wire's word for a thread and no answer to
+"which one" — so `ObjectIndex` draws no column for it and makes the row's name the link that opens
+it. What the member wants from a scheduled task is the channel it posts into, and that is one press
+from the name they already read. The record's own page keeps a `View` in the acts column: a name
+that leads somewhere else must not be the only way to reach the record it names.
+
 The blank draws no icon. Seven settings screens would want seven glyphs, which is the vocabulary
 that earns an icon set — and the portal has none by decision. Midday's own settings blanks carry
 title, body, and one button with no glyph, so the pattern is complete without it.

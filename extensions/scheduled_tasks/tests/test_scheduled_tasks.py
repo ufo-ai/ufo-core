@@ -3784,7 +3784,7 @@ def test_spec_schema_states_the_shape_a_form_needs() -> None:
 
     assert properties["schedule"]["examples"] == ["0 9 * * 1-5"]
     assert _facet(properties["schedule"], "maxLength") == SCHEDULE_MAX
-    assert _facet(properties["description"], "maxLength") == SUMMARY_MAX
+    assert _facet(properties["description"], "maxLength") is None
     assert _facet(properties["prompt"], "maxLength") is None
     assert properties["expires_at"]["title"] == "Expires At"
     assert _facet(properties["expires_at"], "format") == "date-time"
@@ -3793,3 +3793,12 @@ def test_spec_schema_states_the_shape_a_form_needs() -> None:
 def test_a_bound_field_refuses_a_value_past_its_bound() -> None:
     with pytest.raises(ValueError):
         ScheduledTaskSpec(schedule="* " * SCHEDULE_MAX)
+
+
+def test_a_description_past_the_listing_line_is_still_a_spec_this_model_reads() -> None:
+    """A listing line is bounded where it is drawn, never where it is stored: this model is what a
+    read reconstructs a stored row into, so a bound here makes every row written before it
+    unreadable for good. The portal's own proof carries the other half — the row that holds this
+    description still lists at `SUMMARY_MAX`."""
+    sprawling = "d" * (SUMMARY_MAX * 3)
+    assert ScheduledTaskSpec(description=sprawling).description == sprawling

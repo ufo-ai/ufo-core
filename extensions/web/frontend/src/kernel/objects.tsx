@@ -33,10 +33,14 @@ import { DataTable, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { day, isMoment, relativeMoment } from "@/lib/moments";
-import { agentHash } from "@/lib/route";
+import { agentHash, chatHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
+/** The conversation a record belongs to is where the member goes, never a column they read: the
+ *  value is a uuid, which is the wire's word for a thread and nobody's answer to "which one". The
+ *  name carries the press, and the row's own `View` still opens the record itself. */
+const CONVERSATION_FIELD = "conversation";
 
 export type ObjectValue = string | number | boolean | null;
 
@@ -200,13 +204,14 @@ function ObjectIndex({
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
+        const shown = payload.fields.filter((field) => field !== CONVERSATION_FIELD);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
         if (agentId === null) columns.push("Agent");
         columns.push({ label: heading("summary", payload.spec_schema), sort: "summary" });
-        for (const field of payload.fields) {
+        for (const field of shown) {
           columns.push({ label: heading(field, payload.spec_schema), sort: field });
         }
-        if (acts) columns.push("");
+        if (acts || payload.fields.includes(CONVERSATION_FIELD)) columns.push("");
         const flags = payload.fields.filter(
           (field) =>
             narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean"),
@@ -275,16 +280,26 @@ function ObjectIndex({
                 {(row) => (
                   <>
                     <Td>
-                      <button
-                        type="button"
-                        data-part="primary"
-                        onClick={() =>
-                          onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
-                        }
-                        className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-strong text-inherit"
-                      >
-                        {row.name}
-                      </button>
+                      {typeof row[CONVERSATION_FIELD] === "string" ? (
+                        <a
+                          data-part="primary"
+                          href={chatHash(row[CONVERSATION_FIELD])}
+                          className="block max-w-full truncate font-strong text-inherit underline"
+                        >
+                          {row.name}
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          data-part="primary"
+                          onClick={() =>
+                            onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
+                          }
+                          className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-strong text-inherit"
+                        >
+                          {row.name}
+                        </button>
+                      )}
                     </Td>
                     {agentId === null ? (
                       <Td>
@@ -297,26 +312,44 @@ function ObjectIndex({
                       </Td>
                     ) : null}
                     <Td>{row.summary || "—"}</Td>
-                    {payload.fields.map((field) => (
+                    {shown.map((field) => (
                       <Td key={field}>
                         {cell(field, row[field] ?? null, payload.spec_schema, now)}
                       </Td>
                     ))}
-                    {acts ? (
+                    {acts || payload.fields.includes(CONVERSATION_FIELD) ? (
                       <Td>
-                        <ConfirmButton
-                          verb="Delete"
-                          variant="row"
-                          onClick={async () =>
-                            setNotice(
-                              await submit(row.agent_id, {
-                                verb: "delete",
-                                kind: payload.kind,
-                                name: row.name,
-                              }),
-                            )
-                          }
-                        />
+                        <div className="flex justify-end gap-xs">
+                          {payload.fields.includes(CONVERSATION_FIELD) ? (
+                            <Button
+                              variant="row"
+                              onClick={() =>
+                                onOpen({
+                                  agentId: row.agent_id,
+                                  kind: payload.kind,
+                                  name: row.name,
+                                })
+                              }
+                            >
+                              View
+                            </Button>
+                          ) : null}
+                          {acts ? (
+                            <ConfirmButton
+                              verb="Delete"
+                              variant="row"
+                              onClick={async () =>
+                                setNotice(
+                                  await submit(row.agent_id, {
+                                    verb: "delete",
+                                    kind: payload.kind,
+                                    name: row.name,
+                                  }),
+                                )
+                              }
+                            />
+                          ) : null}
+                        </div>
                       </Td>
                     ) : null}
                   </>

@@ -79,7 +79,6 @@ class ScheduledTaskSpec(BaseModel):
     description: str | None = Field(
         default=None,
         title="Description",
-        max_length=SUMMARY_MAX,
         examples=["Weekday morning engineering digest"],
         description="One listing line. Omitted on update preserves it; an empty string clears it.",
     )
