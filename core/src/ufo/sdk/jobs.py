@@ -13,6 +13,9 @@ from ufo.candidates import (
 from ufo.candidates import (
     owner_candidates as owner_candidates,
 )
+from ufo.ext.context import (
+    store_key_workspaces as store_key_workspaces,
+)
 from ufo.ext.manifest import (
     JobSpec as JobSpec,
 )

@@ -80,7 +80,7 @@ from ufo.sdk.manifest import (
     raster_image_media_type,
 )
 from ufo.sdk.memory import MemoryMatch
-from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectListQuery
 from ufo.sdk.seats import Seats
@@ -131,6 +131,16 @@ SUBAGENT_EVENT_LIMIT = 100
 SUBAGENT_NOTE_MAX_CHARS = 500
 SUBAGENT_OUTPUT_MAX_CHARS = 2_000
 CHAT_STORE_PREFIX = "chat/"
+CHAT_PENDING_PREFIX = "chat_title_pending/"
+TITLE_JOB_NAME = "chat_titles"
+TITLE_JOB_SCHEDULE = "*/15 * * * * *"
+TITLE_EXCERPT_CHARS = 1000
+TITLE_MAX_TOKENS = 100
+TITLE_SYSTEM_PROMPT = (
+    "Write a title for the conversation excerpt: a plain phrase of at most eight words naming "
+    "what the conversation is about. No quotes, no ending punctuation, no restated instructions. "
+    "Answer with the title alone."
+)
 NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
@@ -355,6 +365,74 @@ class ChatRecord(BaseModel):
     title: str
 
 
+def _message_text(message: Message) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    return "".join(block.text for block in message.content if isinstance(block, TextBlock))
+
+
+def _title_excerpt(messages: tuple[Message, ...]) -> str:
+    """The opening exchange the title is written from — the first user and first assistant texts,
+    each bounded, joined. Empty until an assistant message exists: a conversation whose first turn
+    has not answered keeps its first-message title and its pending marker for the next tick."""
+    if all(message.role != "assistant" for message in messages):
+        return ""
+    parts = []
+    for role in ("user", "assistant"):
+        text = next(
+            (_message_text(message) for message in messages if message.role == role), ""
+        ).strip()
+        if text:
+            parts.append(text[:TITLE_EXCERPT_CHARS])
+    return "\n\n".join(parts)
+
+
+async def summarize_chat_titles(ctx: ExtensionContext) -> None:
+    """Retitle each newly opened chat from its opening exchange — the batch job behind the rail's
+    summary titles. The pending marker written at open is the whole state machine: the job fires
+    only in workspaces holding one, a marker whose conversation has answered is summarized and
+    deleted, and one whose conversation has not yet answered waits for the next tick. The rewrite
+    is a `put_if` against the row the summary was computed for, so a concurrent writer's newer row
+    is never overwritten, and the marker is deleted either way — a summary is written at most
+    once, and a failed compare keeps the title the concurrent writer stored."""
+    pending = await ctx.store.list(CHAT_PENDING_PREFIX)
+    if not pending:
+        return
+    if ctx.corpus is None or ctx.model is None:
+        raise RuntimeError("chat titles need trajectory and model access; serve wires both")
+    trajectories = {t.conversation_id: t for t in await ctx.corpus.trajectories()}
+    for key, _ in pending:
+        conversation_id = UUID(key.removeprefix(CHAT_PENDING_PREFIX))
+        stored = await ctx.store.get(_chat_row_key(conversation_id))
+        if stored is None:
+            await ctx.store.delete(key)
+            continue
+        trajectory = trajectories.get(conversation_id)
+        excerpt = "" if trajectory is None else _title_excerpt(trajectory.messages)
+        if not excerpt:
+            continue
+        record = ChatRecord.model_validate(stored)
+        summary = _chat_title(
+            await ctx.model.complete(
+                ModelRequest(
+                    model=ctx.model.model,
+                    system=TITLE_SYSTEM_PROMPT,
+                    messages=(Message(role="user", content=excerpt),),
+                    max_tokens=TITLE_MAX_TOKENS,
+                    reasoning="off",
+                )
+            ),
+            (),
+        )
+        if summary:
+            await ctx.store.put_if(
+                _chat_row_key(conversation_id),
+                record.model_copy(update={"title": summary}).model_dump(mode="json"),
+                stored,
+            )
+        await ctx.store.delete(key)
+
+
 async def _open_conversation(
     ctx: SurfaceContext,
     store: ScopedStore,
@@ -384,6 +462,7 @@ async def _open_conversation(
         if record is None:
             raise RuntimeError(f"conversation {conversation_id} has no chat row")
         return conversation_id, record.title
+    await store.put(f"{CHAT_PENDING_PREFIX}{minted}", {})
     return conversation_id, title
 
 

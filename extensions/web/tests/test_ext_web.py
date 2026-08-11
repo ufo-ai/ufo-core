@@ -35,7 +35,7 @@ from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
-from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
+from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import (
@@ -120,6 +120,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.jobs import store_key_workspaces
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
@@ -848,6 +849,57 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
         {"role": "user", "text": "hello"},
         {"role": "assistant", "text": "echo:1"},
     ]
+
+
+def test_title_excerpt_waits_for_an_assistant_reply_and_bounds_both_sides() -> None:
+    opening = Message(role="user", content="Draft the onboarding plan")
+    assert web_surface._title_excerpt((opening,)) == ""
+    reply = Message(role="assistant", content=(TextBlock(text="Here is the plan."),))
+    assert web_surface._title_excerpt((opening, reply)) == (
+        "Draft the onboarding plan\n\nHere is the plan."
+    )
+    long = Message(role="user", content="x" * (web_surface.TITLE_EXCERPT_CHARS + 500))
+    assert web_surface._title_excerpt((long, reply)) == (
+        "x" * web_surface.TITLE_EXCERPT_CHARS + "\n\nHere is the plan."
+    )
+
+
+async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _, _, blob, _ = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "titles@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"Draft next week's onboarding plan for the two new engineers",
+        headers=headers,
+    )
+    assert admitted.status_code == 200
+    opened = admitted.json()["conversation_id"]
+    assert admitted.json()["title"].startswith("Draft next week's onboarding plan")
+    await _consume(client, token, admitted.json()["turn_id"])
+
+    candidates = store_key_workspaces(EXTENSION_WEB, web_surface.CHAT_PENDING_PREFIX)
+    assert workspace_id in await candidates()
+
+    ctx = context_for(EXTENSION_WEB, frozenset(), blob=blob, model_resolver=STANDIN_REGISTRY)
+    with ws(workspace_id):
+        await web_surface.summarize_chat_titles(ctx)
+        assert await ctx.store.list(web_surface.CHAT_PENDING_PREFIX) == ()
+
+    rail = await client.get("/surface/web/api/chats", headers=headers)
+    assert rail.status_code == 200
+    (row,) = rail.json()["chats"]
+    assert row["conversation_id"] == opened
+    assert row["title"] == "echo:1"
+    assert workspace_id not in await candidates()
+
+    with ws(workspace_id):
+        await web_surface.summarize_chat_titles(context_for(EXTENSION_WEB, frozenset()))
 
 
 async def test_transcript_route_returns_durable_tool_activity(

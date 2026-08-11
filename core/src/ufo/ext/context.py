@@ -428,6 +428,25 @@ def trajectory_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_turn)
 
 
+def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
+    """The candidate seam a store-backed job declares: the workspaces holding at least one of the
+    extension's own `ext_store` keys under `prefix`. Core owns `ext_store`, so it owns this query —
+    an extension names its pending-work key space without reaching the cross-workspace engine, and
+    a workspace with no such key never fires the handler."""
+
+    def with_a_key() -> sa.Select[tuple[UUID]]:
+        return (
+            sa.select(tables.ext_store.c.workspace_id)
+            .where(
+                tables.ext_store.c.extension == extension,
+                tables.ext_store.c.key.startswith(prefix, autoescape=True),
+            )
+            .distinct()
+        )
+
+    return owner_candidates(with_a_key)
+
+
 class TurnInvoker(Protocol):
     """The internal turn seam a background handler drives. It never consumes a member's pause;
     idempotency collapses a redelivered invocation to the turn already admitted."""
