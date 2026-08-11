@@ -103,9 +103,10 @@ class ReviewTarget:
             f"Pull request: {self.pull_request_number}\n"
             f"Base SHA: {self.base_sha}\n"
             f"Head SHA: {self.head_sha}\n"
-            "Spawn exactly one `code_review` subagent with these values. Run it until it returns "
-            f"a final typed result. Publish that result with review run {run_id}, then return a "
-            "final answer. Do not ask the user a question."
+            "Spawn exactly one `code_review` subagent in the background with these values, then "
+            "end the turn without publishing. Its validated result arrives on this conversation "
+            f"as a later message: publish that result with review run {run_id}, then end that "
+            "turn. Do not ask the user a question."
         )
 
     @property

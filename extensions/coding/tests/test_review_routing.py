@@ -275,7 +275,8 @@ async def test_activation_baselines_existing_pages_and_wakes_exact_inbox(db: Non
     assert "Pull request: 1237" in turn["inbound"]
     assert f"Base SHA: {'b' * 40}" in turn["inbound"]
     assert f"Head SHA: {'a' * 40}" in turn["inbound"]
-    assert "Spawn exactly one `code_review` subagent" in turn["inbound"]
+    assert "Spawn exactly one `code_review` subagent in the background" in turn["inbound"]
+    assert "end the turn without publishing" in turn["inbound"]
     async with workspace_tx() as connection:
         inbox = (
             (
