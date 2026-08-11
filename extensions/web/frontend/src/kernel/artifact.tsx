@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { Markdown } from "@/lib/markdown";
+import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
 
 const ARTIFACT_TEXT_BYTES = 64 * 1024;
@@ -13,7 +14,15 @@ export function isTextMedia(mediaType: string): boolean {
 /** A shared text file, read to the fold. Markdown renders as the document it is — the same
  *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
  *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
-export function ArtifactText({ url, mediaType }: { url: string | null; mediaType: string }) {
+export function ArtifactText({
+  url,
+  mediaType,
+  display = "frame",
+}: {
+  url: string | null;
+  mediaType: string;
+  display?: "excerpt" | "frame" | "inline";
+}) {
   const [body, setBody] = useState<string | null>(null);
   const [bounded, setBounded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -64,15 +73,28 @@ export function ArtifactText({ url, mediaType }: { url: string | null; mediaType
   return (
     <>
       {mediaType === MARKDOWN_MEDIA_TYPE ? (
-        <div className="max-h-(--media-tall) overflow-y-auto rounded-panel bg-fill-subtle p-lg">
+        <div
+          data-artifact-document
+          className={cn(
+            "relative rounded-panel bg-fill-subtle p-lg",
+            display === "excerpt" && "max-h-24 overflow-hidden",
+            display === "frame" && "max-h-(--media-tall) overflow-y-auto",
+          )}
+        >
           <Markdown text={body} />
+          {display === "excerpt" ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-2xl bg-linear-to-t from-fill-subtle"
+            />
+          ) : null}
         </div>
       ) : (
         <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
           {body}
         </pre>
       )}
-      {bounded ? (
+      {bounded && display !== "excerpt" ? (
         <div className="font-mono text-small opacity-(--muted)">
           First {formatSize(ARTIFACT_TEXT_BYTES)} shown.
         </div>

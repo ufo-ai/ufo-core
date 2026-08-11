@@ -404,6 +404,7 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
 function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
   const [opened, setOpened] = useState(false);
   const textUrl = isTextMedia(artifact.media_type) ? artifact.url : null;
+  const markdown = artifact.media_type === "text/markdown";
   return (
     <article className="min-w-0 rounded-panel border border-edge p-lg">
       {artifact.preview ? (
@@ -427,7 +428,23 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
       <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
         {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
       </p>
-      {textUrl ? (
+      {textUrl && markdown ? (
+        <div className="mt-sm">
+          <ArtifactText
+            url={textUrl}
+            mediaType={artifact.media_type}
+            display={opened ? "inline" : "excerpt"}
+          />
+          <button
+            type="button"
+            className="mt-sm border-0 bg-transparent p-0 text-label text-inherit underline"
+            aria-expanded={opened}
+            onClick={() => setOpened((full) => !full)}
+          >
+            {opened ? "First lines" : "Full document"}
+          </button>
+        </div>
+      ) : textUrl ? (
         <details className="mt-sm" onToggle={(event) => setOpened(event.currentTarget.open)}>
           <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
             Preview

@@ -501,7 +501,7 @@ test("artifacts slot renders durable shared outputs with their download metadata
   expect(screen.queryByText("Preview")).toBeNull();
 });
 
-test("a text artifact reads its bounded body into the slot and a binary one offers no preview", async () => {
+test("a markdown artifact starts with its first lines and expands to the full document inline", async () => {
   const notes = "https://ufo.example/artifacts/notes.md?token=signed";
   let bodyReads = 0;
   wire({
@@ -546,18 +546,22 @@ test("a text artifact reads its bounded body into the slot and a binary one offe
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 2" }));
   expect(await screen.findByText("The written summary")).toBeTruthy();
-  // One disclosure, on the text artifact — the PDF's row offers none, and neither row has read
-  // a byte of its body until the member opens it.
-  expect(screen.getAllByText("Preview")).toHaveLength(1);
-  expect(bodyReads).toBe(0);
-
-  await userEvent.click(screen.getByText("Preview"));
   expect(await screen.findByText(/The number moved\./)).toBeTruthy();
   expect(bodyReads).toBe(1);
-  // Markdown reads as the document it is: the heading is a heading, not a line beginning with #.
   const heading = await screen.findByRole("heading", { name: "Findings" });
   expect(heading.tagName).toBe("H1");
   expect(screen.queryByText(/# Findings/)).toBeNull();
+  const document = heading.closest("[data-artifact-document]");
+  expect(document?.className).toContain("max-h-24");
+
+  const full = screen.getByRole("button", { name: "Full document" });
+  expect(full.getAttribute("aria-expanded")).toBe("false");
+  await userEvent.click(full);
+  expect(document?.className).not.toContain("max-h-24");
+  expect(screen.getByRole("button", { name: "First lines" }).getAttribute("aria-expanded")).toBe(
+    "true",
+  );
+  expect(screen.queryByText("Preview")).toBeNull();
 });
 
 test("a plain text artifact keeps its characters instead of being read as markdown", async () => {
