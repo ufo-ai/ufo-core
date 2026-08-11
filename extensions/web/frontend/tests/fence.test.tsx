@@ -10,11 +10,9 @@ import {
   AGENT,
   MEMBER,
   NO_TASKS,
-  SECOND,
   TASK_KIND,
   json,
   objectIndex,
-  pick,
   useStreamFake,
 } from "./harness";
 
@@ -60,45 +58,6 @@ test("switching tabs discards the read left behind rather than painting it", asy
 
   expect(screen.queryByText("stale-provider")).toBeNull();
   expect(screen.getByText(NO_TASKS)).toBeTruthy();
-});
-
-test("picking another agent discards the read left behind rather than painting it", async () => {
-  const pending = new Map<string, (value: Response) => void>();
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string) => {
-      if (url.includes("/skills")) {
-        return new Promise<Response>((resolve) => {
-          pending.set(url, resolve);
-        });
-      }
-      if (url.includes("/api/chats")) return json({ chats: [] });
-      return json({ messages: [] });
-    }),
-  );
-
-  location.hash = "#/customize/skills";
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  await waitFor(() => expect(pending.size).toBe(1));
-  const [firstUrl] = [...pending.keys()];
-
-  await pick("Agent", "second");
-  await waitFor(() => expect(pending.size).toBe(2));
-  const secondUrl = [...pending.keys()].find((url) => url !== firstUrl)!;
-
-  pending.get(secondUrl)!(
-    json({ skills: [{ name: "mine", description: "second's skill", origin: "member" }] }),
-  );
-  await waitFor(() => expect(screen.getByText("second's skill")).toBeTruthy());
-
-  pending.get(firstUrl)!(
-    json({ skills: [{ name: "theirs", description: "first's skill", origin: "member" }] }),
-  );
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  expect(screen.queryByText("first's skill")).toBeNull();
-  expect(screen.getByText("second's skill")).toBeTruthy();
 });
 
 test("a slow read for a filter the member left never paints over the filter they chose", async () => {

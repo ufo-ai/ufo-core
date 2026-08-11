@@ -138,7 +138,7 @@ function SubagentSkills({ base }: { base: string }) {
           {payload.loads_skills ? (
             <Hint className="m-0">
               A child also loads the member-authored skills of the agent that spawned it, listed
-              under Customize for that agent.
+              under that agent's Skills tab.
             </Hint>
           ) : null}
           {payload.loads_skills && payload.skills.length ? (

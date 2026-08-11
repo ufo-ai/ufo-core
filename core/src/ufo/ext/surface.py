@@ -448,11 +448,13 @@ class PortalKind:
 @dataclass(frozen=True)
 class PortalSkill:
     """One skill as the portal lists it: a member-authored skill of the selected agent
-    (`origin="member"`) or a deploy-provided loadable skill (`origin="deploy"`)."""
+    (`origin="member"`) or a deploy-provided loadable skill (`origin="deploy"`), carrying the
+    workflow body the agent loads so the portal can show the whole record."""
 
     name: str
     description: str
     origin: Literal["member", "deploy"]
+    instructions: str
 
 
 class ConnectionView(BaseModel):
@@ -1625,6 +1627,7 @@ class SurfaceContext:
                 name=skill.name,
                 description=skill.description,
                 origin="deploy" if skill.name in deploy_names else "member",
+                instructions=skill.instructions,
             )
             for skill in merged.by_name.values()
             if skill.parent is None

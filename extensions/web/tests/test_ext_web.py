@@ -4852,6 +4852,7 @@ async def test_a_skill_intent_creates_replaces_and_deletes(
     saved = (await listed())["release-notes"]
     assert saved["description"] == "How release notes read."
     assert saved["origin"] == "member"
+    assert saved["instructions"] == "Write tersely."
     replaced = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={

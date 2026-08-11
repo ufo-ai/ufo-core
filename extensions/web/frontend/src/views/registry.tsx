@@ -8,7 +8,6 @@ import { Connectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { Scheduled } from "@/views/Scheduled";
 import { Sites } from "@/views/Sites";
-import { Skills } from "@/views/Skills";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
@@ -60,11 +59,6 @@ export const CUSTOMIZE_VIEWS: Record<CustomizeTab, PaneView> = {
     label: "Connectors",
     remountOnPlace: false,
     render: (place, onPlace) => <Connectors place={place} onPlace={onPlace} />,
-  },
-  skills: {
-    label: "Skills",
-    remountOnPlace: false,
-    render: (place, onPlace) => <Skills place={place} onPlace={onPlace} />,
   },
   memory: {
     label: "Memory",

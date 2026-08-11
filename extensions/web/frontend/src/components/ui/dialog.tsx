@@ -60,8 +60,14 @@ export function DialogDescription({
 
 /** The close sits in the footer beside the act it cancels, never as a corner glyph: the portal
  *  ships no icon set, and a labelled control states what leaving does. `Cancel` takes the padding
- *  of `send` so the pair reads as one choice of two, not an act with a smaller way out. */
-export function DialogFooter({ className, children, ...props }: ComponentProps<"div">) {
+ *  of `send` so the pair reads as one choice of two, not an act with a smaller way out. A dialog
+ *  with nothing to commit names the leave `Close` — there is no act to abandon. */
+export function DialogFooter({
+  className,
+  children,
+  leave = "Cancel",
+  ...props
+}: ComponentProps<"div"> & { leave?: string }) {
   return (
     <div
       className={cn(
@@ -71,7 +77,7 @@ export function DialogFooter({ className, children, ...props }: ComponentProps<"
       {...props}
     >
       <DialogPrimitive.Close asChild>
-        <Button className="px-3xl py-md">Cancel</Button>
+        <Button className="px-3xl py-md">{leave}</Button>
       </DialogPrimitive.Close>
       {children}
     </div>

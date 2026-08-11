@@ -31,11 +31,46 @@ function portal(routes: Record<string, () => Response>) {
   return routes;
 }
 
+async function openSubagents() {
+  await userEvent.click(screen.getByRole("button", { name: "Show subagents" }));
+}
+
+test("subagents start collapsed and open on demand", async () => {
+  portal({});
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+  expect(screen.getByRole("heading", { name: "Subagents" })).toBeTruthy();
+  expect(screen.queryByText("deep_research")).toBeNull();
+  expect(screen.queryByText("This deploy declares no subagents.")).toBeNull();
+  expect(screen.getByRole("button", { name: "Show subagents" }).getAttribute("aria-expanded")).toBe(
+    "false",
+  );
+
+  await openSubagents();
+
+  expect(screen.getByText("deep_research")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Hide subagents" }).getAttribute("aria-expanded")).toBe(
+    "true",
+  );
+});
+
+test("an empty subagent section has no fold control", async () => {
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+  expect(screen.getByRole("heading", { name: "Subagents" })).toBeTruthy();
+  expect(screen.getByText("This deploy declares no subagents.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /subagents/i })).toBeNull();
+});
+
 test("a subagent row opens its page, naming the model, round limit, and untrusted wall", async () => {
   wire({ "/subagents/deep_research/overview": () => json(OVERVIEW) });
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await openSubagents();
   await userEvent.click(await viewCard("deep_research"));
 
   expect(location.hash).toBe("#/subagents/deep_research");
@@ -62,6 +97,7 @@ test("a subagent inheriting its parent's model says so rather than naming one", 
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await openSubagents();
   await userEvent.click(await viewCard("general_purpose"));
 
   await screen.findByTestId("panel");

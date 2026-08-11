@@ -1160,7 +1160,12 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(
         {
             "skills": [
-                {"name": skill.name, "description": skill.description, "origin": skill.origin}
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "origin": skill.origin,
+                    "instructions": skill.instructions,
+                }
                 for skill in listed
             ]
         }

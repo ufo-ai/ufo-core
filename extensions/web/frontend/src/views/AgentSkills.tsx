@@ -10,46 +10,47 @@ import {
 } from "@/components/ui/dialog";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
-import { Td } from "@/components/ui/table";
-import { AgentPicker, chosenAgent } from "@/kernel/agentpick";
-import type { Placement } from "@/kernel/pager";
+import { CardGrid, codeSpans } from "@/kernel/cards";
 import {
   type NoticeState,
   OutcomeNotice,
   Panel,
-  PanelEmpty,
+  PanelBlank,
   QUIET,
   Section,
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
-import { useAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 
-type Skill = { name: string; description: string; origin: string };
+type Skill = { name: string; description: string; origin: string; instructions: string };
 
-/** The wire files a skill under `member` or `deploy`. A member reads where it came from: one they
- *  saved onto this agent, or one the deploy ships to every agent in the workspace. */
 const ORIGINS: { label: string; value: string }[] = [
-  { label: "This agent", value: "member" },
-  { label: "Deploy", value: "deploy" },
+  { label: "Custom", value: "member" },
+  { label: "Built-in", value: "deploy" },
 ];
+
+const ORIGIN_ORDER = ORIGINS.map((entry) => entry.value);
 
 function origin(skill: Skill): string {
   return ORIGINS.find((entry) => entry.value === skill.origin)?.label ?? skill.origin;
 }
 
-/** The grammar every object name obeys, stated to the browser so a name the lane would refuse is
- *  refused in the field the member is typing it into. */
+function ordered(skills: Skill[]): Skill[] {
+  return [...skills].sort((left, right) => {
+    const leftRank = ORIGIN_ORDER.indexOf(left.origin);
+    const rightRank = ORIGIN_ORDER.indexOf(right.origin);
+    const normalizedLeft = leftRank === -1 ? ORIGIN_ORDER.length : leftRank;
+    const normalizedRight = rightRank === -1 ? ORIGIN_ORDER.length : rightRank;
+    if (normalizedLeft !== normalizedRight) return normalizedLeft - normalizedRight;
+    return left.name.localeCompare(right.name);
+  });
+}
+
 const NAME_PATTERN = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
 const NAME_MAX = 64;
 
-/** `SKILL.md` is one file with a fixed header, and the header's `name` must equal the name the
- *  skill is filed under — a form that asks for both invites a mismatch the lane can only refuse.
- *  So the member states name, description, and instructions once each, and the file is composed
- *  here. The description is emitted as a quoted scalar, which is what makes a colon in it safe. */
 function skillDocument(name: string, description: string, instructions: string): string {
   return [
     "---",
@@ -62,39 +63,7 @@ function skillDocument(name: string, description: string, instructions: string):
   ].join("\n");
 }
 
-/** A skill belongs to one agent — the read, the empty line, and the lane a save or a delete is
- *  admitted into all name it — so the tab states which agent it is showing and lets the member say.
- *  The pick rides the place, so a reload and a link both land on the agent the member was reading.
- *  Remounting on it is what discards the read left behind. */
-export function Skills({
-  place,
-  onPlace,
-}: {
-  place: Placement;
-  onPlace: (place: Placement) => void;
-}) {
-  const agents = useAgents();
-  const agent = chosenAgent(agents, place);
-  if (!agent) return <PanelEmpty>No such agent.</PanelEmpty>;
-  return (
-    <AgentSkills
-      key={agent.id}
-      agent={agent}
-      agents={agents}
-      onPick={(id) => onPlace({ agent: id })}
-    />
-  );
-}
-
-function AgentSkills({
-  agent,
-  agents,
-  onPick,
-}: {
-  agent: Agent;
-  agents: Agent[];
-  onPick: (agentId: string) => void;
-}) {
+export function AgentSkills({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [saveNotice, setSaveNotice] = useState<NoticeState>(QUIET);
@@ -105,7 +74,9 @@ function AgentSkills({
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [narrowed, setNarrowed] = useState("");
+  const [viewing, setViewing] = useState<Skill | null>(null);
   const state = usePanelRead<{ skills: Skill[] }>("/agents/" + agent.id + "/skills", reloads);
+  const known = state.phase === "ready" ? state.payload.skills : null;
 
   async function submitIntent(intent: unknown) {
     setBusy(true);
@@ -149,62 +120,94 @@ function AgentSkills({
       <Section
         title="Skills"
         bar={
-          <>
-            <AgentPicker agent={agent} agents={agents} onPick={onPick} />
-            <Input
-              type="search"
-              aria-label="Search"
-              placeholder="Search"
-              className="max-w-control-row"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            <Filter options={ORIGINS} value={narrowed} onChange={setNarrowed} />
-            <Button variant="send" onClick={() => setWriting(true)}>
-              New skill
-            </Button>
-            <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
-          </>
+          known?.length ? (
+            <>
+              <Input
+                type="search"
+                aria-label="Search"
+                placeholder="Search"
+                className="max-w-control-row"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              <Filter options={ORIGINS} value={narrowed} onChange={setNarrowed} />
+              <Button variant="send" onClick={() => setWriting(true)}>
+                New skill
+              </Button>
+            </>
+          ) : null
         }
       >
-        <Panel state={state}>
-          {(payload) => (
-            <DataTable
-              columns={["Name", "Description", "Source", ""]}
-              rows={payload.skills.filter(
-                (skill) =>
-                  (!narrowed || skill.origin === narrowed) &&
-                  (skill.name + " " + skill.description)
-                    .toLowerCase()
-                    .includes(query.toLowerCase()),
-              )}
-              rowKey={(skill) => skill.name}
-              empty={"No skill has been saved onto " + agent.name + " yet."}
-              note={query || narrowed ? "No skill matches this search." : undefined}
-            >
-              {(skill) => (
-                <>
-                  <Td>{skill.name}</Td>
-                  <Td>{skill.description}</Td>
-                  <Td>{origin(skill)}</Td>
-                  <Td>
-                    {skill.origin === "member" ? (
-                      <ConfirmButton
-                        verb="Delete"
-                        variant="row"
-                        disabled={busy}
-                        onClick={() =>
-                          submitIntent({ verb: "delete", kind: "skill", name: skill.name })
-                        }
-                      />
-                    ) : null}
-                  </Td>
-                </>
-              )}
-            </DataTable>
-          )}
+        <Panel state={state} shape="cards">
+          {(payload) => {
+            if (!payload.skills.length)
+              return (
+                <PanelBlank
+                  body={"No skill has been saved onto " + agent.name + " yet."}
+                  action={
+                    <Button variant="outline" onClick={() => setWriting(true)}>
+                      New skill
+                    </Button>
+                  }
+                />
+              );
+            const matched = ordered(payload.skills).filter(
+              (skill) =>
+                (!narrowed || skill.origin === narrowed) &&
+                (skill.name + " " + skill.description)
+                  .toLowerCase()
+                  .includes(query.toLowerCase()),
+            );
+            if (!matched.length) return <PanelBlank body="No skill matches this search." />;
+            return (
+              <CardGrid
+                rows={matched}
+                rowKey={(skill) => skill.name}
+                open={(skill) => () => setViewing(skill)}
+                primary={(skill) => skill.name}
+                status={(skill) => origin(skill)}
+                body={(skill) => codeSpans(skill.description)}
+                action={(skill) =>
+                  skill.origin === "member" ? (
+                    <ConfirmButton
+                      verb="Delete"
+                      variant="row"
+                      disabled={busy}
+                      onClick={() =>
+                        submitIntent({ verb: "delete", kind: "skill", name: skill.name })
+                      }
+                    />
+                  ) : null
+                }
+              />
+            );
+          }}
         </Panel>
       </Section>
+
+      {viewing ? (
+        <Dialog open onOpenChange={(next) => (next ? undefined : setViewing(null))}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{viewing.name}</DialogTitle>
+            </DialogHeader>
+            <div className="flex flex-col gap-xl">
+              <Field label="Description" htmlFor="skill-view-description">
+                <Input id="skill-view-description" readOnly value={viewing.description} />
+              </Field>
+              <Field label="Instructions" htmlFor="skill-view-instructions">
+                <Textarea
+                  id="skill-view-instructions"
+                  readOnly
+                  rows={12}
+                  value={viewing.instructions}
+                />
+              </Field>
+            </div>
+            <DialogFooter leave="Close" />
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       {writing ? (
         <Dialog open onOpenChange={(next) => (next ? undefined : close())}>

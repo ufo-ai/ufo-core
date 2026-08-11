@@ -52,6 +52,7 @@ export function Agents({
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState("");
+  const [subagentsOpen, setSubagentsOpen] = useState(false);
   const wanted = query.trim().toLowerCase();
   const found = agents.filter((agent) => agent.name.toLowerCase().includes(wanted));
 
@@ -118,23 +119,38 @@ export function Agents({
           <PanelBlank body="No agent is visible to you." />
         )}
       </Section>
-      <Section title="Subagents">
+      <Section
+        title="Subagents"
+        bar={
+          subagents.length ? (
+            <Button
+              variant="outline"
+              aria-expanded={subagentsOpen}
+              onClick={() => setSubagentsOpen((open) => !open)}
+            >
+              {subagentsOpen ? "Hide subagents" : "Show subagents"}
+            </Button>
+          ) : null
+        }
+      >
         {subagents.length ? (
-          <CardGrid
-            rows={subagents}
-            rowKey={(subagent) => subagent.name}
-            mark={{ shape: "square" }}
-            primary={(subagent) => subagent.name}
-            status={(subagent) =>
-              subagent.model ? <span className={MODEL}>{subagent.model}</span> : null
-            }
-            body={(subagent) => (subagent.model ? SPAWNED : INHERITS)}
-            action={(subagent) => (
-              <Button variant="row" onClick={() => onOpenSubagent(subagent.name)}>
-                View
-              </Button>
-            )}
-          />
+          subagentsOpen ? (
+            <CardGrid
+              rows={subagents}
+              rowKey={(subagent) => subagent.name}
+              mark={{ shape: "square" }}
+              primary={(subagent) => subagent.name}
+              status={(subagent) =>
+                subagent.model ? <span className={MODEL}>{subagent.model}</span> : null
+              }
+              body={(subagent) => (subagent.model ? SPAWNED : INHERITS)}
+              action={(subagent) => (
+                <Button variant="row" onClick={() => onOpenSubagent(subagent.name)}>
+                  View
+                </Button>
+              )}
+            />
+          ) : null
         ) : (
           <PanelBlank body="This deploy declares no subagents." />
         )}

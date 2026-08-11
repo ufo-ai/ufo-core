@@ -193,8 +193,8 @@ test("skills name where each came from, and save posts one skill file", async ()
     "/skills": () =>
       json({
         skills: [
-          { name: "mine", description: "member skill", origin: "member" },
-          { name: "shipped", description: "deploy skill", origin: "deploy" },
+          { name: "mine", description: "member skill", origin: "member", instructions: "a" },
+          { name: "shipped", description: "deploy skill", origin: "deploy", instructions: "b" },
         ],
       }),
     "/intents": (_url, init) => {
@@ -203,25 +203,20 @@ test("skills name where each came from, and save posts one skill file", async ()
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/customize/skills";
+  location.hash = "#/agents/" + AGENT_ID + "/skills";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByText("deploy skill")).toBeTruthy();
-  expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
-    "Name",
-    "Description",
-    "Source",
-    "",
-  ]);
-  expect(screen.getByText("mine").closest("tr")?.textContent).toContain("This agent");
-  expect(screen.getByText("shipped").closest("tr")?.textContent).toContain("Deploy");
+  expect(screen.queryByRole("columnheader")).toBeNull();
+  expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
+  expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
 
-  await userEvent.click(screen.getByRole("tab", { name: "Deploy" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Built-in" }));
   expect(screen.queryByText("member skill")).toBeNull();
   expect(screen.getByText("deploy skill")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("tab", { name: "This agent" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Custom" }));
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
@@ -681,6 +676,7 @@ test("the agents view lists the deploy's subagents below the agents, opening not
   );
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("button", { name: "Show subagents" }));
   const index = within(screen.getByRole("main"));
   const cards = index.getAllByRole("listitem");
   expect(cards.map((card) => within(card).getByText(/^(assistant|deep_research|general_purpose)$/).textContent)).toEqual([

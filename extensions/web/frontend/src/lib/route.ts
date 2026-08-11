@@ -3,12 +3,13 @@ export const AGENT_TABS = [
   "conversations",
   "scheduled",
   "connectors",
+  "skills",
   "usage",
 ] as const;
 
 export const WORKSPACE_TABS = ["team", "sources", "credentials", "usage"] as const;
 
-export const CUSTOMIZE_TABS = ["connectors", "skills", "memory"] as const;
+export const CUSTOMIZE_TABS = ["connectors", "memory"] as const;
 
 export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
 

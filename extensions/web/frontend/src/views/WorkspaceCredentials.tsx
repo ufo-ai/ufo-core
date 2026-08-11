@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, Input } from "@/components/ui/field";
+import { codeSpans } from "@/kernel/cards";
 import { OutcomeNotice, type NoticeState, QUIET } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
@@ -63,7 +64,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       field: "filled",
       render: (filled) => (filled ? "Filled" : "Not set"),
     },
-    body: { field: "description", render: (description) => descriptionWithCode(description) },
+    body: { field: "description", render: (description) => codeSpans(description) },
   },
   empty: "No credential slots are declared.",
   actions: (row, { act, busy }) => (
@@ -108,19 +109,6 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Dialog>
   ),
 };
-
-function descriptionWithCode(description: string) {
-  const segments = description.split("`");
-  return segments.map((segment, index) =>
-    index % 2 === 1 && index < segments.length - 1 ? (
-      <code key={index} className="font-mono text-mono">
-        {segment}
-      </code>
-    ) : (
-      segment
-    ),
-  );
-}
 
 function CredentialPromptDialogForm({
   sealed,

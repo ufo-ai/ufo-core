@@ -1,173 +1,139 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { MainAgentProvider } from "@/lib/mainAgent";
-import { customizeHash } from "@/lib/route";
+import { agentHash } from "@/lib/route";
 
-import {
-  PlacedCustomize,
-  AGENT,
-  MEMBER,
-  SECOND,
-  SECOND_ID,
-  json,
-  opened,
-  pick,
-  useStreamFake,
-  wire,
-} from "./harness";
+import { AGENT, MEMBER, json, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
 });
 
-const MINE = { name: "mine", description: "the first agent's skill", origin: "member" };
-const THEIRS = { name: "theirs", description: "the second agent's skill", origin: "member" };
+const SKILLS = [
+  { name: "mine", description: "member skill", origin: "member", instructions: "Write tersely." },
+  {
+    name: "shipped",
+    description: "built-in `skill`",
+    origin: "deploy",
+    instructions: "Read the tree first.",
+  },
+];
 
-function skills() {
-  return wire({
-    "/skills": (url) => json({ skills: url.includes(SECOND_ID) ? [THEIRS] : [MINE] }),
-    "/transcript": () => json({ messages: [] }),
-  });
+function renderSkills() {
+  location.hash = agentHash(AGENT.id, "skills");
+  return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 }
 
-function placed() {
-  return render(
-    <MainAgentProvider agents={[AGENT, SECOND]}>
-      <PlacedCustomize view="skills" />
-    </MainAgentProvider>,
-  );
-}
+test("the agent skills tab renders cards without a picker or Refresh", async () => {
+  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
 
-test("the customize tab lists the main agent's skills and names the agents to pick", async () => {
-  location.hash = "#/customize/skills";
-  skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  expect(await screen.findByText("the first agent's skill")).toBeTruthy();
+  expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
-  expect((await opened("Agent")).map((option) => option.textContent)).toEqual([
-    "assistant",
-    "second",
-  ]);
+  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+  expect(screen.queryByRole("columnheader")).toBeNull();
+  expect(document.querySelector('[data-part="mark"]')).toBeNull();
 });
 
-test("picking an agent reads that agent's skills, names it in the hash, and Back returns", async () => {
-  location.hash = "#/customize/skills";
-  const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+test("a card opens the whole skill read-only, and its Delete does not", async () => {
+  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
 
-  expect(await screen.findByText("the first agent's skill")).toBeTruthy();
+  await userEvent.click(await screen.findByText("member skill"));
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog.textContent).toContain("mine");
+  const instructions = screen.getByLabelText("Instructions") as HTMLTextAreaElement;
+  expect(instructions.value).toBe("Write tersely.");
+  expect(instructions.readOnly).toBe(true);
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
 
-  await pick("Agent", "second");
-
-  expect(await screen.findByText("the second agent's skill")).toBeTruthy();
-  expect(screen.queryByText("the first agent's skill")).toBeNull();
-  expect(location.hash).toBe("#/customize/skills?agent=" + SECOND_ID);
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/skills"))).toBe(true);
-
-  history.back();
-  await waitFor(() => expect(location.hash).toBe("#/customize/skills"));
-  expect(await screen.findByText("the first agent's skill")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("a reloaded pick lands on that agent, which the empty line names", async () => {
-  location.hash = customizeHash("skills", { agent: SECOND_ID });
-  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+test("cards sort custom ahead of built-in and render backticks as code", async () => {
+  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
 
-  expect(await screen.findByText("No skill has been saved onto second yet.")).toBeTruthy();
+  expect(await screen.findByText("member skill")).toBeTruthy();
+  const names = [...document.querySelectorAll('[data-part="primary"]')].map(
+    (node) => node.textContent,
+  );
+  expect(names).toEqual(["mine", "shipped"]);
+  expect(screen.getByText("skill", { selector: "code" })).toBeTruthy();
 });
 
-test("a save is admitted into the lane of the agent the member picked", async () => {
-  const posted: string[] = [];
-  location.hash = "#/customize/skills";
+test("the origin filter labels deploy skills Built-in and hides custom skills", async () => {
+  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
+
+  expect(await screen.findByText("member skill")).toBeTruthy();
+  expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
+  expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
+  await userEvent.click(screen.getByRole("tab", { name: "Built-in" }));
+  expect(screen.queryByText("member skill")).toBeNull();
+  expect(screen.getByText("shipped")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+});
+
+test("New skill posts the prepared skill intent for the pane's agent", async () => {
+  const posted: unknown[] = [];
   wire({
     "/skills": () => json({ skills: [] }),
-    "/intents": (url) => {
-      posted.push(url);
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Saved." });
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  renderSkills();
 
-  await pick("Agent", "second");
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
-  await userEvent.type(await screen.findByLabelText("Name"), "triage");
-  await userEvent.type(screen.getByLabelText("Description"), "Load when triaging.");
-  await userEvent.type(screen.getByLabelText("Instructions"), "steps");
+  await userEvent.type(await screen.findByLabelText("Name"), "fresh");
+  await userEvent.type(screen.getByLabelText("Description"), "Load when asked.");
+  await userEvent.type(screen.getByLabelText("Instructions"), "body");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
+  expect(posted[0]).toMatchObject({
+    verb: "apply",
+    kind: "skill",
+    name: "fresh",
+    spec: { files: { "SKILL.md": "---\nname: fresh\ndescription: \"Load when asked.\"\n---\n\nbody\n" } },
+  });
 });
 
-test("a hash naming an agent this member cannot reach reports it", async () => {
-  location.hash = customizeHash("skills", { agent: "99999999-9999-4999-8999-999999999999" });
-  const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+test("Delete is offered and posts only for custom skills", async () => {
+  const posted: unknown[] = [];
+  wire({
+    "/skills": () => json({ skills: SKILLS }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Deleted." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  renderSkills();
 
-  expect(await screen.findByText("No such agent.")).toBeTruthy();
-  expect(calls.some((url) => url.includes("/skills"))).toBe(false);
+  expect(await screen.findByText("member skill")).toBeTruthy();
+  expect(screen.getByText("mine").closest("li")?.querySelector("button")).toBeTruthy();
+  expect(screen.getByText("shipped").closest("li")?.querySelector("button")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+  await waitFor(() => expect(posted).toEqual([{ verb: "delete", kind: "skill", name: "mine" }]));
 });
 
-test("picking an agent reads it once", async () => {
-  location.hash = "#/customize/skills";
-  const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+test("the blank names the agent and holds the only New skill act", async () => {
+  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
 
-  expect(await screen.findByText("the first agent's skill")).toBeTruthy();
-  await pick("Agent", "second");
-  expect(await screen.findByText("the second agent's skill")).toBeTruthy();
-
-  const reads = calls.filter((url) => url.includes("/skills"));
-  expect(reads.filter((url) => url.includes(SECOND_ID)).length).toBe(1);
-});
-
-test("a workspace of one agent is offered no agent to pick", async () => {
-  skills();
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedCustomize view="skills" />
-    </MainAgentProvider>,
-  );
-
-  expect(await screen.findByText("the first agent's skill")).toBeTruthy();
-  expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
-});
-
-test("the search and the origin filter reset with the agent they narrowed", async () => {
-  skills();
-  placed();
-
-  const box = (await screen.findByRole("searchbox")) as HTMLInputElement;
-  await userEvent.type(box, "nothing");
-  expect(await screen.findByText("No skill matches this search.")).toBeTruthy();
-
-  await pick("Agent", "second");
-
-  expect(await screen.findByText("the second agent's skill")).toBeTruthy();
-  expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
-  expect(screen.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
-});
-
-test("the bar is drawn while the first read is still in flight", async () => {
-  const pending = new Map<string, (value: Response) => void>();
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(
-      async (url: string) =>
-        new Promise<Response>((resolve) => {
-          pending.set(url, resolve);
-        }),
-    ),
-  );
-  placed();
-
-  expect(await screen.findByRole("combobox", { name: "Agent" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "New skill" })).toBeTruthy();
-  expect(pending.size).toBe(1);
+  expect(await screen.findByText("No skill has been saved onto assistant yet.")).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "New skill" }).length).toBe(1);
+  expect(screen.queryByRole("searchbox")).toBeNull();
 });

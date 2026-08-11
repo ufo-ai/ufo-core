@@ -89,7 +89,7 @@ and a strip is drawn only where the array holds more than one view. Each destina
 route kind, its own tab type, and its own hash builder, so a tab without a view stays a compile
 error rather than a string the router fails to match. Workspace holds what the workspace *is* — its
 people, its inputs, its output, its spend. Customize holds what the member shapes the agents *with*:
-connectors, skills, memory.
+connectors and memory.
 
 ## Settings views
 
@@ -149,7 +149,8 @@ takes one of two shapes. A record with no picture of its own takes `shape: "squa
 A record that has or will have one takes `shape: "band"` — a full-bleed `h-(--size-band)` strip
 above the card body, filled by the record's own image where it has one and left as the subtle fill
 where it does not (Artifacts, Sites); the status then rides the name's line. A band that fails to
-load falls back to the same fill rather than to a broken image.
+load falls back to the same fill rather than to a broken image. A record that will never earn a
+picture takes no mark at all, and its status rides the name's line (Skills).
 
 Row lines are `RowLines` (`kernel/rows.tsx`) — the list both the declared listings and a bespoke
 section draw, as `CardGrid` is for cards. Where the record is a thing to open, the whole row is the
@@ -317,7 +318,10 @@ sits on the same left edge and the same width as Team's members table, and the t
 section rather than leaving the records unheaded.
 
 Every screen that lists records shares one bar, in one order and on one line: the search at
-`max-w-control-row`, the `Filter` tablist, the `send` act that adds a record, then `Refresh`. The
+`max-w-control-row`, the `Filter` tablist, the `send` act that adds a record, then `Refresh` where
+the screen draws one. Skills draws none: a record lands from the bar's own act — which re-reads —
+or from chat, and the tab re-reads on every visit, so the button re-states what the screen already
+does. The
 bar does not wrap — a control that drops to a second line reads as an orphan of whatever is under
 it, and the search is the item that has to give, since a name is short and the table beneath it
 carries the whole record anyway. `Section` draws the row `items-stretch`, so every control in it
@@ -328,7 +332,7 @@ A Customize screen whose records belong to one agent leads that bar with the age
 `aria-label`, never a second spelling per tab. It sits ahead of the search because it chooses the
 set and the search narrows within it; a picker after the act would read as an act. It is drawn only
 where there is more than one agent to pick, the way the sidebar's new-conversation control is — a
-picker of one is chrome. The pick rides the place (`#/customize/skills?agent=<id>`), so a reload
+picker of one is chrome. The pick rides the place (`#/customize/connectors?agent=<id>`), so a reload
 lands on the agent the member was reading and a link opens the screen they were looking at; it is
 the one place the agent is named, and a link is the only way to reach one that is not the default.
 Picking remounts the screen on the agent, which discards the read left behind and clears the search
@@ -427,6 +431,8 @@ record while the view stays live behind it. `DialogFooter` supplies `Cancel` and
 committing act as its child, so leaving is always the first control and never a corner glyph.
 `Cancel` carries the padding of `send`, so the two footer controls measure the same: the member is
 choosing between two ways out, and a smaller `Cancel` would state that leaving is the lesser one.
+A dialog with nothing to commit — the read-only skill viewer — names the leave `Close` through the
+footer's `leave` prop: there is no act to abandon, so `Cancel` would claim one.
 A form's outcome notice renders inside the dialog and only when it has words — the dialog
 re-centres itself, so there is no layout to reserve against. A refusal therefore leaves the dialog
 standing with what the member typed still in it; only an applied act closes it.
@@ -576,8 +582,10 @@ Copy a known-good implementation instead of composing from rules:
   row's own agent.
 - `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card, and a
   typed object's create act in the bar of a screen that is not that kind's index.
-- `views/Skills.tsx` — a Customize tab whose records belong to an agent the member picks from
-  the bar, the pick riding the place.
+- `views/AgentSkills.tsx` — an agent tab whose records belong to the agent in the pane, read as
+  the same cards Credentials draws: the origin (`Custom`, `Built-in`) in the status slot, the
+  custom family sorted ahead of the built-in directory, and no `Refresh`. The whole card opens the
+  skill through `rowControl` into a read-only copy of the same dialog `New skill` commits with.
 - `views/Connectors.tsx` — one read stated twice: the member's grants under Customize, and what
   the agent can reach on its own tab.
 - `kernel/listing.tsx` — the listing renderer the declarations feed.

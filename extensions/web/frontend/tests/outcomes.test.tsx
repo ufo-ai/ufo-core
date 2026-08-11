@@ -386,7 +386,7 @@ test("the scheduled, overview, and skills refusals tone their notices", async ()
   await refusedNotice("The workspace refuses it.");
   second.unmount();
 
-  location.hash = "#/customize/skills";
+  location.hash = "#/agents/" + AGENT.id + "/skills";
   wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }), "/intents": refuse });
   const third = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
