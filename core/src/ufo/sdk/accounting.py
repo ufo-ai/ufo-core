@@ -17,9 +17,6 @@ from ufo.accounting import (
     MemberSpendReport as MemberSpendReport,
 )
 from ufo.accounting import (
-    SpendCapLine as SpendCapLine,
-)
-from ufo.accounting import (
     SpendReport as SpendReport,
 )
 from ufo.accounting import (
