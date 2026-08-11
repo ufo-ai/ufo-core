@@ -317,7 +317,6 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
     ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [
@@ -354,7 +353,6 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
   const opened = "8f2c1d40-0000-4000-8000-000000000004";
   wire({
     ["/conversations/" + opened + "/transcript"]: () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [
@@ -423,7 +421,6 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
           },
         ],
       }),
-    ["/conversations/" + held + "/files"]: () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [
@@ -459,7 +456,6 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
     screen.getByRole("link", { name: /Subagent · research/ }).getAttribute("href"),
   ).toBe("#/subagents/research/conversations/" + child + "?root=" + held);
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
-  expect(await screen.findByText("No files in this conversation's workspace.")).toBeTruthy();
 });
 
 test("a conversation nobody shared offers no opener", async () => {
@@ -737,7 +733,6 @@ test("the model field offers the deploy's models, which its schema alone cannot 
 test("a conversation the member may not read says so instead of reporting a status code", async () => {
   wire({
     "/conversations/c1/transcript": () => new Response("no", { status: 404 }),
-    "/files": () => json({ files: [] }),
     "/conversations": () =>
       json({
         conversations: [

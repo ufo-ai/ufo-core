@@ -104,9 +104,6 @@
 
   --media-tall: 60vh;
   --media-card: 20rem;
-  --media-frame: 40rem;
-  --media-preview: 36rem;
-  --media-text: 32rem;
   --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
   --size-band: 128px;
   --size-fact: 16ch;
@@ -114,7 +111,6 @@
   --size-reveal: 280px;
   --size-textarea: 12em;
   --size-notice: 1em;
-  --size-thumb: 64px;
   --marker-width: 2px;
 }
 

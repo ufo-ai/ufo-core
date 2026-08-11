@@ -62,7 +62,6 @@ test("acknowledging posts the transcript intent and opens the conversation it na
   const bodies: string[] = [];
   wire({
     "/transcript": () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     ...conversations([PRIVATE]),
     "/intents": (_url, init) => {
       bodies.push(String(init?.body));
@@ -89,7 +88,6 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   let release: ((value: Response) => void) | null = null;
   wire({
     "/transcript": () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     ...conversations([PRIVATE]),
     "/intents": () =>
       new Promise<Response>((resolve) => {
@@ -114,7 +112,6 @@ test("an acknowledgement in flight for one conversation never opens over another
   let release: ((value: Response) => void) | null = null;
   wire({
     "/transcript": () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     ...conversations([PRIVATE, { ...WALLED, disclosable: true }]),
     "/intents": () => {
       if (release) return Response.json({ applied: false, message: "Refused." });
@@ -163,7 +160,6 @@ test("a permalink to another member's conversation offers the listing's acknowle
         ? json({ chats: [], conversation: linked })
         : json({ chats: [] }),
     "/transcript": () => json({ messages: [] }),
-    "/files": () => json({ files: [] }),
     "/intents": () => json({ applied: true, message: "Recorded." }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);

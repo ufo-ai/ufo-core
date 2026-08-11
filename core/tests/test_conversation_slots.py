@@ -6,16 +6,13 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.ext.conversation_slots import (
     CONVERSATION_ARTIFACTS_MAX,
-    CONVERSATION_FILES_MAX,
     CONVERSATION_TASKS_MAX,
     ArtifactsSlotPayload,
     ConversationArtifact,
-    ConversationFile,
     ConversationSlotContext,
     ConversationSlotProvider,
     ConversationSource,
     ConversationTask,
-    FilesSlotPayload,
     ImagePreview,
     TasksSlotPayload,
 )
@@ -45,7 +42,7 @@ def _provider(slot_id: str = "changes") -> ConversationSlotProvider:
 
 def test_conversation_slot_declarations_preserve_manifest_order() -> None:
     first = Manifest(name="first", version="1", conversation_slots=(_provider("changes"),))
-    second = Manifest(name="second", version="1", conversation_slots=(_provider("files"),))
+    second = Manifest(name="second", version="1", conversation_slots=(_provider("artifacts"),))
 
     assert conversation_slot_declarations((first, second)) == (
         (first, first.conversation_slots[0]),
@@ -93,21 +90,6 @@ def test_changes_payload_bounds_its_collection() -> None:
     with pytest.raises(ValidationError, match="too_long"):
         WorkspaceChanges(
             changes=(change,) * (WORKSPACE_CHANGES_MAX + 1),
-            truncated=True,
-        )
-
-
-def test_files_payload_bounds_its_collection() -> None:
-    file = ConversationFile(
-        path="notes/brief.md",
-        size_bytes=42,
-        modified_at=datetime(2026, 8, 6, tzinfo=UTC),
-        preview=None,
-    )
-
-    with pytest.raises(ValidationError, match="too_long"):
-        FilesSlotPayload(
-            files=(file,) * (CONVERSATION_FILES_MAX + 1),
             truncated=True,
         )
 

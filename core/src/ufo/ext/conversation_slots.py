@@ -14,7 +14,6 @@ from ufo.audience import Audience
 from ufo.ext.context import ExtensionContext
 from ufo.image_previews import RasterImageMediaType
 from ufo.models.interface import Message
-from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.workspace_changes import WorkspaceChanges
 
 CONVERSATION_ARTIFACT_FILENAME_MAX_CHARS = 500
@@ -22,7 +21,6 @@ CONVERSATION_ARTIFACT_SUBJECT_MAX_CHARS = 2_000
 CONVERSATION_ARTIFACT_MEDIA_TYPE_MAX_CHARS = 200
 CONVERSATION_ARTIFACT_URL_MAX_CHARS = 8_192
 CONVERSATION_ARTIFACTS_MAX = 100
-CONVERSATION_FILES_MAX = 100
 CONVERSATION_SOURCE_URL_MAX_CHARS = 4_096
 CONVERSATION_SOURCE_TITLE_MAX_CHARS = 500
 CONVERSATION_SOURCE_SNIPPET_MAX_CHARS = 2_000
@@ -38,8 +36,8 @@ CONVERSATION_AUTOMATIONS_MAX = 100
 CONVERSATION_TASK_DESCRIPTION_MAX_CHARS = 2_000
 CONVERSATION_TASK_TITLE_MAX_CHARS = 500
 CONVERSATION_TASKS_MAX = 100
-PortalIcon = Literal["artifact", "calendar", "diff", "file", "link", "task"]
-PORTAL_ICONS = frozenset(("artifact", "calendar", "diff", "file", "link", "task"))
+PortalIcon = Literal["artifact", "calendar", "diff", "link", "task"]
+PORTAL_ICONS = frozenset(("artifact", "calendar", "diff", "link", "task"))
 
 
 class ImagePreview(BaseModel):
@@ -99,23 +97,6 @@ class ArtifactsSlotPayload(BaseModel):
 
     type: Literal["artifacts"] = "artifacts"
     artifacts: tuple[ConversationArtifact, ...] = Field(max_length=CONVERSATION_ARTIFACTS_MAX)
-    truncated: bool
-
-
-class ConversationFile(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    path: str = Field(min_length=1, max_length=FILE_CHANGE_PATH_MAX_CHARS)
-    size_bytes: int = Field(ge=0)
-    modified_at: datetime
-    preview: ImagePreview | None = None
-
-
-class FilesSlotPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["files"] = "files"
-    files: tuple[ConversationFile, ...] = Field(max_length=CONVERSATION_FILES_MAX)
     truncated: bool
 
 
@@ -247,7 +228,6 @@ ConversationSlotPayload = (
     AutomationsSlotPayload
     | ArtifactsSlotPayload
     | WorkspaceChanges
-    | FilesSlotPayload
     | SitesSlotPayload
     | SourcesSlotPayload
     | TasksSlotPayload
@@ -256,7 +236,6 @@ SUPPORTED_CONVERSATION_SLOT_PAYLOADS = (
     AutomationsSlotPayload,
     ArtifactsSlotPayload,
     WorkspaceChanges,
-    FilesSlotPayload,
     SitesSlotPayload,
     SourcesSlotPayload,
     TasksSlotPayload,

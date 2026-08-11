@@ -84,10 +84,7 @@ from ufo.hub import LiveFrame
 from ufo.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES,
     ImagePreviewGrant,
-    InvalidImagePreview,
-    RasterImageMediaType,
     raster_image_media_type,
-    validated_image_preview,
 )
 from ufo.listings import page_of, page_query
 from ufo.o11y import log
@@ -140,13 +137,6 @@ from ufo.workspace_changes import (
     NOTHING_CHANGED,
     WorkspaceChanges,
     recorded_workspace_changes,
-)
-from ufo.workspace_file_preview_token import (
-    WORKSPACE_FILE_PREVIEW_TTL_SECONDS,
-    WorkspaceFilePreviewTokenError,
-    mint_workspace_file_preview_token,
-    verify_workspace_file_preview_token,
-    workspace_file_preview_path_matches,
 )
 
 if TYPE_CHECKING:
@@ -348,14 +338,6 @@ class SharedArtifact:
     subject: str | None
     media_type: str
     size_bytes: int
-
-
-@dataclass(frozen=True)
-class WorkspaceFilePreview:
-    """Validated raster bytes and the exact media type a surface may serve them with."""
-
-    media_type: RasterImageMediaType
-    content: bytes
 
 
 @dataclass(frozen=True)
@@ -2782,50 +2764,6 @@ class SurfaceContext:
         if not await self._owned_conversation(conversation_id):
             return NOTHING_CHANGED
         return await recorded_workspace_changes(conversation_id)
-
-    def workspace_file_preview_token(
-        self, conversation_id: UUID, file: WorkspaceFile
-    ) -> str | None:
-        """A signed claim binding one bounded raster preview to its live file identity and size."""
-        if not self._artifact_token_secret:
-            return None
-        media_type = raster_image_media_type(file.path)
-        if media_type is None or file.size_bytes > IMAGE_PREVIEW_MAX_BYTES:
-            return None
-        expires_at = int(datetime.now(UTC).timestamp()) + WORKSPACE_FILE_PREVIEW_TTL_SECONDS
-        return mint_workspace_file_preview_token(
-            self._artifact_token_secret,
-            self.workspace_id,
-            conversation_id,
-            file.path,
-            ImagePreviewGrant(media_type=media_type, size_bytes=file.size_bytes),
-            expires_at,
-        )
-
-    async def read_workspace_file_preview(
-        self, conversation_id: UUID, rel: str, token: str
-    ) -> WorkspaceFilePreview | None:
-        """Validated raster bytes only when the signed claim matches workspace, file, and size."""
-        try:
-            claims = verify_workspace_file_preview_token(
-                token, self._artifact_token_secret, datetime.now(UTC)
-            )
-        except WorkspaceFilePreviewTokenError:
-            return None
-        if (
-            claims.workspace_id != self.workspace_id
-            or claims.conversation_id != conversation_id
-            or not workspace_file_preview_path_matches(rel, claims.path_digest)
-        ):
-            return None
-        stream = await self.read_workspace_file(conversation_id, rel)
-        if stream is None:
-            return None
-        try:
-            content = await validated_image_preview(stream, claims.preview)
-        except InvalidImagePreview:
-            return None
-        return WorkspaceFilePreview(media_type=claims.preview.media_type, content=content)
 
     async def read_workspace_file(
         self, conversation_id: UUID, rel: str

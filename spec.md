@@ -472,9 +472,9 @@ whose id is not a conversation id reports the bad link rather than opening one. 
 subagent conversations its turn spawned through the child turns' existing parent linkage. The
 conversations view lists the member's own plus the workspace-shared ones and opens each as its
 turns, the turns those spawned nested beneath them (a subagent runs in its own
-conversation carrying the parent's audience, in the spawning turn's sandbox), and the live
-workspace files; an admin lists every conversation of the agent and reads another member's private
-one only by acknowledging first that it may hold private information.
+conversation carrying the parent's audience, in the spawning turn's sandbox); an admin lists every
+conversation of the agent and reads another member's private one only by acknowledging first that it
+may hold private information.
 The acknowledgement is a granting act, so it rides the prepared-intent lane like every other panel
 mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
 writes names the reader, the subject, and the moment before any content is served, and is what the

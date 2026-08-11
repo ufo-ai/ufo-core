@@ -279,7 +279,6 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
           { role: "assistant", text: "reply in Slack" },
         ],
       }),
-    ["/conversations/" + CONVO_ID + "/files"]: () => json({ files: [] }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 

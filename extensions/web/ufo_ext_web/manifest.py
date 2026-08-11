@@ -14,7 +14,6 @@ from ufo_ext_web.surface import (
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
     CHAT_PENDING_PREFIX,
-    FILES_SLOT,
     ROUTES,
     SURFACE_WEB,
     TITLE_JOB_NAME,
@@ -32,7 +31,7 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         tools=WEB_ACCESS_TOOLS,
-        conversation_slots=(CHANGES_SLOT, FILES_SLOT, ARTIFACTS_SLOT),
+        conversation_slots=(CHANGES_SLOT, ARTIFACTS_SLOT),
         surfaces=(
             SurfaceSpec(name=SURFACE_WEB, routes=ROUTES, identify=resolve_workspace, home=True),
         ),

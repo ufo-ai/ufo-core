@@ -30,7 +30,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, TypedDict
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -63,17 +63,14 @@ from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_AUTOMATIONS_MAX,
-    CONVERSATION_FILES_MAX,
     CONVERSATION_SITES_MAX,
     ArtifactsSlotPayload,
     AutomationsSlotPayload,
     ConversationArtifact,
-    ConversationFile,
     ConversationSlotContext,
     ConversationSlotItem,
     ConversationSlotPayload,
     ConversationSlotProvider,
-    FilesSlotPayload,
     ImagePreview,
     SitesSlotPayload,
     WorkspaceChanges,
@@ -1403,28 +1400,6 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     return JSONResponse({"messages": rendered})
 
 
-async def conversation_files(ctx: SurfaceContext, request: Request) -> Response:
-    """The conversation's live workspace files — the sandbox's own state, empty for a conversation
-    whose sandbox is gone."""
-    authorized = await _readable_conversation(ctx, request)
-    if isinstance(authorized, Response):
-        return authorized
-    _agent_id, conversation_id, _viewer = authorized
-    listed = await ctx.list_workspace_files(conversation_id)
-    return JSONResponse(
-        {
-            "files": [
-                {
-                    "path": entry.path,
-                    "size_bytes": entry.size_bytes,
-                    "modified_at": _iso(entry.modified_at),
-                }
-                for entry in listed
-            ]
-        }
-    )
-
-
 @dataclass(frozen=True)
 class SlotViewer:
     member_id: UUID
@@ -1497,47 +1472,6 @@ async def _project_slot_context(
         return replace(
             slot_context,
             projection=await ctx.conversation_changes(slot_context.conversation_id),
-        )
-    if extension == "web" and content is FilesSlotPayload:
-        listed_files = await ctx.list_workspace_files(slot_context.conversation_id)
-        files: list[ConversationFile] = []
-        for file_entry in listed_files[:CONVERSATION_FILES_MAX]:
-            preview_media_type = raster_image_media_type(file_entry.path)
-            file_preview = None
-            preview_token = ctx.workspace_file_preview_token(
-                slot_context.conversation_id, file_entry
-            )
-            if preview_media_type is not None and preview_token is not None:
-                encoded_path = quote(file_entry.path, safe="/")
-                file_url = (
-                    f"/surface/{SURFACE_WEB}/agents/{slot_context.agent_id}"
-                    f"/conversations/{slot_context.conversation_id}/files/{encoded_path}"
-                )
-                if root_conversation_id is not None:
-                    file_url = (
-                        f"{file_url}?root={root_conversation_id}"
-                        f"&preview={quote(preview_token, safe='')}"
-                    )
-                else:
-                    file_url = f"{file_url}?preview={quote(preview_token, safe='')}"
-                try:
-                    file_preview = ImagePreview(media_type=preview_media_type, url=file_url)
-                except ValidationError:
-                    file_preview = None
-            files.append(
-                ConversationFile(
-                    path=file_entry.path,
-                    size_bytes=file_entry.size_bytes,
-                    modified_at=file_entry.modified_at,
-                    preview=file_preview,
-                )
-            )
-        return replace(
-            slot_context,
-            projection=FilesSlotPayload(
-                files=tuple(files),
-                truncated=len(listed_files) > CONVERSATION_FILES_MAX,
-            ),
         )
     if extension == "web" and content is ArtifactsSlotPayload:
         listed_artifacts = await ctx.list_conversation_artifacts(
@@ -1691,16 +1625,15 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
             continue
         if count is None:
             continue
-        summary = {
-            "id": bound.provider.id,
-            "label": bound.provider.label,
-            "icon": bound.provider.icon,
-            "kind": bound.provider.content.model_fields["type"].default,
-            "count": count,
-        }
-        if type(slot_context.projection) is FilesSlotPayload and slot_context.projection.truncated:
-            summary["count_truncated"] = True
-        slots.append(summary)
+        slots.append(
+            {
+                "id": bound.provider.id,
+                "label": bound.provider.label,
+                "icon": bound.provider.icon,
+                "kind": bound.provider.content.model_fields["type"].default,
+                "count": count,
+            }
+        )
     return JSONResponse({"slots": slots})
 
 
@@ -1758,31 +1691,6 @@ CHANGES_SLOT = ConversationSlotProvider(
 )
 
 
-def _files_projection(ctx: ConversationSlotContext) -> FilesSlotPayload:
-    if not isinstance(ctx.projection, FilesSlotPayload):
-        raise RuntimeError("files slot needs the host file projection")
-    return ctx.projection
-
-
-async def _read_files(ctx: ConversationSlotContext) -> FilesSlotPayload:
-    return _files_projection(ctx)
-
-
-async def _summarize_files(ctx: ConversationSlotContext) -> int | None:
-    count = len(_files_projection(ctx).files)
-    return count or None
-
-
-FILES_SLOT = ConversationSlotProvider(
-    id="files",
-    label="Files",
-    icon="file",
-    content=FilesSlotPayload,
-    summarize=_summarize_files,
-    read=_read_files,
-)
-
-
 def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload:
     if not isinstance(ctx.projection, ArtifactsSlotPayload):
         raise RuntimeError("artifacts slot needs the host artifact projection")
@@ -1806,38 +1714,6 @@ ARTIFACTS_SLOT = ConversationSlotProvider(
     summarize=_summarize_artifacts,
     read=_read_artifacts,
 )
-
-
-async def conversation_file(ctx: SurfaceContext, request: Request) -> Response:
-    """One workspace file's bytes, streamed from the live sandbox under the same gate that listed
-    it — including a spawned child's root-conversation proof — so the workspace-scoped path escapes
-    neither the workspace nor the container."""
-    authorized = await _slot_target(ctx, request)
-    if isinstance(authorized, Response):
-        return authorized
-    conversation_id = authorized.conversation_id
-    path = request.path_params["path"]
-    preview_token = request.query_params.get("preview")
-    if preview_token is not None:
-        preview = await ctx.read_workspace_file_preview(conversation_id, path, preview_token)
-        if preview is None:
-            return Response("no such file preview", status_code=404)
-        return Response(
-            preview.content,
-            media_type=preview.media_type,
-            headers={"X-Content-Type-Options": "nosniff"},
-        )
-    try:
-        stream = await ctx.read_workspace_file(conversation_id, path)
-    except ValueError:
-        return Response("no such file", status_code=404)
-    if stream is None:
-        return Response("no such file", status_code=404)
-    return StreamingResponse(
-        stream,
-        media_type="application/octet-stream",
-        headers={"X-Content-Type-Options": "nosniff"},
-    )
 
 
 async def _subagent_gate(
@@ -2539,11 +2415,6 @@ ROUTES = (
     ),
     SurfaceRoute(
         method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/files",
-        handler=conversation_files,
-    ),
-    SurfaceRoute(
-        method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/slots",
         handler=conversation_slots,
     ),
@@ -2551,11 +2422,6 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/slots/{slot_id}",
         handler=conversation_slot,
-    ),
-    SurfaceRoute(
-        method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/files/{path:path}",
-        handler=conversation_file,
     ),
     SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),

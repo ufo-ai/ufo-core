@@ -1,7 +1,6 @@
 import { useState } from "react";
 
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
-import { BASE } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
 import { day } from "@/lib/moments";
@@ -14,7 +13,6 @@ export type ConversationSlotSummary = {
   icon: PortalIcon;
   kind: string;
   count: number;
-  count_truncated?: true;
 };
 
 export type ConversationSlotsPayload = { slots: ConversationSlotSummary[] };
@@ -35,19 +33,12 @@ type ArtifactsPayload = {
   artifacts: ConversationArtifact[];
   truncated: boolean;
 };
-type ConversationFile = {
-  path: string;
-  size_bytes: number;
-  modified_at: string;
-  preview: ImagePreview | null;
-};
-type FilesPayload = { type: "files"; files: ConversationFile[]; truncated: boolean };
 type ImagePreview = {
   type: "image";
   media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp";
   url: string;
 };
-export type PortalIcon = "artifact" | "calendar" | "diff" | "file" | "link" | "task";
+export type PortalIcon = "artifact" | "calendar" | "diff" | "link" | "task";
 type Source = { url: string; title: string; snippet: string; published_date: string | null };
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
 type TaskStatus = "pending" | "in_progress" | "completed";
@@ -89,12 +80,9 @@ type SlotPayload =
   | ArtifactsPayload
   | AutomationsPayload
   | ChangesPayload
-  | FilesPayload
   | SitesPayload
   | SourcesPayload
   | TasksPayload;
-
-const MAX_FILE_PREVIEW_BYTES = 256 * 1024;
 
 function slotPath(
   agentId: string,
@@ -120,24 +108,6 @@ function slotsPath(agentId: string, conversationId: string, rootConversationId?:
     "/conversations/" +
     conversationId +
     "/slots" +
-    (rootConversationId ? "?root=" + rootConversationId : "")
-  );
-}
-
-function filePath(
-  agentId: string,
-  conversationId: string,
-  path: string,
-  rootConversationId?: string,
-) {
-  const encoded = path.split("/").map(encodeURIComponent).join("/");
-  return (
-    "/agents/" +
-    agentId +
-    "/conversations/" +
-    conversationId +
-    "/files/" +
-    encoded +
     (rootConversationId ? "?root=" + rootConversationId : "")
   );
 }
@@ -211,14 +181,7 @@ export function ConversationSlotPane({
             </PanelEmpty>
           )}
         >
-          {(payload) => (
-            <SlotContent
-              payload={payload}
-              agentId={agent.id}
-              conversationId={conversationId}
-              rootConversationId={rootConversationId}
-            />
-          )}
+          {(payload) => <SlotContent payload={payload} />}
         </Panel>
       </div>
     </>
@@ -241,7 +204,6 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
     artifact: "M4 7 12 3l8 4-8 4-8-4Zm0 5 8 4 8-4M4 17l8 4 8-4",
     calendar: "M6 3v4M18 3v4M4 9h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z",
     diff: "M8 5v6M5 8h6M14 8h5M5 17h6M14 17h5",
-    file: "M6 2h8l4 4v16H6V2Zm8 0v5h5",
     link: "M9 15l6-6M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0",
     task: "M9 6h11M9 12h11M9 18h11M3.5 6l1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2",
   }[icon];
@@ -260,17 +222,7 @@ export function SlotIcon({ icon }: { icon: PortalIcon }) {
   );
 }
 
-function SlotContent({
-  payload,
-  agentId,
-  conversationId,
-  rootConversationId,
-}: {
-  payload: SlotPayload;
-  agentId: string;
-  conversationId: string;
-  rootConversationId?: string;
-}) {
+function SlotContent({ payload }: { payload: SlotPayload }) {
   if (payload.type === "changes") {
     if (!payload.changes.length && !payload.truncated) return <PanelEmpty>No changes.</PanelEmpty>;
     return (
@@ -282,16 +234,6 @@ function SlotContent({
           <p className="m-0 opacity-(--muted-soft)">Some changes may not be shown.</p>
         ) : null}
       </div>
-    );
-  }
-  if (payload.type === "files") {
-    return (
-      <FilesContent
-        payload={payload}
-        agentId={agentId}
-        conversationId={conversationId}
-        rootConversationId={rootConversationId}
-      />
     );
   }
   if (payload.type === "artifacts") return <ArtifactsContent payload={payload} />;
@@ -475,110 +417,6 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
       ))}
       {payload.truncated ? (
         <p className="m-0 opacity-(--muted-soft)">Some artifacts may not be shown.</p>
-      ) : null}
-    </div>
-  );
-}
-
-function FilesContent({
-  payload,
-  agentId,
-  conversationId,
-  rootConversationId,
-}: {
-  payload: FilesPayload;
-  agentId: string;
-  conversationId: string;
-  rootConversationId?: string;
-}) {
-  const [preview, setPreview] = useState<
-    | { type: "image"; path: string; image: ImagePreview }
-    | { type: "text"; path: string; text: string }
-    | null
-  >(null);
-
-  async function view(file: ConversationFile) {
-    if (file.preview) {
-      setPreview({ type: "image", path: file.path, image: file.preview });
-      return;
-    }
-    setPreview({ type: "text", path: file.path, text: "Reading…" });
-    const path = filePath(agentId, conversationId, file.path, rootConversationId);
-    try {
-      const response = await fetch(BASE + path, { credentials: "same-origin" });
-      setPreview({
-        type: "text",
-        path: file.path,
-        text: response.ok ? await response.text() : "Error " + response.status + " — retry.",
-      });
-    } catch {
-      setPreview({ type: "text", path: file.path, text: "Network error — retry." });
-    }
-  }
-
-  if (!payload.files.length && !payload.truncated) {
-    return <PanelEmpty>No files in this conversation's workspace.</PanelEmpty>;
-  }
-  return (
-    <div className="flex min-w-0 flex-col gap-xl">
-      <ul className="m-0 flex list-none flex-col gap-sm p-0">
-        {payload.files.map((file) => {
-          const path = filePath(agentId, conversationId, file.path, rootConversationId);
-          return (
-            <li key={file.path} className="min-w-0 rounded-panel border border-edge p-lg">
-              <div className="flex min-w-0 items-start gap-md">
-                {file.preview ? (
-                  <img
-                    loading="lazy"
-                    alt={"Thumbnail of " + file.path}
-                    src={file.preview.url}
-                    className="size-(--size-thumb) shrink-0 rounded-sm border border-edge object-cover"
-                  />
-                ) : null}
-                <div className="min-w-0 flex-1">
-                  <button
-                    type="button"
-                    className="max-w-full border-0 bg-transparent p-0 text-left font-mono text-label font-strong text-inherit underline disabled:no-underline"
-                    disabled={!file.preview && file.size_bytes > MAX_FILE_PREVIEW_BYTES}
-                    onClick={() => view(file)}
-                  >
-                    <span className="block break-all">{file.path}</span>
-                  </button>
-                  <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
-                    {formatSize(file.size_bytes)} · {day(file.modified_at)}
-                  </p>
-                </div>
-                <a href={BASE + path} download={file.path.split("/").at(-1)}>
-                  Download
-                </a>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      {preview ? (
-        <section className="min-w-0 overflow-hidden rounded-panel border border-edge">
-          <h2 className="m-0 break-all border-b border-edge bg-fill-subtle px-lg py-sm font-mono text-label font-strong">
-            {preview.path}
-          </h2>
-          {preview.type === "image" ? (
-            <div className="flex max-h-(--media-frame) justify-center overflow-auto p-lg">
-              <img
-                loading="lazy"
-                alt={"Preview of " + preview.path}
-                src={preview.image.url}
-                className="max-h-(--media-preview) max-w-full object-contain"
-              />
-            </div>
-          ) : (
-            <pre className="m-0 max-h-(--media-text) overflow-auto whitespace-pre-wrap wrap-anywhere p-lg font-mono text-mono">
-              {preview.text}
-            </pre>
-          )}
-        </section>
-      ) : null}
-      {payload.truncated ? (
-        <p className="m-0 opacity-(--muted-soft)">Some files may not be shown.</p>
       ) : null}
     </div>
   );

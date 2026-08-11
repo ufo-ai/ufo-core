@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { Td } from "@/components/ui/table";
 import { day } from "@/lib/moments";
 import { MessageLog } from "@/kernel/messages";
 import {
@@ -17,14 +16,8 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { RowLines } from "@/kernel/rows";
-import { DataTable } from "@/kernel/table";
-import { BASE, postIntent } from "@/lib/api";
-import { formatSize } from "@/lib/size";
+import { postIntent } from "@/lib/api";
 import type { Agent, Conversation, Message } from "@/lib/types";
-
-const MAX_PREVIEW_BYTES = 256 * 1024;
-
-type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
 function Back({ onBack }: { onBack: () => void }) {
@@ -309,62 +302,6 @@ export function ConversationDetail({
           />
         )}
       </Panel>
-      <ConversationFiles base={path} />
     </>
-  );
-}
-
-function ConversationFiles({ base }: { base: string }) {
-  const state = usePanelRead<{ files: WorkspaceFile[] }>(base + "/files");
-  const [preview, setPreview] = useState<string | null>(null);
-
-  async function view(entry: WorkspaceFile) {
-    setPreview("Reading " + entry.path + "…");
-    try {
-      const res = await fetch(BASE + base + "/files/" + entry.path, {
-        credentials: "same-origin",
-      });
-      setPreview(res.ok ? await res.text() : "Error " + res.status + " — reload to retry.");
-    } catch {
-      setPreview("Network error — try again.");
-    }
-  }
-
-  return (
-    <Panel state={state}>
-      {(payload) => (
-        <Section title="Workspace files">
-          <DataTable
-            columns={["File", "Size", "Modified", ""]}
-            rows={payload.files}
-            rowKey={(entry) => entry.path}
-            empty="No files in this conversation's workspace."
-          >
-            {(entry) => (
-              <>
-                <Td>{entry.path}</Td>
-                <Td>{formatSize(entry.size_bytes)}</Td>
-                <Td>{day(entry.modified_at)}</Td>
-                <Td>
-                  <div className="flex flex-wrap items-baseline gap-xs">
-                    {entry.size_bytes <= MAX_PREVIEW_BYTES ? (
-                      <Button variant="row" onClick={() => view(entry)}>
-                        View
-                      </Button>
-                    ) : null}
-                    <a href={BASE + base + "/files/" + entry.path}>Download</a>
-                  </div>
-                </Td>
-              </>
-            )}
-          </DataTable>
-          {preview === null ? null : (
-            <pre className="overflow-x-auto whitespace-pre-wrap wrap-anywhere rounded-panel bg-fill-subtle p-lg font-mono text-mono">
-              {preview}
-            </pre>
-          )}
-        </Section>
-      )}
-    </Panel>
   );
 }

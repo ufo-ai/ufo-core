@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -72,7 +72,6 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
 from ufo.ext.surface import (
-    SurfaceContext,
     fence_member_message,
     mint_marker,
     record_transcript_access,
@@ -102,7 +101,7 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.objects import OBJECT_LIST_PAGE
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox, WorkspaceFile
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.scheduling import ScheduledTask, ScheduleStore, TaskInspection
@@ -6369,7 +6368,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     client, workspace_id, agent_id = web
-    _config, _hub, blob, sandboxes = dbos_runtime
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_m, _token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -6449,9 +6448,6 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
             ),
         )
     )
-    with ws(workspace_id):
-        private_png = _png()
-        await sandboxes.write(child_conversation, "images/private.png", private_png)
     unrelated = await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -6539,28 +6535,9 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     rooted_changes = await client.get(f"{child_changes}?root={theirs}", headers=admin_cookie)
     assert rooted_changes.status_code == 200
     assert rooted_changes.json()["changes"][0]["patch"] == "+private child change\n"
-    child_files = f"/surface/web/agents/{agent_id}/conversations/{child_conversation}/slots/files"
-    assert (await client.get(child_files, headers=admin_cookie)).status_code == 404
-    rooted_files = await client.get(f"{child_files}?root={theirs}", headers=admin_cookie)
-    assert rooted_files.status_code == 200
-    preview_url = rooted_files.json()["files"][0]["preview"]["url"]
-    preview_query = parse_qs(urlsplit(preview_url).query)
-    assert preview_query["root"] == [str(theirs)]
-    assert len(preview_query["preview"][0]) > 40
-    preview = await client.get(preview_url, headers=admin_cookie)
-    assert preview.status_code == 200
-    assert preview.content == private_png
-    assert preview.headers["content-type"] == "image/png"
     assert (
         await client.get(f"{child_changes}?root={unrelated}", headers=admin_cookie)
     ).status_code == 404
-    assert (
-        await client.get(f"{child_files}?root={unrelated}", headers=admin_cookie)
-    ).status_code == 404
-    files = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{theirs}/files", headers=admin_cookie
-    )
-    assert files.status_code == 200
 
     async with workspace_tx() as connection:
         rows = (
@@ -6606,7 +6583,8 @@ async def test_losing_admin_closes_an_open_disclosure_window(
     assert (await client.get(transcript_path, headers=admin_cookie)).status_code == 404
     assert (
         await client.get(
-            f"/surface/web/agents/{agent_id}/conversations/{theirs}/files", headers=admin_cookie
+            f"/surface/web/agents/{agent_id}/conversations/{theirs}/slots/changes",
+            headers=admin_cookie,
         )
     ).status_code == 404
 
@@ -6719,171 +6697,6 @@ async def test_conversation_changes_answer_from_the_one_shared_workspace(
             "changes": [{"path": "repo/app.py", "patch": "-old\n+new\n", "truncated": False}],
             "truncated": False,
         }
-
-
-async def test_live_workspace_files_fill_the_typed_conversation_slot(
-    web: tuple[AsyncClient, UUID, UUID],
-    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, workspace_id, agent_id = web
-    _config, _hub, _blob, sandboxes = dbos_runtime
-    member_id, token = await _seed_member(workspace_id, "files@example.com")
-    conversation_id = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="files",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-    )
-    with ws(workspace_id):
-        await sandboxes.write(conversation_id, "notes/brief draft.md", b"# Brief\n\nShip it.\n")
-        chart_png = _png()
-        backslash_path = "images/back\\slash.png"
-        control_path = "images/control\nname.png"
-        long_path = "/".join(("界" * 20,) * 50) + ".png"
-        await sandboxes.write(conversation_id, "images/bad.png", b"not an image")
-        await sandboxes.write(conversation_id, backslash_path, chart_png)
-        await sandboxes.write(conversation_id, "images/chart.png", chart_png)
-        await sandboxes.write(conversation_id, control_path, chart_png)
-        await sandboxes.write(conversation_id, "images/fake.jpg", chart_png)
-        await sandboxes.write(
-            conversation_id,
-            "images/oversize.png",
-            b"x" * (IMAGE_PREVIEW_MAX_BYTES + 1),
-        )
-        await sandboxes.write(conversation_id, "images/vector.svg", b"<svg></svg>")
-
-    original_list_workspace_files = SurfaceContext.list_workspace_files
-
-    async def list_with_long_path(
-        surface_ctx: SurfaceContext, target_conversation_id: UUID
-    ) -> tuple[WorkspaceFile, ...]:
-        files = await original_list_workspace_files(surface_ctx, target_conversation_id)
-        if target_conversation_id != conversation_id:
-            return files
-        return (
-            *files,
-            WorkspaceFile(
-                path=long_path,
-                size_bytes=len(chart_png),
-                modified_at=datetime(2026, 8, 6, tzinfo=UTC),
-            ),
-        )
-
-    monkeypatch.setattr(SurfaceContext, "list_workspace_files", list_with_long_path)
-
-    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    inventory = await client.get(f"{base}/slots", headers=headers)
-    payload = await client.get(f"{base}/slots/files", headers=headers)
-    downloaded = await client.get(
-        f"{base}/files/{quote('notes/brief draft.md', safe='/')}", headers=headers
-    )
-    image_download = await client.get(f"{base}/files/images/chart.png", headers=headers)
-    vector = await client.get(f"{base}/files/images/vector.svg", headers=headers)
-    vector_preview = await client.get(
-        f"{base}/files/images/vector.svg?preview=true", headers=headers
-    )
-
-    assert inventory.status_code == 200
-    assert inventory.json()["slots"][-1] == {
-        "id": "files",
-        "label": "Files",
-        "icon": "file",
-        "kind": "files",
-        "count": 9,
-    }
-    assert payload.status_code == 200
-    assert payload.json()["type"] == "files"
-    assert payload.json()["truncated"] is False
-    files = {entry["path"]: entry for entry in payload.json()["files"]}
-    assert files["notes/brief draft.md"]["size_bytes"] == 18
-    assert files["notes/brief draft.md"]["preview"] is None
-    image_preview = files["images/chart.png"]["preview"]
-    assert image_preview["type"] == "image"
-    assert image_preview["media_type"] == "image/png"
-    assert image_preview["url"].startswith(f"{base}/files/images/chart.png?preview=")
-    assert files["images/vector.svg"]["preview"] is None
-    assert files["images/oversize.png"]["preview"] is None
-    assert files[backslash_path]["preview"] is None
-    assert files[control_path]["preview"] is None
-    assert len(f"{base}/files/{quote(long_path, safe='/')}?preview=x") > 8_192
-    assert files[long_path]["preview"] is None
-    assert all("media_type" not in file for file in files.values())
-    assert downloaded.status_code == 200
-    assert downloaded.content == b"# Brief\n\nShip it.\n"
-    assert downloaded.headers["content-type"] == "application/octet-stream"
-    assert downloaded.headers["x-content-type-options"] == "nosniff"
-    image = await client.get(image_preview["url"], headers=headers)
-    assert image.status_code == 200
-    assert image.content == chart_png
-    assert image.headers["content-type"] == "image/png"
-    assert image.headers["x-content-type-options"] == "nosniff"
-    preview_token = parse_qs(urlsplit(image_preview["url"]).query)["preview"][0]
-    wrong_path = await client.get(
-        f"{base}/files/images/other.png?preview={quote(preview_token, safe='')}",
-        headers=headers,
-    )
-    assert wrong_path.status_code == 404
-    fake = await client.get(files["images/fake.jpg"]["preview"]["url"], headers=headers)
-    assert fake.status_code == 404
-    bad = await client.get(files["images/bad.png"]["preview"]["url"], headers=headers)
-    assert bad.status_code == 404
-    assert image_download.status_code == 200
-    assert image_download.headers["content-type"] == "application/octet-stream"
-    assert vector.status_code == 200
-    assert vector.headers["content-type"] == "application/octet-stream"
-    assert vector.headers["x-content-type-options"] == "nosniff"
-    assert vector_preview.status_code == 404
-
-
-async def test_files_slot_marks_its_bounded_count_as_truncated(
-    web: tuple[AsyncClient, UUID, UUID],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "many-files@example.com")
-    conversation_id = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="many-files",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-    )
-    listed = tuple(
-        WorkspaceFile(
-            path=f"reports/{index:03}.txt",
-            size_bytes=index,
-            modified_at=datetime(2026, 8, 6, tzinfo=UTC),
-        )
-        for index in range(101)
-    )
-
-    async def list_workspace_files(
-        _surface_ctx: SurfaceContext, target_conversation_id: UUID
-    ) -> tuple[WorkspaceFile, ...]:
-        return listed if target_conversation_id == conversation_id else ()
-
-    monkeypatch.setattr(SurfaceContext, "list_workspace_files", list_workspace_files)
-    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-
-    inventory = await client.get(f"{base}/slots", headers=headers)
-    payload = await client.get(f"{base}/slots/files", headers=headers)
-
-    assert inventory.status_code == 200
-    assert inventory.json()["slots"][-1] == {
-        "id": "files",
-        "label": "Files",
-        "icon": "file",
-        "kind": "files",
-        "count": 100,
-        "count_truncated": True,
-    }
-    assert payload.status_code == 200
-    assert len(payload.json()["files"]) == 100
-    assert payload.json()["truncated"] is True
 
 
 async def test_durable_shared_files_fill_the_typed_artifacts_slot(
@@ -7391,12 +7204,6 @@ async def test_conversation_reads_ride_the_same_gate(
             )
         )
 
-    listed = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/files",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert listed.status_code == 200
-    assert listed.json() == {"files": []}
     changes = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
@@ -7435,19 +7242,8 @@ async def test_conversation_reads_ride_the_same_gate(
     )
     assert empty_slots.status_code == 200
     assert empty_slots.json() == {"slots": []}
-    absent = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/files/brief.md",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert absent.status_code == 404
-    escaping = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{mine}/files/../../etc/passwd",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert escaping.status_code == 404
-
     for token in (token_m, token_admin):
-        for route in ("files", "slots/changes", "files/brief.md"):
+        for route in ("transcript", "slots/changes"):
             denied = await client.get(
                 f"/surface/web/agents/{agent_id}/conversations/{theirs}/{route}",
                 headers={"cookie": f"{SESSION_COOKIE}={token}"},
@@ -7470,7 +7266,7 @@ async def test_conversation_reads_ride_the_same_gate(
     elsewhere = await _seed_agent_conversation(
         workspace_id, second_agent, queue_key="elsewhere", audience="shared", member_id=None
     )
-    for route in ("files", "slots/changes", "files/brief.md"):
+    for route in ("transcript", "slots/changes"):
         crossed = await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/{route}",
             headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
