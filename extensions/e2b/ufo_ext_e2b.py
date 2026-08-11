@@ -50,6 +50,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import httpx
 from e2b import AsyncSandbox as E2BSdkSandbox
 from e2b.exceptions import FileNotFoundException, SandboxNotFoundException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
@@ -94,6 +95,16 @@ CA_INSTALL_TIMEOUT_SECONDS = 30
 SANDBOX_USER = "user"
 WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
 RESUME_PREPARE_TIMEOUT_SECONDS = 5
+RESUME_TRANSPORT_RETRIES = 2
+RESUME_RETRY_DELAY_SECONDS = 1.0
+RESUME_TOTAL_TIMEOUT_SECONDS = 90.0
+"""The whole retried resume, bounded here rather than left to the SDK's per-request default.
+
+Attempts alone bound nothing a member feels: three of them against a control plane that answers
+only by timing out is three times whatever `request_timeout` happens to be, a third-party default
+this repo neither sets nor asserts and which `ConnectionConfig` maps to no timeout at all when a
+caller passes 0. A turn's setup runs before its first round, so the span is the member's whole wait
+with no answer at the end of it."""
 ENSURE_WORKSPACE_COMMAND = (
     f"mkdir -p {WORKSPACE_DIR} && chown {SANDBOX_USER}:{SANDBOX_USER} {WORKSPACE_DIR}"
 )
@@ -186,6 +197,8 @@ class E2BSandbox(Protocol):
 
     def get_host(self, port: int) -> str: ...
 
+    async def kill(self) -> bool: ...
+
 
 class E2BSdk(Protocol):
     async def create(
@@ -233,6 +246,10 @@ class E2BCarrier:
     resume_prepare_seconds: float = RESUME_PREPARE_TIMEOUT_SECONDS
     """How long a resumed box's `envd` is given to re-assert preparation before the turn goes on
     without it."""
+    resume_retry_delay_seconds: float = RESUME_RETRY_DELAY_SECONDS
+    """How long to wait before re-issuing a resume the provider's control plane left unanswered."""
+    resume_total_timeout_seconds: float = RESUME_TOTAL_TIMEOUT_SECONDS
+    """The ceiling on a whole retried resume, attempts and backoff together."""
     _live: dict[UUID, _Lease] = field(default_factory=dict)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
@@ -264,7 +281,16 @@ class E2BCarrier:
         only once this call has returned — so an id being there at all is proof some `create`
         prepared that container. A box reached any other way carries no such proof: this process's
         own cache can name one whose preparation just failed, and a fresh container has nothing on
-        it yet. Both prepare strictly."""
+        it yet. Both prepare strictly.
+
+        A strict preparation that fails drops the lease and raises. The lease goes because the
+        deadline it holds is only evidence while the container answers to it, and this one just
+        did not — so the next open reattaches rather than re-failing against the same box for the
+        rest of the span. The container itself is left standing: it may hold a whole conversation's
+        `/workspace`, and this carrier disposes of nothing that might.
+
+        The lease is published only once preparation has succeeded, so what a concurrent open can
+        adopt is a box already known good rather than one still being made ready."""
         egress_env = _egress_env(spec.proxy, spec.run_token)
         live = self._leased(spec.conversation_id)
         resume_id = (
@@ -276,7 +302,6 @@ class E2BCarrier:
         )
         opened = self.clock()
         sandbox = await self._resume_or_open(spec, resume_id)
-        self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         if sandbox.sandbox_id == spec.resume_id:
             try:
                 async with asyncio.timeout(self.resume_prepare_seconds):
@@ -289,7 +314,12 @@ class E2BCarrier:
                 )
                 emit_metric("sandbox_prepare_deferred_total", carrier=CARRIER_NAME)
         else:
-            await self._prepare(sandbox, spec.proxy.ca_cert)
+            try:
+                await self._prepare(sandbox, spec.proxy.ca_cert)
+            except BaseException:
+                self._drop(spec.conversation_id, "create")
+                raise
+        self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
@@ -309,8 +339,8 @@ class E2BCarrier:
             return None
         opened = self.clock()
         try:
-            sandbox = await self.sdk.connect(
-                spec.resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
+            sandbox = await self._connected(
+                spec.conversation_id, spec.resume_id, SANDBOX_LEASE_SECONDS
             )
         except SandboxNotFoundException:
             self._live.pop(spec.conversation_id, None)
@@ -328,12 +358,17 @@ class E2BCarrier:
         container was left in. e2b holds a paused sandbox until something kills it, so an id that
         comes back not-found names one the provider no longer has: the container is cache over the
         durable workspace, so the turn opens a fresh one rather than failing every turn this
-        conversation will ever admit against an id nothing can resurrect."""
+        conversation will ever admit against an id nothing can resurrect.
+
+        The resume is retried on a transport error and the create is not, and the asymmetry is the
+        same fact read twice: a call whose answer never arrived leaves this process unable to say
+        whether it landed. For `connect` that is harmless — it opens nothing, and its span is a
+        floor — so re-issuing it converges on the one container the id names. For `create` it is
+        not: the lost answer may have carried the id of a sandbox now running with nothing able to
+        name it, and a second create would strand that one for good."""
         if resume_id is not None:
             try:
-                return await self.sdk.connect(
-                    resume_id, timeout=SANDBOX_LEASE_SECONDS, api_key=self.api_key
-                )
+                return await self._connected(spec.conversation_id, resume_id, SANDBOX_LEASE_SECONDS)
             except SandboxNotFoundException:
                 log(
                     "sandbox.e2b.resume_missed",
@@ -355,6 +390,70 @@ class E2BCarrier:
                 "check the template"
             )
         return sandbox
+
+    async def _connected(self, conversation_id: UUID, sandbox_id: str, span: int) -> E2BSandbox:
+        """`connect` on the sandbox `sandbox_id` names, re-issued up to RESUME_TRANSPORT_RETRIES
+        times when the provider's control plane leaves the request unanswered, and bounded whole by
+        RESUME_TOTAL_TIMEOUT_SECONDS. That control plane is a network call off this cluster, so an
+        unanswered one is uncertainty about the provider rather than a fault here — the one case
+        this repo retries. Only a transport error does: a not-found is the provider answering, and
+        the caller decides what that means.
+
+        Every `connect` in this carrier comes through here, because they are one endpoint and one
+        uncertainty: turn setup resuming a conversation's box, the mid-turn lease renewal, and the
+        read path. A stall that kills a turn at setup kills it just as dead ten minutes in.
+
+        The ceiling is what makes the retry bounded in the units a member waits in. Attempts bound
+        only how many times this asks; the wall clock bounds how long it asks for, and a timeout
+        raises the transport fault the last attempt saw rather than a bare TimeoutError, so the
+        caller reads the provider's failure and not this one's."""
+        attempt = 0
+        delay = self.resume_retry_delay_seconds
+        last: httpx.TransportError | None = None
+        try:
+            async with asyncio.timeout(self.resume_total_timeout_seconds):
+                while True:
+                    try:
+                        return await self.sdk.connect(
+                            sandbox_id, timeout=span, api_key=self.api_key
+                        )
+                    except httpx.TransportError as error:
+                        last = error
+                        attempt += 1
+                        if attempt > RESUME_TRANSPORT_RETRIES:
+                            log(
+                                "sandbox.e2b.resume_unanswered",
+                                conversation_id=str(conversation_id),
+                                sandbox_id=sandbox_id,
+                                attempts=attempt,
+                                error_class=type(error).__name__,
+                            )
+                            raise
+                        log(
+                            "sandbox.e2b.resume_retried",
+                            conversation_id=str(conversation_id),
+                            sandbox_id=sandbox_id,
+                            attempt=attempt,
+                            error_class=type(error).__name__,
+                        )
+                        await asyncio.sleep(delay)
+                        delay *= 2
+        except TimeoutError:
+            log(
+                "sandbox.e2b.resume_timed_out",
+                conversation_id=str(conversation_id),
+                sandbox_id=sandbox_id,
+                attempts=attempt,
+                seconds=self.resume_total_timeout_seconds,
+            )
+            raise (
+                last
+                if last is not None
+                else httpx.ReadTimeout(
+                    f"e2b never answered a resume of {sandbox_id} within "
+                    f"{self.resume_total_timeout_seconds}s"
+                )
+            ) from None
 
     async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         """Make the box usable: the proxy's CA in system trust, `/workspace` in place and owned by
@@ -522,7 +621,7 @@ class E2BCarrier:
             return lease.sandbox
         self._live.pop(handle.conversation_id, None)
         span = max(SANDBOX_LEASE_SECONDS, needed_seconds)
-        sandbox = await self.sdk.connect(handle.container_id, timeout=span, api_key=self.api_key)
+        sandbox = await self._connected(handle.conversation_id, handle.container_id, span)
         self._live[handle.conversation_id] = _Lease(sandbox, renewed + span)
         log(
             "sandbox.e2b.leased",

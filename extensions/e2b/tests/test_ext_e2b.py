@@ -22,6 +22,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpcore
+import httpx
 import pytest
 import ufo_ext_e2b as e2b_ext
 from e2b.exceptions import (
@@ -49,6 +50,9 @@ from ufo_ext_e2b import (
     INSTALL_CA_COMMAND,
     NODE_GLOBAL_MODULES,
     PLAYWRIGHT_BROWSERS_DIR,
+    RESUME_RETRY_DELAY_SECONDS,
+    RESUME_TOTAL_TIMEOUT_SECONDS,
+    RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
     SENTINEL_MODEL_KEY,
     SYSTEM_CA_BUNDLE,
@@ -215,9 +219,18 @@ class _Sandbox:
     commands: _Commands
     files: _Files
     traffic_access_token: str | None = "traffic-tok"
+    killed: bool = False
+    kill_raises: Exception | None = None
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
+
+    async def kill(self) -> bool:
+        if self.kill_raises is not None:
+            raise self.kill_raises
+        already_gone = self.killed
+        self.killed = True
+        return not already_gone
 
 
 @dataclass
@@ -235,6 +248,9 @@ class _Sdk:
     command_hangs: bool = False
     on_call: Callable[[], None] | None = None
     traffic_access_token: str | None = "traffic-tok"
+    file_write_raises: Exception | None = None
+    kill_raises: Exception | None = None
+    connect_faults: list[Exception] = field(default_factory=list)
 
     async def create(
         self,
@@ -262,7 +278,8 @@ class _Sdk:
                 timeout_on=self.command_timeout_on,
                 timeout_counts=dict(self.command_timeout_counts),
             ),
-            files=_Files(),
+            files=_Files(raises=self.file_write_raises),
+            kill_raises=self.kill_raises,
         )
         self.sandboxes[sandbox_id] = sandbox
         self.created.append(
@@ -288,8 +305,10 @@ class _Sdk:
             self.on_call()
         self.connected.append(sandbox_id)
         self.connect_leases.append(timeout)
+        if self.connect_faults:
+            raise self.connect_faults.pop(0)
         sandbox = self.sandboxes.get(sandbox_id)
-        if sandbox is None:
+        if sandbox is None or sandbox.killed:
             raise SandboxNotFoundException(f"Paused sandbox {sandbox_id} not found")
         sandbox.provider.lease(timeout)
         return sandbox
@@ -360,16 +379,25 @@ async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
     assert sandbox.commands.users[0] == "root"
 
 
-async def test_a_box_whose_trust_update_failed_is_prepared_again_not_deferred() -> None:
+async def test_a_failed_trust_update_raises_a_named_ca_install_error() -> None:
+    """The CA install is the precondition for every HTTPS call a sandbox makes, so its failure
+    detail is what an operator reads when egress starts refusing. Mapping `CommandExitException`
+    to a named RuntimeError is all that stands between them and a bare provider exception."""
+    sdk = _Sdk(command_fail_counts={"update-ca-certificates": 1})
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    with pytest.raises(RuntimeError, match="sandbox CA install failed"):
+        await carrier.create(_spec(uuid4()))
+
+
+async def test_a_box_reached_off_the_cache_is_prepared_again_not_deferred() -> None:
     """No durable handle names this box — it is reached off this process's own cache — so nothing
     vouches for its preparation and the next open re-asserts it strictly rather than deferring."""
-    sdk = _Sdk(command_fail_counts={"update-ca-certificates": 1})
+    sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_prepare_seconds=0.01)
     spec = _spec(uuid4())
 
-    with pytest.raises(RuntimeError, match="sandbox CA install failed"):
-        await carrier.create(spec)
-    sdk.command_fail_counts = {}
+    await carrier.create(spec)
     sdk.sandboxes["sbx-1"].commands.hangs = True
 
     with pytest.raises(TimeoutError):
@@ -377,6 +405,163 @@ async def test_a_box_whose_trust_update_failed_is_prepared_again_not_deferred() 
             await carrier.create(spec)
 
     assert sdk.connected == ["sbx-1"]
+
+
+async def test_a_cached_box_whose_preparation_failed_is_never_killed() -> None:
+    """The cache can name a container holding a whole conversation's work, so a preparation that
+    fails on it is reported and the box left standing — the kill is for a fresh box alone."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    spec = _spec(uuid4())
+
+    await carrier.create(spec)
+    sdk.sandboxes["sbx-1"].files.raises = httpx.ReadError("connection broken")
+
+    with pytest.raises(httpx.ReadError):
+        await carrier.create(spec)
+
+    assert not sdk.sandboxes["sbx-1"].killed
+    assert carrier._leased(spec.conversation_id) is None
+
+
+async def test_a_resume_the_control_plane_never_answers_is_retried(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The three turns #1346 lost: `POST /sandboxes/{id}/connect` read-timed out and the turn died
+    before its first round. The provider's control plane is off this cluster and `connect` opens
+    nothing, so re-issuing it converges on the one container the id names."""
+    sdk = _Sdk(connect_faults=[httpx.ReadTimeout("timed out")])
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_retry_delay_seconds=0.0)
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.connected.clear()
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        resumed = await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert resumed.container_id == opened.container_id
+    assert sdk.connected == [opened.container_id, opened.container_id]
+    assert len(sdk.created) == 1
+    assert [entry["attempt"] for entry in _events(caplog, "sandbox.e2b.resume_retried")] == [1]
+
+
+async def test_a_resume_the_control_plane_keeps_dropping_raises_bounded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A member waits on this, so the retry is bounded: past the budget the fault is the answer,
+    and it never becomes a fresh box — the paused container the id names holds the workspace."""
+    faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
+    sdk = _Sdk(connect_faults=list(faults))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_retry_delay_seconds=0.0)
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.connected.clear()
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(httpx.ReadTimeout):
+        await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert sdk.connected == [opened.container_id] * len(faults)
+    assert len(sdk.created) == 1
+    assert _events(caplog, "sandbox.e2b.resume_unanswered") == [
+        {
+            "conversation_id": str(conversation),
+            "sandbox_id": opened.container_id,
+            "attempts": RESUME_TRANSPORT_RETRIES + 1,
+            "error_class": "ReadTimeout",
+        }
+    ]
+
+
+async def test_the_resume_backoff_doubles_and_the_whole_retry_is_wall_clock_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schedule a member actually waits out. Every other retry test zeroes the delay, so the
+    doubling and the production default are unobserved there — this one records the sleeps."""
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(e2b_ext.asyncio, "sleep", record)
+    faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
+    sdk = _Sdk(connect_faults=list(faults))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+
+    with pytest.raises(httpx.ReadTimeout):
+        await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert slept == [RESUME_RETRY_DELAY_SECONDS, RESUME_RETRY_DELAY_SECONDS * 2]
+    assert sum(slept) < RESUME_TOTAL_TIMEOUT_SECONDS
+
+
+async def test_a_control_plane_that_answers_nothing_at_all_ends_at_the_ceiling(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Attempts bound how many times this asks; only the wall clock bounds how long. A `connect`
+    that never returns would otherwise hold a member's setup for as long as the SDK's own default
+    allows — a third-party value this repo neither sets nor asserts."""
+    conversation = uuid4()
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    opened = await carrier.create(_spec(conversation))
+
+    async def never_answers(
+        sandbox_id: str,
+        *,
+        timeout: int,  # noqa: ASYNC109
+        api_key: str,
+    ) -> _Sandbox:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    sdk.connect = never_answers  # type: ignore[method-assign]
+    stalling = E2BCarrier(api_key="k", template="t", sdk=sdk, resume_total_timeout_seconds=0.05)
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(httpx.ReadTimeout):
+        await stalling.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert _events(caplog, "sandbox.e2b.resume_timed_out") != []
+
+
+async def test_a_fresh_box_is_not_lease_visible_until_it_is_prepared() -> None:
+    """The lease is what a concurrent open adopts, so it must vouch only for a box already made
+    ready. Publishing it before preparation hands the next caller a container this one is still
+    working on and may be about to fail out of."""
+    conversation = uuid4()
+    sdk = _Sdk(file_write_raises=httpx.ReadError("connection broken"))
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+
+    with pytest.raises(httpx.ReadError):
+        await carrier.create(_spec(conversation))
+
+    assert carrier._leased(conversation) is None
+    assert sdk.sandboxes["sbx-1"].killed is False
+
+
+async def test_every_connect_in_the_carrier_retries_an_unanswered_control_plane() -> None:
+    """One endpoint, one uncertainty. A stall that kills a turn at setup kills it just as dead on
+    the mid-turn lease renewal ten minutes in, and on the read path — so all three `connect` sites
+    come through the one retrying seam rather than only the one #1346 happened to report."""
+    conversation = uuid4()
+    clock = _Clock()
+    sdk = _Sdk(clock=clock)
+    carrier = E2BCarrier(
+        api_key="k", template="t", sdk=sdk, clock=clock, resume_retry_delay_seconds=0.0
+    )
+    opened = await carrier.create(_spec(conversation))
+
+    sdk.connect_faults = [httpx.ReadTimeout("timed out")]
+    attached = await carrier.attach(replace(_spec(conversation), resume_id=opened.container_id))
+    assert attached is not None
+    assert sdk.connected == [opened.container_id] * 2
+
+    sdk.connected.clear()
+    clock.now += SANDBOX_LEASE_SECONDS
+    sdk.connect_faults = [httpx.ReadTimeout("timed out")]
+    assert (await carrier.exec(opened, ("true",), 5)).exit_code == 0
+    assert sdk.connected == [opened.container_id] * 2
 
 
 def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
