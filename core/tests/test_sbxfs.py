@@ -319,6 +319,31 @@ def test_glob_omits_planted_symlinks(tmp_path: Path) -> None:
     assert through_link["files"] == []
 
 
+def test_glob_excludes_named_trees_before_capping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _outside = _workspace(tmp_path)
+    git = workspace / "repo" / ".git"
+    git.mkdir(parents=True)
+    (git / "index").write_text("metadata")
+    report = workspace / "repo" / "report.txt"
+    report.write_text("result")
+    module = _sbxfs()
+    monkeypatch.setattr(module, "GLOB_MAX_RESULTS", 1)
+
+    result = module.op_glob(
+        {
+            "pattern": "repo/**/*",
+            "path": str(workspace),
+            "workspace": str(workspace),
+            "exclude_names": [".git"],
+        }
+    )
+
+    assert [file["path"] for file in result["files"]] == [str(report)]
+    assert result["truncated"] is False
+
+
 def _grep(module: ModuleType, workspace: Path, **params: object) -> dict:
     return module.op_grep(
         {"pattern": "SECRET", "output_mode": "content", "workspace": str(workspace), **params}

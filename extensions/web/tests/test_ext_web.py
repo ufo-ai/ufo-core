@@ -7001,6 +7001,54 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
     assert vector_preview.status_code == 404
 
 
+async def test_files_slot_marks_its_bounded_count_as_truncated(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "many-files@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="many-files",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    listed = tuple(
+        WorkspaceFile(
+            path=f"reports/{index:03}.txt",
+            size_bytes=index,
+            modified_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+        for index in range(101)
+    )
+
+    async def list_workspace_files(
+        _surface_ctx: SurfaceContext, target_conversation_id: UUID
+    ) -> tuple[WorkspaceFile, ...]:
+        return listed if target_conversation_id == conversation_id else ()
+
+    monkeypatch.setattr(SurfaceContext, "list_workspace_files", list_workspace_files)
+    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    inventory = await client.get(f"{base}/slots", headers=headers)
+    payload = await client.get(f"{base}/slots/files", headers=headers)
+
+    assert inventory.status_code == 200
+    assert inventory.json()["slots"][-1] == {
+        "id": "files",
+        "label": "Files",
+        "icon": "file",
+        "kind": "files",
+        "count": 100,
+        "count_truncated": True,
+    }
+    assert payload.status_code == 200
+    assert len(payload.json()["files"]) == 100
+    assert payload.json()["truncated"] is True
+
+
 async def test_durable_shared_files_fill_the_typed_artifacts_slot(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],

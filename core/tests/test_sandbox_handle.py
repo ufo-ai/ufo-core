@@ -1178,6 +1178,18 @@ async def test_workspace_listing_warns_when_the_walk_truncates(
     assert any("workspace.listing_truncated" in record.message for record in caplog.records)
 
 
+async def test_workspace_listing_omits_git_metadata(db: None, tmp_path: Path) -> None:
+    workspace_id, conversation_id = await _conversation()
+    sandboxes = _conversation_sandboxes(LocalCarrier(), tmp_path, "local")
+
+    with ws(workspace_id):
+        await sandboxes.write(conversation_id, "repo/.git/objects/record", b"metadata")
+        await sandboxes.write(conversation_id, "repo/src/app.py", b"print('ready')\n")
+        entries = await sandboxes.entries(conversation_id)
+
+    assert [entry.path for entry in entries] == ["repo/src/app.py"]
+
+
 @dataclass
 class _TruncatingCarrier:
     """Answers the sbxfs glob with a truncated listing — the fake stands in for the container walk

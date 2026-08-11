@@ -1658,15 +1658,16 @@ async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response:
             continue
         if count is None:
             continue
-        slots.append(
-            {
-                "id": bound.provider.id,
-                "label": bound.provider.label,
-                "icon": bound.provider.icon,
-                "kind": bound.provider.content.model_fields["type"].default,
-                "count": count,
-            }
-        )
+        summary = {
+            "id": bound.provider.id,
+            "label": bound.provider.label,
+            "icon": bound.provider.icon,
+            "kind": bound.provider.content.model_fields["type"].default,
+            "count": count,
+        }
+        if type(slot_context.projection) is FilesSlotPayload and slot_context.projection.truncated:
+            summary["count_truncated"] = True
+        slots.append(summary)
     return JSONResponse({"slots": slots})
 
 

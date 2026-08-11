@@ -421,6 +421,28 @@ test("files slot previews and downloads a workspace file in place", async () => 
   );
 });
 
+test("files slot marks its bounded count as a lower bound", async () => {
+  wire({
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          {
+            id: "files",
+            label: "Files",
+            icon: "file",
+            kind: "files",
+            count: 100,
+            count_truncated: true,
+          },
+        ],
+      }),
+  });
+  open();
+
+  expect(await screen.findByRole("button", { name: "Files 100+" })).toBeTruthy();
+});
+
 test("files slot lazily renders raster thumbnails and expands without text decoding", async () => {
   const imagePath =
     "/surface/web/agents/" +

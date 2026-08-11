@@ -14,6 +14,7 @@ export type ConversationSlotSummary = {
   icon: PortalIcon;
   kind: string;
   count: number;
+  count_truncated?: true;
 };
 
 export type ConversationSlotsPayload = { slots: ConversationSlotSummary[] };

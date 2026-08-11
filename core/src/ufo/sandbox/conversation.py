@@ -48,6 +48,7 @@ UNSIGNED_RUN_TOKEN = "off-turn"
 WORKSPACE_WRITE_MAX_BYTES = 100 * 1024 * 1024
 OPEN_CLAIM_ATTEMPTS = 3
 WORKSPACE_ROOT_SETTING = "sandbox.workspace_root"
+WORKSPACE_LISTING_EXCLUDE_NAMES = (".git",)
 
 
 class WorkspaceFile(BaseModel):
@@ -163,17 +164,24 @@ class ConversationSandbox:
             raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
 
     async def entries(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
-        """Every file in the conversation's workspace, path-sorted — the in-container `sbxfs glob`
-        walk over `**/*`, so the browser lists exactly what the sandbox holds, bounded by glob's own
-        result cap. Empty when the conversation has no sandbox yet. Paths come back absolute in the
-        walker's own view — `/workspace/…` from a containerised carrier, the host directory from the
-        local carrier's argv rewrite — so each is made relative against whichever of those two roots
-        it carries."""
+        """Member-visible files in the conversation's workspace, path-sorted. The in-container
+        `sbxfs glob` walk excludes Git metadata before its result cap; filtering in a surface would
+        let metadata consume the cap and hide files. Empty when the conversation has no sandbox yet.
+        Paths come back absolute in the walker's own view — `/workspace/…` from a containerised
+        carrier, the host directory from the local carrier's argv rewrite — so each is made relative
+        against whichever of those two roots it carries."""
         handle = await self.existing(conversation_id)
         if handle is None:
             return ()
         session = SandboxSession(carrier=self.carrier, handle=handle)
-        listed = await session.run_sbxfs("glob", {"pattern": "**/*", "path": WORKSPACE_DIR})
+        listed = await session.run_sbxfs(
+            "glob",
+            {
+                "pattern": "**/*",
+                "path": WORKSPACE_DIR,
+                "exclude_names": list(WORKSPACE_LISTING_EXCLUDE_NAMES),
+            },
+        )
         files = listed["files"]
         if not isinstance(files, list):
             raise RuntimeError("sbxfs glob did not return a file list")

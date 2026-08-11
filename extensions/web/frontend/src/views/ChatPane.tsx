@@ -59,7 +59,7 @@ export function ChatPane({
                   <SlotIcon icon={entry.icon} />
                   <span>
                     {entry.label}
-                    {entry.count ? " " + entry.count : ""}
+                    {entry.count ? " " + entry.count + (entry.count_truncated ? "+" : "") : ""}
                   </span>
                 </span>
               </button>

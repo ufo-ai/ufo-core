@@ -2721,9 +2721,9 @@ class SurfaceContext:
         return await read_compaction_record(self.blob, conversation_id, index)
 
     async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
-        """Every file in the conversation's `/workspace` — the sandbox's own live state, listed in
-        the container — as workspace-relative paths, sorted, bounded by the in-container walk's cap.
-        Empty for a conversation that is not this workspace's or has no sandbox yet."""
+        """Member-visible files in the conversation's `/workspace` — the sandbox's live state with
+        Git metadata omitted before the in-container walk's cap — as sorted workspace-relative
+        paths. Empty for a conversation that is not this workspace's or has no sandbox yet."""
         if not await self._owned_conversation(conversation_id):
             return ()
         return await self._sandboxes.entries(conversation_id)

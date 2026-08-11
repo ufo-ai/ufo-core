@@ -1015,7 +1015,19 @@ def op_glob(params: dict) -> dict:
     symlinked directory."""
     workspace = contained_root(params["workspace"])
     root, pattern = contained_glob(params["pattern"], params.get("path"), workspace)
-    hits = [path for path in root.glob(pattern) if is_contained_regular(path, workspace)]
+    exclude_names = params.get("exclude_names", [])
+    if not isinstance(exclude_names, list) or any(
+        not isinstance(name, str) or not name or "/" in name or "\\" in name
+        for name in exclude_names
+    ):
+        raise FsError("exclude_names must be a list of path component names")
+    excluded = frozenset(exclude_names)
+    hits = [
+        path
+        for path in root.glob(pattern)
+        if not excluded.intersection(path.relative_to(workspace).parts)
+        and is_contained_regular(path, workspace)
+    ]
     hits.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
     truncated = len(hits) > GLOB_MAX_RESULTS
     capped = hits[:GLOB_MAX_RESULTS]
