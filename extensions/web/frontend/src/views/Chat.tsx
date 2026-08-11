@@ -5,12 +5,13 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
-import { chatState, clearChat, updateChat, useChat, type ToolEvent } from "@/lib/chatStore";
+import { chatState, clearChat, updateChat, useChat, type ActivityEvent } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
 import { subagentConversationHash } from "@/lib/route";
 import {
   answerQuestion,
   eventLabel,
+  latestActivity,
   refreshTranscript,
   resyncChat,
   sendMessage,
@@ -34,6 +35,8 @@ export function formatSize(bytes: number): string {
 }
 
 const PIN_THRESHOLD_PX = 40;
+
+const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
 
 export type ChatProps = {
   agent: Agent;
@@ -132,8 +135,9 @@ export function Chat({
           ) : (
             <Speech key={index} mine={message.role === "user"}>
               {message.role === "user" ? message.text : <Markdown text={message.text} />}
-              {message.subagents ? <SubagentCards runs={message.subagents} /> : null}
-              {message.events ? <ToolFold events={message.events} /> : null}
+              {message.role === "user" ? null : (
+                <Activity events={message.events ?? []} runs={message.subagents ?? []} />
+              )}
               {message.files ? <Files files={message.files} /> : null}
               {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
               {message.meta ? <Meta>{message.meta}</Meta> : null}
@@ -143,16 +147,17 @@ export function Chat({
         {state.live ? (
           <Speech mine={false} entering>
             <StreamingBody text={state.live.text} />
-            {state.live.subagents.length ? <SubagentCards runs={state.live.subagents} /> : null}
+            <Activity
+              events={state.live.events}
+              runs={state.live.subagents}
+              working={
+                state.live.reconnecting
+                  ? "Reconnecting…"
+                  : (state.live.activity ?? (state.live.text ? undefined : "Thinking…"))
+              }
+            />
             {state.live.files ? <Files files={state.live.files} /> : null}
             {state.live.connectUrl ? <ConnectLink url={state.live.connectUrl} /> : null}
-            {state.live.reconnecting ? (
-              <Working>Reconnecting…</Working>
-            ) : state.live.activity && !state.live.subagents.length ? (
-              <Working>{state.live.activity}</Working>
-            ) : state.live.text ? null : (
-              <Working>Thinking…</Working>
-            )}
             {state.live.meter ? <Meta>{state.live.meter}</Meta> : null}
             {state.live.meta ? <Meta>{state.live.meta}</Meta> : null}
           </Speech>
@@ -251,42 +256,60 @@ function Meta({ children }: { children: ReactNode }) {
 function Working({ children }: { children: ReactNode }) {
   return (
     <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
-      <span aria-hidden className="size-xs animate-working rounded-full bg-ink motion-reduce:animate-none" />
+      <span aria-hidden className={PULSE} />
       {children}
     </div>
   );
 }
 
-function ToolFold({ events }: { events: ToolEvent[] }) {
+function Activity({
+  events,
+  runs,
+  working,
+}: {
+  events: ActivityEvent[];
+  runs: SubagentRun[];
+  working?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!events.length && !runs.length) {
+    return working === undefined ? null : <Working>{working}</Working>;
+  }
   return (
-    <details className="mt-2xs font-mono text-small opacity-(--muted)">
+    <details
+      className="mt-2xs font-mono text-small opacity-(--muted)"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary className="cursor-pointer">
-        {events.length === 1 ? "1 tool call" : events.length + " tool calls"}
+        {working === undefined ? null : (
+          <span aria-hidden className={cn(PULSE, "mr-sm inline-block align-middle")} />
+        )}
+        {working ?? latestActivity(events, runs)}
       </summary>
-      <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
-        {events.map((event, index) => (
-          <li key={index}>{eventLabel(event, "done")}</li>
-        ))}
-      </ul>
+      {open ? <ActivityTree events={events} runs={runs} /> : null}
     </details>
   );
 }
 
-function SubagentCards({ runs }: { runs: SubagentRun[] }) {
+function ActivityTree({ events, runs }: { events: ActivityEvent[]; runs: SubagentRun[] }) {
+  if (!events.length && !runs.length) return null;
   return (
-    <>
-      {runs.map((run) => (
-        <a
-          key={run.conversation_id}
-          href={subagentConversationHash(run.profile, run.conversation_id)}
-          className="mt-sm flex w-full flex-col rounded-control border border-edge-control px-lg py-md no-underline"
-          data-kind="subagent"
-        >
-          <span>Subagent · {run.profile}</span>
-          <span className="mt-2xs text-small opacity-(--muted)">Open conversation</span>
-        </a>
+    <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
+      {events.map((event, index) => (
+        <li key={index} className="whitespace-pre-wrap">
+          {eventLabel(event, "done")}
+        </li>
       ))}
-    </>
+      {runs.map((run) => (
+        <li key={run.conversation_id} className="flex flex-col gap-hair">
+          <a href={subagentConversationHash(run.profile, run.conversation_id)}>
+            Subagent · {run.profile}
+          </a>
+          <ActivityTree events={run.events} runs={run.subagents} />
+          {run.output ? <div className="whitespace-pre-wrap pl-lg">{run.output}</div> : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 

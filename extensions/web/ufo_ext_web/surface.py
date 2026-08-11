@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
@@ -131,6 +131,10 @@ MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
+SUBAGENT_ACTIVITY_LIMIT = 40
+SUBAGENT_EVENT_LIMIT = 100
+SUBAGENT_NOTE_MAX_CHARS = 500
+SUBAGENT_OUTPUT_MAX_CHARS = 2_000
 CONVERSATION_CHANGE_PATCH_MAX_CHARS = SDK_CONVERSATION_CHANGE_PATCH_MAX_CHARS
 CONVERSATION_CHANGES_RESPONSE_MAX_BYTES = 256_000
 CHAT_STORE_PREFIX = "chat/"
@@ -671,21 +675,95 @@ def _tool_event(block: ToolUseBlock) -> dict[str, str]:
             }
 
 
-SubagentRuns = dict[str, list[dict[str, str]]]
+class SubagentNode(TypedDict):
+    """One subagent run as the conversation shows it: the profile and the conversation that holds
+    the whole record, the work it did, what it answered, and the runs it spawned in turn."""
+
+    profile: str
+    conversation_id: str
+    events: list[dict[str, str]]
+    output: str
+    subagents: list["SubagentNode"]
 
 
-def _subagent_runs(turns: tuple[Turn, ...]) -> SubagentRuns:
-    runs: SubagentRuns = {}
-    for turn in turns:
-        if turn.parent_turn_id is None or turn.subagent_profile is None:
+SubagentRuns = dict[str, list[SubagentNode]]
+
+
+def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
+    """A subagent's own work in the order it happened — the tools and skills it dispatched and the
+    text it wrote between them. Its answer is the terminal's, not the last message here: the finish
+    call that carries it never reaches the transcript."""
+    active = {
+        block.tool_use_id
+        for message in messages
+        if not isinstance(message.content, str)
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.activity
+    }
+    events: list[dict[str, str]] = []
+    for message in messages:
+        if message.role != "assistant" or isinstance(message.content, str):
             continue
-        run = {
-            "profile": turn.subagent_profile,
-            "conversation_id": str(turn.conversation_id),
-        }
-        parent_runs = runs.setdefault(str(turn.parent_turn_id), [])
-        if run not in parent_runs:
-            parent_runs.append(run)
+        for block in message.content:
+            if isinstance(block, TextBlock) and block.text.strip():
+                events.append(
+                    {"kind": "note", "text": block.text.strip()[:SUBAGENT_NOTE_MAX_CHARS]}
+                )
+            elif isinstance(block, ToolUseBlock) and block.id in active:
+                events.append(_tool_event(block))
+    return events[:SUBAGENT_EVENT_LIMIT]
+
+
+def _subagent_output(terminal: TerminalFrame | None) -> str:
+    """What a subagent answered, as prose. Its terminal text is the finish payload its profile's
+    output schema shaped, so the member reads the fields it wrote and never the JSON that carried
+    them; a run that ended without one answers with whatever text it left."""
+    if terminal is None or not terminal.text:
+        return ""
+    try:
+        payload = json.loads(terminal.text)
+    except json.JSONDecodeError:
+        return terminal.text[:SUBAGENT_OUTPUT_MAX_CHARS]
+    if not isinstance(payload, dict):
+        return terminal.text[:SUBAGENT_OUTPUT_MAX_CHARS]
+    written = "\n\n".join(
+        value for value in payload.values() if isinstance(value, str) and value.strip()
+    )
+    return written[:SUBAGENT_OUTPUT_MAX_CHARS]
+
+
+async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns:
+    """The spawned turns as a tree under the turns that spawned them, each node carrying the run's
+    own work. `turns` is the transitive descendant set, so a subagent that spawned its own nests
+    again rather than being lost beside its parent. The work is read from each run's conversation,
+    bounded and concurrently, so a conversation that spawned hundreds still answers in one round
+    trip; a run past the bound, and one still going, carries the conversation link that holds it."""
+    spawned: list[Turn] = []
+    nodes: dict[UUID, SubagentNode] = {}
+    for turn in turns:
+        profile = turn.subagent_profile
+        if turn.parent_turn_id is None or profile is None:
+            continue
+        spawned.append(turn)
+        nodes[turn.id] = SubagentNode(
+            profile=profile,
+            conversation_id=str(turn.conversation_id),
+            events=[],
+            output=_subagent_output(turn.terminal),
+            subagents=[],
+        )
+    read = sorted(spawned, key=lambda turn: turn.created_at, reverse=True)[:SUBAGENT_ACTIVITY_LIMIT]
+    recorded = await asyncio.gather(*(ctx.read_transcript(turn.conversation_id) for turn in read))
+    for turn, work in zip(read, recorded, strict=True):
+        if work is not None:
+            nodes[turn.id]["events"] = _subagent_activity(work.messages)
+    runs: SubagentRuns = {}
+    for turn in spawned:
+        parent = nodes.get(turn.parent_turn_id) if turn.parent_turn_id else None
+        if parent is None:
+            runs.setdefault(str(turn.parent_turn_id), []).append(nodes[turn.id])
+        else:
+            parent["subagents"].append(nodes[turn.id])
     return runs
 
 
@@ -787,7 +865,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         )
         rendered = _rendered_messages(
             recorded.messages,
-            _subagent_runs(spawned),
+            await _subagent_nodes(ctx, spawned),
             frozenset(str(turn.id) for turn in turns),
         )
     latest = await ctx.latest_turn(conversation_id)
@@ -2052,14 +2130,16 @@ async def _events(
             if isinstance(frame, Terminal):
                 detail = await ctx.turn_detail(turn_id)
                 if detail is not None:
-                    for run in _subagent_runs(detail.children).get(str(turn_id), []):
-                        yield _event(
-                            "subagent",
-                            {
-                                "profile": run["profile"],
-                                "conversation_id": run["conversation_id"],
-                            },
-                        )
+                    spawned = await ctx.conversation_subagent_turns(detail.turn.conversation_id)
+                    lineage = {turn_id}
+                    mine = []
+                    for spawn in spawned:
+                        if spawn.parent_turn_id in lineage:
+                            lineage.add(spawn.id)
+                            mine.append(spawn)
+                    nodes = await _subagent_nodes(ctx, tuple(mine))
+                    for run in nodes.get(str(turn_id), []):
+                        yield _event("subagent", dict(run))
                 if frame.frame.connect_request is not None:
                     try:
                         url = await ctx.connect_url(turn_id, member_id)

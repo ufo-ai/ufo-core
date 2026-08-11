@@ -40,7 +40,7 @@ test("a skill frame names the skill being loaded", async () => {
   expect(await screen.findByText("Loading skill · calendar-triage")).toBeTruthy();
 });
 
-test("a settled turn folds its tool calls behind a count that expands to its lines", async () => {
+test("a settled turn states its latest call and opens onto the ones before it", async () => {
   const stream = await streaming();
   stream.emit("tool", { tool: "bash", preview: "ls" });
   stream.emit("tool", { tool: "read", preview: "notes.md" });
@@ -53,16 +53,18 @@ test("a settled turn folds its tool calls behind a count that expands to its lin
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("3 tool calls");
+  const summary = await screen.findByText("Loaded skill · calendar-triage");
   expect(summary.tagName).toBe("SUMMARY");
-  expect(screen.getByText("bash ls").closest("details")).toBe(summary.closest("details"));
-  expect(screen.getByText("bash ls")).toBeTruthy();
-  expect(screen.getByText("read notes.md")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
+  expect(screen.queryByText("bash ls")).toBeNull();
   expect(screen.queryByText("Loading skill · calendar-triage")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("bash ls").closest("details")).toBe(summary.closest("details"));
+  expect(screen.getByText("read notes.md")).toBeTruthy();
+  expect(screen.getAllByText("Loaded skill · calendar-triage")).toHaveLength(2);
 });
 
-test("a single tool call folds behind singular copy", async () => {
+test("one tool call states itself, with nothing more behind it", async () => {
   const stream = await streaming();
   stream.emit("tool", { tool: "bash", preview: "ls" });
   stream.emit("terminal", {
@@ -72,15 +74,22 @@ test("a single tool call folds behind singular copy", async () => {
     tokens: 5,
     cost_micro_usd: 1_000_000,
   });
-  expect((await screen.findByText("1 tool call")).tagName).toBe("SUMMARY");
+  const summary = await screen.findByText("bash ls");
+  expect(summary.tagName).toBe("SUMMARY");
+
+  await userEvent.click(summary);
+  expect(screen.getAllByText("bash ls")).toHaveLength(2);
 });
 
-test("a terminal subagent event becomes a conversation card", async () => {
+test("a terminal subagent event nests its work under the reply", async () => {
   const stream = await streaming();
   const conversationId = "66666666-6666-4666-8666-666666666666";
   stream.emit("subagent", {
     profile: "general_purpose",
     conversation_id: conversationId,
+    events: [{ kind: "note", text: "Reading the changelog." }],
+    output: "It shipped Tuesday.",
+    subagents: [],
   });
   stream.emit("terminal", {
     status: "done",
@@ -90,10 +99,16 @@ test("a terminal subagent event becomes a conversation card", async () => {
     cost_micro_usd: 1,
   });
 
-  const card = await screen.findByRole("link", { name: /Subagent · general_purpose/ });
+  const summary = await screen.findByText("Reading the changelog.");
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
+
+  await userEvent.click(summary);
+  const card = screen.getByRole("link", { name: /Subagent · general_purpose/ });
   expect(card.getAttribute("href")).toBe(
     "#/subagents/general_purpose/conversations/" + conversationId,
   );
+  expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
 });
 
 test("a turn with no tool calls renders no fold", async () => {

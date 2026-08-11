@@ -94,19 +94,27 @@ export type CredentialRequest = {
   prompts: CredentialPrompt[];
 };
 
-export type ToolEvent = {
-  kind: "tool" | "skill";
-  name: string;
-  preview: string;
-  description: string;
-};
+/** One thing an agent did, as a conversation states it: a tool it dispatched, a skill it mounted,
+ *  or a line it wrote between the two. */
+export type ActivityEvent =
+  | { kind: "tool"; name: string; preview: string; description: string }
+  | { kind: "skill"; name: string; preview: string; description: string }
+  | { kind: "note"; text: string };
 
-export type SubagentRun = { profile: string; conversation_id: string };
+/** One subagent run beneath the reply that spawned it: the work it did, what it answered, and the
+ *  runs it spawned in turn. `conversation_id` opens the whole record. */
+export type SubagentRun = {
+  profile: string;
+  conversation_id: string;
+  events: ActivityEvent[];
+  output: string;
+  subagents: SubagentRun[];
+};
 
 export type Message = {
   role: string;
   text: string;
-  events?: ToolEvent[];
+  events?: ActivityEvent[];
   subagents?: SubagentRun[];
 };
 

@@ -47,8 +47,11 @@ from ufo_ext_web.surface import (
     PORTAL_HTML,
     SESSION_COOKIE,
     SESSION_FAULT_HEADER,
+    SubagentNode,
     _rendered_messages,
     _sse,
+    _subagent_activity,
+    _subagent_output,
     load_assets,
 )
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
@@ -256,6 +259,52 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
     ]
 
 
+def test_subagent_activity_keeps_the_text_a_run_wrote_between_its_calls() -> None:
+    """A subagent's own screen is its work in order — what it said, then what it did. Its answer
+    is not here: the finish call carrying it returns before the round reaches the transcript."""
+    events = _subagent_activity(
+        (
+            Message(role="user", content="{}"),
+            Message(
+                role="assistant",
+                content=(
+                    TextBlock(text="  Reading the changelog first.  "),
+                    ToolUseBlock(id="call-1", name="fetch_url", input={"url": "https://x/y"}),
+                    ToolUseBlock(id="call-2", name="grep", input={"pattern": "shipped"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+            ),
+        )
+    )
+
+    assert events == [
+        {"kind": "note", "text": "Reading the changelog first."},
+        {
+            "kind": "tool",
+            "name": "fetch_url",
+            "preview": '{"url":"https://x/y"}',
+            "description": "",
+        },
+    ]
+
+
+def test_subagent_output_reads_the_fields_a_run_wrote_never_the_json_carrying_them() -> None:
+    assert (
+        _subagent_output(
+            TerminalFrame(status="done", text='{"result": "It shipped Tuesday.", "confidence": 3}')
+        )
+        == "It shipped Tuesday."
+    )
+    assert _subagent_output(TerminalFrame(status="done", text="{}")) == ""
+    assert _subagent_output(TerminalFrame(status="failed", text="ran out of rounds")) == (
+        "ran out of rounds"
+    )
+    assert _subagent_output(None) == ""
+
+
 def test_transcript_projection_does_not_move_activity_between_turns() -> None:
     rendered = _rendered_messages(
         (
@@ -427,8 +476,8 @@ def test_transcript_projection_places_child_conversations_on_their_parent_replie
             ),
         ),
         {
-            str(answered): [{"profile": "general_purpose", "conversation_id": str(answered_child)}],
-            str(failed): [{"profile": "deep_research", "conversation_id": str(failed_child)}],
+            str(answered): [_node("general_purpose", answered_child)],
+            str(failed): [_node("deep_research", failed_child)],
         },
         frozenset((str(answered), str(failed))),
     )
@@ -438,15 +487,25 @@ def test_transcript_projection_places_child_conversations_on_their_parent_replie
         {
             "role": "assistant",
             "text": "Done.",
-            "subagents": [{"profile": "general_purpose", "conversation_id": str(answered_child)}],
+            "subagents": [_node("general_purpose", answered_child)],
         },
         {"role": "user", "text": "Second."},
         {
             "role": "assistant",
             "text": "",
-            "subagents": [{"profile": "deep_research", "conversation_id": str(failed_child)}],
+            "subagents": [_node("deep_research", failed_child)],
         },
     ]
+
+
+def _node(profile: str, conversation_id: UUID) -> SubagentNode:
+    return SubagentNode(
+        profile=profile,
+        conversation_id=str(conversation_id),
+        events=[],
+        output="",
+        subagents=[],
+    )
 
 
 @dataclass(frozen=True)
@@ -826,8 +885,39 @@ async def test_transcript_route_returns_durable_tool_activity(
             ),
         )
     )
-    child_conversation, _child_turn = await _seed_subagent(
-        workspace_id, agent_id, member_id, turn_id
+    child_conversation, child_turn = await _seed_subagent(
+        workspace_id,
+        agent_id,
+        member_id,
+        turn_id,
+        terminal_text='{"result": "Nothing is stale."}',
+    )
+    await Transcript(blob=blob, conversation_id=child_conversation).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="{}"),
+                Message(
+                    role="assistant",
+                    content=(
+                        TextBlock(text="Checking the lockfile."),
+                        ToolUseBlock(id="call-2", name="read", input={"path": "uv.lock"}),
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="call-2", content="…", activity=True),),
+                ),
+            ),
+        )
+    )
+    grandchild_conversation, _grandchild_turn = await _seed_subagent(
+        workspace_id,
+        agent_id,
+        member_id,
+        child_turn,
+        terminal_text='{"result": "Nothing further."}',
+        profile="deep_research",
     )
 
     response = await client.get(
@@ -853,6 +943,25 @@ async def test_transcript_route_returns_durable_tool_activity(
                 {
                     "profile": "general_purpose",
                     "conversation_id": str(child_conversation),
+                    "events": [
+                        {"kind": "note", "text": "Checking the lockfile."},
+                        {
+                            "kind": "tool",
+                            "name": "read",
+                            "preview": '{"path":"uv.lock"}',
+                            "description": "",
+                        },
+                    ],
+                    "output": "Nothing is stale.",
+                    "subagents": [
+                        {
+                            "profile": "deep_research",
+                            "conversation_id": str(grandchild_conversation),
+                            "events": [],
+                            "output": "Nothing further.",
+                            "subagents": [],
+                        }
+                    ],
                 }
             ],
         },
@@ -3410,6 +3519,8 @@ async def _seed_subagent(
     agent_id: UUID,
     member_id: UUID,
     parent_turn_id: UUID,
+    terminal_text: str = "{}",
+    profile: str = "general_purpose",
 ) -> tuple[UUID, UUID]:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -3434,9 +3545,9 @@ async def _seed_subagent(
                 seq=1,
                 status="done",
                 inbound="{}",
-                terminal=TerminalFrame(status="done", text="{}").model_dump(mode="json"),
+                terminal=TerminalFrame(status="done", text=terminal_text).model_dump(mode="json"),
                 parent_turn_id=parent_turn_id,
-                subagent_profile="general_purpose",
+                subagent_profile=profile,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -3629,10 +3740,14 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     assert turns == 1
 
 
-async def test_terminal_stream_links_the_turns_child_conversation(
+async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children(
     web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
+    """The stream states a run the same way a reload does — one projection — so the bubble a live
+    turn leaves behind and the bubble the transcript draws hold the same tree."""
     client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _conversation_id, turn_id = await _seed_web_turn(
         workspace_id,
@@ -3641,8 +3756,33 @@ async def test_terminal_stream_links_the_turns_child_conversation(
         "owner@example.com",
         TerminalFrame(status="done", text="Done."),
     )
-    child_conversation, _child_turn = await _seed_subagent(
-        workspace_id, agent_id, member_id, turn_id
+    child_conversation, child_turn = await _seed_subagent(
+        workspace_id,
+        agent_id,
+        member_id,
+        turn_id,
+        terminal_text='{"result": "It shipped Tuesday."}',
+    )
+    await Transcript(blob=blob, conversation_id=child_conversation).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="{}"),
+                Message(
+                    role="assistant",
+                    content=(
+                        ToolUseBlock(id="call-1", name="fetch_url", input={"url": "https://x/y"}),
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+                ),
+            ),
+        )
+    )
+    grandchild_conversation, _grandchild_turn = await _seed_subagent(
+        workspace_id, agent_id, member_id, child_turn, profile="deep_research"
     )
 
     events = dict(await _collect_events(client, token, turn_id))
@@ -3650,6 +3790,24 @@ async def test_terminal_stream_links_the_turns_child_conversation(
     assert events["subagent"] == {
         "profile": "general_purpose",
         "conversation_id": str(child_conversation),
+        "events": [
+            {
+                "kind": "tool",
+                "name": "fetch_url",
+                "preview": '{"url":"https://x/y"}',
+                "description": "",
+            }
+        ],
+        "output": "It shipped Tuesday.",
+        "subagents": [
+            {
+                "profile": "deep_research",
+                "conversation_id": str(grandchild_conversation),
+                "events": [],
+                "output": "",
+                "subagents": [],
+            }
+        ],
     }
 
 

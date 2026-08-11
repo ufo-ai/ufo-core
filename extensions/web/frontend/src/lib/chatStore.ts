@@ -1,15 +1,15 @@
 import { useSyncExternalStore } from "react";
 
 import type {
+  ActivityEvent,
   ChatFile,
   ChatQuestion,
   CredentialRequest,
   Message,
   SubagentRun,
-  ToolEvent,
 } from "@/lib/types";
 
-export type { ToolEvent } from "@/lib/types";
+export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
@@ -24,7 +24,7 @@ export type LiveTurn = {
   meta: string | null;
   files: ChatFile[] | null;
   connectUrl: string | null;
-  events: ToolEvent[];
+  events: ActivityEvent[];
   subagents: SubagentRun[];
   reconnecting: boolean;
 };

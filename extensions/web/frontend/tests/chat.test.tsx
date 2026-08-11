@@ -68,7 +68,7 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
-test("a reloaded conversation keeps the activity that produced its reply", async () => {
+test("a reloaded conversation states its latest activity and opens onto the rest", async () => {
   wire(
     transcript({
       messages: [
@@ -96,10 +96,15 @@ test("a reloaded conversation keeps the activity that produced its reply", async
   );
   open();
 
-  const summary = await screen.findByText("2 tool calls");
+  const summary = await screen.findByText("Loaded skill · coding");
+  expect(screen.queryByText("Running the focused tests")).toBeNull();
+
   await userEvent.click(summary);
   expect(screen.getByText("Running the focused tests")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+  expect(screen.getAllByText("Loaded skill · coding")).toHaveLength(2);
+
+  await userEvent.click(summary);
+  expect(screen.queryByText("Running the focused tests")).toBeNull();
 });
 
 test("a conversation reloaded while its turn runs shows the prompt, says so, and tails the turn", async () => {
@@ -125,6 +130,62 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
   expect(StreamFake.last().closed).toBe(true);
+});
+
+test("a running turn opens onto the calls behind its latest, and keeps working", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
+  StreamFake.last().emit("skill", { skill: "coding" });
+
+  const summary = await screen.findByText("Loading skill · coding");
+  expect(screen.queryByText("bash gh pr view")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("bash gh pr view")).toBeTruthy();
+  expect(document.querySelector(".animate-working")).toBeTruthy();
+
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Reviewed it.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  expect(await screen.findByText("Reviewed it.")).toBeTruthy();
+  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+  expect(document.querySelector(".animate-working")).toBeNull();
+});
+
+test("a live subagent run nests under the reply it produced", async () => {
+  const conversationId = "66666666-6666-4666-8666-666666666666";
+  wire(transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent", {
+    profile: "general_purpose",
+    conversation_id: conversationId,
+    events: [{ kind: "tool", name: "fetch_url", preview: "", description: "Fetching the page" }],
+    output: "The release shipped on Tuesday.",
+    subagents: [],
+  });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "It shipped Tuesday.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  const summary = await screen.findByText("Fetching the page");
+  await userEvent.click(summary);
+  expect(
+    screen.getByRole("link", { name: /Subagent · general_purpose/ }).getAttribute("href"),
+  ).toBe("#/subagents/general_purpose/conversations/" + conversationId);
+  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
 test("a conversation reloaded mid-turn holds the composer, so the turn is tailed once", async () => {
@@ -174,25 +235,65 @@ test("a settled conversation tails nothing", async () => {
   expect(screen.queryByText("Thinking…")).toBeNull();
 });
 
-test("a reloaded conversation links its subagent conversation", async () => {
+test("a reloaded conversation nests its subagent work under the reply and still links it", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
+  const nestedId = "77777777-7777-4777-8777-777777777777";
   wire(
     transcript({
       messages: [
         {
           role: "assistant",
           text: "Done.",
-          subagents: [{ profile: "general_purpose", conversation_id: conversationId }],
+          events: [{ kind: "tool", name: "grep", preview: "", description: "Reading the tree" }],
+          subagents: [
+            {
+              profile: "general_purpose",
+              conversation_id: conversationId,
+              events: [
+                { kind: "note", text: "Checking the release notes first." },
+                { kind: "tool", name: "fetch_url", preview: "", description: "Fetching the page" },
+              ],
+              output: "The release shipped on Tuesday.",
+              subagents: [
+                {
+                  profile: "deep_research",
+                  conversation_id: nestedId,
+                  events: [
+                    { kind: "tool", name: "search_web", preview: "", description: "Searching" },
+                  ],
+                  output: "Nothing further.",
+                  subagents: [],
+                },
+              ],
+            },
+          ],
         },
       ],
     }),
   );
   open();
 
-  const card = await screen.findByRole("link", { name: /Subagent · general_purpose/ });
-  expect(card.getAttribute("href")).toBe(
+  const summary = await screen.findByText("Searching");
+  expect(screen.queryByText("Fetching the page")).toBeNull();
+
+  await userEvent.click(summary);
+  expect(screen.getByText("Reading the tree")).toBeTruthy();
+  expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
+  expect(screen.getByText("Fetching the page")).toBeTruthy();
+  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
+  expect(screen.getByText("Nothing further.")).toBeTruthy();
+
+  const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
+  expect(link.getAttribute("href")).toBe(
     "#/subagents/general_purpose/conversations/" + conversationId,
   );
+  expect(
+    screen.getByRole("link", { name: /Subagent · deep_research/ }).getAttribute("href"),
+  ).toBe("#/subagents/deep_research/conversations/" + nestedId);
+
+  await userEvent.click(summary);
+  expect(screen.queryByText("Fetching the page")).toBeNull();
+  expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
 });
 
 test("a conversation opens its file changes and returns to chat", async () => {

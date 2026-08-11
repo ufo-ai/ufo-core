@@ -5,8 +5,8 @@ import {
   liveTurn,
   migrateChat,
   updateChat,
+  type ActivityEvent,
   type LiveTurn,
-  type ToolEvent,
 } from "@/lib/chatStore";
 import type { ChatFile, ChatQuestion, SubagentRun, Transcript } from "@/lib/types";
 
@@ -66,12 +66,24 @@ export function resetStreams(): void {
   reattachTimer = NATIVE_TIMER;
 }
 
-export function eventLabel(event: ToolEvent, phase: "active" | "done"): string {
-  if (event.description) return event.description;
-  if (event.kind === "skill") {
-    return (phase === "active" ? "Loading skill" : "Loaded skill") + " · " + event.name;
+export function eventLabel(event: ActivityEvent, phase: "active" | "done"): string {
+  switch (event.kind) {
+    case "note":
+      return event.text;
+    case "skill":
+      return (phase === "active" ? "Loading skill" : "Loaded skill") + " · " + event.name;
+    case "tool":
+      return event.description || (event.preview ? event.name + " " + event.preview : event.name);
   }
-  return event.preview ? event.name + " " + event.preview : event.name;
+}
+
+/** What the agent last did, reading to the deepest end of the tree — the line a collapsed
+ *  disclosure states, so the member reads the newest work without opening it. */
+export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): string {
+  const run = runs.at(-1);
+  if (run) return latestActivity(run.events, run.subagents) || "Subagent · " + run.profile;
+  const event = events.at(-1);
+  return event ? eventLabel(event, "done") : "";
 }
 
 export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
@@ -153,7 +165,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("tool", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
-    const entry: ToolEvent = {
+    const entry: ActivityEvent = {
       kind: "tool",
       name: frame.tool,
       preview: frame.preview ?? "",
@@ -168,7 +180,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("skill", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
-    const entry: ToolEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
+    const entry: ActivityEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
     onLive((live) => ({
       ...live,
       events: live.events.concat(entry),

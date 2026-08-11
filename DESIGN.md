@@ -251,6 +251,17 @@ measurement is held rather than retaken — an expanded block always fits its ow
 re-measuring would take its own control away. An agent's prompt runs for screens: left unheld it
 buries every section under it, and the member who came for what is below never learns it is there.
 
+A reply states what the agent did as one line and opens onto the rest. The disclosure is a native
+`<details>` (`Activity` in `views/Chat.tsx`) — its own marker, its own keyboard, its own announced
+state, and so no fourth glyph — and its summary is the *latest* activity, never a count: a member
+reading a settled reply wants what it just did, and `3 tool calls` says only that there were three.
+While the turn runs that same line is the running activity and carries the working pulse, so the
+collapsed state reads the same whether the turn is going or gone. The body mounts only while open.
+Inside it, a subagent's own calls, the lines it wrote between them, and what it answered nest under
+a link to its conversation, one indent per generation — the run is part of the reply that spawned
+it rather than a card beside it, and the link still reaches the whole record. A run's answer is the
+prose it wrote, never the JSON its profile's output schema carried it in.
+
 A screen whose subject is one number leads with that number as a figure, not as a clause in a
 heading: the card takes the same `rounded-panel border border-edge bg-surface` as a table, holding
 a muted label, the value at `text-title font-strong`, and a muted note beneath. Figures sit in the
