@@ -42,6 +42,13 @@ def test_shell_requires_message_authority_for_admin_actions() -> None:
     assert "Omit it only for conversation-common work." in SHELL
 
 
+def test_shell_refuses_to_manufacture_cross_member_approval() -> None:
+    assert "require an authorized member to request it in their own conversation" in SHELL
+    assert "tell them to ask you directly instead of asking them to approve" in SHELL
+    assert "Never promise that a reply elsewhere will apply the action" in SHELL
+    assert "or that you will report its outcome back here" in SHELL
+
+
 def test_shell_asks_for_the_source_without_naming_a_surface() -> None:
     assert "may also carry a `source`" in SHELL
     assert "Requested in: <source>" in SHELL

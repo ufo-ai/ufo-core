@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from evals import (
     ab_reversal,
+    authority_handoff,
     basics,
     browser_nav,
     closing_message,
@@ -60,6 +61,11 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("skill_routing", skill_routing.CASES),
     capability_task("tool_calling", tool_calling.CASES),
+    capability_task(
+        "authority_handoff",
+        authority_handoff.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
     capability_task("object_tools", object_tools.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     scenario_task(
         "object_tools_flows",

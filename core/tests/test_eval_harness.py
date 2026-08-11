@@ -245,6 +245,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["scenario_smoke"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["scenario_smoke"].simulator_reasoning == "off"
     assert tasks["scenario_env"].simulator_model == SCENARIO_SIMULATOR_MODEL
+    assert tasks["authority_handoff"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["authority_handoff"].simulator_model is None
     assert tasks["object_tools"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["object_tools"].simulator_model is None
     assert tasks["object_tools_flows"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -274,6 +276,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "slack_silence",
             "scenario_smoke",
             "scenario_env",
+            "authority_handoff",
             "object_tools",
             "object_tools_flows",
             "document_visual",
