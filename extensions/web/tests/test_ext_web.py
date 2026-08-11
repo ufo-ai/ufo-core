@@ -41,11 +41,11 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import (
-    MEMBER_SESSION_COOKIE,
     NO_MEMBER_FAULT,
     PORTAL_BUILD,
     PORTAL_FILE,
     PORTAL_HTML,
+    SESSION_COOKIE,
     SESSION_FAULT_HEADER,
     _rendered_messages,
     _sse,
@@ -698,7 +698,7 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
         async with client.stream(
             "GET",
             f"/surface/web/turns/{turn_id}/stream",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         ) as stream:
             assert stream.status_code == 200
             assert stream.headers["content-type"].startswith("text/event-stream")
@@ -726,7 +726,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"hello",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert admitted.status_code == 200
     turn_id = admitted.json()["turn_id"]
@@ -781,7 +781,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     }
     transcript = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={opened}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert transcript.status_code == 200
     assert transcript.json()["messages"] == [
@@ -832,7 +832,7 @@ async def test_transcript_route_returns_durable_tool_activity(
 
     response = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
     assert response.status_code == 200
@@ -870,7 +870,7 @@ async def test_transcript_carries_a_running_turns_prompt_and_names_the_turn(
     client, workspace_id, agent_id = web
     _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     conversation_id, _first = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -933,7 +933,7 @@ async def test_unknown_session_token_is_rejected(web: tuple[AsyncClient, UUID, U
     denied = await client.post(
         f"/surface/web/agents/{agent_id}/chat",
         content=b"hi",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={stranger}"},
+        headers={"cookie": f"{SESSION_COOKIE}={stranger}"},
     )
     assert denied.status_code == 401
     missing = await client.post(f"/surface/web/agents/{agent_id}/chat", content=b"hi")
@@ -961,7 +961,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             )
         )
     _member_id, token = await _seed_member(workspace_id, "outsider@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
     assert index.json() == {
@@ -1036,7 +1036,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     await _grant_web_access(workspace_id, second_agent, "member@example.com")
     admin_view = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert admin_view.json()["member"] == {"email": "admin@example.com", "admin": True}
     assert [(a["name"], a["main"]) for a in admin_view.json()["agents"]] == [
@@ -1044,7 +1044,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         ("ops", False),
     ]
     member_view = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_view.json()["member"] == {"email": "member@example.com", "admin": False}
     assert [a["id"] for a in member_view.json()["agents"]] == [
@@ -1059,7 +1059,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     assert member_view.json()["subagents"] == roster
     reachable = await client.get(
         f"/surface/web/agents/{agent_id}/transcript",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert reachable.status_code == 400
     assert reachable.text == "conversation is required"
@@ -1136,32 +1136,30 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
     await _seed_connection(workspace_id, second_agent, member_m, "asana", shared=True)
     path = f"/surface/web/agents/{agent_id}/connections"
-    m_view = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert [
         (c["provider"], c["shared"], c["owner_email"]) for c in m_view.json()["connections"]
     ] == [
         ("github", False, "m@example.com"),
         ("slack", True, None),
     ]
-    n_view = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
+    n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     assert [(c["provider"], c["owner_email"]) for c in n_view.json()["connections"]] == [
         ("slack", "n@example.com")
     ]
-    admin_view = await client.get(
-        path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
-    )
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     assert [(c["provider"], c["owner_email"]) for c in admin_view.json()["connections"]] == [
         ("github", "m@example.com"),
         ("slack", "n@example.com"),
     ]
     other = await client.get(
         f"/surface/web/agents/{second_agent}/connections",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
     )
     assert [c["provider"] for c in other.json()["connections"]] == ["asana"]
     walled = await client.get(
         f"/surface/web/agents/{second_agent}/connections",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert walled.status_code == 404
 
@@ -1189,7 +1187,7 @@ async def test_credentials_view_reports_slots_and_never_values(
     assert "acme_api_key" not in anonymous.text
     listed = await client.get(
         "/surface/web/workspace/credentials",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert listed.status_code == 200
     assert listed.json()["slots"] == [
@@ -1232,21 +1230,19 @@ async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID
                 )
             )
     path = "/surface/web/workspace/sources"
-    m_view = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert [(s["backend"], s["shared"], s["owner_email"]) for s in m_view.json()["sources"]] == [
         ("folder", True, None),
         ("github", False, "m@example.com"),
         ("notion", True, None),
     ]
-    n_view = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
+    n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     assert [(s["backend"], s["owner_email"]) for s in n_view.json()["sources"]] == [
         ("folder", None),
         ("notion", "n@example.com"),
     ]
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    admin_view = await client.get(
-        path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
-    )
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     assert [(s["backend"], s["owner_email"]) for s in admin_view.json()["sources"]] == [
         ("folder", None),
         ("github", "m@example.com"),
@@ -1304,9 +1300,7 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
                 )
             minute += 1
     path = "/surface/web/workspace/artifacts"
-    m_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
-    ).json()
+    m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
     assert [entry["filename"] for entry in m_view["artifacts"]] == ["chart.png", "report.pdf"]
     assert [entry["media_type"] for entry in m_view["artifacts"]] == [
         "image/png",
@@ -1314,12 +1308,10 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     ]
     assert m_view["artifacts"][0]["url"].startswith("https://web/")
     assert "/chart.png?exp=" in m_view["artifacts"][0]["url"]
-    n_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
-    ).json()
+    n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
     assert [entry["filename"] for entry in n_view["artifacts"]] == ["notes.txt"]
     admin_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"})
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
     assert [entry["filename"] for entry in admin_view["artifacts"]] == [
         "notes.txt",
@@ -1359,7 +1351,7 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
                 )
             )
     path = "/surface/web/workspace/usage"
-    mine = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    mine = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert mine.status_code == 200
     payload = mine.json()
     assert payload["workspace"] is None
@@ -1370,11 +1362,9 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
     body = mine.text
     assert "n@example.com" not in body
     assert "assistant" not in body
-    theirs = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
-    ).json()
+    theirs = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
     assert [cap["limit_micro_usd"] for cap in theirs["caps"]] == [9_000_000]
-    rolled = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"})
+    rolled = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     workspace = rolled.json()["workspace"]
     assert rolled.json()["total_micro_usd"] == 0
     assert workspace["total_micro_usd"] == 110_000
@@ -1386,13 +1376,13 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
     assert {line["dimension"] for line in workspace["by_dimension"]} == {"egress", "tokens"}
     windowed = (
         await client.get(
-            f"{path}?window_seconds=3600", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"}
+            f"{path}?window_seconds=3600", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
         )
     ).json()
     assert windowed["window_seconds"] == 3_600
     for bad in ("abc", "-5", "0", str(web_surface.MAX_USAGE_WINDOW_SECONDS + 1)):
         refused = await client.get(
-            f"{path}?window_seconds={bad}", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"}
+            f"{path}?window_seconds={bad}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
         )
         assert refused.status_code == 400
     anonymous = await client.get(path)
@@ -1507,7 +1497,7 @@ async def test_artifacts_listing_walks_pages_without_repeating_or_skipping(
         tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(5)),
     )
     monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
     assert _names(first) == ["file-4.txt", "file-3.txt"]
@@ -1548,7 +1538,7 @@ async def test_artifacts_paging_breaks_a_shared_timestamp_at_the_boundary(
         ),
     )
     monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 1)
-    walked = await _walk_artifacts(client, {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"})
+    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token}"})
     assert sorted(walked) == ["first.txt", "second.txt", "third.txt"]
     assert len(walked) == len(set(walked))
 
@@ -1569,7 +1559,7 @@ async def test_artifacts_paging_is_stable_across_a_concurrent_share(
         tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(4)),
     )
     monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
     assert _names(first) == ["file-3.txt", "file-2.txt"]
     await _seed_artifacts(
@@ -1599,7 +1589,7 @@ async def test_artifacts_view_refuses_a_cursor_it_never_minted(
         "m@example.com",
         (("file.txt", datetime(2026, 7, 1, tzinfo=UTC)),),
     )
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     for stale in ("nonsense", f"older|not-a-date|{uuid4()}", "sideways|2026-07-01T00:00:00|x"):
         refused = await client.get(f"{ARTIFACTS_PATH}?after={quote(stale)}", headers=headers)
         assert refused.status_code == 400, stale
@@ -1632,7 +1622,7 @@ async def test_artifacts_pages_hold_the_member_fence_throughout_the_walk(
         ),
     )
     monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    walked = await _walk_artifacts(client, {"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert walked == [f"mine-{index}.txt" for index in (3, 2, 1, 0)]
 
 
@@ -1655,7 +1645,7 @@ async def test_artifacts_listing_caps_at_the_real_limit_with_more_behind_it(
         ),
     )
     page = (
-        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"})
+        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
     ).json()
     assert len(page["artifacts"]) == web_surface.ARTIFACT_LIST_LIMIT
     assert page["older"] is not None
@@ -1697,19 +1687,15 @@ async def test_site_index_answers_through_the_kinds_own_gate(
             True,
         )
     path = f"/surface/web/objects/site?agent={agent_id}"
-    m_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
-    ).json()
+    m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
     assert sorted(row["name"].split("-")[0] for row in m_view["objects"]) == ["draft", "landing"]
     assert sorted(m_view["fields"]) == ["conversation", "created_at", "site_url", "visibility"]
     assert "guidance" not in m_view and "description" not in m_view
     assert m_view["applies"] is False
-    n_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
-    ).json()
+    n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
     assert [row["name"].split("-")[0] for row in n_view["objects"]] == ["landing"]
     admin_view = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"})
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
     assert sorted(row["name"].split("-")[0] for row in admin_view["objects"]) == [
         "draft",
@@ -1746,7 +1732,7 @@ async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(
                 conversation_audience(member_m),
                 True,
             )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
     base = f"/surface/web/objects/site?agent={agent_id}"
     first = (await client.get(base, headers=cookie)).json()
     assert len(first["objects"]) == OBJECT_LIST_PAGE
@@ -1788,7 +1774,7 @@ async def test_a_site_detail_carries_its_conversation_link_and_refuses_a_hidden_
         )
     name = site_object_name(conversation_id, "draft")
     path = f"/surface/web/objects/site/{name}?agent={agent_id}"
-    read = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    read = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert read.status_code == 200
     detail = read.json()
     assert detail["spec"] == {"visibility": "private"}
@@ -1802,7 +1788,7 @@ async def test_a_site_detail_carries_its_conversation_link_and_refuses_a_hidden_
         }
     ]
     assert detail["created_at"] is not None
-    hidden = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
+    hidden = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     assert hidden.status_code == 404
     assert "site" in hidden.text
 
@@ -1834,7 +1820,7 @@ async def test_a_link_opens_only_where_its_own_row_answers_this_member(
     )
     conversation = f"/surface/web/objects/conversation/{conversation_id}?agent={agent_id}"
     for token, opens in ((token_m, True), (token_n, False)):
-        cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+        cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
         [link] = (await client.get(path, headers=cookie)).json()["links"]
         assert link["opens"] is opens
         followed = await client.get(conversation, headers=cookie)
@@ -1852,7 +1838,7 @@ async def test_task_index_filters_and_orders_on_the_kinds_declared_fields(
     reversed. A field the kind never declared is refused, not silently ignored."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "creator@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     for name, schedule in (("alpha", "0 6 * * *"), ("zulu", "0 22 * * *")):
         created = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
@@ -1913,7 +1899,7 @@ async def test_a_task_detail_links_to_the_conversation_it_reports_into(
     client, workspace_id, agent_id = web
     _creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
     _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
-    creator_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={creator_token}"}
+    creator_cookie = {"cookie": f"{SESSION_COOKIE}={creator_token}"}
     created = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={
@@ -1957,7 +1943,7 @@ async def test_a_task_detail_links_to_the_conversation_it_reports_into(
 
     unseen = await client.get(
         f"/surface/web/objects/conversation/{link['name']}?agent={agent_id}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert unseen.status_code == 404
     assert "conversation" in unseen.text
@@ -1976,7 +1962,7 @@ async def test_the_credential_index_lists_every_declared_slot_and_no_value(
         await CredentialStore(fernet=CREDENTIAL_FERNET).put(workspace_id, "acme_api_key", "s3cret")
     index = f"/surface/web/objects/credential?agent={agent_id}"
     for token_value in (token, admin_token):
-        cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token_value}"}
+        cookie = {"cookie": f"{SESSION_COOKIE}={token_value}"}
         listed = (await client.get(index, headers=cookie)).json()
         assert {row["name"]: row["filled"] for row in listed["objects"]} == {
             "acme-api-key": True,
@@ -2022,7 +2008,7 @@ async def test_the_roster_answers_off_the_main_agent_and_narrows_to_self_off_ano
     for email in ("m@example.com", "boss@example.com"):
         await _grant_web_access(workspace_id, child_agent, email)
     for token_value, reader in ((token, member_id), (admin_token, admin_id)):
-        cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token_value}"}
+        cookie = {"cookie": f"{SESSION_COOKIE}={token_value}"}
         roster = (
             await client.get(f"/surface/web/objects/member?agent={agent_id}", headers=cookie)
         ).json()
@@ -2128,7 +2114,7 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
     names["ours.txt"] = f"{shared_conversation.hex[:8]}-ours-txt"
     index = f"/surface/web/objects/artifact?agent={agent_id}"
     for token in (token_m, token_admin):
-        cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+        cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
         listed = (await client.get(index, headers=cookie)).json()
         assert {row["filename"] for row in listed["objects"]} == (
             {"mine.txt", "ours.txt"} if token == token_m else {"ours.txt"}
@@ -2145,7 +2131,7 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
         assert "artifact" in hidden.text
     own = await client.get(
         f"/surface/web/objects/artifact/{names['mine.txt']}?agent={agent_id}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert own.status_code == 200
     assert own.json()["spec"] == {
@@ -2165,7 +2151,7 @@ async def test_object_pages_refuse_an_unregistered_kind_an_unlisted_kind_and_a_w
     one row but does not list, and an agent outside the viewer's web audience."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "m@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     unknown = await client.get(f"/surface/web/objects/widget?agent={agent_id}", headers=cookie)
     assert unknown.status_code == 404
     assert "widget" in unknown.text
@@ -2232,7 +2218,7 @@ async def test_revoking_web_access_ends_streaming_too(
                 updated_at=sa.func.now(),
             )
         )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     granted = await client.get(f"/surface/web/turns/{turn_id}/stream", headers=cookie)
     assert granted.status_code == 200
     with ws(workspace_id):
@@ -2251,13 +2237,13 @@ async def test_a_stale_cookie_does_not_block_a_fresh_token_post(
     client, workspace_id, _agent_id = web
     stale = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=-1))
     fresh = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
-    page = await client.get("/surface/web", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={stale}"})
+    page = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={stale}"})
     assert page.status_code == 303
     assert page.headers["location"] == "/login"
     opened = await client.post(
         "/surface/web",
         data={"token": fresh},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={stale}"},
+        headers={"cookie": f"{SESSION_COOKIE}={stale}"},
     )
     assert opened.status_code == 303
     assert opened.headers["set-cookie"].startswith(f"ufo_session={fresh}")
@@ -2283,7 +2269,7 @@ async def test_one_member_holds_a_conversation_per_agent(
             )
         )
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     first = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
@@ -2317,7 +2303,7 @@ async def test_a_first_message_opens_a_conversation_and_the_next_continues_it(
     two transcripts stay separate."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     opened = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
@@ -2387,7 +2373,7 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _other_id, other_token = await _seed_member(workspace_id, "peer@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     seeded_id, seeded_turn = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -2425,7 +2411,7 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     theirs = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"peer message",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     await _consume(client, other_token, theirs.json()["turn_id"])
     rail = await client.get("/surface/web/api/chats", headers=cookie)
@@ -2440,7 +2426,7 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     assert rows[0]["last_at"] is not None
     assert rows[1]["title"] == "An earlier exchange"
     peer_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"}
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={other_token}"}
     )
     assert [row["conversation_id"] for row in peer_rail.json()["chats"]] == [
         theirs.json()["conversation_id"]
@@ -2459,7 +2445,7 @@ async def test_other_surface_traffic_never_displaces_the_rail(
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     mine_id, mine_turn = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -2508,7 +2494,7 @@ async def test_an_answer_into_a_fresh_conversation_is_refused(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=b"Now",
         headers={
-            "cookie": f"{MEMBER_SESSION_COOKIE}={token}",
+            "cookie": f"{SESSION_COOKIE}={token}",
             "x-ufo-answer-turn": str(uuid4()),
             "x-ufo-answer-question": "0",
         },
@@ -2533,7 +2519,7 @@ async def test_a_parameterless_call_is_refused_before_anything_opens(
     refused before any conversation, chat row, or turn exists."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat", content=b"hello", headers=cookie
     )
@@ -2559,7 +2545,7 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     older_id, older_turn = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -2594,7 +2580,7 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     assert rows[0]["last_at"] is not None
     crossed = await client.get(
         f"/surface/web/api/chats?conversation={older_id}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={peer_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
     )
     assert crossed.json() == {"chats": []}
     malformed = await client.get("/surface/web/api/chats?conversation=not-a-uuid", headers=cookie)
@@ -2626,7 +2612,7 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
 
     resolved = await client.get(
         f"/surface/web/api/chats?conversation={conversation_id}",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
     assert resolved.status_code == 200
@@ -2679,8 +2665,8 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
         await _seed_listed_turn(
             workspace_id, conversation_id, agent_id, seq=1, inbound="from Slack"
         )
-    admin_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"}
-    peer_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={peer_token}"}
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    peer_cookie = {"cookie": f"{SESSION_COOKIE}={peer_token}"}
 
     private = await client.get(
         f"/surface/web/api/chats?conversation={theirs}", headers=admin_cookie
@@ -2709,7 +2695,7 @@ async def test_an_orphaned_chat_row_is_inert(
     exactly that one and gives the orphan no slot."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     orphan = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -2746,7 +2732,7 @@ async def test_a_malformed_chat_row_is_a_fault_not_a_missing_conversation(
     fault instead of degrading to not-found or silently dropping the row."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     conversation_id, _turn = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -2782,8 +2768,8 @@ async def test_a_conversation_is_walled_to_its_member_and_its_agent(
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
-    peer_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={peer_token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    peer_cookie = {"cookie": f"{SESSION_COOKIE}={peer_token}"}
     STREAM_GATE.arm()
     opened = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"mine", headers=cookie
@@ -2893,7 +2879,7 @@ async def test_web_stream_privately_opens_the_speakers_connect_handoff(
     try:
         response = await client.get(
             f"/surface/web/turns/{turn_id}/stream",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
     finally:
         install_connect_flow(None)
@@ -2923,14 +2909,14 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
         await client.post(
             f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_a}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token_a}"},
         )
     ).json()["turn_id"]
     turn_b = (
         await client.post(
             f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_b}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
         )
     ).json()["turn_id"]
     await _consume(client, token_a, turn_a)
@@ -2954,7 +2940,7 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
     assert member_subject(member_a) not in recall_subjects(conversation_audience(member_b))
     crossed = await client.get(
         f"/surface/web/turns/{turn_a}/stream",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_b}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
     )
     assert crossed.status_code == 403
 
@@ -3067,7 +3053,7 @@ async def test_admin_view_reads_the_workspace_shape(
                 )
             )
     view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"}
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert view.status_code == 200
     payload = view.json()
@@ -3123,7 +3109,7 @@ async def test_admin_view_reports_ungated_seats(
         await Seats(workspace_id).auto_seat(connection, admin_id)
         await Seats(workspace_id).auto_seat(connection, member_id)
     view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"}
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert view.status_code == 200
     payload = view.json()
@@ -3141,7 +3127,7 @@ async def test_a_non_admin_is_not_found_on_the_admin_view(
     await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
     denied = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
     assert denied.status_code == 404
     assert "admin@example.com" not in denied.text
@@ -3177,7 +3163,7 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     401; each revalidates by etag rather than transferring on every load."""
     client, workspace_id, _agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     assert PORTAL_HTML is not None, f"portal app is not built — run `{PORTAL_BUILD}`"
     assert "<!doctype html>" in PORTAL_HTML
     for scheme in ("http://", "https://", "//cdn"):
@@ -3229,7 +3215,7 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
-    shell = await client.get("/surface/web", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"})
+    shell = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert shell.status_code == 200
     assert shell.text == PORTAL_FILE.read_text()
     client.cookies.clear()
@@ -3275,7 +3261,7 @@ async def test_a_token_outside_the_bearer_alphabet_answers_400(
     refused = await client.post(
         "/surface/web",
         data={"token": pasted},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={session}"},
+        headers={"cookie": f"{SESSION_COOKIE}={session}"},
     )
     assert refused.status_code == 400
     assert "set-cookie" not in refused.headers
@@ -3292,13 +3278,13 @@ async def test_an_unverified_bearer_authenticates_nobody(
     landed = await client.post(
         "/surface/web",
         data={"token": "not-a-signed-bearer"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert landed.status_code == 303
     assert "ufo_session=not-a-signed-bearer" in landed.headers["set-cookie"]
     refused = await client.get(
         "/surface/web/api/agents",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}=not-a-signed-bearer"},
+        headers={"cookie": f"{SESSION_COOKIE}=not-a-signed-bearer"},
     )
     assert refused.status_code == 401
 
@@ -3315,7 +3301,7 @@ async def test_a_bearer_whose_email_holds_no_member_row_names_that_fault(
         TOKEN_SECRET, str(workspace_id), "stranger@example.com", timedelta(hours=1)
     )
     stranger = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={stranger_token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={stranger_token}"}
     )
     assert stranger.status_code == 401
     assert stranger.text == "no member with this email in this workspace"
@@ -3422,7 +3408,7 @@ async def _collect_events(
         async with client.stream(
             "GET",
             f"/surface/web/turns/{turn_id}/stream",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         ) as stream:
             assert stream.status_code == 200
             event = "message"
@@ -3475,7 +3461,7 @@ async def test_question_affordance_admits_the_first_answer_only(
         "owner@example.com",
         TerminalFrame(status="done", text="one question", question=QUESTION),
     )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     loaded = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
@@ -3563,14 +3549,14 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
         "owner@example.com",
         TerminalFrame(status="done", text="keys please", credential_request=request),
     )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     events = dict(await _collect_events(client, token, turn_id))
     assert [p["slot"] for p in events["credentials"]["prompts"]] == ["api_key", "signing_key"]
     _member_b, token_b = await _seed_member(workspace_id, "b@example.com")
     hijack = await client.post(
         "/surface/web/credentials",
         data={"sealed": sealed, "slot": "api_key", "value": "stolen"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_b}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
     )
     assert hijack.status_code == 403
     stored = await client.post(
@@ -3654,7 +3640,7 @@ async def test_shared_files_stream_and_reload_as_download_links(
     assert file["filename"] == "report.pdf"
     assert file["size_bytes"] == 3
     assert file["url"].startswith("https://web/artifacts/")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     loaded = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
@@ -3681,7 +3667,7 @@ async def test_composer_files_land_in_the_workspace_before_the_turn(
             ("file", ("notes.txt", b"hello", "text/plain")),
             ("file", ("notes.txt", b"again", "text/plain")),
         ],
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert admitted.status_code == 200
     await _consume(client, token, admitted.json()["turn_id"])
@@ -3712,7 +3698,7 @@ async def test_an_oversize_request_is_refused_at_the_door(
     nothing."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     unparseable = {**cookie, "content-type": "multipart/form-data; boundary=never-used"}
     monkeypatch.setattr(web_surface, "MAX_REQUEST_BYTES", 4)
     oversize = await client.post(
@@ -3753,7 +3739,7 @@ async def test_a_plain_body_is_bounded_by_what_it_consumes(
     and the chunked one that declares none."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     monkeypatch.setattr(web_surface, "MAX_INBOUND_BYTES", 16)
     declared = await client.post(
         f"/surface/web/agents/{agent_id}/chat", content=b"x" * 64, headers=cookie
@@ -3785,7 +3771,7 @@ async def test_a_malformed_multipart_body_is_the_clients_400(
         f"/surface/web/agents/{agent_id}/chat",
         content=b"not a multipart body at all",
         headers={
-            "cookie": f"{MEMBER_SESSION_COOKIE}={token}",
+            "cookie": f"{SESSION_COOKIE}={token}",
             "content-type": "multipart/form-data; boundary=never-used",
         },
     )
@@ -3807,7 +3793,7 @@ async def test_a_body_that_is_not_utf8_is_refused_not_rewritten(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat",
         content=b"caf\xe9 in latin-1",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 400
     async with workspace_tx() as connection:
@@ -3838,7 +3824,7 @@ async def test_a_multipart_message_part_lands_as_the_parsers_decode(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=body,
         headers={
-            "cookie": f"{MEMBER_SESSION_COOKIE}={token}",
+            "cookie": f"{SESSION_COOKIE}={token}",
             "content-type": "multipart/form-data; boundary=frame",
         },
     )
@@ -3865,7 +3851,7 @@ async def test_a_urlencoded_chat_body_is_unsupported(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat",
         data={"message": "hi"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 415
     async with workspace_tx() as connection:
@@ -3887,7 +3873,7 @@ async def test_the_token_form_reads_are_framed_at_both_doors(
     client, workspace_id, _agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
     urlencoded = {"content-type": "application/x-www-form-urlencoded"}
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}", **urlencoded}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}", **urlencoded}
 
     async def _streamed() -> AsyncIterator[bytes]:
         yield b"token=x"
@@ -3902,7 +3888,7 @@ async def test_the_token_form_reads_are_framed_at_both_doors(
     session_oversize = await client.post("/surface/web", content=oversized, headers=cookie)
     assert session_oversize.status_code == 413
     unparseable = {
-        "cookie": f"{MEMBER_SESSION_COOKIE}={token}",
+        "cookie": f"{SESSION_COOKIE}={token}",
         "content-type": "multipart/form-data; boundary=never-used",
     }
 
@@ -3933,7 +3919,7 @@ async def test_a_multibyte_message_at_the_char_bound_admits(
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
         content=text.encode(),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert admitted.status_code == 200
     await _consume(client, token, admitted.json()["turn_id"])
@@ -3966,7 +3952,7 @@ async def test_a_client_chosen_filename_is_never_a_path(
             ("file", ("../../we ird&name!!.txt", b"safe", "text/plain")),
             ("file", ("x" * 300 + ".txt", b"capped", "text/plain")),
         ],
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert admitted.status_code == 200
     await _consume(client, token, admitted.json()["turn_id"])
@@ -3995,7 +3981,7 @@ async def test_a_files_note_cannot_blow_the_inbound_bound(
     client, workspace_id, agent_id = web
     _config, _hub, _blob, sandboxes = dbos_runtime
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     opened = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
@@ -4031,7 +4017,7 @@ async def test_malformed_answer_headers_are_refused(
 ) -> None:
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     bad_turn = await client.post(
         f"/surface/web/agents/{agent_id}/chat",
         content=b"Now",
@@ -4093,7 +4079,7 @@ async def test_a_message_part_that_is_not_text_is_refused(
             ("message", ("message.txt", b"typed words", "text/plain")),
             ("file", ("notes.txt", b"hello", "text/plain")),
         ],
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 400
     async with workspace_tx() as connection:
@@ -4118,7 +4104,7 @@ async def test_credential_fulfillment_refusals(
         CREDENTIAL_FERNET,
         CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("api_key",)),
     )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     sessionless = await client.post(
         "/surface/web/credentials",
         data={"sealed": sealed, "slot": "api_key", "value": "value", "token": token},
@@ -4208,7 +4194,7 @@ async def test_a_token_that_cannot_ride_a_cookie_answers_400(
     refused = await client.post(
         "/surface/web",
         data={"token": pasted},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={session}"},
+        headers={"cookie": f"{SESSION_COOKIE}={session}"},
     )
     assert refused.status_code == 400
     assert "set-cookie" not in refused.headers
@@ -4257,7 +4243,7 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
     each mutation a turn, each outcome the kind's own."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "creator@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     created = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={
@@ -4342,7 +4328,7 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "name": "digest",
             "spec": {"schedule": "0 7 * * *", "prompt": "assemble the digest"},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={creator_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
     )
     assert created.json()["applied"] is True
 
@@ -4354,7 +4340,7 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "name": "digest",
             "spec": {"prompt": "exfiltrate the digest"},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert unseen.json()["applied"] is False
     assert "no scheduled_task object named" in unseen.json()["message"]
@@ -4366,7 +4352,7 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "name": "digest",
             "spec": {"prompt": "rewrite the digest"},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert refused.json()["applied"] is False
     assert "creator" in refused.json()["message"]
@@ -4381,7 +4367,7 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "name": "digest",
             "spec": {"paused": True},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert admin_paused.json()["applied"] is True
     row = await _task_row(workspace_id, "digest")
@@ -4402,7 +4388,7 @@ async def test_a_delete_intent_carrying_a_spec_is_malformed(
             "name": "digest",
             "spec": {"paused": True},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 400
     assert refused.json() == {"error": "malformed intent"}
@@ -4428,7 +4414,7 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.status_code == 200
     outcome = submitted.json()
@@ -4509,7 +4495,7 @@ async def test_an_intent_the_deadline_outruns_answers_that_it_is_still_applying(
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.status_code == 504
     outcome = submitted.json()
@@ -4533,7 +4519,7 @@ async def test_a_deadline_spanning_the_tails_close_keeps_the_outcome_it_already_
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.status_code == 200
     outcome = submitted.json()
@@ -4565,7 +4551,7 @@ async def test_an_answered_intent_leaves_no_tail_running(
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.json()["applied"] is True
     assert opened, "the intent answered without tailing its turn"
@@ -4589,7 +4575,7 @@ async def test_a_skill_intent_creates_replaces_and_deletes(
     walled agent's lane stays not-found for the same body."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     async def listed() -> dict[str, dict[str, str]]:
         answer = await client.get(f"/surface/web/agents/{agent_id}/skills", headers=cookie)
@@ -4654,7 +4640,7 @@ async def test_a_refused_skill_intent_surfaces_the_kinds_error_and_writes_nothin
     refusal: the outcome carries it, no skill lands, and no store row exists."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={
@@ -4689,7 +4675,7 @@ async def test_an_agent_delete_intent_surfaces_the_kinds_refusal(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "delete", "kind": "agent", "name": "assistant"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
@@ -4709,7 +4695,7 @@ async def test_a_refused_intent_surfaces_the_refusal_and_applies_nothing(
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.status_code == 200
     outcome = submitted.json()
@@ -4749,7 +4735,7 @@ async def test_an_out_of_audience_agent_takes_no_intent(
     denied = await client.post(
         f"/surface/web/agents/{walled_agent}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert denied.status_code == 404
     async with workspace_tx() as connection:
@@ -4760,7 +4746,7 @@ async def test_an_out_of_audience_agent_takes_no_intent(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 200
     outcome = refused.json()
@@ -4795,7 +4781,7 @@ async def test_a_source_intent_reaches_the_source_kind(
                 updated_at=sa.func.now(),
             )
         )
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     listed = await client.get("/surface/web/workspace/sources", headers=cookie)
     [projected] = listed.json()["sources"]
     spec = {
@@ -4882,7 +4868,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=flip,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
@@ -4895,7 +4881,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     flipped = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=flip,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={owner_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
     )
     assert flipped.status_code == 200
     assert flipped.json()["applied"] is True
@@ -4907,7 +4893,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     revoked = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "delete", "kind": "connector_grant", "name": name},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={owner_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
     )
     assert revoked.status_code == 200
     assert revoked.json()["applied"] is True
@@ -4938,7 +4924,7 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         submitted = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "connect", "kind": "connection", "name": "github"},
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert submitted.status_code == 200
         outcome = submitted.json()
@@ -4958,7 +4944,7 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         assert "oauth.example.test" not in json.dumps(terminal)
         streamed = await client.get(
             f"/surface/web/turns/{outcome['turn_id']}/stream",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         lines = streamed.text.splitlines()
         connect_data = json.loads(lines[lines.index("event: connect") + 1].removeprefix("data: "))
@@ -4966,7 +4952,7 @@ async def test_a_connect_intent_leaves_the_private_handoff_on_the_turn(
         unknown = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "connect", "kind": "connection", "name": "nonesuch"},
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert unknown.status_code == 200
         assert unknown.json()["applied"] is False
@@ -4991,7 +4977,7 @@ async def test_connect_pairs_with_the_connection_kind_exactly(
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json=body,
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert refused.status_code == 400
     async with workspace_tx() as connection:
@@ -5013,7 +4999,7 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "apply", "kind": kind, "name": "x", "spec": {"admin": True}},
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert refused.status_code == 400
     async with workspace_tx() as connection:
@@ -5033,7 +5019,7 @@ async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_va
     panel can name."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     minted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "request", "kind": "credential", "name": "acme-api-key"},
@@ -5087,7 +5073,7 @@ async def test_a_credential_clear_intent_empties_the_slot_and_gates_on_admin(
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     store = CredentialStore(fernet=CREDENTIAL_FERNET)
     await store.put(workspace_id, "acme_api_key", "live-value")
-    member_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"}
+    member_cookie = {"cookie": f"{SESSION_COOKIE}={member_token}"}
     held = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "delete", "kind": "credential", "name": "acme-api-key"},
@@ -5107,14 +5093,14 @@ async def test_a_credential_clear_intent_empties_the_slot_and_gates_on_admin(
     cleared = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "delete", "kind": "credential", "name": "acme-api-key"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert cleared.json()["applied"] is True
     with pytest.raises(CredentialSlotUnset):
         await store.get(workspace_id, "acme_api_key")
     listed = await client.get(
         "/surface/web/workspace/credentials",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     slots = {entry["slot"]: entry for entry in listed.json()["slots"]}
     assert slots["acme_api_key"]["filled"] is False
@@ -5137,7 +5123,7 @@ async def test_a_credential_intent_never_carries_a_spec(
             "name": "acme-api-key",
             "spec": {"value": "s3cr3t"},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert crossed.status_code == 400
     assert "s3cr3t" not in crossed.text
@@ -5156,7 +5142,7 @@ async def test_a_malformed_intent_answers_400_before_any_turn(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "rename", "kind": "agent", "name": "assistant"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 400
     async with workspace_tx() as connection:
@@ -5204,7 +5190,7 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
         )
     seen = await client.get(
         f"/surface/web/agents/{agent_id}/overview",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert seen.status_code == 200
     data = seen.json()
@@ -5228,25 +5214,25 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     assert data["audience"] == []
     granted_view = await client.get(
         f"/surface/web/agents/{second_agent}/overview",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert granted_view.json()["audience"] == ["member@example.com"]
     member_view = await client.get(
         f"/surface/web/agents/{second_agent}/overview",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert member_view.status_code == 200
     assert member_view.json()["audience"] is None
     ungranted_main = await client.get(
         f"/surface/web/agents/{agent_id}/overview",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert ungranted_main.status_code == 200
     assert ungranted_main.json()["agent"]["name"] == "assistant"
     assert ungranted_main.json()["audience"] is None
     stranger = await client.get(
         f"/surface/web/agents/{uuid4()}/overview",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
     assert stranger.status_code == 404
 
@@ -5260,7 +5246,7 @@ async def test_concurrent_intents_serialize_on_the_members_intent_conversation(
     client, workspace_id, agent_id = web
     await _seed_member(workspace_id, "admin@example.com", admin=True)
     token = mint_token(TOKEN_SECRET, str(workspace_id), "admin@example.com", timedelta(hours=1))
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     first, second = await asyncio.gather(
         client.post(f"/surface/web/agents/{agent_id}/intents", json=INTENT_BODY, headers=cookie),
         client.post(
@@ -5316,7 +5302,7 @@ async def test_a_capped_members_intent_parks_and_the_panel_reads_the_reason(
     submitted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=INTENT_BODY,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert submitted.status_code == 200
     outcome = submitted.json()
@@ -5347,7 +5333,7 @@ async def test_a_model_outside_the_registry_refuses_before_any_turn(
             "name": "assistant",
             "spec": {"model": "claude-sonnet-5-typo", "internet_access_allowed": False},
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 200
     assert refused.json() == {
@@ -5369,7 +5355,7 @@ async def test_an_oversized_intent_answers_413(web: tuple[AsyncClient, UUID, UUI
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=body,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 413
 
@@ -5406,7 +5392,7 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         seen = await client.get(
             f"/surface/web/agents/{agent_id}/overview",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
     dbos_client.destroy()
     assert seen.status_code == 200
@@ -5467,7 +5453,7 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
     created = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert created.status_code == 200
     assert created.json()["applied"] is True
@@ -5488,13 +5474,13 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
         False,
     )
     listed = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
     assert "research" in [agent["name"] for agent in listed.json()["agents"]]
     duplicate = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope,
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert duplicate.json()["applied"] is False
     assert "proposal path" in duplicate.json()["message"]
@@ -5510,14 +5496,14 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
                 "reasoning": "auto",
             },
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert promptless.json()["applied"] is False
     assert "requires a prompt" in promptless.json()["message"]
     outsider = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={**envelope, "name": "third"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert outsider.json()["applied"] is False
     assert "admin" in outsider.json()["message"]
@@ -5564,13 +5550,13 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     promoted = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(member_id, admin=True, seated=True),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert promoted.json()["applied"] is True
     unseated = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(member_id, admin=True, seated=False),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert unseated.json()["applied"] is True
     async with workspace_tx() as connection:
@@ -5586,21 +5572,21 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     demote_last_seated = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(admin_id, admin=False, seated=True),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert demote_last_seated.json()["applied"] is False
     assert "seated admin" in demote_last_seated.json()["message"]
     unseat_last = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(admin_id, admin=True, seated=False),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert unseat_last.json()["applied"] is False
     assert "last seated" in unseat_last.json()["message"]
     outsider = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(admin_id, admin=False, seated=True),
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert outsider.json()["applied"] is False
     assert "admin" in outsider.json()["message"]
@@ -5632,22 +5618,22 @@ async def test_audience_intents_write_the_grant_store(
     granted = await client.post(
         f"/surface/web/agents/{second_agent}/intents",
         json={"verb": "grant_web_access", "email": "member@example.com"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert granted.status_code == 200
     assert granted.json()["applied"] is True, granted.json()
     listed = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert "ops" in [agent["name"] for agent in listed.json()["agents"]]
     revoked = await client.post(
         f"/surface/web/agents/{second_agent}/intents",
         json={"verb": "revoke_web_access", "email": "member@example.com"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert revoked.json()["applied"] is True
     relisted = await client.get(
-        "/surface/web/api/agents", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"}
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert "ops" not in [agent["name"] for agent in relisted.json()["agents"]]
     async with workspace_tx() as connection:
@@ -5663,7 +5649,7 @@ async def test_audience_intents_write_the_grant_store(
     outsider = await client.post(
         f"/surface/web/agents/{second_agent}/intents",
         json={"verb": "grant_web_access", "email": "other@example.com"},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert outsider.status_code == 404
     with ws(workspace_id):
@@ -5679,7 +5665,7 @@ async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
     client, workspace_id, agent_id = web
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
     )
     payload = view.json()
     assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
@@ -5946,7 +5932,7 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     )
     path = f"/surface/web/agents/{agent_id}/conversations"
 
-    listed = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert listed.status_code == 200
     rows = listed.json()["conversations"]
     assert {entry["id"] for entry in rows} == {str(mine), str(shared)}
@@ -5957,9 +5943,7 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     assert "queue_key" not in by_id[str(shared)]
     assert by_id[str(shared)]["member_email"] is None
 
-    admin_view = await client.get(
-        path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
-    )
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     admin_rows = admin_view.json()["conversations"]
     assert {entry["id"] for entry in admin_rows} == {
         str(mine),
@@ -5977,7 +5961,7 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
 
     walled = await client.get(
         f"/surface/web/agents/{walled_agent}/conversations",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert walled.status_code == 404
     anonymous = await client.get(path)
@@ -6054,7 +6038,7 @@ async def test_conversation_turns_nest_subagents_and_fail_closed(
 
     read = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/turns",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert read.status_code == 200
     payload = read.json()
@@ -6071,17 +6055,17 @@ async def test_conversation_turns_nest_subagents_and_fail_closed(
         for token in (token_m, token_admin):
             denied = await client.get(
                 f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/turns",
-                headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+                headers={"cookie": f"{SESSION_COOKIE}={token}"},
             )
             assert denied.status_code == 404
     crossed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/turns",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
     )
     assert crossed.status_code == 404
     malformed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/not-a-uuid/turns",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert malformed.status_code == 404
     anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/turns")
@@ -6093,7 +6077,7 @@ async def _acknowledge(
 ) -> Response:
     return await client.post(
         f"/surface/web/agents/{agent_id}/intents",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
         json={
             "verb": "read",
             "kind": "transcript",
@@ -6155,7 +6139,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
         member_id=None,
     )
     turns = f"/surface/web/agents/{agent_id}/conversations/{theirs}/turns"
-    admin_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
 
     blocked = await client.get(turns, headers=admin_cookie)
     assert blocked.status_code == 404
@@ -6168,7 +6152,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
     assert (
-        await client.get(turns, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_n}"})
+        await client.get(turns, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).status_code == 404
     async with workspace_tx() as connection:
         assert (
@@ -6244,7 +6228,7 @@ async def test_losing_admin_closes_an_open_disclosure_window(
     )
     await _seed_listed_turn(workspace_id, theirs, agent_id, seq=1, inbound="private question")
     turns = f"/surface/web/agents/{agent_id}/conversations/{theirs}/turns"
-    admin_cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
     assert (await _acknowledge(client, agent_id, theirs, token_admin)).json()["applied"] is True
     assert (await client.get(turns, headers=admin_cookie)).status_code == 200
 
@@ -6297,7 +6281,7 @@ async def test_the_conversations_route_serializes_who_may_be_disclosed(
 
     listed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
     )
     rows = {entry["id"]: entry for entry in listed.json()["conversations"]}
     assert rows[str(theirs)]["disclosable"] is True
@@ -6584,11 +6568,11 @@ async def test_conversation_changes_stay_with_their_execution_conversation(
 
     parent_response = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     worker_response = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{worker_conversation_id}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
     assert parent_response.status_code == 200
@@ -6660,7 +6644,7 @@ async def test_live_workspace_files_fill_the_typed_conversation_slot(
     monkeypatch.setattr(SurfaceContext, "list_workspace_files", list_with_long_path)
 
     base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     inventory = await client.get(f"{base}/slots", headers=headers)
     payload = await client.get(f"{base}/slots/files", headers=headers)
     downloaded = await client.get(
@@ -6787,7 +6771,7 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
         )
 
     base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     inventory = await client.get(f"{base}/slots", headers=headers)
     response = await client.get(f"{base}/slots/artifacts", headers=headers)
 
@@ -6871,12 +6855,12 @@ async def test_durable_todo_board_fills_the_typed_tasks_slot(
         }
 
     base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-    headers = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     inventory = await client.get(f"{base}/slots", headers=headers)
     response = await client.get(f"{base}/slots/tasks", headers=headers)
     denied = await client.get(
         f"{base}/slots/tasks",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
 
     assert inventory.status_code == 200
@@ -6960,11 +6944,11 @@ async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversa
     monkeypatch.setattr(HostedSites, "all", refuse_workspace_scan)
 
     path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/sites"
-    creator = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={creator_token}"})
-    viewer = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={viewer_token}"})
-    admin = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"})
+    creator = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"})
+    viewer = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"})
+    admin = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})
     inventory = await client.get(
-        path.rsplit("/", 1)[0], headers={"cookie": f"{MEMBER_SESSION_COOKIE}={viewer_token}"}
+        path.rsplit("/", 1)[0], headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
     )
 
     assert creator.status_code == 200
@@ -7089,7 +7073,7 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
     monkeypatch.setattr(ScheduleStore, "inspect", refuse_single_inspection)
     monkeypatch.setattr(ScheduleStore, "inspect_many", count_batch)
     creator_inventory = await client.get(
-        base, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={creator_token}"}
+        base, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"}
     )
     assert (
         next(slot for slot in creator_inventory.json()["slots"] if slot["id"] == "automations")[
@@ -7100,16 +7084,16 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
     assert batch_calls == 0
     creator = await client.get(
         f"{base}/automations",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={creator_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
     )
     viewer = await client.get(
-        f"{base}/automations", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={viewer_token}"}
+        f"{base}/automations", headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
     )
     viewer_inventory = await client.get(
-        base, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={viewer_token}"}
+        base, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"}
     )
     admin = await client.get(
-        f"{base}/automations", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={admin_token}"}
+        f"{base}/automations", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert batch_calls == 3
 
@@ -7233,13 +7217,13 @@ async def test_conversation_reads_ride_the_same_gate(
 
     listed = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert listed.status_code == 200
     assert listed.json() == {"files": []}
     changes = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert changes.status_code == 200
     change_payload = json.loads(result)
@@ -7250,13 +7234,13 @@ async def test_conversation_reads_ride_the_same_gate(
     }
     no_transcript = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert no_transcript.status_code == 200
     assert no_transcript.json() == {"type": "changes", "changes": [], "truncated": False}
     slots = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{empty}/slots",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert slots.status_code == 200
     assert slots.json() == {
@@ -7275,7 +7259,7 @@ async def test_conversation_reads_ride_the_same_gate(
     )
     compacted_without_changes = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert compacted_without_changes.status_code == 200
     assert compacted_without_changes.json() == {
@@ -7290,7 +7274,7 @@ async def test_conversation_reads_ride_the_same_gate(
         )
     compacting = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert compacting.status_code == 200
     assert compacting.json() == {"type": "changes", "changes": [], "truncated": True}
@@ -7305,7 +7289,7 @@ async def test_conversation_reads_ride_the_same_gate(
     )
     invalid = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert invalid.status_code == 200
     assert invalid.json() == {"type": "changes", "changes": [], "truncated": True}
@@ -7335,18 +7319,18 @@ async def test_conversation_reads_ride_the_same_gate(
         )
         malformed = await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{mine}/slots/changes",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
         )
         assert malformed.status_code == 200
         assert malformed.json() == {"type": "changes", "changes": [], "truncated": True}
     absent = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files/brief.md",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert absent.status_code == 404
     escaping = await client.get(
         f"/surface/web/agents/{agent_id}/conversations/{mine}/files/../../etc/passwd",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert escaping.status_code == 404
 
@@ -7354,7 +7338,7 @@ async def test_conversation_reads_ride_the_same_gate(
         for route in ("files", "slots/changes", "files/brief.md"):
             denied = await client.get(
                 f"/surface/web/agents/{agent_id}/conversations/{theirs}/{route}",
-                headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+                headers={"cookie": f"{SESSION_COOKIE}={token}"},
             )
             assert denied.status_code == 404
 
@@ -7377,7 +7361,7 @@ async def test_conversation_reads_ride_the_same_gate(
     for route in ("files", "slots/changes", "files/brief.md"):
         crossed = await client.get(
             f"/surface/web/agents/{agent_id}/conversations/{elsewhere}/{route}",
-            headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"},
+            headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
         )
         assert crossed.status_code == 404
 
@@ -7399,7 +7383,7 @@ async def test_team_view_lists_the_roster_for_every_member(
             .where(tables.member.c.id == _member_id)
             .values(seated_at=sa.func.now())
         )
-    member_view = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    member_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     body = member_view.json()
     assert [(entry["email"], entry["admin"], entry["seated"]) for entry in body["members"]] == [
         ("boss@example.com", True, False),
@@ -7409,9 +7393,7 @@ async def test_team_view_lists_the_roster_for_every_member(
     assert body["can_add"] is False
     assert body["domain"] == "example.com"
 
-    admin_view = await client.get(
-        path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
-    )
+    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     assert admin_view.json()["can_add"] is True
     assert [entry["email"] for entry in admin_view.json()["members"]] == [
         entry["email"] for entry in body["members"]
@@ -7432,7 +7414,7 @@ async def test_the_team_panel_adds_a_member_through_the_intent_lane(
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, member_token = await _seed_member(workspace_id, "plain@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     added = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -7459,7 +7441,7 @@ async def test_the_team_panel_adds_a_member_through_the_intent_lane(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "add_member", "email": "sneak@example.com", "admin": True},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
@@ -7487,7 +7469,7 @@ async def test_the_team_panel_refuses_a_foreign_domain(
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "add_member", "email": "outsider@other.test", "admin": False},
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
@@ -7511,7 +7493,7 @@ async def test_subagent_page_reads_the_profile_and_refuses_an_unknown_name(
     a 404 — and a profile holding no `load_skill` lists no skills rather than the deploy's."""
     client, workspace_id, _agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     overview = await client.get("/surface/web/subagents/deep_research/overview", headers=cookie)
     assert overview.status_code == 200
@@ -7596,7 +7578,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     )
     path = "/surface/web/subagents/deep_research/conversations"
 
-    listed = await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"})
+    listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert listed.status_code == 200
     rows = listed.json()["conversations"]
     assert len(rows) == 1
@@ -7611,31 +7593,29 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
     assert datetime.fromisoformat(rows[0]["last_turn_at"]).tzinfo is not None
 
     admin_rows = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"})
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()["conversations"]
     assert {entry["id"] for entry in admin_rows} == {str(mine), str(theirs)}
     assert {entry["readable"] for entry in admin_rows} == {False}
 
-    readable = await client.get(
-        f"{path}/{mine}", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"}
-    )
+    readable = await client.get(f"{path}/{mine}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert readable.status_code == 200
     assert [turn["inbound"] for turn in readable.json()["turns"]] == ["find it", "and again"]
     assert readable.json()["run"] == rows[0]
 
     for blocked in (theirs, other_profile):
         refused = await client.get(
-            f"{path}/{blocked}", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_m}"}
+            f"{path}/{blocked}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
         )
         assert refused.status_code == 404
     admin_refused = await client.get(
-        f"{path}/{theirs}", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
+        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
     )
     assert admin_refused.status_code == 404
     with ws(workspace_id):
         assert await record_transcript_access(workspace_id, theirs, agent_id, admin_id) is not None
     still_refused = await client.get(
-        f"{path}/{theirs}", headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"}
+        f"{path}/{theirs}", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
     )
     assert still_refused.status_code == 404
 
@@ -7680,13 +7660,13 @@ async def test_subagent_work_stays_behind_the_agent_wall(
         subagent_profile="deep_research",
     )
     path = "/surface/web/subagents/deep_research/conversations"
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     assert (await client.get(path, headers=cookie)).json()["conversations"] == []
     assert (await client.get(f"{path}/{walled}", headers=cookie)).status_code == 404
 
     admin_rows = (
-        await client.get(path, headers={"cookie": f"{MEMBER_SESSION_COOKIE}={token_admin}"})
+        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()["conversations"]
     assert [entry["id"] for entry in admin_rows] == [str(walled)]
 

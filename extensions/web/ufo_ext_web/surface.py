@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
-from ufo.sdk.bearer import LOGIN_PATH, MEMBER_SESSION_COOKIE, verify_token, workspace_claim
+from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
 from ufo.sdk.http import (
     FormData,
@@ -190,7 +190,7 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     on to the sign-in page, so the target survives signing in; it is re-parsed as a UUID, so only
     a conversation id ever reaches that redirect. The handler re-verifies the same bearer for the
     member email — workspace here, identity there."""
-    cookie = request.cookies.get(MEMBER_SESSION_COOKIE, "")
+    cookie = request.cookies.get(SESSION_COOKIE, "")
     workspace = workspace_claim(cookie) if cookie else None
     if (
         workspace is None
@@ -260,7 +260,7 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
     not. The second carries `SESSION_FAULT_HEADER`, so the page states the cause instead of
     advising a sign-in that cannot change it. The email is the web `surface_identity`, linked to
     (or created as) a member on first contact."""
-    token = request.cookies.get(MEMBER_SESSION_COOKIE, "")
+    token = request.cookies.get(SESSION_COOKIE, "")
     email = verify_token(token, ctx.workspace_id) if token else None
     if email is None:
         return Response("missing or unknown session cookie", status_code=401)
@@ -305,7 +305,7 @@ async def open_session(ctx: SurfaceContext, request: Request) -> Response:
     if not TOKEN_SHAPE.fullmatch(posted.strip()):
         return JSONResponse({"error": "malformed token"}, status_code=400)
     response = RedirectResponse(str(request.url), status_code=303)
-    set_session_cookie(response, MEMBER_SESSION_COOKIE, posted.strip(), samesite="lax")
+    set_session_cookie(response, SESSION_COOKIE, posted.strip(), samesite="lax")
     return response
 
 

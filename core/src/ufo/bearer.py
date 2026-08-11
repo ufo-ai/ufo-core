@@ -13,7 +13,7 @@ is spelled out here once:
 The signing secret is `UFO_TOKEN_SECRET` on every party, and it never crosses the sdk: core reads
 it here, so an extension hands over a token and gets claims back without ever holding the key.
 
-The session's two fixed addresses live beside the codec: `MEMBER_SESSION_COOKIE` names the cookie
+The session's two fixed addresses live beside the codec: `SESSION_COOKIE` names the cookie
 the bearer rides in a browser, and `LOGIN_PATH` the one sign-in door that lands it there."""
 
 import base64
@@ -26,7 +26,7 @@ from uuid import UUID
 
 UFO_TOKEN_SECRET_ENV = "UFO_TOKEN_SECRET"
 TOKEN_SEPARATOR = "."
-MEMBER_SESSION_COOKIE = "ufo_session"
+SESSION_COOKIE = "ufo_session"
 LOGIN_PATH = "/login"
 
 

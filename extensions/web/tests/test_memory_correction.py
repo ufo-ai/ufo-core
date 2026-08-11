@@ -22,7 +22,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory import manifest as memory_manifest_module
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory_item
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.surface import MEMBER_SESSION_COOKIE
+from ufo_ext_web.surface import SESSION_COOKIE
 from ufo_testsupport.surfaces import EMPTY_SKILL_REGISTRY, NO_SUBAGENTS, no_user_skills
 
 from ufo.bearer import mint_token
@@ -241,7 +241,7 @@ async def test_a_correction_records_a_new_item_and_the_original_stands(
     body unchanged, never superseded."""
     client, workspace_id, agent_id = memory_web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     await _remember(workspace_id, member_subject(member_id), "the codename is bluebird")
     found = await client.get("/surface/web/workspace/memory?q=codename", headers=cookie)
     [hit] = found.json()["matches"]
@@ -326,7 +326,7 @@ async def test_a_correction_never_touches_another_members_item(
             "corrects": str(original_id),
             "body": "the launch is monday",
         },
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={other_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert corrected.status_code == 200
     assert corrected.json()["applied"] is True
@@ -348,7 +348,7 @@ async def test_a_correction_never_touches_another_members_item(
     await _index(workspace_id)
     owner_view = await client.get(
         "/surface/web/workspace/memory?q=launch",
-        headers={"cookie": f"{MEMBER_SESSION_COOKIE}={owner_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
     )
     assert {match["text"] for match in owner_view.json()["matches"]} == {"the launch is friday"}
 
@@ -360,7 +360,7 @@ async def test_a_malformed_or_walled_correction_writes_nothing(
     at validation, a walled agent is not-found — and none of them writes a turn or an item."""
     client, workspace_id, agent_id = memory_web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    cookie = {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     walled_agent = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(

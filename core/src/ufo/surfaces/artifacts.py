@@ -28,7 +28,7 @@ from ufo.artifact_url import (
     mint_artifact_url,
     verify_artifact_url,
 )
-from ufo.bearer import LOGIN_PATH, MEMBER_SESSION_COOKIE, verified_claims
+from ufo.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.image_previews import InvalidImagePreview, validated_image_preview
@@ -102,7 +102,7 @@ async def _refreshed_for_member(
     run under that bearer's own workspace scope. A refused browser is sent to sign in with this
     link as its target, so signing in lands back here and the grant refreshes; any other client
     gets the 403 that names the next step."""
-    bearer = request.cookies.get(MEMBER_SESSION_COOKIE, "")
+    bearer = request.cookies.get(SESSION_COOKIE, "")
     session = verified_claims(bearer) if bearer else None
     if session is None:
         raise _refusal(request)

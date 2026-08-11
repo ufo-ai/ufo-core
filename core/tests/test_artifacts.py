@@ -18,7 +18,7 @@ from ufo.artifact_url import (
     mint_artifact_url,
     verify_artifact_url,
 )
-from ufo.bearer import LOGIN_PATH, MEMBER_SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.bearer import LOGIN_PATH, SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
@@ -392,7 +392,7 @@ async def _seed_shared_artifact(blob_key: str, filename: str) -> UUID:
 
 def _session_cookie(workspace_id: UUID, email: str = MEMBER_EMAIL) -> dict[str, str]:
     bearer = mint_token(BEARER_SECRET, str(workspace_id), email, ttl=timedelta(hours=1))
-    return {"cookie": f"{MEMBER_SESSION_COOKIE}={bearer}"}
+    return {"cookie": f"{SESSION_COOKIE}={bearer}"}
 
 
 async def test_an_expired_url_redirects_a_member_to_a_fresh_grant(
@@ -434,7 +434,7 @@ async def test_an_expired_url_refuses_a_missing_foreign_or_unmembered_session(
     unmembered = await client.get(
         expired, headers=_session_cookie(workspace_id, email="stranger@example.com")
     )
-    garbage = await client.get(expired, headers={"cookie": f"{MEMBER_SESSION_COOKIE}=nonsense"})
+    garbage = await client.get(expired, headers={"cookie": f"{SESSION_COOKIE}=nonsense"})
     for response in (no_cookie, foreign, unmembered, garbage):
         assert response.status_code == 403
         assert response.json()["detail"] == EXPIRED_DETAIL

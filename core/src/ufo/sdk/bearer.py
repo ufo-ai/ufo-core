@@ -7,7 +7,7 @@ from ufo.bearer import (
     LOGIN_PATH as LOGIN_PATH,
 )
 from ufo.bearer import (
-    MEMBER_SESSION_COOKIE as MEMBER_SESSION_COOKIE,
+    SESSION_COOKIE as SESSION_COOKIE,
 )
 from ufo.bearer import (
     verified_claims as verified_claims,

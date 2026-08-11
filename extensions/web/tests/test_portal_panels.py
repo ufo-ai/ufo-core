@@ -62,7 +62,7 @@ from ufo.subjects import member_subject
 from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"
-MEMBER_SESSION_COOKIE = "ufo_session"
+SESSION_COOKIE = "ufo_session"
 ADMIN_EMAIL = "admin@example.com"
 CREATOR_EMAIL = "creator@example.com"
 OTHER_EMAIL = "other@example.com"
@@ -122,7 +122,7 @@ async def _seed_member(
             )
         )
     token = mint_token(TOKEN_SECRET, str(workspace_id), email, timedelta(hours=1))
-    return member_id, {"cookie": f"{MEMBER_SESSION_COOKIE}={token}"}
+    return member_id, {"cookie": f"{SESSION_COOKIE}={token}"}
 
 
 async def _grant(workspace_id: UUID, agent_id: UUID, email: str) -> None:
