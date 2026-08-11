@@ -5,7 +5,9 @@ A Gmail message's readable content lives inside a nested MIME `payload` tree —
 sender in `payload.headers` — not in flat columns, so this is a connector that overrides `render`:
 the default JSON dump of that tree is unrecallable. `render` decodes the MIME parts into a readable
 `From`/`To`/`Subject` header block over the plain-text body (HTML stripped when only HTML is
-present), so a synced email recalls as what a member would read.
+present), so a synced email recalls as what a member would read. A `Subject` header is optional, so
+a message carrying none is titled by its identity — the same title the default render falls back to
+— because a page's title is never empty.
 
 Sync is a `historyId` delta, carried opaquely as the run cursor. With no cursor the run backfills —
 `GET /gmail/v1/users/me/messages` enumerates the message ids inside the stream's pinned backfill
@@ -253,6 +255,7 @@ class GmailConnector(RestConnector):
         if stream.name != "messages":
             return super().render(record, stream)
         subject = _str(record.get("subject"))
+        title = subject or super().render(record, stream)[0]
         header_lines: list[str] = []
         sender = _format_contact(record.get("from_handle"), record.get("from_display_name"))
         if sender:
@@ -264,11 +267,11 @@ class GmailConnector(RestConnector):
         if subject:
             header_lines.append(f"Subject: {subject}")
         parts = [
-            f"# gmail messages: {subject}".rstrip(),
+            f"# gmail messages: {title}",
             "\n".join(header_lines),
             _message_body(record),
         ]
-        return subject, "\n\n".join(part for part in parts if part).strip()
+        return title, "\n\n".join(part for part in parts if part).strip()
 
 
 def _message_ids(entries: Any) -> list[str]:

@@ -14,6 +14,7 @@ import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
@@ -2782,6 +2783,32 @@ async def test_a_stream_fault_reports_the_reason_the_backend_authored_for_it(
 
     failure = _events(caplog, "source_sync.failed")[0]
     assert (failure.ufo["error_class"], failure.ufo["provider_fault"]) == ("StreamFault", reason)
+
+
+async def test_a_rejected_page_reports_the_field_and_rule_that_rejected_it(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A record the page model rejects fails the run that carried it, and the class alone says
+    nothing about which record or which field — the shape a stuck stream leaves an operator with.
+    The fault names the field paths and the rules that rejected them, and the rejected values stay
+    out: they are the provider's payload, or the parameters a member registered the source with."""
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    with pytest.raises(ValidationError) as raised:
+        Page(
+            source_ref="messages/m1", body="body", stream="messages", title="", created_at="MMXXVI"
+        )
+    driver = _connector_driver([raised.value], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    failure = _events(caplog, "source_sync.failed")[0]
+    assert (failure.ufo["error_class"], failure.ufo["provider_fault"]) == (
+        "ValidationError",
+        "title: string_too_short; created_at: value_error",
+    )
+    assert "MMXXVI" not in str(failure.ufo)
 
 
 async def test_a_provider_fault_is_bounded_before_it_reaches_the_record(

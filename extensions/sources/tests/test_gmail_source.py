@@ -74,10 +74,17 @@ def _message(message_id: str, subject: str, body: str) -> dict:
     }
 
 
+def _without_subject(message: dict) -> dict:
+    payload = message["payload"]
+    headers = [header for header in payload["headers"] if header["name"] != "Subject"]
+    return {**message, "payload": {**payload, "headers": headers}}
+
+
 MESSAGES = {
     "m1": _message("m1", "Launch plan", "Ship it by Friday."),
     "m2": _message("m2", "Standup", "Notes from standup."),
     "m3": _message("m3", "Re: Launch plan", "Pushed to Monday."),
+    "m4": _without_subject(_message("m4", "", "Scanned document attached.")),
 }
 
 
@@ -124,6 +131,37 @@ async def test_backfill_lists_messages_seeds_the_history_cursor_and_renders() ->
     assert "multipart" not in body
     assert "Content-Type" not in body
     assert _b64("Ship it by Friday.") not in body
+
+
+async def test_a_message_carrying_no_subject_header_is_titled_by_its_identity() -> None:
+    """A `Subject` header is optional, so a mailbox holds messages without one — a scanner, a
+    device notification. The page model rejects an empty title, so titling such a message by its
+    subject verbatim failed the run that fetched it, and a delta stream that fails advances no
+    cursor: the same message came back every interval and nothing synced again. It titles by its
+    identity instead, and the messages it shares the page with land with it."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/gmail/v1/users/me/messages":
+            return httpx.Response(
+                200, json={"messages": [{"id": "m4"}, {"id": "m1"}], "nextPageToken": None}
+            )
+        if path.startswith("/gmail/v1/users/me/messages/"):
+            return _get(path.rsplit("/", 1)[-1], request)
+        if path == "/gmail/v1/users/me/profile":
+            return _profile()
+        return httpx.Response(404, json={"path": path})
+
+    result = await _fetch(handle)
+
+    assert {page.source_ref: page.title for page in result.pages} == {
+        "messages/m4": "messages/m4",
+        "messages/m1": "Launch plan",
+    }
+    untitled = next(page for page in result.pages if page.source_ref == "messages/m4")
+    assert "Scanned document attached." in untitled.body
+    assert "From: Ada Lovelace <ada@example.com>" in untitled.body
+    assert "Subject:" not in untitled.body
 
 
 async def test_the_pinned_window_bounds_the_backfill_and_survives_a_cursor_reset() -> None:

@@ -31,7 +31,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import sqlalchemy as sa
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -155,6 +155,15 @@ class StreamSkipped(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+def validation_fault(error: ValidationError) -> str:
+    """A rejected model as the field paths and rules that rejected it — `title: string_too_short`.
+    The rejected values stay out of it: they are the provider's payload, or the parameters a member
+    registered a source with, and a record carries neither."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['type']}" for item in error.errors()
+    )
 
 
 class StreamFault(RuntimeError):
@@ -770,8 +779,9 @@ class SyncDriver:
         start. The exception's own text stays out of the record — h11 quotes the raw header value it
         rejects, which is the credential a member pasted, and `_raise_for_status` builds a status
         error's message out of the provider's response body — so a provider fault renders as the
-        status and URL of the request that drew it, query dropped, bounded, and a `StreamFault`
-        renders the reason the backend authored for it; any other class is named by `error_class`
+        status and URL of the request that drew it, query dropped, bounded, a `StreamFault`
+        renders the reason the backend authored for it, and a rejected model renders the field paths
+        and rules that rejected it, never the values; any other class is named by `error_class`
         alone. The log goes first and each emission is suppressed on its own: this sits on the
         failure path, where a telemetry fault would replace the error it exists to report and strand
         the claim the release is about to free, and where a fault reaching the collector would leave
@@ -787,6 +797,8 @@ class SyncDriver:
                     )
                 case StreamFault():
                     fault = error.reason
+                case ValidationError():
+                    fault = validation_fault(error)
                 case _:
                     fault = ""
             log_error(

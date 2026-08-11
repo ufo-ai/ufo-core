@@ -3,7 +3,8 @@
 A connector speaks in streams and async page generators; the source seam speaks in one `SyncResult`
 per run. `ConnectorBackend` bridges them: one `source` row is one (account, stream), so `fetch`
 resolves the account's `Credential` through the runner's auth proxy, drives the connector's one
-stream, and renders each record into a recallable `Page`. A full-collection stream
+stream, and renders each record into a recallable `Page` — one record the page model rejects is
+dropped and warned rather than failing the run (`_page`). A full-collection stream
 (`delete_missing`) returns as an authoritative `snapshot` so the driver tombstones records that
 vanished; an incremental stream returns `snapshot=False`, advances a watermark over its
 `cursor_field`, and names any provider-reported removals in `deletes`. A row whose config pins a
@@ -71,6 +72,7 @@ from ufo.sources.sync import (
     SourceRowConfig,
     SyncResult,
     normalize_page_timestamp,
+    validation_fault,
 )
 
 MAX_RECORDS_PER_RUN = 5_000
@@ -190,7 +192,9 @@ class ConnectorBackend:
                     if skipped < skip_target:
                         skipped += 1
                         continue
-                    pages.append(self._page(stream, record))
+                    page_row = self._page(stream, record)
+                    if page_row is not None:
+                        pages.append(page_row)
                     if stream.cursor_field:
                         watermark = _max_str(watermark, record.get(stream.cursor_field))
                 if isinstance(page, StreamPage):
@@ -264,10 +268,16 @@ class ConnectorBackend:
         except ValidationError as error:
             raise RuntimeError(f"malformed {BACKFILL_KEY} cursor envelope: {cursor!r}") from error
 
-    def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page:
+    def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page | None:
         """One provider record as a recallable page: the connector's rendered body, keyed by
         `stream.name/<primary key>` so a re-fetch of an unchanged record, an upsert, and a `deletes`
-        entry all settle on the same page."""
+        entry all settle on the same page.
+
+        None when the page model rejects what the connector rendered for that one record. It is
+        dropped, named by `source_ref` and the field the model rejected, and the run lands the rest:
+        a run that raises commits no page and advances no cursor, so a single unrepresentable record
+        would hold every later record of the stream behind it for as long as the provider keeps
+        returning it."""
         ref = _record_ref(stream, record)
         title, body = self.connector.render(record, stream)
         created_at = _record_timestamp(
@@ -282,14 +292,24 @@ class ConnectorBackend:
             connector=self.connector.name,
             stream=stream.name,
         )
-        return Page(
-            source_ref=f"{stream.name}/{ref}",
-            body=body,
-            stream=stream.name,
-            title=title,
-            created_at=created_at,
-            updated_at=updated_at,
-        )
+        try:
+            return Page(
+                source_ref=f"{stream.name}/{ref}",
+                body=body,
+                stream=stream.name,
+                title=title,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+        except ValidationError as error:
+            warn(
+                "source_sync.unrepresentable_record",
+                connector=self.connector.name,
+                stream=stream.name,
+                source_ref=f"{stream.name}/{ref}",
+                fault=validation_fault(error),
+            )
+            return None
 
 
 def _record_timestamp(

@@ -22,7 +22,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from ufo.connectors import Credential
 from ufo.sources import backend as backend_module
@@ -74,9 +73,13 @@ class _FeedConnector(Connector):
             self.closed = True
 
 
-class _EmptyTitleConnector(_FeedConnector):
+class _UntitledRecordConnector(_FeedConnector):
+    """Renders record 2 with the empty title the page model rejects, every other record normally."""
+
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
-        return "", json.dumps(record, sort_keys=True)
+        if record.get("id") == 2:
+            return "", json.dumps(record, sort_keys=True)
+        return super().render(record, stream)
 
 
 class _NoAuthProxy:
@@ -152,10 +155,36 @@ async def test_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_dri
     assert connector.streams()[0].backfill_window_days == 30
 
 
-async def test_connector_backend_rejects_an_empty_rendered_title() -> None:
-    stream = StreamSpec(name="items", source_object="items")
-    with pytest.raises(ValidationError, match="title"):
-        await _run(_EmptyTitleConnector(stream, [[{"id": 1}]]), stream)
+async def test_an_unrepresentable_record_is_dropped_and_named_not_run_failing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A record the page model rejects is one record, so it costs one record: it is dropped, the
+    warning names it and the field that rejected it, and the run lands its siblings and advances the
+    watermark past it. Failing the run instead costs the stream — a failed run commits nothing and
+    advances no cursor, so a record the provider keeps returning holds every later record behind it
+    every interval."""
+    stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
+    connector = _UntitledRecordConnector(stream, [_records(1, 2)])
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _run(connector, stream)
+
+    assert [page.source_ref for page in result.pages] == ["items/1"]
+    # the watermark is the dropped record's own: the next run resumes past it, not at it
+    assert result.next_cursor == "2026-01-02T00:00:00Z"
+    dropped = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "source_sync.unrepresentable_record"
+    ]
+    assert [record.ufo for record in dropped] == [
+        {
+            "connector": "probe",
+            "stream": "items",
+            "source_ref": "items/2",
+            "fault": "title: string_too_short",
+        }
+    ]
 
 
 async def test_cursor_field_supplies_updated_at_when_provider_value_is_absent() -> None:
