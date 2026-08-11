@@ -1624,7 +1624,7 @@ async def _read_changes(ctx: ConversationSlotContext) -> ChangesSlotPayload:
 
 async def _summarize_changes(ctx: ConversationSlotContext) -> int | None:
     changes, _truncated = _conversation_changes(ctx.messages)
-    return len(changes)
+    return len(changes) or None
 
 
 CHANGES_SLOT = ConversationSlotProvider(

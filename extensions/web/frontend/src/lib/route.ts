@@ -180,24 +180,6 @@ export function chatHash(conversationId: string, slot?: string): string {
   return CHAT_PREFIX + conversationId + (slot ? "?slot=" + encodeURIComponent(slot) : "");
 }
 
-export function conversationSlotHash(
-  agentId: string,
-  conversationId: string,
-  slot: string,
-  rootConversationId?: string,
-): string {
-  const root = rootConversationId ? "?root=" + rootConversationId : "";
-  return (
-    "#/agents/" +
-    agentId +
-    "/conversations/" +
-    conversationId +
-    "/slots/" +
-    slot +
-    root
-  );
-}
-
 export function newChatHash(agentId: string): string {
   return "#/new/" + agentId;
 }

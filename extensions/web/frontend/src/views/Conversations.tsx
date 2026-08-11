@@ -20,7 +20,6 @@ import { RowLines } from "@/kernel/rows";
 import { DataTable } from "@/kernel/table";
 import { BASE, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { conversationSlotHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
@@ -44,20 +43,17 @@ type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
 export function turnTree(
   turns: Turn[],
   spawned: Turn[],
-): { turn: Turn; depth: number; first: boolean }[] {
+): { turn: Turn; depth: number }[] {
   const children = new Map<string | null, Turn[]>();
   for (const turn of spawned) {
     const siblings = children.get(turn.parent_turn_id) ?? [];
     siblings.push(turn);
     children.set(turn.parent_turn_id, siblings);
   }
-  const rows: { turn: Turn; depth: number; first: boolean }[] = [];
+  const rows: { turn: Turn; depth: number }[] = [];
   const placed = new Set<string>();
-  const conversations = new Set<string>();
   const walk = (turn: Turn, depth: number) => {
-    const first = !conversations.has(turn.conversation_id);
-    rows.push({ turn, depth, first });
-    conversations.add(turn.conversation_id);
+    rows.push({ turn, depth });
     placed.add(turn.id);
     for (const child of children.get(turn.id) ?? []) walk(child, depth + 1);
   };
@@ -290,15 +286,7 @@ export function ConversationDetail({
             payload.turns.length || payload.subagent_turns.length ? (
               <div className="flex flex-col gap-lg">
                 {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-                  <TurnLine
-                    key={entry.turn.id}
-                    turn={entry.turn}
-                    depth={entry.depth}
-                    showChanges={entry.first}
-                    rootConversationId={
-                      entry.turn.conversation_id === conversation.id ? undefined : conversation.id
-                    }
-                  />
+                  <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
                 ))}
               </div>
             ) : (
@@ -312,24 +300,9 @@ export function ConversationDetail({
   );
 }
 
-/** What a turn is called on the line that states it and on the link that leaves it. A detail can
- *  merge several subagent conversations, so "Changes" alone names none of them. */
-function named(turn: Turn): string {
-  return turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq;
-}
-
-export function TurnLine({
-  turn,
-  depth,
-  showChanges,
-  rootConversationId,
-}: {
-  turn: Turn;
-  depth: number;
-  showChanges: boolean;
-  rootConversationId?: string;
-}) {
+export function TurnLine({ turn, depth }: { turn: Turn; depth: number }) {
   const answer = turn.outcome || turn.error_class;
+  const name = turn.subagent_profile ? "subagent " + turn.subagent_profile : "turn " + turn.seq;
   return (
     <div
       className={cn(
@@ -339,20 +312,7 @@ export function TurnLine({
       style={{ marginLeft: "calc(var(--spacing-2xl) * " + depth + ")" }}
     >
       <div className="flex gap-md font-mono text-mono">
-        <span>{named(turn) + " · " + turn.status + " · " + (day(turn.created_at) || "")}</span>
-        {showChanges ? (
-          <a
-            href={conversationSlotHash(
-              turn.agent_id,
-              turn.conversation_id,
-              "changes",
-              rootConversationId,
-            )}
-            aria-label={"Changes from " + named(turn)}
-          >
-            Changes
-          </a>
-        ) : null}
+        <span>{name + " · " + turn.status + " · " + (day(turn.created_at) || "")}</span>
       </div>
       <div className="max-w-bubble self-end whitespace-pre-wrap wrap-anywhere rounded-bubble bg-fill px-lg py-sm">
         {turn.inbound}

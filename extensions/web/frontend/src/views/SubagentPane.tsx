@@ -283,15 +283,7 @@ function RunDetail({
             {payload.turns.length || payload.subagent_turns.length ? (
               <div className="flex flex-col gap-lg">
                 {turnTree(payload.turns, payload.subagent_turns).map((entry) => (
-                  <TurnLine
-                    key={entry.turn.id}
-                    turn={entry.turn}
-                    depth={entry.depth}
-                    showChanges={entry.first}
-                    rootConversationId={
-                      entry.turn.conversation_id === conversationId ? undefined : conversationId
-                    }
-                  />
+                  <TurnLine key={entry.turn.id} turn={entry.turn} depth={entry.depth} />
                 ))}
               </div>
             ) : (

@@ -145,7 +145,6 @@ test("a transcript bubble wraps an unbreakable string instead of widening the pa
         parent_turn_id: null,
       }}
       depth={0}
-      showChanges={false}
     />,
   );
 

@@ -7,7 +7,6 @@ import {
   artifactTarget,
   bootRoute,
   chatHash,
-  conversationSlotHash,
   customizeHash,
   parseHash,
   sectionHash,
@@ -129,14 +128,25 @@ test("conversation slots parse in chat and standalone URLs", () => {
     conversationId: CONVO_ID,
     slot: "changes",
   });
-  expect(parseHash(conversationSlotHash(AGENT.id, CONVO_ID, "changes"))).toEqual({
+  expect(
+    parseHash("#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes"),
+  ).toEqual({
     kind: "conversation-slot",
     agentId: AGENT.id,
     conversationId: CONVO_ID,
     slot: "changes",
   });
   const root = "99999999-9999-4999-8999-999999999999";
-  expect(parseHash(conversationSlotHash(AGENT.id, CONVO_ID, "changes", root))).toEqual({
+  expect(
+    parseHash(
+      "#/agents/" +
+        AGENT.id +
+        "/conversations/" +
+        CONVO_ID +
+        "/slots/changes?root=" +
+        root,
+    ),
+  ).toEqual({
     kind: "conversation-slot",
     agentId: AGENT.id,
     conversationId: CONVO_ID,

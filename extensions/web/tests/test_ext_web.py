@@ -7232,14 +7232,8 @@ async def test_conversation_reads_ride_the_same_gate(
         "changes": [{**change_payload["change"], "path": change_payload["path"]}],
         "truncated": True,
     }
-    no_transcript = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
-        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
-    )
-    assert no_transcript.status_code == 200
-    assert no_transcript.json() == {"type": "changes", "changes": [], "truncated": False}
     slots = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots",
+        f"/surface/web/agents/{agent_id}/conversations/{mine}/slots",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert slots.status_code == 200
@@ -7250,10 +7244,22 @@ async def test_conversation_reads_ride_the_same_gate(
                 "label": "Changes",
                 "icon": "diff",
                 "kind": "changes",
-                "count": 0,
+                "count": 1,
             }
         ]
     }
+    no_transcript = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots/changes",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert no_transcript.status_code == 200
+    assert no_transcript.json() == {"type": "changes", "changes": [], "truncated": False}
+    empty_slots = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{empty}/slots",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert empty_slots.status_code == 200
+    assert empty_slots.json() == {"slots": []}
     await Transcript(blob=blob, conversation_id=mine).write(
         Conversation(seq=2, messages=(Message(role="user", content="continued"),))
     )

@@ -140,9 +140,7 @@ test("the conversations tab lists this subagent's runs and opens one as a turn t
   expect(location.hash).toBe("#/subagents/deep_research/conversations/" + RUN_ID);
   expect(await screen.findByText("Find the filing deadline")).toBeTruthy();
   expect(screen.getByText("March 31")).toBeTruthy();
-  expect(
-    screen.getByRole("link", { name: "Changes from subagent deep_research" }).getAttribute("href"),
-  ).toBe("#/agents/" + AGENT.id + "/conversations/" + RUN_ID + "/slots/changes");
+  expect(screen.queryByRole("link", { name: /^Changes from/ })).toBeNull();
 });
 
 test("a search over the runs holds the table and states that nothing matched", async () => {

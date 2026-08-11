@@ -481,22 +481,7 @@ test("conversations open a turn tree that nests a subagent under the turn that s
   const parent = screen.getByText(/^turn 2 ·/);
   const child = screen.getByText(/^subagent research ·/);
   expect(parent.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  const changes = screen.getAllByRole("link", { name: /^Changes from/ });
-  expect(changes.map((link) => link.getAttribute("aria-label"))).toEqual([
-    "Changes from turn 2",
-    "Changes from subagent research",
-  ]);
-  expect(changes.map((link) => link.getAttribute("href"))).toEqual([
-    "#/agents/" +
-      AGENT_ID +
-      "/conversations/" +
-      rootConversation +
-      "/slots/changes",
-    "#/agents/" +
-      AGENT_ID +
-      "/conversations/22222222-2222-4222-8222-222222222222/slots/changes?root=" +
-      rootConversation,
-  ]);
+  expect(screen.queryByRole("link", { name: /^Changes from/ })).toBeNull();
   expect(await screen.findByText("No files in this conversation's workspace.")).toBeTruthy();
 });
 
