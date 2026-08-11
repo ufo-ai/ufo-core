@@ -196,9 +196,7 @@ type CapabilitySeed = Callable[[UUID, UUID, BlobStore], Awaitable[None]]
 type WorkspacePrepare = Callable[[UUID, Path], Awaitable[None]]
 
 
-def source_digest(
-    hook: CapabilityFollowup | EvalSeed | CapabilitySeed | WorkspacePrepare,
-) -> str:
+def source_digest(hook: Callable[..., object]) -> str:
     """A case hook's identity: its own source plus its defining module's, so editing the hook — or a
     helper the module's hooks share — moves the suite digest by itself. A hook carrying state is a
     callable object rather than a function, and its source is its class's."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from evals import (
+    ab_reversal,
     basics,
     browser_nav,
     closing_message,
@@ -13,9 +14,11 @@ from evals import (
     dead_route_repeat,
     document_visual,
     github_connections,
+    handback,
     object_tools,
     onboarding_help,
     pdf_build,
+    red_after_green,
     response_formatting,
     response_register,
     scenario_smoke,
@@ -27,7 +30,13 @@ from evals import (
     tool_calling,
     web_research,
 )
-from evals.harness.registry import EvalTask, capability_task, scenario_task, selected_tasks
+from evals.harness.registry import (
+    EvalTask,
+    arc_task,
+    capability_task,
+    scenario_task,
+    selected_tasks,
+)
 from evals.scenario_env import frontier, lookups, multistep, restraint, writes
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
 from evals.skill_loading.runner import skill_loading_task
@@ -102,6 +111,9 @@ TASKS: tuple[EvalTask, ...] = (
         judge_model=SEMANTIC_JUDGE_MODEL,
         serial=True,
     ),
+    arc_task("handback", handback.CASES),
+    arc_task("ab_reversal", ab_reversal.CASES),
+    arc_task("red_after_green", red_after_green.CASES),
 )
 
 

@@ -297,6 +297,9 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "connector_connections",
         "github_connections",
         "onboarding_help",
+        "handback",
+        "ab_reversal",
+        "red_after_green",
     }
 
 

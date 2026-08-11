@@ -63,6 +63,9 @@ METRICS = (
     "tool_call_total",
     "source_sync_failed_total",
     "repl_run_total",
+    "objective_step_recorded_total",
+    "objective_condition_total",
+    "objective_frontier_injected_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import cast
 
+from evals.harness.arc import ArcCase, ArcRun
 from evals.harness.capability import CapabilityCase, run_capability_case
 from evals.harness.harness import EvalCaseResult, EvalReport, digest_payload
 from evals.harness.judge import JUDGE_MAX_TOKENS, JUDGE_REVISION
@@ -172,6 +173,24 @@ def scenario_task(
         judge_reasoning=judge_reasoning,
         exclusive=True,
     )
+
+
+def arc_task(name: str, cases: tuple[ArcCase, ...]) -> EvalTask:
+    """An arc suite. Cases run one at a time and the task is exclusive: an arc waits on the real
+    clock for the deploy's scheduler to fire, so a co-running suite's turns would contend for the
+    same worker and stretch the very wait the case measures."""
+    digest = digest_payload(
+        {"runner": "arc-case", "task": name, "cases": [case.payload() for case in cases]}
+    )
+
+    async def run(target: CapabilityTarget, slots: asyncio.Semaphore) -> EvalReport:
+        results: list[EvalCaseResult] = []
+        for case in cases:
+            async with slots:
+                results.append(await ArcRun(case, target).result())
+        return EvalReport(name=name, suite="arc", digest=digest, cases=tuple(results))
+
+    return EvalTask(name, "arc", digest, tuple(case.name for case in cases), run, exclusive=True)
 
 
 def selected_tasks(
