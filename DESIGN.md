@@ -107,7 +107,10 @@ line as the `<h1>` and the tab strip, and the eye returns to one margin down the
 Sections are headed by the shared `Section` component — never hand-written heading markup. A section stacks three bands: the heading, then `Section bar`, then the records. The bar
 runs left with the rest — the search over the section's records at `max-w-control-row`, then the act
 that makes one directly beside it — so the member reads what the section is, how to narrow it, and
-how to add to it before reaching a single row.
+how to add to it before reaching a single row. A section that has to say where its records come
+from says it as `note` — one muted line inside the heading band, directly under the `<h2>` it
+qualifies. A fourth band, or the same line set first among the records, reads as an orphan of the
+bar above it and puts the sentence further from the heading than from the table.
 
 `Section` is the only owner of vertical rhythm: `gap-lg` between its three bands and between the
 records and whatever follows them, `mb-6xl` to the next section, and the scrolling body sets no gap
@@ -143,7 +146,10 @@ fields and the prose beneath as one truncated muted meta line. Read, it is a `Ca
 two-column grid of bordered cards drawn by `CardGrid` (`kernel/cards.tsx`), one column under
 `--breakpoint-narrow` where two would clip the name off every card, carrying a mark, the
 name, the status opposite it, the sentence wrapping at full width, and the row's act at the card's
-foot; backtick-quoted literals in the sentence render as code spans, not raw backticks. The mark
+foot; backtick-quoted literals in the sentence render as code spans, not raw backticks. A card
+whose record came from somewhere the member can name states that on the `meta` line — one
+truncated mono line under the sentence, and the only place a card carries a second fact about
+itself. The mark
 takes one of two shapes. A record with no picture of its own takes `shape: "square"` — a
 `size-6xl rounded-panel bg-fill-subtle` block inset top-left, the status on its line (Credentials).
 A record that has or will have one takes `shape: "band"` — a full-bleed `h-(--size-band)` strip
@@ -165,8 +171,8 @@ acts and a button inside a button is not markup a browser will keep. `rowControl
 every press: one that lands on the row's own control — a `ConfirmButton`, a download link, a
 field — belongs to that control and never also opens the row, so opening cannot ride along with a
 delete. Eligibility is decided in one place, by whether a row is handed a control at all: a row the
-member may not open takes no role, no tab stop and no pointer cursor, and the state it is in
-(`Private`, `Not shared with you`) is a meta part rather than a control offering an act the row does
+member may not open takes no role, no tab stop and no pointer cursor, and who may read it
+(`Only you`, `Private to <email>`) is a meta part rather than a control offering an act the row does
 not carry. One record is named one way on every surface that lists it: a conversation's row states
 the same string its rail row does, falling back to whose it is where the words that would name it
 are content the member may not read.
@@ -275,7 +281,8 @@ buries every section under it, and the member who came for what is below never l
 A reply states what the agent did as one line and opens onto the rest, in the live chat and in every
 transcript read back, since one component draws a reply wherever it is drawn. The disclosure is a
 native `<details>` (`Activity` in `kernel/messages.tsx`) — its own marker, its own keyboard, its own
-announced state, and so no fourth glyph — and its summary is the *latest* activity, never a count: a
+announced state, and so no glyph of the portal's own — and its summary is the *latest* activity,
+never a count: a
 member reading a settled reply wants what it just did, and `3 tool calls` says only there were three.
 While the turn runs that same line is the running activity and carries the working pulse, so the
 collapsed state reads the same whether the turn is going or gone. The body mounts only while open.
@@ -308,6 +315,15 @@ table that renders it and falls back to the raw value, so a dimension the deploy
 rather than crashing the screen. A test that feeds the table an invented value proves nothing about
 this; the fixtures carry the real vocabulary.
 
+Who a record belongs to and who may read it are two facts, and `lib/audience.ts` holds the one
+spelling of each. Owner is `ownerLabel`: `You` for the viewer's own, another member's address
+verbatim, `Workspace` where no member created it — never blank, since a row with no owner stated
+reads as a row nobody is answerable for. Audience is `audienceLabel` off the wire value:
+`Workspace`, `Only you`, `Private to <email>`, the channel's own name for a room, `Shared with
+another org`, and `Unknown` for an audience the map does not know — an explicit word, never an
+omitted one. A screen states owner and audience only where the pane does not already: the viewer's
+own private row carries no audience label, because the exception is what gets labelled.
+
 `ring-*` is not available for that border. Tailwind emits a literal `#fff` ring default, which the
 zero-authored-colour test refuses; `border` reaches the same hairline through the tokens.
 
@@ -319,13 +335,87 @@ section rather than leaving the records unheaded.
 
 Every screen that lists records shares one bar, in one order and on one line: the search at
 `max-w-control-row`, the `Filter` tablist, the `send` act that adds a record, then `Refresh` where
-the screen draws one. Skills draws none: a record lands from the bar's own act — which re-reads —
-or from chat, and the tab re-reads on every visit, so the button re-states what the screen already
-does. The
+the screen draws one. Skills draws no `Refresh`: a record lands from the bar's own act — which
+re-reads — or from chat, and the tab re-reads on every visit, so the button re-states what the
+screen already does. The
 bar does not wrap — a control that drops to a second line reads as an orphan of whatever is under
 it, and the search is the item that has to give, since a name is short and the table beneath it
 carries the whole record anyway. `Section` draws the row `items-stretch`, so every control in it
 resolves to the height of the tallest and no button floats short beside the search.
+
+Skills stacks that bar instead: the search flexing to fill the line (`Search skills`) with
+`New skill` beside it, the `Filter` tablist beneath, and no section heading — the tab strip
+already says the one word the heading would repeat. The stack is two bands in the `bar` slot, so
+`Section` still owns the rhythm; the stack keeps its two lines at `gap-md` and pads its own foot
+(`pb-lg`), so the controls read as one group standing apart from the records they act on.
+
+The Skills filter names two collections and not two origins — `Community`, then `Installed` — and
+takes no `All`, since one card cannot come from both. It opens on `Community`, the skills.sh
+directory: the tab exists so a member can put a skill on the agent, and the agent's own skills are
+the shorter list they already know. `Custom` and `Built-in` still read on the card, where an origin
+is a fact about one skill rather than a way to narrow a list of a dozen. The directory listing
+lands on the 24 most installed skills rather than on a prompt to search, because a member who does
+not yet know what a skill is cannot name one, and a screen that opens on a blank state teaches
+nothing. The same search box narrows it — Enter submits, since the read leaves the portal — to 24
+results, and clearing the box returns the leaderboard. Every listing is held for a quarter of an
+hour and every document a member opens is held for the life of the process, because the directory
+rate limits what it answers and a member moving between the narrowings, or re-opening a skill they
+already read, must not spend that budget twice.
+
+A skill reads the same whether the agent already holds it or the directory merely lists it: one
+row type, one `ItemGroup`, three parts. The name over its one line — `Custom` or `Built-in` for a
+skill the agent holds, the source repository for a directory row — then, on the right, what the
+directory row states about itself (`Installed`, else the install count) and the acts. An installed
+skill's line names where it came from rather than what it does: the description is written for the
+agent that loads the skill, runs to a sentence or two, and is read once when the member decides to
+keep the skill — so it stands in the skill's own dialog, where the whole document is, and the
+listing stays one scannable line per record.
+
+A directory row's line is the source repository and the install count, `·`-separated and set in the
+body face like every other line — never mono, since the two collections are read as one list and a
+monospaced row states a difference that is not there. The count sits on that line rather than
+opposite the name: it is a fact about the skill, and the right-hand side is only ever acts.
+
+The acts are the row's one difference. A directory row carries `Source ↗` then `Install`. Every
+row the agent already holds — a directory row it has taken, and every row under `Installed` —
+carries a disabled `Installed` in that same place instead: never an absence, and never a muted word
+beside the acts. A row that drops its button leaves the column ragged and states the skill's
+condition by omission, which is the one thing a member cannot read; a button that names the state
+holds the line and says why it cannot be pressed.
+
+`Source ↗` is the `<a>` to the skill's own repository on GitHub, drawn from what the directory
+publishes, and it is drawn as a link and not as a button — no border, muted until the pointer
+reaches it — because it is the row's secondary act and a second bordered control beside `Install`
+states the two are equals. It keeps `Install`'s type size and box, borrowing the same padding under
+a transparent border, so the two sit on one line and the lighter one is lighter in weight and not
+in stature. The arrow is the one place a glyph says what a word cannot repeat in the space: the act
+leaves the portal.
+
+`Delete` is on no row at all. It stands in the dialog the row opens, under the description and the
+instructions it destroys, so the act is taken beside the thing itself and never one press away from
+a name in a list. It sits at the footer's far end, through `DialogFooter`'s `lead` — an act on the
+record, not one of the two ways out of the dialog, and a destructive act must not be the control
+beside the one the member is reaching for. It is a `ConfirmButton` like every destructive act, and
+it is drawn only on a skill the member wrote — a built-in one is the deploy's.
+
+The dialog shows a skill as two boxes of the same kind: description over instructions, both
+`Textarea`, both set in the body face. `Textarea` is mono because the portal's other long fields
+hold a prompt or a document, and a skill is prose the member reads — a mono box states code where
+there is none, and a description in an `Input` beside instructions in a `Textarea` states the two
+are different kinds of thing. Only the family changes: the size stays the one every control in the
+portal is set at, since a box that is also a different size reads as a different kind of field
+again. The create form takes the same face for the same reason. `Install` fetches that skill's SKILL.md for review in the dialog the skill viewer
+uses, and the dialog's `Install` files that document through the same apply intent `New skill`
+posts — the directory is a place to read from, never a second write path.
+
+The rows are items (`components/ui/item.tsx`), not cards: one bordered card holding a column of
+rows divided by hairlines, each row the name over its truncated line with its acts opposite. A card grid holds its rhythm only while every card is the same height, and a directory of
+two dozen rows whose one distinguishing line is a repository path is a field of near-identical
+cards the eye cannot run down. An item list has one left edge, one line per record, and the same
+acts in the same place on every row. `ItemGroup` draws the card, `Item` the row, `ItemSeparator`
+the rule between two of them — its own row, so no item carries an edge and the last one meets the
+card with nothing beside it — and `ItemContent` / `ItemTitle` / `ItemDescription` / `ItemActions`
+the parts. The whole row is the control through `rowControl`, as a table row and a card are.
 
 A Customize screen whose records belong to one agent leads that bar with the agent, as the shared
 `AgentPicker` (`kernel/agentpick.tsx`) — one `Select` at `max-w-control-row` carrying its own
@@ -459,8 +549,20 @@ commit is `disabled` until every row carries a value: an act that cannot yet suc
 the press rather than after it.
 
 Once the dialog has gone, its result is a `Toast` — fixed bottom-left, `role="status"`,
-self-dismissing. A toast reports only what applied; a refusal stays beside the control that can
-correct it, because a message that dismisses itself cannot be read back.
+self-dismissing, and two lines: the title states what happened, the description states why. A
+refusal a field can answer stays beside that field instead, because a message that dismisses itself
+cannot be read back — but a read that fails under a row the member pressed has no field to answer
+it, and the same toast reports that: `release-notes did not open.` over the sentence the surface
+itself wrote. So a refusal carries a member's sentence and not a status code — the route answers
+in plain text (`The skill directory limits reads to 60 an hour…`) and `getJson` surfaces it,
+falling back to the code only where the answer is a body no member wrote.
+
+What decides between the two is whether anything is left standing. A conversation that never
+loaded has an empty pane, so it states the failure *in* the pane, where it can be read for as long
+as it is true and the composer is dead beside it; the same read failing under a conversation
+already on screen is a toast, because the transcript the member is reading is still theirs. A
+transcript that could not be read is never drawn as a conversation holding no messages — that is
+the surface answering a question it does not know.
 
 ## Controls
 
@@ -501,8 +603,9 @@ Only the parts a view uses ship: no group, label, or separator exists until some
 one.
 
 The chevron and the tick are drawn inline in `select.tsx`. The portal carries no icon set and does
-not earn one at two glyphs — both take `currentColor`, so neither needs a token, and an icon
-package would be a dependency with a vocabulary of one.
+not earn one at four glyphs — these two, the sort caret, and the leaving arrow, each drawn where it
+is used and each taking `currentColor`, so none needs a token and an icon package would be a
+dependency with a vocabulary of four.
 
 A row that pairs controls is `items-stretch`, never `items-center`. Two controls on the same
 surface still resolve their heights from their own content, and centring unequal boxes leaves the
@@ -510,15 +613,19 @@ shorter one floating with its chevron off the line the row reads along. Stretchi
 height the one both agree to.
 
 A listing filter is `Filter` (`components/ui/filter.tsx`) — one component, every screen. It is a
-segmented `role="tablist"`: a `rounded-panel bg-fill-subtle p-hair` container holding `All` plus one
-tab per declared state, the active tab a raised `rounded-control border-edge bg-surface` pill inside
-it — never `aria-current`, never an underline, never a count in the label. The component supplies
-its own `All`, so a caller passes only the narrowings and no screen re-derives the empty value.
+segmented `role="tablist"` on no container surface: `All` plus one tab per declared state as muted
+labels, and one `bg-fill-subtle rounded-control` pill that slides beneath the active tab
+(`transition-[left,width]`, measured in a layout effect, cut under reduced motion) — never
+`aria-current`, never an underline, never a count in the label. An inactive tab brightens to full
+opacity under the pointer; the pill moves only on a pick. The component supplies
+its own `All`, so a caller passes only the narrowings and no screen re-derives the empty value —
+except where the narrowings already divide the whole collection between them and one row cannot sit
+in two, which `all={false}` states and which then draws no tab standing for every row at once.
 
 Selection is drawn in colour and surface, never in weight — neither here nor on the `TabStrip`
 above. Bolding the active tab remeasures its text, so every tab after it slides sideways as the
-member moves along the strip and the strip they are aiming at is not where they saw it. A raised
-pill and full opacity against `--muted-soft` say the same thing at a fixed width. The section bar
+member moves along the strip and the strip they are aiming at is not where they saw it. The
+sliding pill and full opacity against `--muted-soft` say the same thing at a fixed width. The section bar
 stretches its controls
 (`items-stretch`), so the search, the tablist, and `Refresh` share one height instead of three. A
 search box carries no button beside it, whether it narrows what is loaded or asks the server: the
@@ -582,15 +689,21 @@ Copy a known-good implementation instead of composing from rules:
   row's own agent.
 - `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card, and a
   typed object's create act in the bar of a screen that is not that kind's index.
-- `views/AgentSkills.tsx` — an agent tab whose records belong to the agent in the pane, read as
-  the same cards Credentials draws: the origin (`Custom`, `Built-in`) in the status slot, the
-  custom family sorted ahead of the built-in directory, and no `Refresh`. The whole card opens the
-  skill through `rowControl` into a read-only copy of the same dialog `New skill` commits with.
+- `views/AgentSkills.tsx` — two collections drawn as one item list: the agent's own skills and the
+  community directory mapped to a single row type, so the name, status, description, source and
+  acts sit in the same places whichever the member is reading. The screen opens on the directory,
+  the custom family sorts ahead of the built-in one under `Installed`, there is no `Refresh`, and
+  the stacked bar carries the flexing search and the create act on one line with the two
+  collections beneath and no section heading. A directory read that fails reports as a toast. The whole row opens the
+  skill through `rowControl` into a read-only copy of the same dialog `New skill` commits with —
+  which is where `Delete` stands — and a directory row's `View` leaves for the source repository.
 - `views/Connectors.tsx` — one read stated twice: the member's grants under Customize, and what
   the agent can reach on its own tab.
 - `kernel/listing.tsx` — the listing renderer the declarations feed.
 - `views/Usage.tsx` — figures over headed breakdown tables, every wire value labelled.
 - `kernel/cards.tsx` — the card grid both the declared and the bespoke card sections draw.
+- `components/ui/item.tsx` — the card of hairline-divided rows a directory of same-shaped
+  records reads as.
 - `kernel/panel.tsx` — the section's rhythm, the shaped skeleton, and the blank card.
 - `components/ui/filter.tsx` — the one segmented filter every listing narrows with.
 - `views/SubagentPane.tsx` — a subject's own pane: its facts as a column, its prompt behind the
@@ -604,6 +717,7 @@ Copy a known-good implementation instead of composing from rules:
 - `kernel/row.ts` — the one way a record's whole row becomes the control that opens it.
 - `components/ui/facts.tsx` — the labelled column a pane states its subject's facts in.
 - `components/ui/reveal.tsx` — the fold long content is held at.
+- `components/ui/toast.tsx` — the two-line report of an outcome, or of a read no field can answer.
 - `views/Overview.tsx` — an agent's facts, its schema-driven settings as a form card, its prompt
   behind the fold.
 - `components/ui/field.tsx` — the labelled field and the card its form is set in.

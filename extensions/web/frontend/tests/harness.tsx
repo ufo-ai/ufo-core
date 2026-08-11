@@ -187,7 +187,7 @@ export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["conversation", "next_run_at", "paused"],
+  fields: ["conversation", "next_run_at", "paused", "owner_email"],
   spec_schema: {
     properties: {
       schedule: { type: "string" },
@@ -200,7 +200,7 @@ export const TASK_KIND = {
 
 export const SITE_KIND = {
   kind: "site",
-  fields: ["conversation", "created_at", "visibility", "site_url"],
+  fields: ["conversation", "created_at", "visibility", "site_url", "owner_email"],
   spec_schema: {
     properties: { visibility: { type: "string", enum: ["private", "workspace", "public"] } },
   },

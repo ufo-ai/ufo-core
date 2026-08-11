@@ -2,11 +2,12 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { Toast } from "@/components/ui/toast";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { CardGrid } from "@/kernel/cards";
 import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
 import { PanelBlank, PanelEmpty, Section, outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { webAudienceLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
@@ -23,6 +24,7 @@ export type AgentsProps = {
 const AGENT_KIND = "agent";
 const MODEL_FIELD = "model";
 const MODEL = "font-mono text-mono opacity-(--muted-strong)";
+const MAIN = "The agent this workspace answers with by default.";
 const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
 const INHERITS = "Spawned by an agent for one task, on that agent's model.";
 
@@ -51,7 +53,7 @@ export function Agents({
   const mainAgent = useMainAgent();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
-  const [toast, setToast] = useState("");
+  const [toast, setToast] = useState<ToastState>(SILENT);
   const [subagentsOpen, setSubagentsOpen] = useState(false);
   const wanted = query.trim().toLowerCase();
   const found = agents.filter((agent) => agent.name.toLowerCase().includes(wanted));
@@ -63,7 +65,7 @@ export function Agents({
     const outcome = await postIntent(lane, envelope);
     if (outcome.applied) {
       onAgents();
-      setToast("Created " + envelope.name + ".");
+      setToast({ title: "Created " + envelope.name + "." });
     }
     return outcomeNotice(outcome);
   }
@@ -99,9 +101,13 @@ export function Agents({
             mark={{ shape: "square" }}
             primary={(agent) => agent.name}
             status={(agent) => <span className={MODEL}>{agent.model}</span>}
-            body={(agent) =>
-              agent.main ? "The agent this workspace answers with by default." : null
-            }
+            body={(agent) => {
+              const reach = agent.web_audience
+                ? webAudienceLabel(agent.main, agent.web_audience)
+                : null;
+              if (!agent.main) return reach;
+              return [MAIN, reach].filter(Boolean).join(" · ");
+            }}
             action={(agent) => (
               <div className="flex flex-wrap gap-xs">
                 <Button variant="send" onClick={() => onNewChat(agent.id)}>
@@ -167,7 +173,7 @@ export function Agents({
           onClose={() => setCreating(false)}
         />
       ) : null}
-      <Toast message={toast} onDone={() => setToast("")} />
+      <Toast state={toast} onDone={() => setToast(SILENT)} />
     </main>
   );
 }

@@ -24,6 +24,7 @@ const artifact = (over: Record<string, unknown> = {}) => ({
   size_bytes: 12,
   created_at: "2026-07-31T09:00:00",
   url: TEXT_URL,
+  owner_email: "member@example.com",
   ...over,
 });
 
@@ -343,6 +344,7 @@ test("the artifacts listing renders as cards, each led by its own band", async (
   );
   expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe("notes.txt");
   expect(item?.querySelector('[data-part="body"]')?.textContent).toBe("notes");
+  expect(item?.querySelector('[data-part="meta"]')?.textContent).toBe("member@example.com");
   expect(item?.querySelector('[data-part="status"]')?.textContent).toBe("Jul 31 2026");
   const band = item?.querySelector('[data-part="mark"]');
   expect(band?.className).toContain("h-(--size-band)");

@@ -13,13 +13,14 @@ from typing import cast
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_todos as todos
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient, Response
+from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
 from pydantic import BaseModel, ValidationError
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
@@ -33,6 +34,7 @@ from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
+from ufo_ext_web import community as web_community
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
@@ -1211,6 +1213,22 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         ("assistant", True),
         ("ops", False),
     ]
+    assert admin_view.json()["agents"] == [
+        {
+            "id": str(agent_id),
+            "name": "assistant",
+            "main": True,
+            "model": "claude-opus-4-8",
+            "web_audience": [],
+        },
+        {
+            "id": str(second_agent),
+            "name": "ops",
+            "main": False,
+            "model": "claude-sonnet-5",
+            "web_audience": ["member@example.com"],
+        },
+    ]
     member_view = await client.get(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
@@ -1219,6 +1237,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         str(agent_id),
         str(second_agent),
     ]
+    assert all("web_audience" not in agent for agent in member_view.json()["agents"])
     roster = [
         {"name": "deep_research", "model": "claude-opus-4-8"},
         {"name": "general_purpose", "model": None},
@@ -1322,10 +1341,6 @@ async def _seed_connection(
 async def test_connections_panel_holds_the_member_gate_and_the_wall(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """#624 acceptance, read-side: inside one agent, member M's private connector never appears in
-    member N's panel while agent-shared ones appear to both — a shared edge naming its owner only
-    to an admin or the owner; another agent's grants are absent; an out-of-audience agent is
-    not-found; a workspace admin sees every edge."""
     client, workspace_id, agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -1349,14 +1364,12 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     path = f"/surface/web/agents/{agent_id}/connections"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert [
-        (c["provider"], c["shared"], c["owner_email"]) for c in m_view.json()["connections"]
-    ] == [
-        ("github", False, "m@example.com"),
-        ("slack", True, None),
-    ]
+        (c["provider"], c["shared"], c["owner_email"], c["own"])
+        for c in m_view.json()["connections"]
+    ] == [("github", False, "m@example.com", True), ("slack", True, "n@example.com", False)]
     n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
-    assert [(c["provider"], c["owner_email"]) for c in n_view.json()["connections"]] == [
-        ("slack", "n@example.com")
+    assert [(c["provider"], c["owner_email"], c["own"]) for c in n_view.json()["connections"]] == [
+        ("slack", "n@example.com", True)
     ]
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     assert [(c["provider"], c["owner_email"]) for c in admin_view.json()["connections"]] == [
@@ -1442,15 +1455,17 @@ async def test_sources_panel_gates_on_subject(web: tuple[AsyncClient, UUID, UUID
             )
     path = "/surface/web/workspace/sources"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert [(s["backend"], s["shared"], s["owner_email"]) for s in m_view.json()["sources"]] == [
-        ("folder", True, None),
-        ("github", False, "m@example.com"),
-        ("notion", True, None),
+    assert [
+        (s["backend"], s["shared"], s["owner_email"], s["own"]) for s in m_view.json()["sources"]
+    ] == [
+        ("folder", True, None, False),
+        ("github", False, "m@example.com", True),
+        ("notion", True, "n@example.com", False),
     ]
     n_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
-    assert [(s["backend"], s["owner_email"]) for s in n_view.json()["sources"]] == [
-        ("folder", None),
-        ("notion", "n@example.com"),
+    assert [(s["backend"], s["owner_email"], s["own"]) for s in n_view.json()["sources"]] == [
+        ("folder", None, False),
+        ("notion", "n@example.com", True),
     ]
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
@@ -1517,6 +1532,7 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
         "image/png",
         "application/pdf",
     ]
+    assert {entry["owner_email"] for entry in m_view["artifacts"]} == {"m@example.com"}
     assert m_view["artifacts"][0]["url"].startswith("https://web/")
     assert "/chart.png?exp=" in m_view["artifacts"][0]["url"]
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
@@ -1528,6 +1544,11 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
         "notes.txt",
         "chart.png",
         "report.pdf",
+    ]
+    assert [entry["owner_email"] for entry in admin_view["artifacts"]] == [
+        "n@example.com",
+        "m@example.com",
+        "m@example.com",
     ]
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
@@ -1900,7 +1921,13 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     path = f"/surface/web/objects/site?agent={agent_id}"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
     assert sorted(row["name"].split("-")[0] for row in m_view["objects"]) == ["draft", "landing"]
-    assert sorted(m_view["fields"]) == ["conversation", "created_at", "site_url", "visibility"]
+    assert sorted(m_view["fields"]) == [
+        "conversation",
+        "created_at",
+        "owner_email",
+        "site_url",
+        "visibility",
+    ]
     assert "guidance" not in m_view and "description" not in m_view
     assert m_view["applies"] is False
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
@@ -1918,6 +1945,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     for row in m_view["objects"]:
         assert row["conversation"] == str(conversation_id)
         assert row["created_at"]
+        assert row["owner_email"] == "m@example.com"
 
 
 async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(
@@ -2078,6 +2106,7 @@ async def test_task_index_filters_and_orders_on_the_kinds_declared_fields(
         "alpha": True,
         "zulu": False,
     }
+    assert {row["owner_email"] for row in listed["objects"]} == {"creator@example.com"}
     searched = (await client.get(base + "&q=alpha", headers=cookie)).json()
     assert [row["name"] for row in searched["objects"]] == ["alpha"]
     stopped = (await client.get(base + "&paused=true", headers=cookie)).json()
@@ -2131,6 +2160,7 @@ async def test_a_task_detail_links_to_the_conversation_it_reports_into(
     ).json()
     assert task["spec"]["prompt"] == "write the daily brief"
     assert task["status"]["paused"] is False
+    assert task["status"]["owner_email"] == "creator@example.com"
     [link] = task["links"]
     assert link["relation"] == "reports_to"
     assert link["kind"] == "conversation"
@@ -2833,6 +2863,8 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         "id": str(conversation_id),
         "agent": {"id": str(agent_id), "name": "assistant"},
         "surface": "slack",
+        "surface_label": None,
+        "audience": "shared",
         "member_email": None,
         "description": "from Slack",
         "speakers": ["Robin Vale (owner@example.com)"],
@@ -4826,6 +4858,142 @@ async def test_an_answered_intent_leaves_no_tail_running(
 SKILL_MD = "---\nname: release-notes\ndescription: How release notes read.\n---\nWrite tersely.\n"
 
 
+OTHER_SKILL_MD = "---\nname: other\ndescription: Else.\n---\nBody.\n"
+LEADERBOARD = (
+    'a:["$","div",null,{"skills":['
+    '{"source":"acme/kit","skillId":"release-notes","name":"release-notes","installs":12},'
+    '{"source":"acme/kit","skillId":"other","name":"other","installs":40},'
+    '{"source":"acme/kit","skillId":"release-notes","name":"release-notes","installs":12},'
+    '{"source":"open.example.com","skillId":"hosted","name":"hosted","installs":900},'
+    '{"source":"acme/kit","skillId":"undocumented","name":"undocumented","installs":7}'
+    "]}]"
+)
+DOCUMENTS = {"release-notes": SKILL_MD, "other": OTHER_SKILL_MD}
+
+
+def _directory(calls: list[str]) -> Callable[[httpx.Request], Response]:
+    def handler(request: httpx.Request) -> Response:
+        assert request.url.host == "skills.sh"
+        calls.append(request.url.path)
+        if request.url.path == "/":
+            assert request.headers["RSC"] == "1"
+            return Response(200, text=LEADERBOARD)
+        if request.url.path == "/api/search":
+            assert request.url.params["q"] == "release"
+            assert request.url.params["limit"] == "24"
+            return Response(
+                200,
+                json={
+                    "skills": [
+                        {"skillId": "release-notes", "source": "acme/kit", "installs": 12},
+                        {"skillId": "other", "source": "acme/kit", "installs": 40},
+                    ]
+                },
+            )
+        owner, repo, skill = request.url.path.removeprefix("/api/download/").split("/")
+        assert (owner, repo) == ("acme", "kit")
+        if skill not in DOCUMENTS:
+            return Response(200, json={"files": [{"path": "README.md", "contents": "not a skill"}]})
+        return Response(200, json={"files": [{"path": "SKILL.md", "contents": DOCUMENTS[skill]}]})
+
+    return handler
+
+
+async def test_community_skills_list_and_fetch(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no query the community listing is the directory's leaderboard, deduplicated and ranked
+    by installs; with one it is the directory's search. Either way a listed skill states the name,
+    the source and the install count the directory publishes, a listing and a fetched document are
+    each read once and held, and an upstream failure answers 502 with the sentence the member
+    reads, never an empty list."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        web_surface,
+        "COMMUNITY",
+        web_community.CommunitySkills(transport=MockTransport(_directory(calls))),
+    )
+
+    short = await client.get(f"/surface/web/agents/{agent_id}/skills/community?q=x", headers=cookie)
+    assert short.status_code == 400
+
+    popular = await client.get(f"/surface/web/agents/{agent_id}/skills/community", headers=cookie)
+    assert popular.status_code == 200
+    assert popular.json()["skills"] == [
+        {"name": "other", "source": "acme/kit", "installs": 40},
+        {"name": "release-notes", "source": "acme/kit", "installs": 12},
+        {"name": "undocumented", "source": "acme/kit", "installs": 7},
+    ]
+    assert calls == ["/"]
+
+    calls.clear()
+    again = await client.get(f"/surface/web/agents/{agent_id}/skills/community", headers=cookie)
+    assert again.json() == popular.json()
+    assert calls == []
+
+    found = await client.get(
+        f"/surface/web/agents/{agent_id}/skills/community?q=release", headers=cookie
+    )
+    assert found.status_code == 200
+    assert [skill["name"] for skill in found.json()["skills"]] == ["other", "release-notes"]
+    assert calls == ["/api/search"]
+
+    calls.clear()
+    fetched = await client.get(
+        f"/surface/web/agents/{agent_id}/skills/community/acme/kit/release-notes",
+        headers=cookie,
+    )
+    assert fetched.status_code == 200
+    assert fetched.json() == {
+        "name": "release-notes",
+        "description": "How release notes read.",
+        "instructions": "Write tersely.",
+        "document": SKILL_MD,
+    }
+
+    assert calls == ["/api/download/acme/kit/release-notes"]
+
+    calls.clear()
+    reopened = await client.get(
+        f"/surface/web/agents/{agent_id}/skills/community/acme/kit/release-notes",
+        headers=cookie,
+    )
+    assert reopened.json() == fetched.json()
+    assert calls == []
+
+    absent = await client.get(
+        f"/surface/web/agents/{agent_id}/skills/community/acme/kit/undocumented", headers=cookie
+    )
+    assert absent.status_code == 404
+
+    monkeypatch.setattr(
+        web_surface,
+        "COMMUNITY",
+        web_community.CommunitySkills(
+            transport=MockTransport(lambda _request: Response(429, text="rate_limit_exceeded"))
+        ),
+    )
+    limited = await client.get(
+        f"/surface/web/agents/{agent_id}/skills/community/acme/kit/release-notes", headers=cookie
+    )
+    assert limited.status_code == 502
+    assert "60 an hour" in limited.text
+
+    monkeypatch.setattr(
+        web_surface,
+        "COMMUNITY",
+        web_community.CommunitySkills(
+            transport=MockTransport(lambda _request: Response(500, text="down"))
+        ),
+    )
+    failed = await client.get(f"/surface/web/agents/{agent_id}/skills/community", headers=cookie)
+    assert failed.status_code == 502
+    assert failed.text == "The skill directory answered 500."
+
+
 async def test_a_skill_intent_creates_replaces_and_deletes(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -5943,6 +6111,7 @@ async def _seed_agent_conversation(
     member_id: UUID | None,
     surface: str = "web",
     sandbox_conversation_id: UUID | None = None,
+    surface_label: str | None = None,
 ) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
@@ -5956,6 +6125,7 @@ async def _seed_agent_conversation(
                 member_id=member_id,
                 audience=audience,
                 sandbox_conversation_id=sandbox_conversation_id,
+                surface_label=surface_label,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -6620,6 +6790,7 @@ async def test_the_conversations_route_serializes_who_may_be_disclosed(
         audience="room:slack:C7",
         member_id=None,
         surface="slack",
+        surface_label="#ops",
     )
     own = await _seed_agent_conversation(
         workspace_id,
@@ -6638,6 +6809,10 @@ async def test_the_conversations_route_serializes_who_may_be_disclosed(
     assert rows[str(theirs)]["disclosable"] is True
     assert rows[str(room)]["disclosable"] is False
     assert rows[str(own)]["disclosable"] is False
+    assert rows[str(theirs)]["audience"] == f"member:{member_m}"
+    assert rows[str(room)]["audience"] == "room:slack:C7"
+    assert rows[str(room)]["surface_label"] == "#ops"
+    assert rows[str(own)]["surface_label"] is None
 
 
 async def test_conversation_changes_answer_from_the_one_shared_workspace(
@@ -7507,6 +7682,8 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         "agent": {"id": str(agent_id), "name": "assistant"},
         "surface": SUBAGENT_SURFACE,
         "member_email": "m@example.com",
+        "surface_label": None,
+        "audience": rows[0]["audience"],
         "description": "find it",
         "speakers": [],
         "turn_count": 2,
@@ -7515,6 +7692,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         "readable": True,
         "disclosable": False,
     }
+    assert rows[0]["audience"].startswith("member:")
     assert datetime.fromisoformat(rows[0]["last_turn_at"]).tzinfo is not None
 
     admin_rows = (

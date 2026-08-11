@@ -4,6 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { ObjectPane } from "@/kernel/objects";
+import { Viewer } from "@/lib/audience";
 import { relativeMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { Scheduled } from "@/views/Scheduled";
@@ -19,6 +20,7 @@ import {
   SECOND_ID,
   SITE_KIND,
   TASK_KIND,
+  fact,
   json,
   objectIndex,
   owned,
@@ -39,6 +41,7 @@ const TASK_ROW = owned({
   conversation: CONVO_ID,
   next_run_at: IN_THREE_HOURS,
   paused: false,
+  owner_email: "mel@example.com",
 });
 
 const SECOND_CONVO_ID = "6f1d4c2a-9b3e-4a71-8c05-2d7e6b1f0a94";
@@ -59,7 +62,7 @@ const TASK_DETAIL = {
   name: "daily-brief",
   summary: "0 9 * * * — daily brief",
   spec: { schedule: "0 9 * * *", prompt: "write the daily brief", paused: false },
-  status: { next_run_at: IN_THREE_HOURS, paused: false },
+  status: { next_run_at: IN_THREE_HOURS, paused: false, owner_email: "mel@example.com" },
   links: [{ relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true }],
   created_at: "2026-07-01T09:00:00Z",
   updated_at: "2026-07-02T09:00:00Z",
@@ -127,13 +130,22 @@ test("an index is a table: one column per field the kind declares, headed by a m
   mount();
 
   await screen.findByRole("link", { name: "daily-brief" });
-  expect(headings()).toEqual(["Name", "Agent", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual([
+    "Name",
+    "Agent",
+    "Created By",
+    "Summary",
+    "Next Run At",
+    "Paused",
+    "",
+  ]);
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-brief");
   expect(said[1]).toBe("assistant");
-  expect(said[2]).toBe("0 9 * * * — daily brief");
-  expect(said[3]).toContain("in ");
-  expect(said[4]).toBe("No");
+  expect(said[2]).toBe("mel@example.com");
+  expect(said[3]).toBe("0 9 * * * — daily brief");
+  expect(said[4]).toContain("in ");
+  expect(said[5]).toBe("No");
 });
 
 test("a record's conversation is where its name leads, never a column of uuids", async () => {
@@ -167,8 +179,8 @@ test("a boolean cell answers its column, and a field the record lacks takes a da
   mount();
 
   await screen.findByRole("link", { name: "daily-brief" });
-  expect(cells("daily-brief")[3]).toBe("—");
-  expect(cells("daily-brief")[4]).toBe("Yes");
+  expect(cells("daily-brief")[4]).toBe("—");
+  expect(cells("daily-brief")[5]).toBe("Yes");
 });
 
 test("a value the kind's spec declares as an enum reads as its own chip", async () => {
@@ -275,7 +287,15 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
 
   expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual([
+    "Name",
+    "Agent",
+    "Created By",
+    "Summary",
+    "Next Run At",
+    "Paused",
+    "",
+  ]);
   expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
@@ -314,13 +334,14 @@ test("the order sits on the head of the column it orders, and only there", async
   expect(heads.map((head) => head.querySelector("button")?.textContent ?? null)).toEqual([
     "Name",
     null,
+    "Created By",
     "Summary",
     "Next Run At",
     "Paused",
     null,
   ]);
   expect(heads[0].getAttribute("aria-sort")).toBe("ascending");
-  expect(heads[3].getAttribute("aria-sort")).toBe("none");
+  expect(heads[4].getAttribute("aria-sort")).toBe("none");
 
   await userEvent.click(screen.getByRole("button", { name: "Name" }));
   expect(screen.getAllByRole("columnheader")[0].getAttribute("aria-sort")).toBe("descending");
@@ -355,7 +376,7 @@ test("one agent's index names that agent, so it neither reads nor draws the owne
 
   await screen.findByRole("link", { name: "daily-brief" });
   expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(headings()).toEqual(["Name", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual(["Name", "Created By", "Summary", "Next Run At", "Paused", ""]);
   expect(screen.queryByRole("link", { name: "assistant" })).toBeNull();
 });
 
@@ -404,7 +425,32 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(sections).toEqual(["daily-brief", "Spec", "Status", "Links"]);
   expect(document.querySelectorAll("h1").length).toBe(0);
   expect(await screen.findByText("write the daily brief")).toBeTruthy();
-  expect(screen.getByText(/^Created /)).toBeTruthy();
+  expect(fact("Created By")).toBe("mel@example.com");
+  expect(screen.queryByText("Owner Email")).toBeNull();
+  expect(screen.getByText(/^Created Jul/)).toBeTruthy();
+});
+
+test("a creator reads as You to its own member, the address to another, Workspace to none", async () => {
+  wire({
+    "/objects/scheduled_task": () =>
+      objectIndex(TASK_KIND, [
+        { ...TASK_ROW, owner_email: "mel@example.com" },
+        owned({ ...TASK_ROW, name: "mine", owner_email: MEMBER.email }),
+        owned({ ...TASK_ROW, name: "standing", owner_email: null }),
+      ]),
+  });
+  render(
+    <Viewer.Provider value={MEMBER.email}>
+      <MainAgentProvider agents={[AGENT]}>
+        <Scheduled />
+      </MainAgentProvider>
+    </Viewer.Provider>,
+  );
+
+  await screen.findByRole("link", { name: "daily-brief" });
+  expect(cells("daily-brief")[2]).toBe("mel@example.com");
+  expect(cells("mine")[2]).toBe("You");
+  expect(cells("standing")[2]).toBe("Workspace");
 });
 
 test("a task detail's reports_to link lands on that conversation's detail page", async () => {

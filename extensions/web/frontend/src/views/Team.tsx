@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Td } from "@/components/ui/table";
-import { Toast } from "@/components/ui/toast";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -52,7 +52,7 @@ export function Team({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
-  const [toast, setToast] = useState(place.notice ?? "");
+  const [toast, setToast] = useState<ToastState>(place.notice ? { title: place.notice } : SILENT);
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([BLANK]);
@@ -88,7 +88,11 @@ export function Team({
     const outcomes: { applied: boolean; message: string }[] = [];
     for (const row of wanted) {
       outcomes.push(
-        await postIntent(mainAgent.id, { verb: "add_member", email: row.email, admin: row.admin }),
+        await postIntent(mainAgent.id, {
+          verb: "add_member",
+          email: row.email,
+          admin: row.admin,
+        }),
       );
     }
     setBusy(false);
@@ -212,7 +216,7 @@ export function Team({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
-            <Toast message={toast} onDone={() => setToast("")} />
+            <Toast state={toast} onDone={() => setToast(SILENT)} />
           </>
         );
       }}

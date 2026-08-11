@@ -101,6 +101,23 @@ test("a deep link waits while the rail loads instead of denying the conversation
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
+test("a rail read that fails states so and keeps the rows it has", async () => {
+  wire({ "/api/chats": () => new Response("nope", { status: 503 }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const toast = await screen.findByRole("status");
+  expect(toast.textContent).toContain("Conversations did not refresh.");
+  expect(toast.textContent).toContain("Error 503 — reload to retry.");
+});
+
+test("a rail read the session refuses states nothing, since sign-in answers it", async () => {
+  wire({ "/api/chats": () => new Response("unauthorized", { status: 401 }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
 test("a new-conversation link naming no agent of this workspace says so", async () => {
   location.hash = "#/new/99999999-9999-4999-8999-999999999999";
   wire({});
@@ -263,6 +280,8 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
               id: CONVO_ID,
               agent: { id: AGENT_ID, name: AGENT.name },
               surface: "slack",
+              surface_label: null,
+              audience: "shared",
               member_email: null,
               turn_count: 1,
               created_at: "2026-08-01T08:00:00Z",
@@ -286,12 +305,10 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   expect(screen.getByText("reply in Slack")).toBeTruthy();
   expect(screen.queryByLabelText("Message the agent")).toBeNull();
   expect(
-    screen.getByText("This conversation is read-only here. Reply in slack to continue it."),
+    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
   ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
-  expect(
-    screen.getByRole("heading", { name: AGENT.name + " · Shared · " + CONVO_ID.slice(0, 8) }),
-  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: AGENT.name + " · Workspace" })).toBeTruthy();
 });
 
 test("the new-conversation control targets the main agent, or picks among several", async () => {

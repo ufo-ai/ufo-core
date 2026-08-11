@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { REFUSAL_HEADER } from "@/lib/api";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
@@ -87,6 +88,40 @@ test("the overview states the agent's facts, renders its schema, and submits a s
   expect(await screen.findByText("Applied.")).toBeTruthy();
 });
 
+test("the agents cards state admin-visible web reach", async () => {
+  location.hash = "#/agents";
+  render(
+    <App
+      agents={[
+        { ...AGENT, web_audience: [] },
+        { ...SECOND, web_audience: ["member@example.com"] },
+        { ...SECOND, id: "33333333-3333-4333-8333-333333333333", name: "private", web_audience: [] },
+      ]}
+      subagents={[]}
+      member={{ ...MEMBER, admin: true }}
+      newAgent={null}
+      onAgents={() => {}}
+    />,
+  );
+
+  expect(
+    await screen.findByText("The agent this workspace answers with by default. · Every member"),
+  ).toBeTruthy();
+  expect(screen.getByText("member@example.com")).toBeTruthy();
+  expect(screen.getByText("No member grants — admins only")).toBeTruthy();
+});
+
+test("non-admin agent cards keep their existing copy", () => {
+  location.hash = "#/agents";
+  render(
+    <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+  );
+
+  expect(screen.getByText("The agent this workspace answers with by default.")).toBeTruthy();
+  expect(screen.queryByText("Every member")).toBeNull();
+  expect(screen.queryByText("No member grants — admins only")).toBeNull();
+});
+
 test("an overview that fails to read states the error and offers no form", async () => {
   wire({
     "/overview": () => new Response("nope", { status: 503 }),
@@ -132,9 +167,10 @@ test("the scheduled index lists declared fields and its detail pauses through th
 
   const listed = (await screen.findByRole("button", { name: "digest" })).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
-  expect(said[1]).toBe("0 9 * * * — summarize");
-  expect(said[2]).toContain(" ago");
-  expect(said[3]).toBe("No");
+  expect(said[1]).toBe("Workspace");
+  expect(said[2]).toBe("0 9 * * * — summarize");
+  expect(said[3]).toContain(" ago");
+  expect(said[4]).toBe("No");
 
   await userEvent.click(screen.getByRole("button", { name: "digest" }));
   await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
@@ -190,6 +226,7 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
 test("skills name where each came from, and save posts one skill file", async () => {
   const posted: unknown[] = [];
   wire({
+    "/skills/community": () => json({ skills: [] }),
     "/skills": () =>
       json({
         skills: [
@@ -205,21 +242,17 @@ test("skills name where each came from, and save posts one skill file", async ()
   });
   location.hash = "#/agents/" + AGENT_ID + "/skills";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(await screen.findByText("member skill")).toBeTruthy();
-  expect(screen.getByText("deploy skill")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "All" })).toBeNull();
+  await userEvent.click(screen.getByRole("tab", { name: "Installed" }));
+  expect(await screen.findByText("mine")).toBeTruthy();
+  expect(screen.queryByText("member skill")).toBeNull();
   expect(screen.queryByRole("columnheader")).toBeNull();
+  expect(screen.getByPlaceholderText("Search skills")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Skills" })).toBeNull();
   expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
   expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-
-  await userEvent.click(screen.getByRole("tab", { name: "Built-in" }));
-  expect(screen.queryByText("member skill")).toBeNull();
-  expect(screen.getByText("deploy skill")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("tab", { name: "Custom" }));
-  expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("tab", { name: "All" }));
   await userEvent.click(screen.getByRole("button", { name: "New skill" }));
   await userEvent.type(await screen.findByLabelText("Name"), "fresh");
   await userEvent.type(screen.getByLabelText("Description"), "Load when: asked.");
@@ -239,6 +272,90 @@ test("skills name where each came from, and save posts one skill file", async ()
   });
 });
 
+test("the skills tab opens on the directory and install files the fetched document", async () => {
+  const posted: unknown[] = [];
+  const DOCUMENT = '---\nname: release-notes\ndescription: "Drafts notes."\n---\n\nRead the tags.\n';
+  const POPULAR = [
+    { name: "release-notes", source: "acme/kit", installs: 12400 },
+    { name: "mine", source: "acme/kit", installs: 900 },
+  ];
+  wire({
+    "/skills/community/acme/kit/release-notes": () =>
+      json({
+        name: "release-notes",
+        description: "Drafts notes.",
+        instructions: "Read the tags.",
+        document: DOCUMENT,
+      }),
+    "/skills/community?q=": (url) => {
+      expect(url).toContain("q=release");
+      return json({ skills: [POPULAR[0]] });
+    },
+    "/skills/community": () => json({ skills: POPULAR }),
+    "/skills": () =>
+      json({
+        skills: [
+          { name: "mine", description: "member skill", origin: "member", instructions: "a" },
+        ],
+      }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/skills";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  expect(await screen.findByText("release-notes")).toBeTruthy();
+  expect(screen.getByText("acme/kit · 12.4K installs")).toBeTruthy();
+  expect(document.querySelector("code")).toBeNull();
+  const held = screen.getByText("mine").closest("li");
+  const state = within(held as HTMLElement).getByRole("button", { name: "Installed" });
+  expect((state as HTMLButtonElement).disabled).toBe(true);
+  expect(within(held as HTMLElement).queryByRole("button", { name: "Install" })).toBeNull();
+  const source = within(held as HTMLElement).getByRole("link", { name: "Source ↗" });
+  expect(source.getAttribute("href")).toBe("https://github.com/acme/kit");
+  expect(source.getAttribute("target")).toBe("_blank");
+  expect(source.getAttribute("rel")).toBe("noopener noreferrer");
+
+  await userEvent.type(screen.getByPlaceholderText("Search skills"), "release{Enter}");
+  await waitFor(() => expect(screen.queryByText("mine")).toBeNull());
+
+  await userEvent.click(screen.getByRole("button", { name: "Install" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("Description")).toHaveProperty("value", "Drafts notes.");
+  expect(within(dialog).getByLabelText("Instructions")).toHaveProperty("value", "Read the tags.");
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Install" }));
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toMatchObject({
+    verb: "apply",
+    kind: "skill",
+    name: "release-notes",
+    spec: { files: { "SKILL.md": DOCUMENT } },
+  });
+});
+
+test("a directory read the member cannot correct is stated as a toast", async () => {
+  const LIMITED = "The skill directory limits reads to 60 an hour and this deploy has reached it.";
+  wire({
+    "/skills/community/acme/kit/release-notes": () =>
+      new Response(LIMITED, { status: 502, headers: { [REFUSAL_HEADER]: "1" } }),
+    "/skills/community": () =>
+      json({ skills: [{ name: "release-notes", source: "acme/kit", installs: 3 }] }),
+    "/skills": () => json({ skills: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/skills";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Install" }));
+  const toast = await screen.findByRole("status");
+  expect(toast.textContent).toContain("release-notes did not open.");
+  expect(toast.textContent).toContain("60 an hour");
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 test("a private grant is shared with the agent from the connectors tab", async () => {
   const posted: unknown[] = [];
   wire({
@@ -251,6 +368,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
             owner_email: "member@example.com",
             shared: false,
             connected_at: "2026-07-01T00:00:00",
+            own: true,
             grant: "g1",
           },
         ],
@@ -264,7 +382,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
   });
   location.hash = "#/customize/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(await screen.findByText("Private")).toBeTruthy();
+  expect(await screen.findByText("Only you")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
@@ -281,6 +399,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
             owner_email: "member@example.com",
             shared: true,
             connected_at: "2026-07-01T00:00:00",
+            own: true,
             grant: "g1",
           },
           {
@@ -289,6 +408,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
             owner_email: "member@example.com",
             shared: false,
             connected_at: "2026-07-01T00:00:00",
+            own: true,
             grant: "g2",
           },
         ],
@@ -323,6 +443,8 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
           {
             id: shared,
             surface: "slack",
+            surface_label: null,
+            audience: "shared",
             member_email: null,
             description: "",
             speakers: [],
@@ -339,17 +461,17 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const label = "Shared · " + shared.slice(0, 8);
-  const row = await screen.findByRole("button", { name: new RegExp(label) });
-  expect(row.querySelector("[data-part='primary']")!.textContent).toBe(label);
-  expect(row.textContent).not.toContain("Channel or room");
-  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("slack · 3 turns");
+  const row = await screen.findByRole("button", { name: /Slack · 3 turns/ });
+  expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Workspace");
+  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("Slack · 3 turns");
+  expect(row.textContent).not.toContain("slack");
+  expect(row.textContent).not.toContain(shared.slice(0, 8));
 
   await userEvent.click(row);
-  expect(await screen.findByText("slack · " + label)).toBeTruthy();
+  expect(await screen.findByText("Slack · Workspace")).toBeTruthy();
 });
 
-test("a conversation row names what it is about and who spoke, and the keyboard opens it", async () => {
+test("a conversation row names what it is about and whose it is, and the keyboard opens it", async () => {
   const opened = "8f2c1d40-0000-4000-8000-000000000004";
   wire({
     ["/conversations/" + opened + "/transcript"]: () => json({ messages: [] }),
@@ -359,6 +481,8 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
           {
             id: opened,
             surface: "slack",
+            surface_label: null,
+            audience: "shared",
             member_email: "mel@example.com",
             description: "can you take a look at the failing deploy",
             speakers: ["Mel Okafor (mel@example.com)", "pat@example.com"],
@@ -383,7 +507,7 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
     "can you take a look at the failing deploy",
   );
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
-    "slack · Mel Okafor (mel@example.com), pat@example.com · 4 turns",
+    "mel@example.com · Slack · Mel Okafor (mel@example.com), pat@example.com · 4 turns · Workspace",
   );
   expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 7 2026");
 
@@ -393,7 +517,7 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(
-    screen.getByRole("heading", { name: "slack · can you take a look at the failing deploy" }),
+    screen.getByRole("heading", { name: "Slack · can you take a look at the failing deploy" }),
   ).toBeTruthy();
 });
 
@@ -427,6 +551,8 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
           {
             id: held,
             surface: "web",
+            surface_label: null,
+            audience: "member:m1",
             member_email: "member@example.com",
             description: "Rename the deploy job",
             speakers: ["member@example.com"],
@@ -466,6 +592,8 @@ test("a conversation nobody shared offers no opener", async () => {
           {
             id: "7ae41c02-0000-4000-8000-000000000001",
             surface: "slack",
+            surface_label: "#ops",
+            audience: "room:slack:C123",
             member_email: null,
             description: "",
             speakers: [],
@@ -477,6 +605,8 @@ test("a conversation nobody shared offers no opener", async () => {
           {
             id: "31bd9f77-0000-4000-8000-000000000002",
             surface: "slack",
+            surface_label: null,
+            audience: "room:slack:C456",
             member_email: null,
             description: "",
             speakers: [],
@@ -491,13 +621,15 @@ test("a conversation nobody shared offers no opener", async () => {
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect((await screen.findAllByText(/Not shared with you/)).length).toBe(2);
-  expect(screen.queryAllByRole("button", { name: /Channel or room/ })).toEqual([]);
-  const rows = screen.getAllByText(/Not shared with you/).map((meta) => meta.closest("li")!);
-  const labels = rows.map((row) => row.querySelector("[data-part='primary']")!.textContent ?? "");
-  expect(labels.every((label) => label.startsWith("Channel or room · "))).toBe(true);
-  expect(new Set(labels).size).toBe(labels.length);
-  expect(labels.some((label) => label.startsWith("Shared"))).toBe(false);
+  const named = await screen.findByText("#ops", { selector: "[data-part='primary']" });
+  const unnamed = screen.getByText("Private channel", { selector: "[data-part='primary']" });
+  expect(named.closest("li")!.querySelector("[data-part='meta']")!.textContent).toBe("4 turns");
+  expect(unnamed.closest("li")!.querySelector("[data-part='meta']")!.textContent).toBe(
+    "Slack · 2 turns",
+  );
+  expect(screen.queryAllByRole("button", { name: /channel/i })).toEqual([]);
+  expect(named.closest("li")!.getAttribute("role")).toBeNull();
+  expect(screen.queryByText(/Channel or room/)).toBeNull();
 });
 
 test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {
@@ -514,6 +646,7 @@ test("the sources listing groups a binding's streams and acts on the main agent'
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 1,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -525,6 +658,7 @@ test("the sources listing groups a binding's streams and acts on the main agent'
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 2,
             next_sync_at: "2026-08-01T07:00:00",
           },
@@ -739,6 +873,8 @@ test("a conversation the member may not read says so instead of reporting a stat
           {
             id: "c1",
             surface: "slack",
+            surface_label: null,
+            audience: "shared",
             member_email: null,
             description: "a shared thread",
             speakers: [],
@@ -770,6 +906,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
             owner_email: "member@example.com",
             shared: false,
             connected_at: "2026-07-01T00:00:00",
+            own: true,
             grant: "g1",
           },
         ],
@@ -847,6 +984,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
             owner_email: "member@example.com",
             shared: false,
             connected_at: "2026-07-01T00:00:00",
+            own: true,
             grant: "g1",
           },
         ],

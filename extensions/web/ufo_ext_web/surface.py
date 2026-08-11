@@ -33,6 +33,7 @@ from typing import Literal, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
@@ -101,6 +102,7 @@ from ufo.sdk.surfaces import (
 )
 from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
+from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_overview, submit_intent
 
 SURFACE_WEB = "web"
@@ -116,6 +118,7 @@ WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
+REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
 MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
@@ -513,11 +516,24 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     if isinstance(resolved, Response):
         return resolved
     _member_id, email, audience = resolved
+    grants = None
+    if audience.admin:
+        grants = await granted_emails(web_extension().store)
     return JSONResponse(
         {
             "member": {"email": email, "admin": audience.admin},
             "agents": [
-                {"id": str(agent.id), "name": agent.name, "main": agent.main, "model": agent.model}
+                {
+                    "id": str(agent.id),
+                    "name": agent.name,
+                    "main": agent.main,
+                    "model": agent.model,
+                    **(
+                        {"web_audience": list(grants.get(agent.id, ()))}
+                        if grants is not None
+                        else {}
+                    ),
+                }
                 for agent in audience.agents
             ],
             "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
@@ -1169,6 +1185,63 @@ async def skills(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+COMMUNITY_QUERY_MIN_CHARS = 2
+
+
+def _community_refusal(fault: Exception) -> Response:
+    """A directory failure the member reads verbatim. `REFUSAL_HEADER` is what marks the body as
+    member copy — without it the panel states the status code, since a bare body is the surface
+    talking to itself."""
+    return Response(str(fault), status_code=502, headers={REFUSAL_HEADER: "1"})
+
+
+GITHUB_SEGMENT = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})\Z")
+COMMUNITY_SKILL_NAME = re.compile(r"\A[a-z0-9](?:[a-z0-9-]{0,63})\Z")
+
+
+async def community_skills(ctx: SurfaceContext, request: Request) -> Response:
+    """One page of the community skill directory — the leaderboard with no query, the search with
+    one — scoped like every other panel read. The results are candidates for the agent the member
+    is reading, filed only through the intent lane."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    query = request.query_params.get("q", "").strip()
+    if query and len(query) < COMMUNITY_QUERY_MIN_CHARS:
+        return Response(
+            f"q must be at least {COMMUNITY_QUERY_MIN_CHARS} characters", status_code=400
+        )
+    try:
+        found = await COMMUNITY.listing(query)
+    except (CommunityUnavailable, httpx.HTTPError) as fault:
+        return _community_refusal(fault)
+    return JSONResponse({"skills": [skill.model_dump() for skill in found]})
+
+
+async def community_skill(ctx: SurfaceContext, request: Request) -> Response:
+    """One community skill's document, fetched for review — the member reads the description and
+    instructions before the apply intent files the same document."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    owner = request.path_params["owner"]
+    repo = request.path_params["repo"]
+    name = request.path_params["skill"]
+    if not (
+        GITHUB_SEGMENT.match(owner)
+        and GITHUB_SEGMENT.match(repo)
+        and COMMUNITY_SKILL_NAME.match(name)
+    ):
+        return Response("no such skill", status_code=404)
+    try:
+        fetched = await COMMUNITY.fetch(f"{owner}/{repo}", name)
+    except (CommunityUnavailable, httpx.HTTPError) as fault:
+        return _community_refusal(fault)
+    if fetched is None:
+        return Response("no such skill", status_code=404)
+    return JSONResponse(fetched.model_dump())
+
+
 async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
     """The member's memory across every agent they reach. With no query, one keyset page of the
     live items under the viewer's own subject plus shared, newest first — a listing, not a recall,
@@ -1244,6 +1317,7 @@ def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]:
             "text": match.text,
             "ref": None if match.ref is None else f"{match.ref.kind}/{match.ref.name}",
             "created_at": _iso(match.created_at),
+            "subject": match.subject,
         }
         for match in found
     ]
@@ -1353,6 +1427,8 @@ def _conversation_row(
         "id": str(entry.summary.id),
         "agent": agent,
         "surface": entry.summary.surface,
+        "surface_label": entry.surface_label,
+        "audience": entry.audience,
         "member_email": entry.summary.member_email,
         "description": (title or _chat_title(entry.opening_message, ())) if entry.readable else "",
         "speakers": [who.sender or who.email for who in entry.speakers],
@@ -1908,6 +1984,7 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
                 {
                     "filename": entry.artifact.filename,
                     "subject": entry.artifact.subject,
+                    "owner_email": entry.owner_email,
                     "media_type": entry.artifact.media_type,
                     "size_bytes": entry.artifact.size_bytes,
                     "created_at": _iso(entry.created_at),
@@ -2401,6 +2478,12 @@ ROUTES = (
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/skills/community", handler=community_skills),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/skills/community/{owner}/{repo}/{skill}",
+        handler=community_skill,
+    ),
     SurfaceRoute(method="GET", path="agents/{agent_id}/usage", handler=usage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
     SurfaceRoute(method="GET", path="subagents/{subagent}/overview", handler=subagent_overview),

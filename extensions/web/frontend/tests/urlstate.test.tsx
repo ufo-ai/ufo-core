@@ -65,6 +65,7 @@ function serve() {
               base_url: null,
               owner_email: "member@example.com",
               shared: false,
+              own: true,
               consecutive_errors: 0,
               next_sync_at: "2026-08-01T06:00:00",
             },
@@ -76,6 +77,7 @@ function serve() {
               base_url: "https://example.com/feed",
               owner_email: null,
               shared: true,
+              own: true,
               consecutive_errors: 0,
               next_sync_at: "2026-08-02T09:30:00",
             },
@@ -91,7 +93,7 @@ function serve() {
 }
 
 test("a workspace tab and a section carry the same place and parse back to it", () => {
-  const place = { kind: "fact", after: "c2", q: "roadmap", chip: "Shared", open: OLDER_KEY };
+  const place = { kind: "fact", after: "c2", q: "roadmap", chip: "Workspace", open: OLDER_KEY };
   expect(parseHash(workspaceHash("sources", place))).toEqual({
     kind: "workspace",
     view: "sources",
@@ -260,31 +262,31 @@ test("search and chip ride the hash by replacement, never as history entries", a
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Shared" }));
+  await userEvent.click(await screen.findByRole("tab", { name: "Workspace" }));
   await userEvent.type(screen.getByRole("searchbox"), "rss");
 
   await waitFor(() => expect(location.hash).toContain("q=rss"));
-  expect(location.hash).toContain("chip=Shared");
+  expect(location.hash).toContain("chip=Workspace");
 
   history.back();
   await waitFor(() => expect(location.hash).toBe("#/agents"));
 });
 
 test("a reloaded filter lands filtered", async () => {
-  location.hash = workspaceHash("sources", { q: "rss", chip: "Shared" });
+  location.hash = workspaceHash("sources", { q: "rss", chip: "Workspace" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("rss")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeNull();
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("rss");
-  expect(screen.getByRole("tab", { name: "Shared" }).getAttribute("aria-selected")).toBe(
+  expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe(
     "true",
   );
 });
 
 test("a tab click releases the filters, so returning starts unfiltered", async () => {
-  location.hash = workspaceHash("sources", { q: "rss", chip: "Shared" });
+  location.hash = workspaceHash("sources", { q: "rss", chip: "Workspace" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -390,6 +392,7 @@ test("a placement from a pane the member already left never writes its dead plac
               base_url: "https://example.com/feed",
               owner_email: null,
               shared: true,
+              own: true,
               consecutive_errors: 0,
               next_sync_at: "2026-08-01T06:00:00",
             },
@@ -472,6 +475,7 @@ test("an intent resolving after the member leaves never rewrites where they went
               base_url: null,
               owner_email: "member@example.com",
               shared: false,
+              own: true,
               consecutive_errors: 0,
               next_sync_at: "2026-08-01T06:00:00",
             },

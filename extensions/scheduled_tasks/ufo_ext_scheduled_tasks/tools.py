@@ -32,6 +32,7 @@ from ufo.sdk.objects import (
     ObjectRow,
     OwnedRow,
     object_page,
+    owner_emails,
 )
 from ufo.sdk.scheduling import ListedTask, ScheduledTask, ScheduleStore
 from ufo.sdk.subjects import subject_shared
@@ -221,6 +222,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         member_id: UUID | None,
         conversation_id: UUID | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        listed_rows = await _require_scheduler(ext).list_reported(conversation_id=conversation_id)
+        emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
         return tuple(
             OwnedRow(
                 name=listed.task.name,
@@ -234,11 +237,10 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "conversation": str(listed.task.conversation_id),
                     "next_run_at": listed.task.next_run_at.isoformat(),
                     "paused": listed.task.paused,
+                    "owner_email": emails.get(listed.task.created_by_member_id),
                 },
             )
-            for listed in await _require_scheduler(ext).list_reported(
-                conversation_id=conversation_id
-            )
+            for listed in listed_rows
         )
 
     async def _member_object(
@@ -405,7 +407,8 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
-        "Listing returns each task's name, schedule, and description, and filters and orders on "
+        "Listing returns each task's name, schedule, description, and creator (`owner_email`), "
+        "and filters and orders on "
         "`next_run_at` and `paused` — order by `next_run_at` asc for what fires next, or filter "
         "`paused: true` for what is stopped; get shows the latest run's response and a "
         "`reports_to` link naming the conversation it posts into. A run's per-run output is not "
@@ -415,7 +418,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
-    list_fields=frozenset({"conversation", "next_run_at", "paused"}),
+    list_fields=frozenset({"conversation", "next_run_at", "paused", "owner_email"}),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )
 

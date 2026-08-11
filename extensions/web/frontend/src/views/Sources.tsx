@@ -1,5 +1,6 @@
 import { Button, ConfirmButton } from "@/components/ui/button";
 import type { ListingSpec } from "@/kernel/listing";
+import { ownerLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
 
 type Source = {
@@ -10,12 +11,17 @@ type Source = {
   base_url: string | null;
   backfill_days: number | "all" | null;
   owner_email: string | null;
+  own: boolean;
   shared: boolean;
   consecutive_errors: number;
   next_sync_at: string;
 };
 
 type SourcesPayload = { sources: Source[] };
+
+function access(shared: boolean): string {
+  return shared ? "Workspace" : "Only you";
+}
 
 // Mirrors the object's own spec: a row act submits `{...row.apply, <what it changes>}`, so every
 // field the binding's identity is built from belongs here even when no column shows it. Omit one
@@ -35,11 +41,12 @@ type SourceRow = {
   name: string | null;
   backend: string;
   streams: string;
-  owner: string;
+  owner: string | null;
   access: string;
   errors: string;
   next_sync: string | null;
   shared: boolean;
+  own: boolean;
   apply: SourceSpec | null;
 };
 
@@ -62,11 +69,12 @@ function rows(payload: SourcesPayload): SourceRow[] {
       name,
       backend: first.backend,
       streams: names.join(", "),
-      owner: first.owner_email || "—",
-      access: first.shared ? "Shared" : "Private",
+      owner: first.owner_email,
+      access: access(first.shared),
       errors: String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
       next_sync: day(streams.map((entry) => entry.next_sync_at).sort()[0]),
       shared: first.shared,
+      own: first.own,
       apply: {
         provider: first.backend,
         streams: names,
@@ -84,11 +92,12 @@ function rows(payload: SourcesPayload): SourceRow[] {
       name: null,
       backend: entry.backend,
       streams: "—",
-      owner: entry.owner_email || "—",
-      access: entry.shared ? "Shared" : "Private",
+      owner: entry.owner_email,
+      access: access(entry.shared),
       errors: String(entry.consecutive_errors),
       next_sync: day(entry.next_sync_at),
       shared: entry.shared,
+      own: entry.own,
       apply: null,
     })),
   );
@@ -98,15 +107,19 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
   read: "/workspace/sources",
   rows,
   rowKey: (row) => row.key,
-  search: (row) => [row.name ?? "", row.backend, row.streams, row.owner].join(" "),
+  search: (row) => [row.name ?? "", row.backend, row.streams, row.owner ?? ""].join(" "),
   chips: [
-    { label: "Private", has: (row) => !row.shared },
-    { label: "Shared", has: (row) => row.shared },
+    { label: "Only you", has: (row) => !row.shared },
+    { label: "Workspace", has: (row) => row.shared },
   ],
   columns: [
     { field: "backend", label: "Source" },
     { field: "streams", label: "Streams" },
-    { field: "owner", label: "Owner" },
+    {
+      field: "owner",
+      label: "Owner",
+      render: (email, _row, { viewer }) => ownerLabel(email, viewer),
+    },
     { field: "access", label: "Access" },
     { field: "errors", label: "Errors" },
     { field: "next_sync", label: "Next Sync" },
@@ -115,7 +128,7 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     "Register a source in chat. The agent connects the account or credential it needs as part " +
     "of the request.",
   actions: (row, { act, busy }) =>
-    row.apply === null || row.name === null ? null : (
+    row.apply === null || row.name === null || !row.own ? null : (
       <div className="flex flex-wrap gap-xs">
         <Button
           variant="row"

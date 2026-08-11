@@ -293,8 +293,18 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
                 }
             ),
         )
+        await ScheduleStore().create(
+            conversation_id,
+            "standing",
+            DAILY_9AM,
+            "sweep",
+            "nightly sweep",
+            datetime(2026, 8, 8, 9, tzinfo=UTC),
+        )
         tasks = {task.name: task for task in await ScheduleStore().list()}
         listed = json.loads(await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND))
+        admin_ctx = replace(ctx, speaker_member_id=await _member(workspace_id, is_admin=True))
+        admin_listed = json.loads(await _dispatch(listing, admin_ctx, kind=SCHEDULED_TASK_KIND))
         stopped = json.loads(
             await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND, filters={"paused": True})
         )
@@ -305,6 +315,10 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
     rows = {row["name"]: row for row in listed["objects"]}
     assert rows["daily"]["paused"] is False
     assert rows["daily"]["next_run_at"] == tasks["daily"].next_run_at.isoformat()
+    assert rows["daily"]["owner_email"] == f"{creator.hex[:8]}@x.test"
+    assert "standing" not in rows
+    admin_rows = {row["name"]: row for row in admin_listed["objects"]}
+    assert admin_rows["standing"]["owner_email"] is None
     assert rows["weekly"]["paused"] is True
     assert [row["name"] for row in stopped["objects"]] == ["weekly"]
     assert [row["name"] for row in soonest_first["objects"]] == sorted(

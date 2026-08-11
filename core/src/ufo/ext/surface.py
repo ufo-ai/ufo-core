@@ -311,6 +311,7 @@ class ListedArtifact:
 
     artifact: "SharedArtifact"
     created_at: datetime
+    owner_email: str | None
 
 
 @dataclass(frozen=True)
@@ -436,13 +437,14 @@ class PortalSkill:
 class ConnectionView(BaseModel):
     """One connector account reaching one agent, as the portal's connections panel lists it: the
     provider identity, the `connector_grant` object name a prepared intent mutates it by, the
-    consenting owner (named only to an admin or the owner), the edge's disclosure, and when the
-    grant landed."""
+    consenting owner, whether this viewer may manage it, the edge's disclosure, and when the grant
+    landed."""
 
     provider: str
     account_id: str
     grant: str
     owner_email: str | None
+    own: bool
     shared: bool
     connected_at: datetime
 
@@ -568,15 +570,16 @@ def _binding_fields(backend: str, config: dict[str, JsonValue]) -> _BindingField
 class SourceView(BaseModel):
     """One live source stream as the portal lists it: the backend, its disclosure subject
     (member-private pages stay gated to their member; `shared` means the agent's audience), the
-    registering owner (named only to an admin or the owner — None is also a source with no owner
-    member), sync health, and — for a connector-registered row — the `source` kind's binding
-    name plus the spec fields that reconstruct the binding, so the panel's per-binding acts
-    (resync, share, remove) submit the same object the chat verbs mutate. A config- or
-    feed-registered row is not kind-managed and carries None."""
+    registering owner, whether this viewer may manage it, sync health, and — for a
+    connector-registered row — the `source` kind's binding name plus the spec fields that
+    reconstruct the binding, so the panel's per-binding acts (resync, share, remove) submit the
+    same object the chat verbs mutate. A config- or feed-registered row is not kind-managed and
+    carries None."""
 
     backend: str
     shared: bool
     owner_email: str | None
+    own: bool
     consecutive_errors: int
     next_sync_at: datetime
     name: str | None = None
@@ -705,6 +708,9 @@ class ListedConversation(BaseModel):
     are not here and no portal read lists them: the record is the operator's, kept in
     `transcript_access` and reported by `surface.transcript_disclosed`.
 
+    `audience` and `surface_label` travel as the conversation row stores them — the portal maps
+    them to member words.
+
     `opening_message` is the member's own words out of the first turn's inbound — the ambient
     digest a channel surface renders around them is not what the conversation is about — capped at
     `OPENING_MESSAGE_CHARS`, and empty for a conversation no member opened. `speakers` runs in
@@ -717,6 +723,8 @@ class ListedConversation(BaseModel):
     no read surface can carry past it."""
 
     summary: ConversationSummary
+    audience: str
+    surface_label: str | None
     readable: bool
     disclosable: bool
     opening_message: str
@@ -1721,10 +1729,8 @@ class SurfaceContext:
     ) -> tuple[ConnectionView, ...]:
         """The connector accounts granted to one agent that this member may see — the member gate
         in the query, never the caller: an admin sees every edge, everyone else their own private
-        grants plus agent-shared ones (#645's resolution rule, read-side). The wall stays the
-        query's `agent_id`; another agent's edges are simply absent. A shared edge names its
-        owner only to an admin or the owner: the roster names every colleague, but which of them
-        holds a given account is the owner's to disclose, and chat names it to nobody else."""
+        grants plus agent-shared ones. The wall stays the query's `agent_id`; another agent's
+        edges are simply absent."""
         query = (
             sa.select(
                 tables.connection.c.provider,
@@ -1760,7 +1766,8 @@ class SurfaceContext:
                 provider=row.provider,
                 account_id=row.account_id,
                 grant=account_object_name(row.provider, row.account_id),
-                owner_email=row.email if admin or row.owner_member_id == member_id else None,
+                owner_email=row.email,
+                own=admin or row.owner_member_id == member_id,
                 shared=row.shared,
                 connected_at=row.created_at,
             )
@@ -1790,14 +1797,17 @@ class SurfaceContext:
                 tables.shared_artifact.c.media_type,
                 tables.shared_artifact.c.size_bytes,
                 tables.shared_artifact.c.created_at,
+                tables.member.c.email,
             )
             .select_from(
                 tables.shared_artifact.join(
                     tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
-                ).join(
+                )
+                .join(
                     tables.conversation,
                     tables.turn.c.conversation_id == tables.conversation.c.id,
                 )
+                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
             )
             .where(tables.shared_artifact.c.workspace_id == self.workspace_id)
         )
@@ -1828,6 +1838,7 @@ class SurfaceContext:
                     size_bytes=row.size_bytes,
                 ),
                 created_at=row.created_at,
+                owner_email=row.email,
             ),
             position=lambda row: (
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
@@ -1852,11 +1863,17 @@ class SurfaceContext:
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
                 tables.shared_artifact.c.created_at,
+                tables.member.c.email,
             )
             .select_from(
                 tables.shared_artifact.join(
                     tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
                 )
+                .join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
             )
             .where(
                 tables.shared_artifact.c.workspace_id == self.workspace_id,
@@ -1884,6 +1901,7 @@ class SurfaceContext:
                     preview_size_bytes=row.preview_size_bytes,
                 ),
                 created_at=row.created_at,
+                owner_email=row.email,
             )
             for row in rows
         )
@@ -2011,10 +2029,7 @@ class SurfaceContext:
     async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]:
         """The live source bindings this member may see — an admin all of them, everyone else
         their own registrations plus shared ones. Removed sources stay gone; a member-subject
-        source's pages remain gated to that member wherever they land. A shared source names its
-        owner only to an admin or the owner: chat omits a shared source's owner entirely, so which
-        colleague registered a binding stays the owner's to disclose even though the roster names
-        every colleague."""
+        source's pages remain gated to that member wherever they land."""
         query = (
             sa.select(
                 tables.source.c.backend,
@@ -2049,7 +2064,8 @@ class SurfaceContext:
             SourceView(
                 backend=row.backend,
                 shared=row.subject == SHARED_SUBJECT,
-                owner_email=row.email if admin or row.owner_member_id == member_id else None,
+                owner_email=row.email,
+                own=admin or row.owner_member_id == member_id,
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
                 **_binding_fields(row.backend, row.config),
@@ -2216,6 +2232,7 @@ class SurfaceContext:
                 tables.conversation.c.surface,
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
+                tables.conversation.c.surface_label,
                 tables.member.c.email,
                 tables.conversation.c.created_at,
                 activity.c.turn_count,
@@ -2262,6 +2279,8 @@ class SurfaceContext:
                     turn_count=row.turn_count or 0,
                     last_turn_at=row.last_turn_at,
                 ),
+                audience=row.audience,
+                surface_label=row.surface_label,
                 readable=row.audience in readable,
                 disclosable=admin
                 and row.audience != mine
@@ -2451,6 +2470,7 @@ class SurfaceContext:
                 tables.conversation.c.surface,
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
+                tables.conversation.c.surface_label,
                 tables.conversation.c.created_at,
                 tables.conversation.c.agent_id,
                 tables.agent.c.name.label("agent_name"),
@@ -2495,6 +2515,8 @@ class SurfaceContext:
                         turn_count=row.turn_count,
                         last_turn_at=row.last_turn_at,
                     ),
+                    audience=row.audience,
+                    surface_label=row.surface_label,
                     readable=row.audience in readable,
                     disclosable=False,
                     opening_message=openings.get(row.id, ""),
@@ -2534,6 +2556,8 @@ class SurfaceContext:
                 tables.conversation.c.agent_id,
                 tables.conversation.c.surface,
                 tables.conversation.c.queue_key,
+                tables.conversation.c.audience,
+                tables.conversation.c.surface_label,
                 tables.conversation.c.created_at,
                 tables.agent.c.name.label("agent_name"),
                 tables.member.c.email,
@@ -2558,6 +2582,8 @@ class SurfaceContext:
                 tables.conversation.c.agent_id,
                 tables.conversation.c.surface,
                 tables.conversation.c.queue_key,
+                tables.conversation.c.audience,
+                tables.conversation.c.surface_label,
                 tables.conversation.c.created_at,
                 tables.agent.c.name,
                 tables.member.c.email,
@@ -2608,6 +2634,8 @@ class SurfaceContext:
                     turn_count=found.turn_count,
                     last_turn_at=found.last_turn_at,
                 ),
+                audience=found.audience,
+                surface_label=found.surface_label,
                 readable=True,
                 disclosable=False,
                 opening_message=openings.get(conversation_id, ""),

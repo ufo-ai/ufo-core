@@ -227,6 +227,7 @@ class MemorySearchService:
                 text=item.body,
                 ref=ObjectRef(kind=MEMORY_KIND, name=str(item.memory_id)),
                 created_at=item.created_at,
+                subject=item.subject,
             )
             for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
         )
@@ -236,6 +237,7 @@ class MemorySearchService:
                 text=match.text,
                 ref=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(match.page_id)),
                 created_at=match.created_at,
+                subject=match.subject,
             )
             for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
         )
@@ -262,6 +264,7 @@ class MemorySearchService:
             memory_item.c.body,
             memory_item.c.item_class,
             memory_item.c.created_at,
+            memory_item.c.subject,
         ).where(
             memory_item.c.workspace_id == self.ctx.store.workspace_id,
             memory_item.c.subject.in_(subjects),
@@ -290,6 +293,7 @@ class MemorySearchService:
                 text=row.body,
                 ref=ObjectRef(kind=MEMORY_KIND, name=str(row.id)),
                 created_at=_aware(row.created_at),
+                subject=row.subject,
             ),
             position=lambda row: (_aware(row.created_at), str(row.id)),
         )

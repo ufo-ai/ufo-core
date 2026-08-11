@@ -4,6 +4,7 @@ export type Agent = {
   name: string;
   model: string;
   main: boolean;
+  web_audience?: string[];
 };
 
 /** The same agent as the administration read names it, carrying the deploy facts only an admin
@@ -26,6 +27,8 @@ export type Conversation = {
   id: string;
   agent: ConversationAgent | null;
   surface: string;
+  surface_label: string | null;
+  audience: string;
   member_email: string | null;
   description: string;
   speakers: string[];

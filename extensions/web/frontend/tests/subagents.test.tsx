@@ -109,6 +109,8 @@ const RUN = {
   id: RUN_ID,
   agent: { id: AGENT.id, name: "assistant" },
   surface: "subagent",
+  surface_label: null,
+  audience: "member:m1",
   member_email: "member@example.com",
   description: "Find the filing deadline",
   speakers: [],
@@ -124,6 +126,7 @@ const WALLED_RUN = {
   id: "88888888-8888-4888-8888-888888888888",
   agent: { id: "99999999-9999-4999-8999-999999999999", name: "ops" },
   member_email: null,
+  audience: "room:slack:C9",
   description: "",
   turn_count: 3,
   last_turn_at: "2026-08-01T09:30:00Z",
@@ -165,13 +168,13 @@ test("the conversations tab lists this subagent's runs as rows that name the age
   const panel = within(await screen.findByTestId("panel"));
   const row = await panel.findByRole("button", { name: /Find the filing deadline/ });
   expect(row.querySelector("[data-part='primary']")!.textContent).toBe("Find the filing deadline");
-  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("assistant · 1 turn");
+  expect(row.querySelector("[data-part='meta']")!.textContent).toBe("You · assistant · 1 turn");
   expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 2 2026");
 
-  const walled = panel.getByText(/Not shared with you/).closest("li")!;
-  expect(walled.querySelector("[data-part='meta']")!.textContent).toBe(
-    "ops · 3 turns · Not shared with you",
-  );
+  const walled = panel
+    .getByText("Private channel", { selector: "[data-part='primary']" })
+    .closest("li")!;
+  expect(walled.querySelector("[data-part='meta']")!.textContent).toBe("ops · 3 turns");
   expect(walled.getAttribute("role")).toBeNull();
 
   await userEvent.click(row);

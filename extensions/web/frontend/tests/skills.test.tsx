@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -21,69 +21,82 @@ const SKILLS = [
   },
 ];
 
+const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
+
 function renderSkills() {
   location.hash = agentHash(AGENT.id, "skills");
   return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 }
 
-test("the agent skills tab renders cards without a picker or Refresh", async () => {
-  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
-  renderSkills();
+/** The tab opens on the directory, so every read of the agent's own skills starts with the pick
+ *  that names the other collection. */
+async function openInstalled() {
+  await userEvent.click(await screen.findByRole("tab", { name: "Installed" }));
+}
 
-  expect(await screen.findByText("member skill")).toBeTruthy();
+test("the agent skills tab renders items without a picker or Refresh", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+  renderSkills();
+  await openInstalled();
+
+  expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
   expect(screen.queryByRole("combobox", { name: "Agent" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
   expect(screen.queryByRole("columnheader")).toBeNull();
   expect(document.querySelector('[data-part="mark"]')).toBeNull();
+  const group = screen.getByText("mine").closest("ul") as HTMLElement;
+  expect(group.querySelectorAll("li[aria-hidden]").length).toBe(1);
 });
 
-test("a card opens the whole skill read-only, and its Delete does not", async () => {
-  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+test("an item opens the whole skill read-only, and states its description there", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
   renderSkills();
+  await openInstalled();
 
-  await userEvent.click(await screen.findByText("member skill"));
+  expect(screen.queryByText("member skill")).toBeNull();
+  await userEvent.click(await screen.findByText("mine"));
   const dialog = await screen.findByRole("dialog");
   expect(dialog.textContent).toContain("mine");
+  expect(screen.getByLabelText("Description")).toHaveProperty("value", "member skill");
   const instructions = screen.getByLabelText("Instructions") as HTMLTextAreaElement;
   expect(instructions.value).toBe("Write tersely.");
   expect(instructions.readOnly).toBe(true);
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("dialog")).toBeNull();
-
-  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("cards sort custom ahead of built-in and render backticks as code", async () => {
-  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+test("items sort custom ahead of built-in", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
   renderSkills();
+  await openInstalled();
 
-  expect(await screen.findByText("member skill")).toBeTruthy();
+  expect(await screen.findByText("mine")).toBeTruthy();
   const names = [...document.querySelectorAll('[data-part="primary"]')].map(
     (node) => node.textContent,
   );
   expect(names).toEqual(["mine", "shipped"]);
-  expect(screen.getByText("skill", { selector: "code" })).toBeTruthy();
 });
 
-test("the origin filter labels deploy skills Built-in and hides custom skills", async () => {
-  wire({ "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
+test("an item states where its skill came from, and the filter names collections", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }), "/transcript": () => json({ messages: [] }) });
   renderSkills();
+  await openInstalled();
 
-  expect(await screen.findByText("member skill")).toBeTruthy();
+  expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
   expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-  await userEvent.click(screen.getByRole("tab", { name: "Built-in" }));
-  expect(screen.queryByText("member skill")).toBeNull();
-  expect(screen.getByText("shipped")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Custom" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Built-in" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "All" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Community" })).toBeTruthy();
 });
 
 test("New skill posts the prepared skill intent for the pane's agent", async () => {
   const posted: unknown[] = [];
   wire({
+    ...NO_COMMUNITY,
     "/skills": () => json({ skills: [] }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
@@ -108,9 +121,10 @@ test("New skill posts the prepared skill intent for the pane's agent", async () 
   });
 });
 
-test("Delete is offered and posts only for custom skills", async () => {
+test("Delete stands in the skill's own dialog, and only for a custom skill", async () => {
   const posted: unknown[] = [];
   wire({
+    ...NO_COMMUNITY,
     "/skills": () => json({ skills: SKILLS }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
@@ -119,21 +133,35 @@ test("Delete is offered and posts only for custom skills", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   renderSkills();
+  await openInstalled();
 
-  expect(await screen.findByText("member skill")).toBeTruthy();
-  expect(screen.getByText("mine").closest("li")?.querySelector("button")).toBeTruthy();
-  expect(screen.getByText("shipped").closest("li")?.querySelector("button")).toBeNull();
+  expect(await screen.findByText("mine")).toBeTruthy();
+  const state = within(screen.getByText("mine").closest("li") as HTMLElement).getByRole("button");
+  expect(state.textContent).toBe("Installed");
+  expect((state as HTMLButtonElement).disabled).toBe(true);
 
-  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
-  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+  await userEvent.click(screen.getByText("shipped"));
+  expect(within(await screen.findByRole("dialog")).queryByRole("button", { name: "Delete" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+
+  await userEvent.click(screen.getByText("mine"));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("Description").tagName).toBe("TEXTAREA");
+  expect([...dialog.querySelectorAll("button")].map((one) => one.textContent)).toEqual([
+    "Delete",
+    "Close",
+  ]);
+  await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Confirm delete" }));
   await waitFor(() => expect(posted).toEqual([{ verb: "delete", kind: "skill", name: "mine" }]));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("the blank names the agent and holds the only New skill act", async () => {
-  wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
+test("the blank names the agent, and the bar holds the only New skill act", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
   renderSkills();
+  await openInstalled();
 
   expect(await screen.findByText("No skill has been saved onto assistant yet.")).toBeTruthy();
   expect(screen.getAllByRole("button", { name: "New skill" }).length).toBe(1);
-  expect(screen.queryByRole("searchbox")).toBeNull();
 });

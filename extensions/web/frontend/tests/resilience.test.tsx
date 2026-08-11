@@ -145,6 +145,38 @@ test("returning to an idle tab refetches the transcript", async () => {
   expect(serves).toBe(2);
 });
 
+test("a transcript that never loads says so in the pane, not as an empty conversation", async () => {
+  wire({
+    "/api/chats": () => json(RAIL),
+    "/transcript": () => new Response("nope", { status: 503 }),
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByText("The conversation did not load.")).toBeTruthy();
+  expect(screen.getByText("Error 503 — reload to retry.")).toBeTruthy();
+  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+test("a re-read that fails states so over the conversation it already holds", async () => {
+  let serves = 0;
+  wire({
+    "/api/chats": () => json(RAIL),
+    "/transcript": () => {
+      serves += 1;
+      if (serves === 1) return json({ messages: [{ role: "assistant", text: "still here" }] });
+      return new Response("nope", { status: 503 });
+    },
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await screen.findByText("still here");
+
+  window.dispatchEvent(new Event("focus"));
+  const toast = await screen.findByRole("status");
+  expect(toast.textContent).toContain("The conversation did not load.");
+  expect(screen.getByText("still here")).toBeTruthy();
+});
+
 test("a draft survives leaving the chat and is cleared by sending", async () => {
   wire({
     "/api/chats": () => json(RAIL),

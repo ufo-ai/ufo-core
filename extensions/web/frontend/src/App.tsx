@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
@@ -11,6 +12,7 @@ import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CUSTOMIZE_VIEWS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { Viewer, surfaceWord } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -73,6 +75,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     if (target) location.replace(target);
   }, []);
   const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
+  const [toast, setToast] = useState<ToastState>(SILENT);
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
   const [linked, setLinked] = useState<Record<string, OwnedConversation>>({});
@@ -95,6 +98,9 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     setRail((current) => ({ phase: "loading", rows: current.rows }));
     getJson<ChatsPayload>("/api/chats").then((result) => {
       if (!live) return;
+      if (!result.ok && result.status !== 401) {
+        setToast({ title: "Conversations did not refresh.", description: result.message });
+      }
       setRail((current) =>
         result.ok
           ? { phase: "ready", rows: mergeChats(result.payload.chats, current.rows) }
@@ -259,99 +265,102 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   }, [route, rail, sought]);
 
   return (
-    <MainAgentProvider agents={agents}>
-      <div className="grid h-dvh grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
-        <nav className="flex min-h-0 flex-col border-r border-edge max-narrow:flex-row max-narrow:items-center max-narrow:border-r-0 max-narrow:border-b">
-          <div className="px-2xl py-lg font-strong max-narrow:px-lg max-narrow:py-md">ufo</div>
-          <div className="px-lg pb-sm max-narrow:p-0">
-            <NewChat agents={agents} mainAgent={mainAgent} onNewChat={openNewChat} />
-          </div>
-          <div className="flex-1 overflow-y-auto py-2xs max-narrow:flex max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
-            <RailList
-              rail={rail}
-              route={route}
-              mainAgent={mainAgent}
-              onOpen={openChat}
-              onRetry={() => setReloads((count) => count + 1)}
-            />
-          </div>
-          <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
-            <li>
-              <SidebarButton
-                current={
-                  route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
-                }
-                onClick={openAgents}
-              >
-                Agents
-              </SidebarButton>
-            </li>
-            {SECTIONS.map((section) => (
-              <li key={section}>
+    <Viewer.Provider value={member.email}>
+      <MainAgentProvider agents={agents}>
+        <div className="grid h-dvh grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
+          <nav className="flex min-h-0 flex-col border-r border-edge max-narrow:flex-row max-narrow:items-center max-narrow:border-r-0 max-narrow:border-b">
+            <div className="px-2xl py-lg font-strong max-narrow:px-lg max-narrow:py-md">ufo</div>
+            <div className="px-lg pb-sm max-narrow:p-0">
+              <NewChat agents={agents} mainAgent={mainAgent} onNewChat={openNewChat} />
+            </div>
+            <div className="flex-1 overflow-y-auto py-2xs max-narrow:flex max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
+              <RailList
+                rail={rail}
+                route={route}
+                mainAgent={mainAgent}
+                onOpen={openChat}
+                onRetry={() => setReloads((count) => count + 1)}
+              />
+            </div>
+            <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
+              <li>
                 <SidebarButton
-                  current={route.kind === "section" && route.section === section}
-                  onClick={() => placeSection(section, {}, "push")}
+                  current={
+                    route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
+                  }
+                  onClick={openAgents}
                 >
-                  {SECTION_VIEWS[section].label}
+                  Agents
                 </SidebarButton>
               </li>
-            ))}
-            <li>
-              <SidebarButton
-                current={route.kind === "customize"}
-                onClick={() => placeCustomize(CUSTOMIZE_TABS[0], {}, "push")}
-              >
-                Customize
-              </SidebarButton>
-            </li>
-            <li>
-              <SidebarButton
-                current={route.kind === "workspace"}
-                onClick={() => placeWorkspace("team", {}, "push")}
-              >
-                Workspace
-              </SidebarButton>
-            </li>
-          </ul>
-          <footer className="flex flex-col gap-2xs border-t border-edge px-2xl py-lg font-mono text-mono max-narrow:ml-auto max-narrow:border-t-0 max-narrow:px-lg max-narrow:py-md">
-            <span className="max-narrow:hidden">
-              {member.email}
-              {member.admin ? " · admin" : ""}
-            </span>
-            {member.admin ? (
-              <button
-                type="button"
-                onClick={openAdmin}
-                className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
-              >
-                Administration
-              </button>
-            ) : null}
-          </footer>
-        </nav>
-        <Pane
-          route={route}
-          agents={agents}
-          subagents={subagents}
-          member={member}
-          newAgent={newAgent}
-          mainAgent={mainAgent}
-          rail={rail}
-          onAgents={onAgents}
-          onCreated={created}
-          onActivity={activity}
-          onOpenAgent={openAgent}
-          onOpenSlot={openSlot}
-          onOpenSubagent={openSubagent}
-          onNewChat={openNewChat}
-          onPlaceWorkspace={placeWorkspace}
-          onPlaceSection={placeSection}
-          onPlaceCustomize={placeCustomize}
-          sought={sought}
-          linked={linked}
-        />
-      </div>
-    </MainAgentProvider>
+              {SECTIONS.map((section) => (
+                <li key={section}>
+                  <SidebarButton
+                    current={route.kind === "section" && route.section === section}
+                    onClick={() => placeSection(section, {}, "push")}
+                  >
+                    {SECTION_VIEWS[section].label}
+                  </SidebarButton>
+                </li>
+              ))}
+              <li>
+                <SidebarButton
+                  current={route.kind === "customize"}
+                  onClick={() => placeCustomize(CUSTOMIZE_TABS[0], {}, "push")}
+                >
+                  Customize
+                </SidebarButton>
+              </li>
+              <li>
+                <SidebarButton
+                  current={route.kind === "workspace"}
+                  onClick={() => placeWorkspace("team", {}, "push")}
+                >
+                  Workspace
+                </SidebarButton>
+              </li>
+            </ul>
+            <footer className="flex flex-col gap-2xs border-t border-edge px-2xl py-lg font-mono text-mono max-narrow:ml-auto max-narrow:border-t-0 max-narrow:px-lg max-narrow:py-md">
+              <span className="max-narrow:hidden">
+                {member.email}
+                {member.admin ? " · admin" : ""}
+              </span>
+              {member.admin ? (
+                <button
+                  type="button"
+                  onClick={openAdmin}
+                  className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
+                >
+                  Administration
+                </button>
+              ) : null}
+            </footer>
+          </nav>
+          <Pane
+            route={route}
+            agents={agents}
+            subagents={subagents}
+            member={member}
+            newAgent={newAgent}
+            mainAgent={mainAgent}
+            rail={rail}
+            onAgents={onAgents}
+            onCreated={created}
+            onActivity={activity}
+            onOpenAgent={openAgent}
+            onOpenSlot={openSlot}
+            onOpenSubagent={openSubagent}
+            onNewChat={openNewChat}
+            onPlaceWorkspace={placeWorkspace}
+            onPlaceSection={placeSection}
+            onPlaceCustomize={placeCustomize}
+            sought={sought}
+            linked={linked}
+          />
+          <Toast state={toast} onDone={() => setToast(SILENT)} />
+        </div>
+      </MainAgentProvider>
+    </Viewer.Provider>
   );
 }
 
@@ -570,7 +579,8 @@ function LinkedPane({
           <>
             <ConversationDetail agent={agent} conversation={conversation} onBack={back} />
             <p className="max-w-hint opacity-(--muted-soft)">
-              This conversation is read-only here. Reply in {conversation.surface} to continue it.
+              This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
+              continue it.
             </p>
           </>
         ) : (

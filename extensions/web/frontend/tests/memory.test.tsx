@@ -10,6 +10,7 @@ const MATCH = {
   kind: "fact",
   ref: "memory/m1",
   created_at: "2026-07-20T08:00:00",
+  subject: "shared",
 };
 
 function open(view: "memory" = "memory") {
@@ -191,21 +192,35 @@ test("a refused correction tones its notice in place", async () => {
 });
 
 test("each memory is a row carrying its class and date, never its raw ref", async () => {
+  const mine = { ...MATCH, text: "prefers terse answers", ref: null, subject: "member:m1" };
+  const unfiled = { ...MATCH, text: "half-migrated note", ref: null, subject: null };
   wire({
     "/workspace/memory": () =>
-      json({ available: true, kinds: ["fact"], matches: [MATCH], older: null, newer: null }),
+      json({
+        available: true,
+        kinds: ["fact"],
+        matches: [MATCH, mine, unfiled],
+        older: null,
+        newer: null,
+      }),
   });
   open();
 
   const heads = (await screen.findAllByRole("columnheader")).map((cell) => cell.textContent);
-  expect(heads.slice(0, 3)).toEqual(["Memory", "Class", "Added"]);
+  expect(heads.slice(0, 4)).toEqual(["Memory", "Class", "Audience", "Added"]);
 
   const row = screen.getByText("the deploy runs on EKS").closest("tr") as HTMLTableRowElement;
   const cells = [...row.cells].map((cell) => cell.textContent);
-  expect(cells.slice(0, 3)).toEqual([
+  expect(cells.slice(0, 4)).toEqual([
     "the deploy runs on EKS",
     "Fact",
+    "Workspace",
     "Jul 20 2026",
   ]);
   expect(row.textContent).not.toContain("memory/m1");
+
+  const audience = (text: string) =>
+    (screen.getByText(text).closest("tr") as HTMLTableRowElement).cells[2].textContent;
+  expect(audience("prefers terse answers")).toBe("Only you");
+  expect(audience("half-migrated note")).toBe("Unknown");
 });

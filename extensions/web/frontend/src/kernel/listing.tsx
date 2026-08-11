@@ -18,6 +18,7 @@ import {
 import { Pager, type Placement } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
 import { postIntent } from "@/lib/api";
+import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { CredentialRequest } from "@/lib/types";
 
@@ -25,6 +26,7 @@ export type RowContext<Row> = {
   open: (row: Row) => void;
   act: (envelope: unknown) => void;
   busy: boolean;
+  viewer: string | null;
 };
 
 export type Part<Row> = {
@@ -53,6 +55,7 @@ export type CardFace<Row> = {
   primary: Part<Row>;
   status?: Part<Row>;
   body?: Part<Row>;
+  meta?: Part<Row>;
 };
 
 type Presentation<Row> =
@@ -62,6 +65,7 @@ type Presentation<Row> =
 
 export type ListingSpec<Payload, Row> = {
   read: string;
+  note?: string;
   rows: (payload: Payload) => Row[];
   rowKey: (row: Row) => string;
   empty: string;
@@ -90,6 +94,7 @@ export function Listing<Payload, Row>({
   onPlace: (place: Placement) => void;
 }) {
   const mainAgent = useMainAgent();
+  const viewer = useViewer();
   const [notice, setNotice] = useState<NoticeState>({
     text: place.notice ?? "",
     refused: false,
@@ -126,7 +131,7 @@ export function Listing<Payload, Row>({
   }
 
   const refresh = () => setReloads((count) => count + 1);
-  const context: RowContext<Row> = { open, act, busy };
+  const context: RowContext<Row> = { open, act, busy, viewer };
   const term = query.trim().toLowerCase();
   const bySearch = (row: Row) =>
     !spec.search || !term || spec.search(row).toLowerCase().includes(term);
@@ -145,6 +150,7 @@ export function Listing<Payload, Row>({
       <OutcomeNotice state={notice} />
       <Section
         title={title}
+        note={spec.note}
         bar={
           known?.length || state.phase === "failed" ? (
             <>
@@ -334,7 +340,7 @@ function Cards<Payload, Row>({
   rows: Row[];
   context: RowContext<Row>;
 }) {
-  const { mark, primary, status, body } = face;
+  const { mark, primary, status, body, meta } = face;
   const { actions } = spec;
   return (
     <CardGrid
@@ -344,6 +350,7 @@ function Cards<Payload, Row>({
       primary={(row) => part(primary, row, context)}
       status={status ? (row) => part(status, row, context) : undefined}
       body={body ? (row) => part(body, row, context) : undefined}
+      meta={meta ? (row) => part(meta, row, context) : undefined}
       action={actions ? (row) => actions(row, context) : undefined}
     />
   );

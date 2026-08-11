@@ -27,6 +27,7 @@ function grant(provider: string, shared: boolean, name: string) {
     provider,
     account_id: "acct",
     owner_email: "member@example.com",
+    own: true,
     shared,
     connected_at: "2026-07-01T00:00:00",
     grant: name,
@@ -51,7 +52,8 @@ test("the customize tab lists every grant on the agent it names", async () => {
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.getByText("Private")).toBeTruthy();
+  expect(screen.getByText("Only you")).toBeTruthy();
+  expect(screen.getByText("You")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
     "true",
   );

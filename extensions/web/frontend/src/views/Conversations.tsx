@@ -17,6 +17,13 @@ import {
 } from "@/kernel/panel";
 import { RowLines } from "@/kernel/rows";
 import { postIntent } from "@/lib/api";
+import {
+  audienceLabel,
+  isMemberAudience,
+  origin as surfaceOrigin,
+  ownerLabel,
+  useViewer,
+} from "@/lib/audience";
 import type { Agent, Conversation, Message } from "@/lib/types";
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
@@ -44,6 +51,7 @@ export function Disclose({
   const [outcome, setOutcome] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
   const live = useRef(true);
+  const viewer = useViewer();
   const owner = conversation.member_email || "another member";
 
   useEffect(() => {
@@ -72,7 +80,7 @@ export function Disclose({
   return (
     <>
       <Back onBack={onBack} />
-      <Section title={conversationTitle(conversation)}>
+      <Section title={conversationTitle(conversation, viewer)}>
         <p className="m-0 max-w-hint">
           This conversation is private to {owner} and may contain private information. Opening it
           records your email, theirs, and the time.
@@ -88,21 +96,22 @@ export function Disclose({
   );
 }
 
-/** Who a conversation belongs to, as a member reads it: the member's own address, or — for the
- *  two audiences that name no member — what it is, since a room's content nobody reads here and
- *  a workspace-shared conversation everybody does. The short id distinguishes two of a kind; the
- *  queue key is never a member-facing name. */
-export function who(entry: { member_email: string | null; readable: boolean; id: string }): string {
-  if (entry.member_email) return entry.member_email;
-  const kind = entry.readable ? "Shared" : "Channel or room";
-  return kind + " · " + entry.id.slice(0, 8);
+/** Who a conversation belongs to, as a member reads it: `You` for the viewer's own, another
+ *  member's address, or — where no member's name is on it — who may read it, which is what a row
+ *  with no owner is. */
+export function who(
+  entry: { member_email: string | null; audience: string; surface_label?: string | null },
+  viewer: string | null,
+): string {
+  if (entry.member_email === null) return audienceLabel(entry, viewer);
+  return ownerLabel(entry.member_email, viewer);
 }
 
 /** What a conversation is called: the words it opened with — the same cut the rail labels a chat
  *  with, so an index row and a rail row never name one conversation two ways — else whose it is,
  *  which is all a row the member may not read has to state. */
-function subject(conversation: Conversation): string {
-  return conversation.description || who(conversation);
+function subject(conversation: Conversation, viewer: string | null): string {
+  return conversation.description || who(conversation, viewer);
 }
 
 /** Where a conversation came from, in the one slot a row and a heading each keep for it: the agent
@@ -110,31 +119,43 @@ function subject(conversation: Conversation): string {
  *  is the one the pane the member is standing in does not already state — a subagent's page names
  *  the profile and needs the agent, an agent's page names the agent and needs the surface. */
 function origin(conversation: Conversation): string {
-  return conversation.agent ? conversation.agent.name : conversation.surface;
+  return conversation.agent ? conversation.agent.name : surfaceOrigin(conversation);
 }
 
 /** One conversation names itself the same way on every screen that opens it — where it came from,
  *  then what it is about. A row states its origin in its own meta line; a heading standing alone
  *  above a transcript has nowhere else to put it. */
-export function conversationTitle(conversation: Conversation): string {
-  return origin(conversation) + " · " + subject(conversation);
+export function conversationTitle(conversation: Conversation, viewer: string | null): string {
+  return origin(conversation) + " · " + subject(conversation, viewer);
 }
 
-/** What a member may do with a row they cannot simply open. `Private` reads on another member's
- *  conversation an admin may disclose to themselves: pressing it reaches the acknowledgement,
- *  never the transcript, so the record of who read whose is still written by an act. */
-function standing(entry: Conversation): string {
-  if (entry.readable) return "";
-  return entry.disclosable ? "Private" : "Not shared with you";
+/** The meta line: whose the row is, where it came in, who spoke, how busy it is, and who may read
+ *  it. The viewer's own private row carries no audience label — the exception is labelled, never
+ *  the default — and a label the origin or the subject already states does not repeat. Another
+ *  member's private row states owner and audience as the one part `Private to <email>`. */
+function metaParts(entry: Conversation, viewer: string | null): string[] {
+  const mine = entry.member_email !== null && entry.member_email === viewer;
+  const theirs = isMemberAudience(entry.audience) && !mine;
+  const shown = subject(entry, viewer);
+  const reach = mine ? "" : audienceLabel(entry, viewer);
+  const named = entry.member_email === null || theirs ? "" : ownerLabel(entry.member_email, viewer);
+  const parts = [
+    named,
+    origin(entry),
+    entry.speakers.join(", "),
+    turns(entry.turn_count),
+    reach === origin(entry) ? "" : reach,
+  ];
+  return parts.map((part) => (part === shown ? "" : part));
 }
 
 function turns(count: number): string {
   return count === 1 ? "1 turn" : count + " turns";
 }
 
-function matches(entry: Conversation, query: string): boolean {
-  const stated = [subject(entry), who(entry), origin(entry), ...entry.speakers].join(" ");
-  return stated.toLowerCase().includes(query.toLowerCase());
+function matches(entry: Conversation, query: string, viewer: string | null): boolean {
+  const stated = [subject(entry, viewer), who(entry, viewer), origin(entry), ...entry.speakers];
+  return stated.join(" ").toLowerCase().includes(query.toLowerCase());
 }
 
 /** Every screen that lists conversations draws this one section — an agent's own and a subagent's
@@ -156,7 +177,8 @@ export function ConversationList({
   onDisclose?: (conversation: Conversation) => void;
 }) {
   const [query, setQuery] = useState("");
-  const shown = rows.filter((entry) => matches(entry, query));
+  const viewer = useViewer();
+  const shown = rows.filter((entry) => matches(entry, query, viewer));
   return (
     <Section
       title="Conversations"
@@ -178,13 +200,8 @@ export function ConversationList({
         <RowLines
           rows={shown}
           rowKey={(entry) => entry.id}
-          primary={subject}
-          meta={(entry) => [
-            origin(entry),
-            entry.speakers.join(", "),
-            turns(entry.turn_count),
-            standing(entry),
-          ]}
+          primary={(entry) => subject(entry, viewer)}
+          meta={(entry) => metaParts(entry, viewer)}
           when={(entry) => day(entry.last_turn_at) || day(entry.created_at)}
           open={(entry) =>
             entry.readable
@@ -289,6 +306,7 @@ export function ConversationDetail({
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
   const state = usePanelRead<{ messages: Message[] }>(path + "/transcript");
+  const viewer = useViewer();
 
   return (
     <>
@@ -297,7 +315,7 @@ export function ConversationDetail({
         {(payload) => (
           <ConversationTranscript
             conversationId={conversation.id}
-            title={conversationTitle(conversation)}
+            title={conversationTitle(conversation, viewer)}
             messages={payload.messages}
           />
         )}

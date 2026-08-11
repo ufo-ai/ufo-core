@@ -11,6 +11,8 @@ const ADMIN = { ...MEMBER, admin: true };
 const PRIVATE = {
   id: "c1",
   surface: "slack",
+  surface_label: null,
+  audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
   member_email: "owner@example.com",
   description: "",
   speakers: [],
@@ -21,7 +23,13 @@ const PRIVATE = {
   disclosable: true,
 };
 
-const WALLED = { ...PRIVATE, id: "c2", disclosable: false };
+const WALLED = {
+  ...PRIVATE,
+  id: "c2",
+  audience: "room:slack:C2",
+  member_email: null,
+  disclosable: false,
+};
 
 const conversations = (entries: unknown[]) => ({
   "/conversations": () => json({ conversations: entries }),
@@ -41,8 +49,8 @@ test("a disclosable row is the control, one shared with nobody is inert and says
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   expect(await disclosable()).toBeTruthy();
-  expect(screen.getByText(/Not shared with you/)).toBeTruthy();
-  expect(screen.queryAllByRole("button", { name: /Not shared with you/ })).toEqual([]);
+  expect(screen.getByText("Private channel", { selector: "[data-part='primary']" })).toBeTruthy();
+  expect(screen.queryAllByRole("button", { name: /Private channel/ })).toEqual([]);
 });
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
@@ -80,7 +88,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
     conversation_id: "c1",
   });
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "slack · owner@example.com" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Slack · owner@example.com" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
 
@@ -170,7 +178,7 @@ test("a permalink to another member's conversation offers the listing's acknowle
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(
-    screen.getByText("This conversation is read-only here. Reply in slack to continue it."),
+    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
   ).toBeTruthy();
 });
 

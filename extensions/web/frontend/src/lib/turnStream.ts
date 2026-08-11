@@ -310,10 +310,24 @@ export async function refreshTranscript(
   }
   const epoch = RESYNC_EPOCH.get(chatKey) ?? 0;
   const result = await getJson<Transcript>(path);
-  if (!result.ok && !onlyIfEmpty) return;
-  const payload: Transcript = result.ok ? result.payload : { messages: [] };
+  if (!result.ok) {
+    updateChat(chatKey, (current) => {
+      if (onlyIfEmpty && current.messages !== null) return current;
+      if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
+      if (!onlyIfEmpty && (current.busy || current.turn)) return current;
+      return {
+        ...current,
+        fault: {
+          title: "The conversation did not load.",
+          description: result.message,
+        },
+      };
+    });
+    return;
+  }
+  const payload = result.payload;
   updateChat(chatKey, (current) => {
-    if (onlyIfEmpty && current.messages !== null) return current;
+    if (onlyIfEmpty && current.messages !== null) return { ...current, fault: null };
     if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const incoming = ("question" in payload && payload.question) || null;
@@ -328,6 +342,7 @@ export async function refreshTranscript(
     return {
       ...current,
       messages: payload.messages,
+      fault: null,
       busy: running ? true : current.busy,
       turn: running ? { id: running, answering: false } : current.turn,
       live: running ? (current.live ?? liveTurn()) : current.live,

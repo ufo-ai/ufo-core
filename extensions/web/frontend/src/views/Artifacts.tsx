@@ -4,6 +4,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import type { ListingSpec } from "@/kernel/listing";
 import { cn } from "@/lib/cn";
+import { ownerLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
 import { formatSize } from "@/lib/size";
 import { Sheet } from "@/components/ui/sheet";
@@ -15,6 +16,7 @@ type Artifact = {
   size_bytes: number;
   created_at: string;
   url: string | null;
+  owner_email: string | null;
 };
 
 type ArtifactsPayload = {
@@ -42,6 +44,10 @@ export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
     primary: { field: "filename" },
     status: { field: "created_at", render: (stamp) => day(stamp) },
     body: { field: "subject" },
+    meta: {
+      field: "owner_email",
+      render: (owner, _entry, context) => ownerLabel(owner, context.viewer),
+    },
   },
   empty: "A file an agent shares from a conversation is listed here.",
   actions: (entry, { open }) =>

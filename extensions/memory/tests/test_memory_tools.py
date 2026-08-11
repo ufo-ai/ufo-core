@@ -1146,3 +1146,23 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
     assert str(item_id) in granted_names
     assert ungranted_get is None
     assert granted_get is not None
+
+
+async def test_list_recent_carries_each_row_subject(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    member = uuid4()
+    embed = StubEmbed(vec((0, 1.0)))
+    index = DefaultIndex(transaction=workspace_tx)
+    ext = _ext(index, embed)
+    bound_ctx = _tool_ctx(ext, member, tmp_path, audience=SHARED_AUDIENCE)
+    common_ctx = _tool_ctx(ext, None, tmp_path, audience=SHARED_AUDIENCE)
+    with ws(workspace_id):
+        await _run("memory_update", bound_ctx, body="a private note")
+        await _run("memory_update", common_ctx, body="a team note")
+        listed = await memory.MemorySearchService(ext).list_recent(
+            frozenset({member_subject(member), "shared"}), 25
+        )
+    assert {(row.text, row.subject) for row in listed.rows} == {
+        ("a private note", member_subject(member)),
+        ("a team note", "shared"),
+    }

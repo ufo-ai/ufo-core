@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefOb
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
+import { SILENT, Toast } from "@/components/ui/toast";
 import { Files, MessageLog, Meta } from "@/kernel/messages";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
@@ -95,6 +96,7 @@ export function Chat({
 
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
+  const stalled = messages === null ? state.fault : null;
   const trailing = state.live ? null : state.handoffs.files ?? null;
   const credentials = state.handoffs.credentials;
 
@@ -158,6 +160,12 @@ export function Chat({
             }}
           />
         ) : null}
+        {stalled ? (
+          <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
+            <p>{stalled.title}</p>
+            {stalled.description ? <p>{stalled.description}</p> : null}
+          </div>
+        ) : null}
         {showEmpty ? (
           <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
             {conversationId === null
@@ -171,6 +179,10 @@ export function Chat({
         draftKey={member.id + "/" + chatKey}
         input={composer}
         onSend={repin}
+      />
+      <Toast
+        state={stalled ? SILENT : state.fault ?? SILENT}
+        onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
       />
     </>
   );

@@ -38,6 +38,7 @@ const GROUP_KEYS = Object.keys(GROUPS);
 
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
+  note: "Credential values are shared across the workspace.",
   rows: (payload) =>
     [...payload.slots].sort((left, right) => {
       const leftRank = GROUP_KEYS.indexOf(left.extension);

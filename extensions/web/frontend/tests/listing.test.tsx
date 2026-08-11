@@ -509,6 +509,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 1,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -520,6 +521,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 2,
             next_sync_at: "2026-08-01T07:00:00",
           },
@@ -531,6 +533,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
             base_url: "https://example.com/feed",
             owner_email: null,
             shared: true,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-02T09:30:00",
           },
@@ -558,7 +561,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
     "notion",
     "databases, pages",
     "member@example.com",
-    "Private",
+    "Only you",
     "3",
     "Aug 1 2026",
     "ResyncShareRemove",
@@ -566,8 +569,8 @@ test("the sources declaration projects a binding and a bare stream into one unif
   expect(cellsOf("rss")).toEqual([
     "rss",
     "—",
-    "—",
-    "Shared",
+    "Workspace",
+    "Workspace",
     "0",
     "Aug 2 2026",
     "",
@@ -587,6 +590,7 @@ test("a shared binding is offered no Share control", async () => {
             base_url: null,
             owner_email: "member@example.com",
             shared: true,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -617,6 +621,7 @@ test("resync posts the binding whole, account and base url included", async () =
             base_url: "https://notion.example",
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -628,6 +633,7 @@ test("resync posts the binding whole, account and base url included", async () =
             base_url: "https://notion.example",
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T07:00:00",
           },
@@ -675,6 +681,7 @@ test("an applied outcome states itself under the listing that produced it", asyn
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -707,6 +714,7 @@ test("share flips the value it carries, and remove posts no spec at all", async 
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -803,6 +811,7 @@ test("an outcome released after the member left never resets the view they are o
             base_url: null,
             owner_email: null,
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -854,6 +863,7 @@ test("every declaration keys its rows on fields its own payload carries", () => 
     size_bytes: 1,
     created_at: "2026-08-01T06:00:00",
     url: null,
+    owner_email: null,
   };
   expect(ARTIFACTS.rowKey(artifact)).toBe("2026-08-01T06:00:00|report.txt");
   expect(
@@ -868,6 +878,7 @@ test("every declaration keys its rows on fields its own payload carries", () => 
           backfill_days: null,
           owner_email: null,
           shared: false,
+          own: false,
           consecutive_errors: 0,
           next_sync_at: "2026-08-01T06:00:00",
         },
@@ -1020,6 +1031,7 @@ test("an applied intent keeps the selected tab and the typed search term", async
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -1034,7 +1046,7 @@ test("an applied intent keeps the selected tab and the typed search term", async
   );
 
   await userEvent.click(
-    await screen.findByRole("tab", { name: "Private" }),
+    await screen.findByRole("tab", { name: "Only you" }),
   );
   await userEvent.type(screen.getByRole("searchbox"), "notion");
   await userEvent.click(screen.getByRole("button", { name: "Resync" }));
@@ -1045,7 +1057,7 @@ test("an applied intent keeps the selected tab and the typed search term", async
   );
   expect(
     screen
-      .getByRole("tab", { name: "Private" })
+      .getByRole("tab", { name: "Only you" })
       .getAttribute("aria-selected"),
   ).toBe("true");
 });
@@ -1127,6 +1139,7 @@ test("the sources declaration searches and filters by access with live counts", 
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -1138,6 +1151,7 @@ test("the sources declaration searches and filters by access with live counts", 
             base_url: "https://example.com/feed",
             owner_email: null,
             shared: true,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-02T09:30:00",
           },
@@ -1151,7 +1165,7 @@ test("the sources declaration searches and filters by access with live counts", 
   );
 
   await userEvent.click(
-    await screen.findByRole("tab", { name: "Shared" }),
+    await screen.findByRole("tab", { name: "Workspace" }),
   );
   expect(screen.queryByText("notion")).toBeNull();
   expect(screen.getByText("rss")).toBeTruthy();
@@ -1160,8 +1174,8 @@ test("the sources declaration searches and filters by access with live counts", 
   await userEvent.type(screen.getByRole("searchbox"), "notion");
   expect(await screen.findByText("notion")).toBeTruthy();
   expect(screen.queryByText("rss")).toBeNull();
-  expect(screen.getByRole("tab", { name: "Private" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Shared" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Only you" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Workspace" })).toBeTruthy();
 });
 
 test("a refresh keeps the controls row and the caretted search box while the re-read is in flight", async () => {
@@ -1203,6 +1217,7 @@ test("a tab alone survives an applied intent, with no search term typed", async 
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -1216,15 +1231,13 @@ test("a tab alone survives an applied intent, with no search term typed", async 
     </MainAgentProvider>,
   );
 
-  await userEvent.click(
-    await screen.findByRole("tab", { name: "Private" }),
-  );
+  await userEvent.click(await screen.findByRole("tab", { name: "Only you" }));
   await userEvent.click(screen.getByRole("button", { name: "Resync" }));
 
   expect(await screen.findByText("Resync queued.")).toBeTruthy();
   expect(
     screen
-      .getByRole("tab", { name: "Private" })
+      .getByRole("tab", { name: "Only you" })
       .getAttribute("aria-selected"),
   ).toBe("true");
 });
@@ -1243,6 +1256,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
             base_url: null,
             owner_email: "member@example.com",
             shared: false,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-01T06:00:00",
           },
@@ -1254,6 +1268,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
             base_url: "https://example.com/feed",
             owner_email: null,
             shared: true,
+            own: true,
             consecutive_errors: 0,
             next_sync_at: "2026-08-02T09:30:00",
           },

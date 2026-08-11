@@ -1104,6 +1104,7 @@ async def test_the_site_kind_filters_and_orders_on_its_declared_fields(db: None)
     first_row = {row["name"]: row for row in listed["objects"]}[first_name]
     assert first_row["conversation"] == str(first_conversation)
     assert first_row["visibility"] == "private"
+    assert first_row["owner_email"] == OWNER_EMAIL
     assert first_row["site_url"] == site_url(
         PUBLIC_BASE_URL, workspace.id, first_conversation, SITE
     )

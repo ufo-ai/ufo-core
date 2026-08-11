@@ -16,7 +16,7 @@ call to the owning kind's ExtensionContext."""
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
@@ -365,6 +365,24 @@ class GeneratedObjectOwner(ObjectOwner):
     """An owner whose row may be replaced under the same object name."""
 
     generation: UUID
+
+
+async def owner_emails(owners: Iterable[UUID | None]) -> dict[UUID | None, str]:
+    """The workspace addresses behind a set of owner member ids, resolved in one query — the map a
+    kind's listing reads to put `owner_email` on every row it emits. A row with no owner reads the
+    map with the same key it holds, and the map answers nothing."""
+    wanted = {member_id for member_id in owners if member_id is not None}
+    if not wanted:
+        return {}
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.member.c.id, tables.member.c.email).where(
+                    tables.member.c.id.in_(wanted)
+                )
+            )
+        ).all()
+    return {row.id: row.email for row in rows}
 
 
 @dataclass(frozen=True)

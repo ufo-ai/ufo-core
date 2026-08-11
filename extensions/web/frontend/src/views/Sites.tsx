@@ -6,7 +6,9 @@ import { Filter } from "@/components/ui/filter";
 import { CardGrid } from "@/kernel/cards";
 import { cn } from "@/lib/cn";
 import {
+  OWNER_FIELD,
   ObjectDetail,
+  creator,
   type ObjectAddress,
   type ObjectRow,
 } from "@/kernel/objects";
@@ -17,6 +19,7 @@ import {
   Section,
   usePanelRead,
 } from "@/kernel/panel";
+import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 
 const SITE_KIND = "site";
@@ -62,6 +65,7 @@ function SiteCards({
   agentId: string;
   onOpen: (name: string) => void;
 }) {
+  const viewer = useViewer();
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
   const [visibility, setVisibility] = useState("");
@@ -153,7 +157,8 @@ function SiteCards({
                     ? visibilityLabel(row.visibility)
                     : null
                 }
-                body={(row) => row.summary}
+                body={(row) => (typeof row.summary === "string" ? row.summary : null)}
+                meta={(row) => creator(row[OWNER_FIELD], viewer)}
                 action={(row) => (
                   <div className="flex flex-wrap gap-xs">
                     {typeof row.site_url === "string" ? (

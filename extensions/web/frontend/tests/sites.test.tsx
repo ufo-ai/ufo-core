@@ -15,6 +15,7 @@ const DOCS = {
   created_at: "2026-07-01T09:00:00Z",
   visibility: "workspace",
   site_url: DOCS_URL,
+  owner_email: "mel@example.com",
 };
 
 const NOTES = {
@@ -37,14 +38,18 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("a site is a card carrying its band, its visibility, and its summary", async () => {
-  wire({ "/objects/site": () => objectIndex(SITE_KIND, [DOCS]) });
+test("a site is a card carrying its band, its visibility, its summary, and its creator", async () => {
+  wire({ "/objects/site": () => objectIndex(SITE_KIND, [DOCS, NOTES]) });
   open();
 
   const card = (await screen.findAllByRole("listitem"))[0];
   expect(card.querySelector('[data-part="primary"]')?.textContent).toBe("docs-abc");
   expect(card.querySelector('[data-part="status"]')?.textContent).toBe("Workspace");
   expect(card.querySelector('[data-part="body"]')?.textContent).toBe(DOCS.summary);
+  expect(card.querySelector('[data-part="meta"]')?.textContent).toBe("mel@example.com");
+  const notes = screen.getByText("notes-def").closest("li");
+  expect(notes?.querySelector('[data-part="body"]')?.textContent).toBe(NOTES.summary);
+  expect(notes?.querySelector('[data-part="meta"]')?.textContent).toBe("Workspace");
   const band = card.querySelector('[data-part="mark"]');
   expect(band?.className).toContain("h-(--size-band)");
   expect(band?.getAttribute("aria-hidden")).toBe("true");

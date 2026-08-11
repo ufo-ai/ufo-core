@@ -177,16 +177,25 @@ export function Notice({
  *  would drift wider apart with every band it happens to hold. */
 export function Section({
   title,
+  note,
   bar,
   children,
 }: {
-  title: string;
+  title?: string;
+  note?: string;
   bar?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <section className="mb-6xl flex w-full max-w-section flex-col gap-lg">
-      <h2 className="m-0 text-body font-strong opacity-(--muted-soft)">{title}</h2>
+      {title || note ? (
+        <div className="flex flex-col gap-xs">
+          {title ? (
+            <h2 className="m-0 text-body font-strong opacity-(--muted-soft)">{title}</h2>
+          ) : null}
+          {note ? <p className="m-0 text-small opacity-(--muted-soft)">{note}</p> : null}
+        </div>
+      ) : null}
       {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}
       {children}
     </section>

@@ -29,6 +29,7 @@ from ufo.sdk.objects import (
     ObjectRef,
     OwnedRow,
     VerbNotSupported,
+    owner_emails,
 )
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sites.store import SITE_VISIBILITY_GATE, HostedSite, HostedSites, Visibility
@@ -108,6 +109,8 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         scoped = _workspace(ext)
         base = scoped.public_base_url
+        named = _named(await _sites(ext).all())
+        emails = await owner_emails(site.creator_member_id for site in named.values())
         return tuple(
             OwnedRow(
                 name=name,
@@ -121,6 +124,7 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     "conversation": str(site.conversation_id),
                     "created_at": site.created_at.isoformat(),
                     "visibility": site.visibility,
+                    "owner_email": emails.get(site.creator_member_id),
                 }
                 | (
                     {}
@@ -132,7 +136,7 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     }
                 ),
             )
-            for name, site in _named(await _sites(ext).all()).items()
+            for name, site in named.items()
         )
 
     async def member_conversation_rows(
@@ -234,7 +238,8 @@ SITE_OBJECT = ObjectKind(
         "Sites a deploy left hosted, one object per site and conversation, named "
         "<site-name>-<conversation-digest> (the deploy result carries the name). A site is visible "
         "to the member who deployed it, and to every member once it is workspace or public. "
-        "Each listed site carries its hosted `site_url`, absent only on a deploy that configures "
+        "Each listed site carries its creator (`owner_email`) and its hosted `site_url`, the link "
+        "absent only on a deploy that configures "
         "no public base URL and therefore hosts no reachable link. Listings filter and order on "
         "`conversation`, `created_at`, and `visibility` — filter on this conversation's id for the "
         "sites it hosts, or order by `created_at` desc for the newest. "
@@ -249,5 +254,5 @@ SITE_OBJECT = ObjectKind(
     ),
     spec_model=SiteSpec,
     store=SiteObjects(),
-    list_fields=frozenset({"conversation", "created_at", "visibility", "site_url"}),
+    list_fields=frozenset({"conversation", "created_at", "visibility", "site_url", "owner_email"}),
 )

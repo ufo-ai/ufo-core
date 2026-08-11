@@ -31,6 +31,7 @@ import {
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
+import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { day, isMoment, relativeMoment } from "@/lib/moments";
 import { agentHash, chatHash } from "@/lib/route";
@@ -126,6 +127,15 @@ function cell(
   return value;
 }
 
+export const OWNER_FIELD = "owner_email";
+const OWNER_HEADING = "Created By";
+
+/** Who made a row, in the member's words — the wire's `owner_email` never renders raw. A row
+ *  carrying no creator is the workspace's own. */
+export function creator(value: ObjectValue | undefined, viewer: string | null): string {
+  return ownerLabel(typeof value === "string" && value ? value : null, viewer);
+}
+
 /** Where an object page stands: one kind, and one of its objects once a row or a link is opened. */
 export type ObjectAddress = { kind: string; name: string | null };
 
@@ -174,6 +184,7 @@ function ObjectIndex({
 }) {
   const agents = useAgents();
   const mainAgent = useMainAgent();
+  const viewer = useViewer();
   const [reloads, setReloads] = useState(0);
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
@@ -204,15 +215,19 @@ function ObjectIndex({
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
-        const shown = payload.fields.filter((field) => field !== CONVERSATION_FIELD);
+        const owned = payload.fields.includes(OWNER_FIELD);
+        const shown = payload.fields.filter(
+          (field) => field !== CONVERSATION_FIELD && field !== OWNER_FIELD,
+        );
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
         if (agentId === null) columns.push("Agent");
+        if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD });
         columns.push({ label: heading("summary", payload.spec_schema), sort: "summary" });
         for (const field of shown) {
           columns.push({ label: heading(field, payload.spec_schema), sort: field });
         }
         if (acts || payload.fields.includes(CONVERSATION_FIELD)) columns.push("");
-        const flags = payload.fields.filter(
+        const flags = shown.filter(
           (field) =>
             narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean"),
         );
@@ -311,6 +326,7 @@ function ObjectIndex({
                         </a>
                       </Td>
                     ) : null}
+                    {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
                     <Td>{row.summary || "—"}</Td>
                     {shown.map((field) => (
                       <Td key={field}>
@@ -450,6 +466,7 @@ export function ObjectDetail({
   onOpen: (at: ObjectAddress) => void;
   onBack: () => void;
 }) {
+  const viewer = useViewer();
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const state = usePanelRead<DetailPayload>(
@@ -501,10 +518,14 @@ export function ObjectDetail({
             </Section>
             <Section title="Status">
               <Facts
-                rows={payload.fields.map((field) => ({
-                  label: heading(field, payload.spec_schema),
-                  value: cell(field, payload.status[field] ?? null, payload.spec_schema, now),
-                }))}
+                rows={payload.fields.map((field) =>
+                  field === OWNER_FIELD
+                    ? { label: OWNER_HEADING, value: creator(payload.status[field], viewer) }
+                    : {
+                        label: heading(field, payload.spec_schema),
+                        value: cell(field, payload.status[field] ?? null, payload.spec_schema, now),
+                      },
+                )}
               />
             </Section>
             <Section title="Links">

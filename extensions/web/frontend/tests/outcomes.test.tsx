@@ -113,6 +113,7 @@ test("credentials group, sort, and render slot state and literals", async () => 
   });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
+  expect(await screen.findByText("Credential values are shared across the workspace.")).toBeTruthy();
   expect(await screen.findByText("Filled", { selector: '[data-part="status"]' })).toBeTruthy();
   expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
   expect(await screen.findByRole("tab", { name: "Not set" })).toBeTruthy();

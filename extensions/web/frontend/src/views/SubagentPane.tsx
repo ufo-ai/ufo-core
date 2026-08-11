@@ -6,6 +6,7 @@ import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { TabPanel, TabStrip } from "@/kernel/tabs";
 import {
@@ -232,6 +233,7 @@ function RunDetail({
   const state = usePanelRead<{ run: Conversation; messages: Message[] }>(
     base + "/conversations/" + conversationId + root,
   );
+  const viewer = useViewer();
   return (
     <>
       <div className="mb-lg">
@@ -246,7 +248,7 @@ function RunDetail({
         {(payload) => (
           <ConversationTranscript
             conversationId={conversationId}
-            title={conversationTitle(payload.run)}
+            title={conversationTitle(payload.run, viewer)}
             messages={payload.messages}
           />
         )}

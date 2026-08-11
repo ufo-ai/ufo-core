@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 
+import type { ToastState } from "@/components/ui/toast";
 import type {
   ActivityEvent,
   ChatFile,
@@ -43,9 +44,17 @@ export type ChatState = {
   live: LiveTurn | null;
   turn: StreamingTurn | null;
   handoffs: Handoffs;
+  fault: ToastState | null;
 };
 
-const EMPTY: ChatState = { messages: null, busy: false, live: null, turn: null, handoffs: {} };
+const EMPTY: ChatState = {
+  messages: null,
+  busy: false,
+  live: null,
+  turn: null,
+  handoffs: {},
+  fault: null,
+};
 
 const states = new Map<string, ChatState>();
 const listeners = new Set<() => void>();

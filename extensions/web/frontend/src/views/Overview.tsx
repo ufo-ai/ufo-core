@@ -7,6 +7,7 @@ import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { webAudienceLabel } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
@@ -93,11 +94,7 @@ export function Overview({ agent }: { agent: Agent }) {
                     ? [
                         {
                           label: "Web audience",
-                          value: ready.agent.main
-                            ? "Every member"
-                            : ready.audience.length
-                              ? ready.audience.join(", ")
-                              : "No member grants — admins only",
+                          value: webAudienceLabel(ready.agent.main, ready.audience),
                         },
                       ]
                     : []),

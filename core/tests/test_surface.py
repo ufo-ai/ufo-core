@@ -271,6 +271,7 @@ async def _seed_turn(
     artifacts: tuple[SharedArtifact, ...] = (),
     *,
     surface: str = SURFACE,
+    member_id: UUID | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = (
@@ -291,7 +292,7 @@ async def _seed_turn(
                 agent_id=agent_id,
                 surface=surface,
                 queue_key=queue_key,
-                member_id=None,
+                member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -727,8 +728,13 @@ async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp
         ("slack", True),
     ]
     assert owner_view[0].owner_email == "owner@example.com"
+    assert owner_view[0].own
+    assert owner_view[1].owner_email == "peer@example.com"
+    assert not owner_view[1].own
     peer_view = await context.list_agent_connections(agent_id, peer, admin=False)
     assert [view.provider for view in peer_view] == ["slack"]
+    assert peer_view[0].owner_email == "peer@example.com"
+    assert peer_view[0].own
     admin_view = await context.list_agent_connections(agent_id, peer, admin=True)
     assert [view.provider for view in admin_view] == ["github", "slack"]
     assert [
@@ -803,8 +809,11 @@ async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> N
         ("github", False),
     ]
     assert owner_view[1].owner_email == "owner@example.com"
+    assert owner_view[1].own
     peer_view = await context.list_sources(peer, admin=False)
     assert [view.backend for view in peer_view] == ["folder"]
+    assert peer_view[0].owner_email is None
+    assert not peer_view[0].own
     admin_view = await context.list_sources(peer, admin=True)
     assert [view.backend for view in admin_view] == ["folder", "github"]
 
@@ -1539,6 +1548,29 @@ async def test_shared_artifacts_reads_a_turns_files_deterministically(db: None, 
     assert await context.shared_artifacts(uuid4()) == ()
     foreign = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert await foreign.shared_artifacts(turn_id) == ()
+
+
+async def test_artifact_listing_carries_the_conversation_owner_email(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    owner_id = await _seed_member_row(workspace_id, "owner@example.com")
+    artifact = SharedArtifact(
+        blob_key="artifacts/x/report.pdf",
+        filename="report.pdf",
+        subject=None,
+        media_type="application/pdf",
+        size_bytes=3,
+    )
+    await _seed_turn(
+        workspace_id,
+        "C8:1.0",
+        "done",
+        "files",
+        artifacts=(artifact,),
+        member_id=owner_id,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    page = await context.list_artifacts(owner_id, admin=False, limit=10)
+    assert [entry.owner_email for entry in page.rows] == ["owner@example.com"]
 
 
 async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(
@@ -2365,6 +2397,7 @@ async def _seed_conversation(
     audience: str,
     member_id: UUID | None,
     surface: str = SURFACE,
+    surface_label: str | None = None,
 ) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
@@ -2377,6 +2410,7 @@ async def _seed_conversation(
                 queue_key=queue_key,
                 member_id=member_id,
                 audience=audience,
+                surface_label=surface_label,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2502,6 +2536,7 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
         queue_key="room",
         audience=str(room_audience("slack", "C7")),
         member_id=None,
+        surface_label="#ops",
     )
     foreign = await _seed_conversation(
         workspace_id,
@@ -2536,6 +2571,12 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
     assert {entry.summary.id for entry in as_admin} == {mine, shared, theirs, room, foreign}
     assert {entry.summary.id for entry in as_admin if not entry.readable} == {theirs, room, foreign}
     assert {entry.summary.id for entry in as_admin if entry.disclosable} == {theirs}
+    by_id = {entry.summary.id: entry for entry in as_admin}
+    assert by_id[mine].audience == str(conversation_audience(member_id))
+    assert by_id[shared].audience == str(SHARED_AUDIENCE)
+    assert by_id[room].audience == str(room_audience("slack", "C7"))
+    assert by_id[room].surface_label == "#ops"
+    assert by_id[shared].surface_label is None
     assert subagent not in {entry.summary.id for entry in as_admin}
     assert walled not in {entry.summary.id for entry in as_admin}
 

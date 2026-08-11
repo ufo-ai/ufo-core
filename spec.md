@@ -552,10 +552,10 @@ name — `agent`, whose listing reports the concrete model an `auto` agent resol
 resolution off the reading turn, and `page`, whose detail reads the body through the turn's blob
 capability and whose listing scans every readable page. A
 gate is never widened to admit a kind — the kind stays refused by name until its read no longer
-needs a turn. A shared connection or source names
-its owner only to an admin or the owner: the roster tells every member who their colleagues are,
-but which colleague registered a given binding is the owner's to disclose, and chat names it to
-nobody else either, so neither does a panel. A panel mutation
+needs a turn. A connection or source names its owner to everyone its own gate already admits: the
+row reaches a member because it is shared or theirs, and a member told a binding exists but not
+whose account it draws on cannot tell a colleague's grant from the workspace's. `own` stays the
+separate answer to who may manage it. A panel mutation
 is a **prepared intent**: the form's structured intent is admitted as a turn on the member's one
 durable intent conversation with that agent and dispatched verbatim to the typed object or tool
 action — no model round, no fold into a live chat turn — so a submit applies exactly or returns

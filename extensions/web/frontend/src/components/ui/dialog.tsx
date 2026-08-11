@@ -1,5 +1,5 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -61,13 +61,18 @@ export function DialogDescription({
 /** The close sits in the footer beside the act it cancels, never as a corner glyph: the portal
  *  ships no icon set, and a labelled control states what leaving does. `Cancel` takes the padding
  *  of `send` so the pair reads as one choice of two, not an act with a smaller way out. A dialog
- *  with nothing to commit names the leave `Close` — there is no act to abandon. */
+ *  with nothing to commit names the leave `Close` — there is no act to abandon.
+ *
+ *  `lead` is the far end of the footer: an act on the record the dialog is showing rather than one
+ *  of the two ways out of the dialog. It stands apart from the pair so a destructive act is never
+ *  the control beside the one the member is reaching for. */
 export function DialogFooter({
   className,
   children,
+  lead,
   leave = "Cancel",
   ...props
-}: ComponentProps<"div"> & { leave?: string }) {
+}: ComponentProps<"div"> & { lead?: ReactNode; leave?: string }) {
   return (
     <div
       className={cn(
@@ -76,6 +81,7 @@ export function DialogFooter({
       )}
       {...props}
     >
+      {lead ? <div className="mr-auto">{lead}</div> : null}
       <DialogPrimitive.Close asChild>
         <Button className="px-3xl py-md">{leave}</Button>
       </DialogPrimitive.Close>

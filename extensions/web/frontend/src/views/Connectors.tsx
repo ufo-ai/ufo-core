@@ -26,6 +26,7 @@ import {
 import { DataTable } from "@/kernel/table";
 import { day } from "@/lib/moments";
 import { BASE, postIntent } from "@/lib/api";
+import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 
@@ -33,6 +34,7 @@ type Connection = {
   provider: string;
   account_id: string | null;
   owner_email: string | null;
+  own: boolean;
   shared: boolean;
   connected_at: string;
   grant: string;
@@ -95,6 +97,7 @@ function ConnectorList({
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [watching, setWatching] = useState<string | null>(null);
+  const viewer = useViewer();
   const state = usePanelRead<ConnectionsPayload>("/agents/" + agent.id + "/connections", reloads);
   const source = useRef<EventSource | null>(null);
 
@@ -214,11 +217,11 @@ function ConnectorList({
                 <>
                   <Td>{entry.provider}</Td>
                   <Td>{entry.account_id ?? "—"}</Td>
-                  <Td>{entry.owner_email ?? "—"}</Td>
-                  <Td>{entry.shared ? "Shared" : "Private"}</Td>
+                  <Td>{ownerLabel(entry.owner_email, viewer)}</Td>
+                  <Td>{entry.shared ? "Workspace" : "Only you"}</Td>
                   <Td>{day(entry.connected_at)}</Td>
                   <Td>
-                    {entry.owner_email === null ? null : (
+                    {entry.own ? (
                       <div className="flex flex-wrap gap-xs">
                         <Button
                           variant="row"
@@ -249,7 +252,7 @@ function ConnectorList({
                           }
                         />
                       </div>
-                    )}
+                    ) : null}
                   </Td>
                 </>
               )}

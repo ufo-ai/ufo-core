@@ -23,6 +23,7 @@ export function CardGrid<Row>({
   primary,
   status,
   body,
+  meta,
   action,
   open,
 }: {
@@ -32,6 +33,7 @@ export function CardGrid<Row>({
   primary: (row: Row) => ReactNode;
   status?: (row: Row) => ReactNode;
   body?: (row: Row) => ReactNode;
+  meta?: (row: Row) => ReactNode;
   action?: (row: Row) => ReactNode;
   open?: (row: Row) => (() => void) | null;
 }) {
@@ -39,6 +41,7 @@ export function CardGrid<Row>({
     <ul className="m-0 grid list-none grid-cols-2 gap-lg p-0 max-narrow:grid-cols-1">
       {rows.map((row) => {
         const said = body?.(row);
+        const from = meta?.(row);
         const act = action?.(row);
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
@@ -81,6 +84,14 @@ export function CardGrid<Row>({
                   className="m-0 mt-sm line-clamp-2 text-small opacity-(--muted-soft)"
                 >
                   {said}
+                </p>
+              ) : null}
+              {from ? (
+                <p
+                  data-part="meta"
+                  className="m-0 mt-sm truncate font-mono text-mono opacity-(--muted-soft)"
+                >
+                  {from}
                 </p>
               ) : null}
               {act ? <div className="mt-auto pt-lg">{act}</div> : null}

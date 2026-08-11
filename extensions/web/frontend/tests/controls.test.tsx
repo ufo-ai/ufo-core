@@ -16,7 +16,7 @@ import {
 import { Facts } from "@/components/ui/facts";
 import { Field, FieldGroup, Input } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
-import { Toast } from "@/components/ui/toast";
+import { SILENT, Toast } from "@/components/ui/toast";
 
 const VARIANTS = ["send", "outline", "row", "option"] as const;
 
@@ -145,7 +145,7 @@ test("a dialog's two footer controls measure the same, so neither reads as the l
 test("a toast states what applied and then takes itself away", async () => {
   vi.useFakeTimers();
   const done = vi.fn();
-  render(<Toast message="2 members added." onDone={done} />);
+  render(<Toast state={{ title: "2 members added." }} onDone={done} />);
   expect(screen.getByRole("status").textContent).toBe("2 members added.");
   await act(async () => {
     vi.runAllTimers();
@@ -155,8 +155,19 @@ test("a toast states what applied and then takes itself away", async () => {
 });
 
 test("a toast with nothing to say draws nothing", () => {
-  render(<Toast message="" onDone={vi.fn()} />);
+  render(<Toast state={SILENT} onDone={vi.fn()} />);
   expect(screen.queryByRole("status")).toBeNull();
+});
+
+test("a toast states why under what", () => {
+  const state = {
+    title: "release-notes did not open.",
+    description: "The skill directory answered 502.",
+  };
+  render(<Toast state={state} onDone={vi.fn()} />);
+  const toast = screen.getByRole("status");
+  expect(toast.textContent).toContain("release-notes did not open.");
+  expect(toast.textContent).toContain("The skill directory answered 502.");
 });
 
 test("a dialog's cancel leaves without firing the act", async () => {

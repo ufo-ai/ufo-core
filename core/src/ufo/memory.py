@@ -22,6 +22,7 @@ class MemoryMatch:
     text: str
     ref: ObjectRef | None = None
     created_at: datetime | None = None
+    subject: str | None = None
 
 
 class MemorySearchProvider(Protocol):

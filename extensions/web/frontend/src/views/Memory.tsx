@@ -25,6 +25,7 @@ import {
 } from "@/kernel/panel";
 import { day } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
+import { subjectLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 
 type Match = {
@@ -32,6 +33,7 @@ type Match = {
   kind: string;
   ref: string | null;
   created_at: string | null;
+  subject: string | null;
 };
 
 type MemoryPayload = {
@@ -84,7 +86,7 @@ export function Memory({
 
   const refresh = () => setReloads((count) => count + 1);
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
-  const columns = ["Memory", "Class", "Added"];
+  const columns = ["Memory", "Class", "Audience", "Added"];
 
   return (
     <>
@@ -170,6 +172,7 @@ export function Memory({
                         <tr key={index}>
                           <Td className="w-full">{match.text}</Td>
                           <Td className="whitespace-nowrap">{kindLabel(match.kind)}</Td>
+                          <Td className="whitespace-nowrap">{subjectLabel(match.subject)}</Td>
                           <Td className="whitespace-nowrap opacity-(--muted)">
                             {day(match.created_at) ?? "—"}
                           </Td>
