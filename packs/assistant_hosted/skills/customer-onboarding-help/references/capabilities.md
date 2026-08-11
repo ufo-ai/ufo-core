@@ -78,10 +78,8 @@ reminder.
 ## Files and artifacts
 
 The agent produces reports, spreadsheets, slide decks, PDFs, and documents, and shares them back as
-downloadable files. On Slack and in the terminal, a file the customer cannot see until it is shared
-is not delivered, so the agent always shares the artifact rather than naming a path. In the web
-portal, a conversation's Files tab also lists and downloads every file in its live workspace
-directly, whether shared or not.
+downloadable files. A file the customer cannot see until it is shared is not delivered, so the agent
+always shares the artifact rather than naming a path.
 
 A website is different: the agent hosts it and shares a permanent link instead of a file to
 download.

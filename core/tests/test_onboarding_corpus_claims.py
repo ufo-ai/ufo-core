@@ -34,7 +34,6 @@ SCHEDULING = "core/src/ufo/scheduling.py"
 BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
-WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 
 
 @dataclass(frozen=True)
@@ -234,13 +233,6 @@ CLAIMS = (
         phrase="A member speaking there still reaches their own private memory",
         source=TOOLS_CONTEXT,
         pattern=r"return subjects \| \{member_subject\(acting\)\}",
-    ),
-    Claim(
-        claim="the web portal's Files tab lists and downloads every file in the live workspace",
-        corpus="references/capabilities.md",
-        phrase="a conversation's Files tab also lists and downloads every file",
-        source=WEB_SURFACE,
-        pattern=r'FILES_SLOT = ConversationSlotProvider\(\n\s+id="files",\n\s+label="Files",',
     ),
     Claim(
         claim="the last seated admin cannot be demoted",
