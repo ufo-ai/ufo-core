@@ -40,8 +40,10 @@ The agent remembers durable facts across conversations. Memory is scoped three w
   shared one, so a conversation there is not indistinguishable from general workspace memory.
 
 An externally shared channel is sealed: a Slack Connect channel with an outside organization reads and
-writes only itself. Nothing said there reaches the workspace's own memory or a member's private
-memory, and nothing from either is recalled into it.
+writes only itself. Nothing said there reaches the workspace's shared memory, and nothing from shared
+memory is recalled into it. A member speaking there still reaches their own private memory — the seal
+isolates the channel from the workspace, not from the member — but what they say there stays in the
+channel rather than joining that private memory.
 
 No memory crosses between customer workspaces.
 
@@ -76,8 +78,10 @@ reminder.
 ## Files and artifacts
 
 The agent produces reports, spreadsheets, slide decks, PDFs, and documents, and shares them back as
-downloadable files. A file the customer cannot see until it is shared is not delivered, so the agent
-always shares the artifact rather than naming a path.
+downloadable files. On Slack and in the terminal, a file the customer cannot see until it is shared
+is not delivered, so the agent always shares the artifact rather than naming a path. In the web
+portal, a conversation's Files tab also lists and downloads every file in its live workspace
+directly, whether shared or not.
 
 A website is different: the agent hosts it and shares a permanent link instead of a file to
 download.
