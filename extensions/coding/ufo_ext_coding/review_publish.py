@@ -218,6 +218,16 @@ class CodeReviewWorkflow:
     transport: httpx.AsyncBaseTransport | None = None
 
     async def run(self, run_id: UUID, subagent_id: UUID) -> ToolResult:
+        """One delivered review published as this run's check.
+
+        Findings reach a pull request only from the child that checked this exact comparison out.
+        The run row names that child, written by the checkout itself rather than claimed by a
+        review, and `CodeReviewOutput` carries findings alone — so a result names no comparison and
+        pairing it with the wrong run is a wrong-target publication no downstream reader could
+        detect. A woken turn holds every child a fan-out delivered at once, which is exactly where
+        that pairing is available to get wrong. So a run another child reviewed refuses outright,
+        and an unattested result publishes the incomplete notice without carrying findings the
+        comparison never earned."""
         if self.ctx.ext is None:
             raise RuntimeError("code review requires the coding extension context")
         if self.ctx.subagents is None:
@@ -231,12 +241,16 @@ class CodeReviewWorkflow:
         reviewed = await review_run_for(self.ctx.ext, run_id, self.ctx.turn.conversation_id)
         if reviewed is None:
             raise RuntimeError("review run disappeared")
-        review = (
-            CodeReviewOutput()
-            if result.output is None
-            else CodeReviewOutput.model_validate(result.output)
-        )
         checkout_matches = reviewed.review_conversation_id == result.conversation_id
+        if not checkout_matches and reviewed.review_conversation_id is not None:
+            raise ValueError(
+                f"subagent {subagent_id} did not review the comparison of review run {run_id}"
+            )
+        review = (
+            CodeReviewOutput.model_validate(result.output)
+            if result.output is not None and checkout_matches
+            else CodeReviewOutput()
+        )
         incomplete = (
             result.terminal.status != "done"
             or result.terminal.incomplete_reason is not None

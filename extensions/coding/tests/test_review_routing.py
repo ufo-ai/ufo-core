@@ -8,7 +8,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_coding.github_app import GIT_SLOT
-from ufo_ext_coding.review_checkout import CodeReviewOutput
+from ufo_ext_coding.review_checkout import CodeReviewFinding, CodeReviewOutput
 from ufo_ext_coding.review_publish import UNFINISHED_NOTICE, CodeReviewWorkflow
 from ufo_ext_coding.review_routing import (
     GITHUB_PROVIDER,
@@ -48,6 +48,18 @@ MODEL = "claude-opus-4-8"
 ACCOUNT = "account-one"
 SOURCE_NAME = binding_name(GITHUB_PROVIDER, ACCOUNT, None)
 NOW = datetime(2026, 8, 5, 12, tzinfo=UTC)
+REVIEW_WITH_DEFECT = CodeReviewOutput(
+    findings=(
+        CodeReviewFinding(
+            path="core/other.py",
+            line=7,
+            title="A defect of the comparison nobody asked about",
+            trigger="any request",
+            failure="the wrong pull request is described",
+            impact="materially incorrect result or state for a supported workflow",
+        ),
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -486,6 +498,102 @@ async def test_publish_code_review_reads_the_exact_child_outcome(
     else:
         assert body["output"]["summary"].startswith("No severe defect found.")
     assert ("details_url" in body) is records_checkout
+
+
+async def _publish_fixture(
+    state: Workspace,
+    monkeypatch: pytest.MonkeyPatch,
+    reviewer: UUID,
+    output: CodeReviewOutput | None,
+) -> tuple[ToolContext, UUID, UUID, list[httpx.Request], httpx.MockTransport]:
+    async with workspace_tx() as connection:
+        run_id = (
+            await connection.execute(
+                sa.select(review_run.c.run_id).where(review_run.c.workspace_id == state.id)
+            )
+        ).scalar_one()
+    subagent_id = uuid4()
+
+    class ResultControl:
+        async def result(self, turn_id: UUID) -> SpawnResult:
+            return SpawnResult(
+                turn_id=turn_id,
+                conversation_id=reviewer,
+                output=output,
+                terminal=TerminalFrame(status="done", text="{}", incomplete_reason=None),
+                untrusted=True,
+            )
+
+        async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
+            raise AssertionError(turn_ids)
+
+        async def cancel(self, turn_id: UUID) -> SubagentStatus:
+            raise AssertionError(turn_id)
+
+        async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+            raise AssertionError((turn_id, text, dedup_key))
+
+    requests: list[httpx.Request] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(201, json={"id": 91})
+
+    monkeypatch.setenv(GIT_SLOT.upper(), "secret")
+    context = replace(
+        _tool_context(state),
+        subagents=ResultControl(),
+        ext=context_for("coding", frozenset({GIT_SLOT})),
+        public_base_url="https://app.example.com",
+    )
+    return context, run_id, subagent_id, requests, httpx.MockTransport(github)
+
+
+async def test_publish_refuses_a_child_that_reviewed_another_comparison(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await _workspace()
+    await _activate(state)
+    await _route(state, _hook_context(state), _change(state, revision=1))
+    reviewed_by = await _reviewer_conversation(state)
+    other = await _reviewer_conversation(state)
+    with ws(state.id):
+        await record_review_conversation(
+            context_for("coding", frozenset({GIT_SLOT})),
+            ReviewTarget(
+                repository="metalcraftai/ufo",
+                pull_request_number=1237,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+            ),
+            reviewed_by,
+        )
+    context, run_id, subagent_id, requests, transport = await _publish_fixture(
+        state, monkeypatch, other, REVIEW_WITH_DEFECT
+    )
+    with ws(state.id), pytest.raises(ValueError, match=str(subagent_id)):
+        await CodeReviewWorkflow(context, transport).run(run_id, subagent_id)
+    assert requests == []
+
+
+async def test_publish_carries_no_findings_the_comparison_never_earned(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = await _workspace()
+    await _activate(state)
+    await _route(state, _hook_context(state), _change(state, revision=1))
+    reviewer = await _reviewer_conversation(state)
+    context, run_id, subagent_id, requests, transport = await _publish_fixture(
+        state, monkeypatch, reviewer, REVIEW_WITH_DEFECT
+    )
+    with ws(state.id):
+        await CodeReviewWorkflow(context, transport).run(run_id, subagent_id)
+    body = json.loads(requests[1].content)
+    assert body["conclusion"] == "action_required"
+    assert body["output"]["summary"] == UNFINISHED_NOTICE
+    assert REVIEW_WITH_DEFECT.findings[0].title not in body["output"]["summary"]
 
 
 async def test_review_run_refuses_another_workspaces_turn(db: None) -> None:

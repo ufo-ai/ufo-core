@@ -17,9 +17,7 @@ the result.
 One pass takes a parent conversation's whole outstanding set together, so a fan-out that lands
 between two ticks folds into one woken turn rather than one per child. A conversation another
 delivery woke inside `RESULT_DELIVERY_COOLDOWN_SECONDS` is skipped, its children left outstanding
-for the next tick: that is the bound on a woken turn spawning children that wake it again. The
-interval is a standing guess until it is measured against a real fan-out — too short and a spawn
-chain advances at the tick rate, too long and a late child sits delivered-to-nobody for no reason.
+for the next tick: that is the bound on a woken turn spawning children that wake it again.
 """
 
 from collections.abc import Callable
