@@ -778,8 +778,10 @@ SubagentRuns = dict[str, list[SubagentNode]]
 
 def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
     """A subagent's own work in the order it happened — the tools and skills it dispatched and the
-    text it wrote between them. Its answer is the terminal's, not the last message here: the finish
-    call that carries it never reaches the transcript."""
+    text it wrote between them. Only a round that called a tool is stored as blocks, and work is
+    read from blocks, so the plain text a run ends on is not work here: the prose a stopped child is
+    force-finished over, and the finish payload the transcript closes with, are both string content.
+    Its answer is the terminal's."""
     active = {
         block.tool_use_id
         for message in messages

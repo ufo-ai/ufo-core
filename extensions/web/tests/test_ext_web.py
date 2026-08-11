@@ -93,6 +93,7 @@ from ufo.grants import (
 from ufo.hub import InProcessHub, LiveFrame, SkillLoad, Terminal, ToolCall
 from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.loop import queue as loop_queue
+from ufo.loop.engine import FINISH_PROMPT
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.loop.transcript import Transcript
 from ufo.members import ADD_MEMBER_GATE
@@ -267,8 +268,7 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
 
 
 def test_subagent_activity_keeps_the_text_a_run_wrote_between_its_calls() -> None:
-    """A subagent's own screen is its work in order — what it said, then what it did. Its answer
-    is not here: the finish call carrying it returns before the round reaches the transcript."""
+    """A subagent's own screen is its work in order — what it said, then what it did."""
     events = _subagent_activity(
         (
             Message(role="user", content="{}"),
@@ -296,6 +296,44 @@ def test_subagent_activity_keeps_the_text_a_run_wrote_between_its_calls() -> Non
             "description": "",
         },
     ]
+
+
+FORCE_FINISHED_PROSE = "The filing deadline is March 31."
+FORCE_FINISHED_PAYLOAD = json.dumps({"result": FORCE_FINISHED_PROSE})
+FORCE_FINISHED_RUN = (
+    Message(role="user", content='{"task": "find the deadline"}'),
+    Message(
+        role="assistant",
+        content=(ToolUseBlock(id="call-1", name="fetch_url", input={"url": "https://x/y"}),),
+    ),
+    Message(
+        role="user",
+        content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+    ),
+    Message(role="assistant", content=FORCE_FINISHED_PROSE),
+    Message(role="user", content=FINISH_PROMPT),
+    Message(role="assistant", content=FORCE_FINISHED_PAYLOAD),
+)
+
+
+def test_a_force_finished_run_states_its_prose_once() -> None:
+    """A child that stops on prose is force-finished over it, so the engine appends that prose to
+    the transcript and `persist_transcript` closes with the finish payload — the same words land
+    durably twice. Work is read from blocks and both are string content, so the tree states the
+    call it made and the answer states the prose, each exactly once."""
+    events = _subagent_activity(FORCE_FINISHED_RUN)
+    output = _subagent_output(TerminalFrame(status="done", text=FORCE_FINISHED_PAYLOAD))
+
+    assert events == [
+        {
+            "kind": "tool",
+            "name": "fetch_url",
+            "preview": '{"url":"https://x/y"}',
+            "description": "",
+        }
+    ]
+    assert output == FORCE_FINISHED_PROSE
+    assert [event for event in events if event.get("text") == FORCE_FINISHED_PROSE] == []
 
 
 def test_subagent_output_reads_the_fields_a_run_wrote_never_the_json_carrying_them() -> None:
