@@ -27,7 +27,9 @@ from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
 from ufo.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
+    CONTENT_SECURITY_POLICY,
     FOREIGN_ORIGIN,
+    FRAME_ANCESTORS_DIRECTIVE,
     INGRESS_SESSION_COOKIE,
     INGRESS_SESSION_TTL_SECONDS,
     LINK_NOT_VALID,
@@ -40,6 +42,7 @@ from ufo.ingress_serve import (
     WRONG_SITE,
     IngressServe,
     ingress_base_host,
+    ingress_frame_ancestor,
     upstream_client,
 )
 from ufo.sandbox.ingress_host import site_label
@@ -64,6 +67,9 @@ from ufo.schema import tables
 
 BACKEND = "stub"
 BASE_HOST = "sites.example.test"
+APP_ORIGIN = "https://app.example.test"
+"""Where the frame that reads a site lives — the origin of `[connect] public_base_url`, which is a
+different host from `BASE_HOST` on every deploy."""
 SECRET = "s3cret"
 VIEWER_DEFAULT_HEADERS = ("accept", "accept-encoding", "user-agent")
 """What httpx sends of its own accord, so a test can tell a viewer's header from a fabricated one.
@@ -269,7 +275,13 @@ async def _open(
 def _server(carrier: Carrier, upstream: httpx.AsyncClient) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
     protocol it fakes stops standing in for the dependency, and mypy is what catches the drift."""
-    return IngressServe(backend=BACKEND, base_host=BASE_HOST, carrier=carrier, client=upstream)
+    return IngressServe(
+        backend=BACKEND,
+        base_host=BASE_HOST,
+        carrier=carrier,
+        client=upstream,
+        frame_ancestor=APP_ORIGIN,
+    )
 
 
 @pytest.fixture
@@ -679,6 +691,54 @@ async def test_a_nameless_cookie_cannot_smuggle_a_reserved_name(db, ingress) -> 
     assert got.headers.get_list("set-cookie") == ["a=1", "b=2"]
 
 
+def _framers(response: httpx.Response) -> list[str]:
+    """Every `frame-ancestors` the response relays, across all of its policies. A list rather than a
+    lookup because the count is the assertion: several `Content-Security-Policy` headers combine
+    restrictively, so a second directive anywhere among them narrows the frame our own names."""
+    return [
+        directive.strip()[len(FRAME_ANCESTORS_DIRECTIVE) :].strip()
+        for policy in response.headers.get_list(CONTENT_SECURITY_POLICY)
+        for directive in policy.split(";")
+        if directive.strip().split()[:1] == [FRAME_ANCESTORS_DIRECTIVE]
+    ]
+
+
+async def test_a_site_that_says_nothing_about_framing_is_still_only_framed_by_the_app(
+    db, ingress
+) -> None:
+    """The majority case, and the one framing cannot be left to a site for: a site sends no framing
+    header at all, and every site label shares one registrable domain with every other — so site A
+    frames site B and the viewer's session cookie for B rides along, both sites being agent-authored
+    code in the same workspace. Our own `frame-ancestors` is relayed whatever the site said, once,
+    so the app's frame is the only page that can embed a site."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}/index.html")
+    assert got.status_code == 200
+    assert _framers(got) == [APP_ORIGIN]
+
+
+async def test_a_sites_own_framing_directive_is_replaced_not_added_to(db, ingress) -> None:
+    """A site's directive is cut and ours put in its place, rather than both being relayed: policies
+    combine restrictively, so a surviving `frame-ancestors 'none'` alongside ours would refuse the
+    app's own frame exactly as it does today."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}{REFUSE_FRAMING_PATH}")
+    assert got.status_code == 200
+    assert _framers(got) == [APP_ORIGIN]
+
+
+def test_the_frame_ancestor_is_an_origin_and_nothing_frames_a_site_without_one() -> None:
+    """An origin, not the whole configured URL: a path in `frame-ancestors` is matched by the
+    browser and would name a source no page has. Unset, `'none'` — there is no frame to allow, and
+    unset is not a reason to permit what a configured base would forbid."""
+    assert ingress_frame_ancestor("https://app.example/chat?c=1") == "https://app.example"
+    assert ingress_frame_ancestor("http://localhost:8710/") == "http://localhost:8710"
+    assert ingress_frame_ancestor(None) == "'none'"
+    assert ingress_frame_ancestor("") == "'none'"
+
+
 async def test_a_site_cannot_refuse_to_be_framed(db, ingress) -> None:
     """A site is read inside the frame at the app origin, and that frame is the only page which
     embeds one — so who may frame a site is core's answer, not the site's. `X-Frame-Options` and a
@@ -695,19 +755,21 @@ async def test_a_site_cannot_refuse_to_be_framed(db, ingress) -> None:
     got = await ingress.get(f"{_origin(conversation_id)}{REFUSE_FRAMING_PATH}")
     assert got.status_code == 200
     assert "x-frame-options" not in got.headers
-    assert got.headers["content-security-policy"] == REFUSED_POLICY_KEPT
+    assert REFUSED_POLICY_KEPT in got.headers.get_list(CONTENT_SECURITY_POLICY)
     assert got.headers["content-security-policy-report-only"] == REPORT_ONLY_POLICY
 
 
 async def test_a_policy_of_nothing_but_framing_is_dropped_whole(db, ingress) -> None:
     """Removing the only directive leaves an empty policy, and an empty `Content-Security-Policy` is
-    not a permissive one — a browser reads it as a policy that allows nothing. The header goes
-    instead of being relayed blank."""
+    not a permissive one — a browser reads it as a policy that allows nothing. The site's emptied
+    policy is dropped instead of being relayed blank, so the only one on the response is ours."""
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     await _open(ingress, workspace_id, conversation_id)
     got = await ingress.get(f"{_origin(conversation_id)}{FRAMING_ONLY_PATH}")
     assert got.status_code == 200
-    assert "content-security-policy" not in got.headers
+    assert got.headers.get_list(CONTENT_SECURITY_POLICY) == [
+        f"{FRAME_ANCESTORS_DIRECTIVE} {APP_ORIGIN}"
+    ]
 
 
 async def test_a_tls_target_is_dialed_over_https(db, origin_port, monkeypatch) -> None:
@@ -1272,8 +1334,9 @@ async def test_a_socket_to_a_host_naming_no_site_is_refused(
 async def test_a_socket_to_a_site_whose_sandbox_is_gone_is_refused(
     db, socket_ingress: int, socket_origin: _SocketOrigin
 ) -> None:
-    """The reaper clears `sandbox_handle`, and then there is nothing to dial. The socket says so
-    with the proxy's own 503 rather than accepting a connection it cannot relay."""
+    """A conversation row holding no `sandbox_handle` resolves to no sandbox, and there is nothing
+    to dial. The socket says so with the proxy's own 503 rather than accepting a connection it
+    cannot relay, and the site's own server never sees a handshake."""
     workspace_id, conversation_id = await _seed_conversation(None)
     with pytest.raises(InvalidStatus) as refused:
         async with _socket(

@@ -204,6 +204,18 @@ class IngressServe:
     base_host: str
     carrier: Carrier
     client: httpx.AsyncClient
+    frame_ancestor: str
+    """The one source expression a hosted site may be framed by, relayed on every proxied response
+    as a `frame-ancestors` of ours. Framing is core's invariant rather than an accident of what each
+    agent's server emitted: `_open` binds the session `SameSite=Lax`, so a cross-site framer already
+    gets no cookie and lands on 403, but every site label shares one registrable domain — so without
+    this, site A frames site B and the viewer's session cookie for B rides along, and both sites are
+    agent-authored code in the same workspace.
+
+    Carried as our own header rather than appended to the origin's: a site commonly sends no policy
+    at all, which is the case this exists for, and several policies combine restrictively — so one
+    header of ours binds whatever the site said, and says it exactly once however many the site
+    sent."""
 
     def app(self) -> FastAPI:
         """The view path and everything under it is the ingress's, on every method the proxy serves
@@ -383,6 +395,9 @@ class IngressServe:
                     background=BackgroundTask(upstream.aclose),
                 )
                 response.headers["cache-control"] = UNCACHEABLE
+                response.headers[CONTENT_SECURITY_POLICY] = (
+                    f"{FRAME_ANCESTORS_DIRECTIVE} {self.frame_ancestor}"
+                )
                 for name, value in upstream.headers.multi_items():
                     lowered = name.lower()
                     if lowered in ORIGIN_RESPONSE_DROPPED_HEADERS:
@@ -667,6 +682,17 @@ def ingress_base_host(configured: str | None) -> str:
     return host
 
 
+def ingress_frame_ancestor(configured: str | None) -> str:
+    """The origin of `[connect] public_base_url` — scheme, host and port, never its path — which is
+    where the frame that reads a hosted site lives. `'none'` when unset, since then no frame exists
+    and nothing may embed a site: unset is not a reason to allow what a set base would forbid."""
+    base = urlsplit(configured or "")
+    if not base.scheme or not base.hostname:
+        return "'none'"
+    port = f":{base.port}" if base.port else ""
+    return f"{base.scheme}://{base.hostname}{port}"
+
+
 def upstream_client() -> httpx.AsyncClient:
     """The one client every site's origin is dialed through, bounded and cookie-blind.
 
@@ -705,6 +731,7 @@ def run() -> None:
         base_host=ingress_base_host(config.sandbox.ingress_public_url),
         carrier=select_carrier(config, manifests)[0],
         client=upstream_client(),
+        frame_ancestor=ingress_frame_ancestor(config.connect.public_base_url),
     )
     log("ingress.starting", port=config.sandbox.ingress_port)
     uvicorn.run(
