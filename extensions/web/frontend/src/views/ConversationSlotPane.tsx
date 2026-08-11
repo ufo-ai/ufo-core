@@ -432,7 +432,9 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
           <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
             Preview
           </summary>
-          <div className="mt-sm">{opened ? <ArtifactText url={textUrl} /> : null}</div>
+          <div className="mt-sm">
+            {opened ? <ArtifactText url={textUrl} mediaType={artifact.media_type} /> : null}
+          </div>
         </details>
       ) : null}
     </article>

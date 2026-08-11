@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
 
+import { Markdown } from "@/lib/markdown";
 import { formatSize } from "@/lib/size";
 
 const ARTIFACT_TEXT_BYTES = 64 * 1024;
+const MARKDOWN_MEDIA_TYPE = "text/markdown";
 
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
 }
 
-export function ArtifactText({ url }: { url: string | null }) {
+/** A shared text file, read to the fold. Markdown renders as the document it is — the same
+ *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
+ *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
+export function ArtifactText({ url, mediaType }: { url: string | null; mediaType: string }) {
   const [body, setBody] = useState<string | null>(null);
   const [bounded, setBounded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -58,9 +63,15 @@ export function ArtifactText({ url }: { url: string | null }) {
   if (body === null) return <div>Loading…</div>;
   return (
     <>
-      <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
-        {body}
-      </pre>
+      {mediaType === MARKDOWN_MEDIA_TYPE ? (
+        <div className="max-h-(--media-tall) overflow-y-auto rounded-panel bg-fill-subtle p-lg">
+          <Markdown text={body} />
+        </div>
+      ) : (
+        <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
+          {body}
+        </pre>
+      )}
       {bounded ? (
         <div className="font-mono text-small opacity-(--muted)">
           First {formatSize(ARTIFACT_TEXT_BYTES)} shown.

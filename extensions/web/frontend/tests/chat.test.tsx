@@ -554,6 +554,50 @@ test("a text artifact reads its bounded body into the slot and a binary one offe
   await userEvent.click(screen.getByText("Preview"));
   expect(await screen.findByText(/The number moved\./)).toBeTruthy();
   expect(bodyReads).toBe(1);
+  // Markdown reads as the document it is: the heading is a heading, not a line beginning with #.
+  const heading = await screen.findByRole("heading", { name: "Findings" });
+  expect(heading.tagName).toBe("H1");
+  expect(screen.queryByText(/# Findings/)).toBeNull();
+});
+
+test("a plain text artifact keeps its characters instead of being read as markdown", async () => {
+  const notes = "https://ufo.example/artifacts/notes.txt?token=signed";
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({
+        type: "artifacts",
+        artifacts: [
+          {
+            filename: "notes.txt",
+            subject: null,
+            media_type: "text/plain",
+            size_bytes: 32,
+            created_at: "2026-08-06T12:00:00Z",
+            url: notes,
+            preview: null,
+          },
+        ],
+        truncated: false,
+      }),
+    [notes]: () => new Response("# Findings\n\n* not a list item"),
+    ...transcript(),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
+        ],
+      }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
+  await userEvent.click(await screen.findByText("Preview"));
+  // A .txt means the characters it holds: no heading is made of its '#', no list of its '*'.
+  const preformatted = await screen.findByText(/# Findings/);
+  expect(preformatted.tagName).toBe("PRE");
+  expect(preformatted.textContent).toContain("* not a list item");
+  expect(document.querySelector("aside h1")).toBeNull();
+  expect(document.querySelector("aside li")).toBeNull();
 });
 
 test("tasks slot renders durable checklist progress and task status", async () => {

@@ -85,7 +85,7 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       {isImage(entry) ? (
         <FullImage entry={entry} />
       ) : isText(entry) ? (
-        <ArtifactText url={entry.url} />
+        <ArtifactText url={entry.url} mediaType={entry.media_type} />
       ) : (
         <div className="font-mono text-small opacity-(--muted)">
           No preview for this file type. Download it to open it.
