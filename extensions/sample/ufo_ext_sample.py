@@ -113,7 +113,8 @@ from ufo.sdk.search import (
     SearchQuery,
     SearchResults,
 )
-from ufo.sdk.sources import SHARED_SUBJECT, Page, SourceAuth, SyncResult
+from ufo.sdk.sources import Page, SourceAuth, SyncResult
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 

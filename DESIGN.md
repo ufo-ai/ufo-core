@@ -227,8 +227,10 @@ A wire identifier is never a member's word. The kind the wire calls `scheduled_t
 its screens as `Scheduled` — the sidebar button and the agent tab the member pressed to arrive, the
 two differing in scope and not in name — and names itself in a sentence as `scheduled task`. An
 object screen's own copy is written around the
-singular, so no screen has to guess a plural: `No scheduled task has been created yet.`,
-`No scheduled task matches this search.`
+singular, so no screen has to guess a plural: `No scheduled task is visible to you.`,
+`No scheduled task matches this search.` The blank states what the member can see, never that the
+record does not exist: every object index answers through its kind's visibility gate, so a screen
+saying nothing has been created yet is a screen guessing at rows it was never shown.
 
 An index read across every agent states the owner on the row; one read in a single namespace does
 not, because the pane already named it. So the Agent column appears only in the section, second and

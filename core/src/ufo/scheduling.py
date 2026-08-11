@@ -9,7 +9,7 @@ partition due work. Cron parsing stays in the scheduled-tasks extension."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -51,6 +51,17 @@ class ScheduledTask:
     created_at: datetime
     updated_at: datetime
     created_by_member_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class ListedTask:
+    """One scheduled task beside the disclosure audience of the conversation it reports into — the
+    pair every member-facing read decides visibility from, since who may see a task is a fact of
+    where it reports and not of the task row. A fire reads `ScheduledTask` alone, so only a read
+    that must answer for a member pays for the join."""
+
+    task: ScheduledTask
+    audience: str
 
 
 class ScheduleInvoker(Protocol):
@@ -531,19 +542,19 @@ class ScheduleStore:
         if deleted.rowcount == 0:
             raise ValueError(f"scheduled task {expected.name!r} changed while cancelling")
 
-    async def list(
+    def _listing(
         self,
+        selected: tuple[sa.ColumnElement[Any], ...],
         *,
-        conversation_id: UUID | None = None,
-        names: tuple[str, ...] | None = None,
-        visible_to_member_id: UUID | None = None,
-        include_all_owners: bool = True,
-        limit: int | None = None,
-    ) -> tuple[ScheduledTask, ...]:
-        agent_id = object_agent_id()
-        query = sa.select(*_COLUMNS).where(
+        conversation_id: UUID | None,
+        names: tuple[str, ...] | None,
+        visible_to_member_id: UUID | None,
+        include_all_owners: bool,
+        limit: int | None,
+    ) -> sa.Select[Any]:
+        query = sa.select(*selected).where(
             tables.scheduled_task.c.workspace_id == self.workspace_id,
-            tables.scheduled_task.c.agent_id == agent_id,
+            tables.scheduled_task.c.agent_id == object_agent_id(),
             tables.scheduled_task.c.schedule != ONE_TIME_SCHEDULE,
         )
         if conversation_id is not None:
@@ -555,11 +566,57 @@ class ScheduleStore:
                 tables.scheduled_task.c.created_by_member_id == visible_to_member_id
             )
         query = query.order_by(tables.scheduled_task.c.name)
-        if limit is not None:
-            query = query.limit(limit)
+        return query if limit is None else query.limit(limit)
+
+    async def list(
+        self,
+        *,
+        conversation_id: UUID | None = None,
+        names: tuple[str, ...] | None = None,
+        visible_to_member_id: UUID | None = None,
+        include_all_owners: bool = True,
+        limit: int | None = None,
+    ) -> tuple[ScheduledTask, ...]:
+        query = self._listing(
+            _COLUMNS,
+            conversation_id=conversation_id,
+            names=names,
+            visible_to_member_id=visible_to_member_id,
+            include_all_owners=include_all_owners,
+            limit=limit,
+        )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).mappings().all()
         return tuple(_task(row) for row in rows)
+
+    async def list_reported(
+        self,
+        *,
+        conversation_id: UUID | None = None,
+        names: tuple[str, ...] | None = None,
+        visible_to_member_id: UUID | None = None,
+        include_all_owners: bool = True,
+        limit: int | None = None,
+    ) -> tuple[ListedTask, ...]:
+        """The same page as `list`, each task beside the audience of the conversation it reports
+        into — the read a member-facing surface answers visibility from. A fire never asks, so the
+        join is paid only where the answer is needed."""
+        query = self._listing(
+            (*_COLUMNS, tables.conversation.c.audience),
+            conversation_id=conversation_id,
+            names=names,
+            visible_to_member_id=visible_to_member_id,
+            include_all_owners=include_all_owners,
+            limit=limit,
+        ).select_from(
+            tables.scheduled_task.join(
+                tables.conversation,
+                tables.conversation.c.id == tables.scheduled_task.c.conversation_id,
+            )
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).mappings().all()
+        return tuple(ListedTask(task=_task(row), audience=row["audience"]) for row in rows)
 
     async def claim_due(
         self, now: datetime, lease_seconds: int, limit: int = CLAIM_BATCH_MAX_TASKS

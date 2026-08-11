@@ -33,7 +33,8 @@ from ufo.sdk.objects import (
     OwnedRow,
     object_page,
 )
-from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
+from ufo.sdk.scheduling import ListedTask, ScheduledTask, ScheduleStore
+from ufo.sdk.subjects import subject_shared
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
 from ufo_ext_scheduled_tasks.visibility import task_content_visible
@@ -131,14 +132,26 @@ def _summary(task: ScheduledTask) -> str:
     return f"{task.schedule} — {task.description or task.prompt}"[:SUMMARY_MAX]
 
 
+def _owner(listed: ListedTask) -> GeneratedObjectOwner:
+    """Who a task belongs to and who else may see it. A task is shared exactly as far as the
+    conversation it reports into is, so every surface listing the kind — the index, the section,
+    and a conversation's own slot — answers one question the same way."""
+    return GeneratedObjectOwner(
+        member_id=listed.task.created_by_member_id,
+        shared=subject_shared(listed.audience),
+        generation=listed.task.id,
+    )
+
+
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
-    """The kind's handlers over `ScheduleStore`: a task is private to the member who created it, so
-    only that member or a workspace admin sees and deletes it — the per-member visibility and
-    admin gate is the base's. This kind supplies the task rows, their specs and status, and the
-    create/update/cancel domain acts. Creation binds the applying turn's conversation and agent;
-    updates preserve both, so a later fire re-enters that conversation as that agent, acting on
-    behalf of the creator.
+    """The kind's handlers over `ScheduleStore`: a task is seen by whoever reads the conversation it
+    reports into, plus its creator and a workspace admin — the gate is the base's, and this kind
+    supplies only the `shared` fact it decides from. Deleting stays the creator's and an admin's,
+    so a member reading a shared task is never a member who can change it. This kind supplies the
+    task rows, their specs and status, and the create/update/cancel domain acts. Creation binds the
+    applying turn's conversation and agent; updates preserve both, so a later fire re-enters that
+    conversation as that agent, acting on behalf of the creator.
 
     Content editing is narrower than cadence management: an update keeps the original creator, so
     an admin may change schedule or expiry but never the prompt or description that fires as that
@@ -184,19 +197,17 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         admin: bool,
         limit: int,
     ) -> tuple[ConversationObjectGrant, ...]:
-        tasks = await _require_scheduler(ext).list(
-            conversation_id=conversation_id,
-            visible_to_member_id=member_id,
-            include_all_owners=admin,
-            limit=limit,
+        tasks = await _require_scheduler(ext).list_reported(
+            conversation_id=conversation_id, limit=limit
         )
         return tuple(
             ConversationObjectGrant(
-                name=task.name,
-                generation=task.id,
-                content_visible=task_content_visible(task, member_id),
+                name=listed.task.name,
+                generation=listed.task.id,
+                content_visible=task_content_visible(listed, member_id),
             )
-            for task in tasks
+            for listed in tasks
+            if self._visible(_owner(listed), member_id, admin)
         )
 
     async def _member_rows(
@@ -213,24 +224,22 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
-                name=task.name,
+                name=listed.task.name,
                 summary=(
-                    _summary(task)
-                    if task_content_visible(task, member_id)
-                    else f"{task.schedule} — private member task"
+                    _summary(listed.task)
+                    if task_content_visible(listed, member_id)
+                    else f"{listed.task.schedule} — private member task"
                 ),
-                owner=GeneratedObjectOwner(
-                    member_id=task.created_by_member_id,
-                    shared=False,
-                    generation=task.id,
-                ),
+                owner=_owner(listed),
                 fields={
-                    "conversation": str(task.conversation_id),
-                    "next_run_at": task.next_run_at.isoformat(),
-                    "paused": task.paused,
+                    "conversation": str(listed.task.conversation_id),
+                    "next_run_at": listed.task.next_run_at.isoformat(),
+                    "paused": listed.task.paused,
                 },
             )
-            for task in await _require_scheduler(ext).list(conversation_id=conversation_id)
+            for listed in await _require_scheduler(ext).list_reported(
+                conversation_id=conversation_id
+            )
         )
 
     async def _member_object(
@@ -241,9 +250,10 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         *,
         member_id: UUID | None,
     ) -> ObjectDetail[ScheduledTaskSpec] | None:
-        task = await self._find(ext, name)
-        if task is None or task.id != owner.generation:
+        listed = await self._find(ext, name)
+        if listed is None or listed.task.id != owner.generation:
             return None
+        task = listed.task
         return ObjectDetail(
             spec=ScheduledTaskSpec(
                 schedule=task.schedule,
@@ -260,15 +270,16 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
                 ),
             ),
-            spec_visible=task_content_visible(task, member_id),
+            spec_visible=task_content_visible(listed, member_id),
         )
 
     async def _status(
         self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
     ) -> dict[str, JsonValue] | None:
-        task = await self._find(ctx.ext, name)
-        if task is None or task.id != owner.generation:
+        listed = await self._find(ctx.ext, name)
+        if listed is None or listed.task.id != owner.generation:
             return None
+        task = listed.task
         inspection = await _require_scheduler(ctx.ext).inspect(task)
         if inspection is None:
             return None
@@ -278,7 +289,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if task_content_visible(task, ctx.acting_member_id):
+            if task_content_visible(listed, ctx.acting_member_id):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -308,7 +319,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         acting_member = ctx.acting_member_id
         if acting_member is None:
             raise AdminRequired(SCHEDULE_REQUESTER_GATE)
-        existing = await self._find(ctx.ext, name)
+        found = await self._find(ctx.ext, name)
+        existing = None if found is None else found.task
         scheduler = _require_scheduler(ctx.ext)
         if owner is None:
             if existing is not None:
@@ -350,14 +362,19 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
-        task = await self._find(ctx.ext, name)
-        if task is None or task.id != owner.generation:
+        listed = await self._find(ctx.ext, name)
+        if listed is None or listed.task.id != owner.generation:
             raise ValueError(f"scheduled task {name!r} changed while cancelling")
-        await _require_scheduler(ctx.ext).cancel(task)
+        await _require_scheduler(ctx.ext).cancel(listed.task)
 
-    async def _find(self, ext: ExtensionContext | None, name: str) -> ScheduledTask | None:
+    async def _find(self, ext: ExtensionContext | None, name: str) -> ListedTask | None:
         return next(
-            (task for task in await _require_scheduler(ext).list() if task.name == name), None
+            (
+                listed
+                for listed in await _require_scheduler(ext).list_reported()
+                if listed.task.name == name
+            ),
+            None,
         )
 
 
@@ -365,10 +382,13 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     name=SCHEDULED_TASK_KIND,
     description=(
         "A durable recurring task: a 5-field UTC cron schedule that re-invokes the agent with "
-        "the spec's prompt, reporting into the conversation that created it. Private to its "
-        "creator — the creator may read, update, or delete it; an admin may list its management "
-        "metadata, change cadence, expiry, or pause, or delete it without reading its content; "
-        "a fire acts on the creator's behalf. Applying `paused: true` stops fires without losing "
+        "the spec's prompt, reporting into the conversation that created it. Seen by whoever "
+        "reads that conversation — a task reporting into a workspace-shared one is read by every "
+        "member, a task reporting into one member's own conversation by that member alone. Only "
+        "the creator may update or delete it; an admin may list any task's management metadata, "
+        "change cadence, expiry, or pause, or delete it, and reads the content of one whose "
+        "conversation is not theirs only where that conversation is shared; a fire acts on the "
+        "creator's behalf. Applying `paused: true` stops fires without losing "
         "the task; false resumes from the next cron fire. One-shot scheduling is not supported."
     ),
     guidance=(
@@ -376,10 +396,13 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "schedule and the task prompt. The platform materializes a locked-down recurring task "
         "that searches memory, then invokes you on that schedule in the conversation the task "
         "was created from; re-applying an existing name updates the definition in place and "
-        "never moves where it reports. A task is private to its creator: an admin may inspect or "
-        "change another member's cadence or expiry, or delete it, but cannot alter its prompt or "
-        "description. Other members "
-        "cannot see it. The main agent may name another agent only when updating that agent's "
+        "never moves where it reports. A task is as visible as the conversation it reports into: "
+        "one reporting into a shared conversation is listed and read by every member, one "
+        "reporting into a member's own conversation by that member alone, and a private or "
+        "externally-shared channel's tasks by nobody else at all. Seeing a task is not changing "
+        "it — only its creator may edit or delete it, and an admin may inspect or change another "
+        "member's cadence or expiry, or delete it, but cannot alter its prompt or "
+        "description. The main agent may name another agent only when updating that agent's "
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "

@@ -6969,6 +6969,10 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The slot answers the kind's own gate, so a task is as visible beside a thread as it is in
+    the index: in a shared conversation every member reads all three whole, because the fires
+    already post there for all of them, and one member's own conversation is not a slot anybody
+    else opens. Display fields stay bounded and one batched inspection serves each read."""
     client, workspace_id, agent_id = web
     creator_id, creator_token = await _seed_member(workspace_id, "task-owner@example.com")
     _viewer_id, viewer_token = await _seed_member(workspace_id, "task-viewer@example.com")
@@ -7074,7 +7078,7 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
         next(slot for slot in creator_inventory.json()["slots"] if slot["id"] == "automations")[
             "count"
         ]
-        == 2
+        == 3
     )
     assert batch_calls == 0
     creator = await client.get(
@@ -7090,11 +7094,11 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
     admin = await client.get(
         f"{base}/automations", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
-    assert batch_calls == 2
+    assert batch_calls == 3
 
     assert creator.status_code == 200
     creator_tasks = {task["name"]: task for task in creator.json()["automations"]}
-    assert set(creator_tasks) == {"bounded-output", "daily-brief"}
+    assert set(creator_tasks) == {"bounded-output", "daily-brief", "system-cleanup"}
     creator_task = creator_tasks["daily-brief"]
     assert creator_task["description"] == "Send the morning brief."
     assert creator_task["schedule"] == "0 9 * * *"
@@ -7110,27 +7114,59 @@ async def test_automations_slot_uses_the_scheduled_task_member_gate(
     assert bounded_task["latest_response"] == long_response[:400]
     assert creator.json()["truncated"] is True
     assert viewer.status_code == 200
-    assert viewer.json() == {"type": "automations", "automations": [], "truncated": False}
-    assert all(slot["id"] != "automations" for slot in viewer_inventory.json()["slots"])
+    viewer_tasks = {task["name"]: task for task in viewer.json()["automations"]}
+    assert set(viewer_tasks) == {"bounded-output", "daily-brief", "system-cleanup"}
+    assert viewer_tasks["daily-brief"]["description"] == "Send the morning brief."
+    assert viewer_tasks["daily-brief"]["latest_response"] == "ok"
+    assert "prompt" not in viewer_tasks["daily-brief"]
+    assert (
+        next(slot for slot in viewer_inventory.json()["slots"] if slot["id"] == "automations")[
+            "count"
+        ]
+        == 3
+    )
     assert admin.status_code == 200
     admin_tasks = {task["name"]: task for task in admin.json()["automations"]}
     assert set(admin_tasks) == {"bounded-output", "daily-brief", "system-cleanup"}
     admin_task = admin_tasks["daily-brief"]
     assert admin_task["name"] == "daily-brief"
-    assert admin_task["description"] is None
+    assert admin_task["description"] == "Send the morning brief."
     assert admin_task["schedule"] == "0 9 * * *"
     assert admin_task["paused"] is False
     assert admin_task["latest_status"] == "done"
-    assert admin_task["latest_response"] is None
+    assert admin_task["latest_response"] == "ok"
     assert "prompt" not in admin_task
     ownerless_task = admin_tasks["system-cleanup"]
     assert ownerless_task["description"] == "Clean expired system records."
     assert ownerless_task["latest_response"] == "ok"
     assert "prompt" not in ownerless_task
     admin_bounded = admin_tasks["bounded-output"]
-    assert admin_bounded["description"] is None
-    assert admin_bounded["latest_response"] is None
+    assert admin_bounded["description"] == long_description[:2_000]
+    assert admin_bounded["latest_response"] == long_response[:400]
     assert admin_bounded["schedule"] == long_schedule[:100]
+
+    private_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="automations-private",
+        audience=str(conversation_audience(creator_id)),
+        member_id=creator_id,
+    )
+    with ws(workspace_id), bind_agent(agent_id):
+        await ScheduleStore().create(
+            conversation_id=private_conversation,
+            name="private-cadence",
+            schedule="0 6 * * *",
+            prompt="Read private sources.",
+            description="The creator's own cadence.",
+            next_run_at=datetime(2026, 8, 11, 6, tzinfo=UTC),
+            created_by_member_id=creator_id,
+        )
+    private_base = (
+        f"/surface/web/agents/{agent_id}/conversations/{private_conversation}/slots/automations"
+    )
+    walled = await client.get(private_base, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"})
+    assert walled.status_code == 404
 
 
 async def test_conversation_reads_ride_the_same_gate(

@@ -26,7 +26,8 @@ from ufo.schema import tables
 from ufo.schema.records import SUBAGENT_SURFACE, Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.manifest import HookContext, PageChangeBatch
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, binding_name
+from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import ws

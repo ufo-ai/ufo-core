@@ -11,7 +11,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
-from ufo.sdk.sources import SHARED_SUBJECT, ConnectorSourceConfig, PageChange, binding_name
+from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
 
 GITHUB_PROVIDER = "github"

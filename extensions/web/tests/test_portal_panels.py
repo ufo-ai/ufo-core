@@ -31,6 +31,7 @@ from ufo_ext_web.surface import MAX_USAGE_WINDOW_SECONDS, MEMORY_RECENT_LIMIT
 
 from ufo.accounting import record_egress_request, record_sandbox_tokens, record_turn_usage
 from ufo.agent_scope import agent as bind_agent
+from ufo.audience import conversation_audience
 from ufo.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.credentials import CredentialStore
@@ -131,7 +132,9 @@ async def _grant(workspace_id: UUID, agent_id: UUID, email: str) -> None:
         )
 
 
-async def _seed_conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
+async def _seed_conversation(
+    workspace_id: UUID, agent_id: UUID, member_id: UUID | None = None
+) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -141,6 +144,8 @@ async def _seed_conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
                 agent_id=agent_id,
                 surface="web",
                 queue_key=uuid4().hex,
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -243,16 +248,17 @@ async def portal(db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
-    """The task index and detail carry exactly what the scheduled_task kind discloses: its creator
-    reads the whole spec, an admin reads the management row with its content elided (`spec` null,
-    the summary saying so), everyone else sees no row at all, and each read is walled by the agent
-    named on it."""
+    """The task index and detail carry exactly what the scheduled_task kind discloses: a task
+    reporting into a shared conversation is read whole by every member, since its replies land
+    there for all of them anyway; a task reporting into one member's own conversation is that
+    member's alone, reaching an admin as a management row with its content elided (`spec` null,
+    the summary saying so) and no one else at all. Each read is walled by the agent named on it."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
     with ws(workspace_id):
-        conversation_id = await _seed_conversation(workspace_id, agent_a)
+        conversation_id = await _seed_conversation(workspace_id, agent_a, creator_id)
         with bind_agent(agent_a):
             await ScheduleStore().create(
                 conversation_id,
@@ -316,6 +322,28 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
             headers=other_headers,
         )
     ).status_code == 404
+
+    with ws(workspace_id):
+        shared_conversation = await _seed_conversation(workspace_id, agent_a)
+        with bind_agent(agent_a):
+            await ScheduleStore().create(
+                shared_conversation,
+                "channel-digest",
+                "0 8 * * *",
+                "post the channel digest",
+                "channel digest",
+                NEXT_RUN,
+                created_by_member_id=creator_id,
+            )
+    shared_view = await client.get(index, headers=other_headers)
+    (shared_row,) = shared_view.json()["objects"]
+    assert shared_row["name"] == "channel-digest"
+    assert shared_row["summary"] == "0 8 * * * — channel digest"
+    read = await client.get(
+        f"/surface/web/objects/scheduled_task/channel-digest?agent={agent_a}", headers=other_headers
+    )
+    assert read.json()["spec"]["prompt"] == "post the channel digest"
+
     crossed = await client.get(
         f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=creator_headers
     )
@@ -334,7 +362,9 @@ async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> 
     agent the viewer's web audience holds, each row naming its own. An agent no grant reaches
     contributes nothing until it does, the merged page is ordered across agents rather than
     standing in agent blocks, and it carries no cursor — the kind mints one per agent, and there
-    is no single walk to continue."""
+    is no single walk to continue. A colleague who created none of them reads the same page: these
+    report into shared conversations, so the rows are no more private than the replies they post
+    there."""
     client, workspace_id, agent_a, agent_b = portal
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     with ws(workspace_id):
@@ -372,6 +402,15 @@ async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> 
     assert [row["name"] for row in descending.json()["objects"]] == ["daily-brief", "alpha-sweep"]
     searched = await client.get(index + "?q=sweep", headers=creator_headers)
     assert [row["name"] for row in searched.json()["objects"]] == ["alpha-sweep"]
+
+    _colleague_id, colleague_headers = await _seed_member(workspace_id, OTHER_EMAIL)
+    await _grant(workspace_id, agent_b, OTHER_EMAIL)
+    colleague = await client.get(index, headers=colleague_headers)
+    assert [row["name"] for row in colleague.json()["objects"]] == ["alpha-sweep", "daily-brief"]
+    assert [row["summary"] for row in colleague.json()["objects"]] == [
+        "0 3 * * * — alpha-sweep",
+        "0 9 * * * — daily-brief",
+    ]
 
     walking = await client.get(index + "?cursor=abc", headers=creator_headers)
     assert walking.status_code == 400

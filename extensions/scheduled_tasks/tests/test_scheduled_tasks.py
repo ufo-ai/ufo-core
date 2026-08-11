@@ -51,7 +51,12 @@ from ufo.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSu
 from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import (
+    SHARED_AUDIENCE,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
@@ -2451,9 +2456,9 @@ async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
 
 
 async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:
-    """A scheduled task is private to its creator: a stranger cannot read it, re-point it (the
-    re-point hijack), or delete it. An admin may inspect or delete, but only the creator may edit,
-    so the created_by identity cannot be reassigned."""
+    """A task reporting into one member's own conversation is that member's: a stranger cannot read
+    it, re-point it (the re-point hijack), or delete it. An admin may inspect or delete, but only
+    the creator may edit, so the created_by identity cannot be reassigned."""
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
     stranger = await _member(workspace_id, created_at=datetime(2027, 1, 2, tzinfo=UTC))
@@ -2519,6 +2524,83 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
     assert len(tasks) == 1
     assert tasks[0].prompt == "Check my oncology portal and summarize the biopsy result."
     assert tasks[0].created_by_member_id == creator
+
+
+async def test_a_task_reporting_into_a_shared_conversation_is_read_but_not_changed(
+    db: None,
+) -> None:
+    """A task reporting into a conversation the whole workspace reads is listed and read whole by
+    every member — its fires post there for all of them, so the schedule behind them is no secret.
+    Reading is not owning: the same member is refused the edit and the delete, and told who may."""
+    workspace_id, agent_id, _private_conversation = await _seed()
+    creator = await _member(workspace_id)
+    colleague = await _member(workspace_id)
+    shared_conversation, private_room, foreign_room = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        for conversation_id, queue_key, audience in (
+            (shared_conversation, "channel", str(SHARED_AUDIENCE)),
+            (private_room, "private-room", str(room_audience("slack", "C0PRIVATE"))),
+            (foreign_room, "foreign-room", str(foreign_room_audience("slack", "C0FOREIGN"))),
+        ):
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="slack",
+                    queue_key=queue_key,
+                    member_id=None,
+                    audience=audience,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    creator_ctx = replace(
+        _tool_ctx(workspace_id, shared_conversation, agent_id), speaker_member_id=creator
+    )
+    colleague_ctx = replace(creator_ctx, speaker_member_id=colleague)
+    apply = _object_tool("object_apply")
+    get = _object_tool("object_get")
+    listing = _object_tool("object_list")
+    delete = _object_tool("object_delete")
+
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            creator_ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "post the channel digest", "the digest"),
+        )
+        seen = json.loads(await _dispatch(listing, colleague_ctx, kind=SCHEDULED_TASK_KIND))
+        fetched = yaml.safe_load(
+            await _dispatch(get, colleague_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        )
+        with pytest.raises(AdminRequired, match="creator"):
+            await _dispatch(
+                apply,
+                colleague_ctx,
+                manifest=_task_manifest("digest", "0 17 * * 1", "hijacked"),
+            )
+        with pytest.raises(AdminRequired, match="creator or a workspace admin"):
+            await _dispatch(delete, colleague_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
+        for conversation_id, name in ((private_room, "room-sweep"), (foreign_room, "guest-sweep")):
+            await _dispatch(
+                apply,
+                replace(
+                    _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
+                ),
+                manifest=_task_manifest(name, DAILY_9AM, f"run {name}", name),
+            )
+        walled = json.loads(await _dispatch(listing, colleague_ctx, kind=SCHEDULED_TASK_KIND))
+        surviving = await ScheduleStore().list()
+
+    assert [row["name"] for row in seen["objects"]] == ["digest"]
+    assert [row["summary"] for row in seen["objects"]] == [f"{DAILY_9AM} — the digest"]
+    assert fetched["spec"]["prompt"] == "post the channel digest"
+    assert [row["name"] for row in walled["objects"]] == ["digest"]
+    assert {task.name for task in surviving} == {"digest", "room-sweep", "guest-sweep"}
+    assert [
+        (task.prompt, task.created_by_member_id) for task in surviving if task.name == "digest"
+    ] == [("post the channel digest", creator)]
 
 
 async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None) -> None:
@@ -3290,6 +3372,11 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.id == child_conversation)
+            .values(member_id=alice, audience=str(conversation_audience(alice)))
         )
         child_name = (
             await connection.execute(

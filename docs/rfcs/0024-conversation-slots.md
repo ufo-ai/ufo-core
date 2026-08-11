@@ -147,8 +147,10 @@ receives the same management metadata with another member's private description 
 omitted. Ownerless rows retain the object kind's existing admin-only visibility and full-content
 semantics. Every displayed row is fenced to its durable task id, so delete/recreate cannot replay a
 grant. Oversized display fields are truncated before validation and mark the payload truncated.
-Other members receive no row. The payload never carries the task prompt, owner identity, or proof
-metadata.
+Another member receives a row exactly when the conversation the task reports into is one they read,
+which is the same answer the object index gives — a task posting into a shared conversation is no
+more private than the fires it posts there, and one posting into a member's own conversation
+reaches nobody else. The payload never carries the task prompt, owner identity, or proof metadata.
 
 Exa is a search backend, not the Sources owner. Browser and connector outputs remain Files or
 Artifacts until they gain a distinct durable conversation record. Memory is not a slot because it

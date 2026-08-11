@@ -55,12 +55,11 @@ from ufo.sdk.objects import (
     VerbNotSupported,
 )
 from ufo.sdk.sources import (
-    SHARED_SUBJECT,
     ConnectorSourceConfig,
     PageChange,
     binding_name,
-    member_subject,
 )
+from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
@@ -224,7 +223,7 @@ class _Binding:
             streams=tuple(stream.name for stream in self.streams),
             account_id="" if self.account == DIRECT_ACCOUNT else self.account,
             base_url=self.base_url or "",
-            shared=self.subject == SHARED_SUBJECT,
+            shared=subject_shared(self.subject),
             subscribers=subscribers,
             backfill_days=self.backfill_days,
         )
@@ -458,7 +457,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                 summary=binding.summary(),
                 owner=ObjectOwner(
                     member_id=binding.owner_member_id,
-                    shared=binding.subject == SHARED_SUBJECT,
+                    shared=subject_shared(binding.subject),
                 ),
             )
             for binding in await _bindings_from_ext(_require_ext(ext))
@@ -489,7 +488,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         binding = await self._find(ctx.ext, name)
         if binding is None:
             return None
-        shared = binding.subject == SHARED_SUBJECT
+        shared = subject_shared(binding.subject)
         caller = ctx.turn.conversation_id.hex
         subscribers = await _subscribers_map(_require_ext(ctx.ext), name)
         status: dict[str, JsonValue] = {

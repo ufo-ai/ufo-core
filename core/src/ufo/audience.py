@@ -55,6 +55,14 @@ def parse_audience(value: str) -> Audience:
     return audience
 
 
+def readable_audiences(member_id: UUID) -> tuple[Audience, ...]:
+    """Every conversation audience whose content this member reads: the workspace-shared one and
+    their own. A room and an externally-shared channel are absent by construction — the workspace
+    holds no fact about who is in either — so this is the one definition every member-facing read
+    answers from, whether it lists conversations or the objects anchored to them."""
+    return (SHARED_AUDIENCE, conversation_audience(member_id))
+
+
 def audience_member(audience: Audience) -> UUID | None:
     parsed = parse_audience(audience)
     if not parsed.startswith(MEMBER_SUBJECT_PREFIX):

@@ -260,7 +260,7 @@ function ObjectIndex({
                 columns={columns}
                 rows={payload.objects}
                 rowKey={(row) => row.agent_id + "/" + row.name}
-                empty={"No " + noun(payload.kind) + " has been created yet."}
+                empty={"No " + noun(payload.kind) + " is visible to you."}
                 note={narrowing ? "No " + noun(payload.kind) + " matches this search." : undefined}
                 sort={{
                   by: orderBy,

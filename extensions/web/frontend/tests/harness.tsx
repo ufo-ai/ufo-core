@@ -182,7 +182,7 @@ export const CHAT_ROW = {
 
 export const json = (payload: unknown) => Response.json(payload);
 
-export const NO_TASKS = "No scheduled task has been created yet.";
+export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {

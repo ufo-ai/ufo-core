@@ -8,4 +8,5 @@ from ufo.audience import audience_subjects as audience_subjects
 from ufo.audience import conversation_audience as conversation_audience
 from ufo.audience import foreign_room_audience as foreign_room_audience
 from ufo.audience import parse_audience as parse_audience
+from ufo.audience import readable_audiences as readable_audiences
 from ufo.audience import room_audience as room_audience

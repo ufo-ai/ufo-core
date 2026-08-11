@@ -121,9 +121,3 @@ from ufo.sources.sync import (
 from ufo.sources.sync import (
     SyncResult as SyncResult,
 )
-from ufo.subjects import (
-    SHARED_SUBJECT as SHARED_SUBJECT,
-)
-from ufo.subjects import (
-    member_subject as member_subject,
-)

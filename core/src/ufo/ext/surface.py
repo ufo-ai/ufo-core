@@ -56,12 +56,12 @@ from ufo.artifact_token import (
     mint_artifact_token,
 )
 from ufo.audience import (
-    SHARED_AUDIENCE,
     Audience,
     audience_member,
     conversation_audience,
     narrow_audience,
     parse_audience,
+    readable_audiences,
 )
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
@@ -792,13 +792,6 @@ def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
     asking, and a fresh request (a rotation) seals differently and prompts anew."""
     digest = hashlib.sha256(sealed.encode()).hexdigest()[:32]
     return f"workspaces/{workspace_id}/credential_requests/{digest}/{slot}"
-
-
-def _readable_audience_values(member_id: UUID) -> tuple[str, ...]:
-    """The two conversation audiences whose content this member reads: the workspace-shared one and
-    their own. A room and an externally-shared channel are absent by construction — the one
-    definition `list_agent_conversations` and `readable_conversation` both answer from."""
-    return (str(SHARED_AUDIENCE), str(conversation_audience(member_id)))
 
 
 async def _main_agent(workspace_id: UUID) -> UUID:
@@ -2219,14 +2212,12 @@ class SurfaceContext:
         if conversation_id is not None:
             query = query.where(tables.conversation.c.id == conversation_id)
         if not admin:
-            query = query.where(
-                tables.conversation.c.audience.in_(_readable_audience_values(member_id))
-            )
+            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         if not rows:
             return ()
-        readable = _readable_audience_values(member_id)
+        readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
         openings = await self._conversation_openings(content)
         speakers = await self._conversation_speakers(content)
@@ -2371,7 +2362,7 @@ class SurfaceContext:
             ).one_or_none()
             if found is None:
                 return False
-            if found.audience in _readable_audience_values(member_id):
+            if found.audience in readable_audiences(member_id):
                 return True
             if not admin or audience_member(parse_audience(found.audience)) is None:
                 return False
@@ -2449,9 +2440,7 @@ class SurfaceContext:
             .limit(limit)
         )
         if not admin:
-            query = query.where(
-                tables.conversation.c.audience.in_(_readable_audience_values(member_id))
-            )
+            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return tuple(
@@ -2461,7 +2450,7 @@ class SurfaceContext:
                 member_email=row.email,
                 turn_count=row.turn_count,
                 last_turn_at=row.last_turn_at,
-                readable=row.audience in _readable_audience_values(member_id),
+                readable=row.audience in readable_audiences(member_id),
             )
             for row in rows
         )
