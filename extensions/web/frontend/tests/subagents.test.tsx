@@ -27,7 +27,7 @@ beforeEach(() => {
 });
 
 function portal(routes: Record<string, () => Response>) {
-  render(<App agents={[AGENT]} subagents={[RESEARCH, GENERAL]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[RESEARCH, GENERAL]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   return routes;
 }
 

@@ -38,7 +38,7 @@ beforeEach(() => {
 
 test("a disclosable row is the control, one shared with nobody is inert and says so", async () => {
   wire(conversations([PRIVATE, WALLED]));
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   expect(await disclosable()).toBeTruthy();
   expect(screen.getByText(/Not shared with you/)).toBeTruthy();
@@ -47,7 +47,7 @@ test("a disclosable row is the control, one shared with nobody is inert and says
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
 
@@ -69,7 +69,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
       return json({ applied: true, message: "Recorded." });
     },
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -96,7 +96,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
         release = resolve;
       }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -123,7 +123,7 @@ test("an acknowledgement in flight for one conversation never opens over another
       });
     },
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   const openers = await screen.findAllByRole("button", { name: /Private/ });
   await userEvent.click(openers[0]);
@@ -145,7 +145,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
     ...conversations([PRIVATE]),
     "/intents": () => json({ applied: false, message: "Only an admin may read it." }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
@@ -166,7 +166,7 @@ test("a permalink to another member's conversation offers the listing's acknowle
     "/files": () => json({ files: [] }),
     "/intents": () => json({ applied: true, message: "Recorded." }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText(/private to owner@example.com/)).toBeTruthy();
   expect(calls.some((url) => url.includes("/turns"))).toBe(false);
@@ -187,7 +187,7 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
         ? json({ chats: [], conversation: linked })
         : json({ chats: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   expect(
     await screen.findByText("This conversation is not shared with this account."),
@@ -197,7 +197,7 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
 
 test("leaving the acknowledgement returns to the listing without reading", async () => {
   wire(conversations([PRIVATE]));
-  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} />);
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await disclosable());
   await userEvent.click(screen.getByRole("button", { name: "All conversations" }));

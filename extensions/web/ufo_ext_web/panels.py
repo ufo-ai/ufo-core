@@ -327,11 +327,12 @@ async def submit_intent(
     raise RuntimeError("the turn's tail ended without a terminal frame")
 
 
-def reasoning_levels() -> list[JsonValue]:
-    """The reasoning efforts a create form offers, read off the spec's own enum so the portal's two
-    write lanes cannot drift from each other or from what the kind accepts."""
-    enum = AgentSpec.model_json_schema()["properties"]["reasoning"]["enum"]
-    return list(enum)
+def agent_create_schema() -> dict[str, JsonValue]:
+    """The create form's field source: the whole writable spec, with `prompt` among the required
+    fields. The kind takes the initial prompt at birth and refuses a create without one, so the
+    form states the requirement exactly where the kind enforces it."""
+    schema = AgentSpec.model_json_schema()
+    return {**schema, "required": [*schema["required"], "prompt"]}
 
 
 def _update_schema() -> dict[str, JsonValue]:

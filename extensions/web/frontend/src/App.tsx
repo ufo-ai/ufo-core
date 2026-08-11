@@ -48,9 +48,15 @@ import {
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
-import type { Agent, Member, Subagent } from "@/lib/types";
+import type { Agent, Member, NewAgentForm, Subagent } from "@/lib/types";
 
-export type AppProps = { agents: Agent[]; subagents: Subagent[]; member: Member };
+export type AppProps = {
+  agents: Agent[];
+  subagents: Subagent[];
+  member: Member;
+  newAgent: NewAgentForm | null;
+  onAgents: () => void;
+};
 
 type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
 
@@ -61,7 +67,7 @@ type Sought =
   | { kind: "signed-out" }
   | { kind: "failed"; message: string };
 
-export function App({ agents, subagents, member }: AppProps) {
+export function App({ agents, subagents, member, newAgent, onAgents }: AppProps) {
   const [route, setRoute] = useState<Route>(() => bootRoute(location.hash, location.search));
   useEffect(() => {
     const target = artifactTarget(location.search);
@@ -329,8 +335,10 @@ export function App({ agents, subagents, member }: AppProps) {
           agents={agents}
           subagents={subagents}
           member={member}
+          newAgent={newAgent}
           mainAgent={mainAgent}
           rail={rail}
+          onAgents={onAgents}
           onCreated={created}
           onActivity={activity}
           onOpenAgent={openAgent}
@@ -353,8 +361,10 @@ function Pane({
   agents,
   subagents,
   member,
+  newAgent,
   mainAgent,
   rail,
+  onAgents,
   onCreated,
   onActivity,
   onOpenAgent,
@@ -371,8 +381,10 @@ function Pane({
   agents: Agent[];
   subagents: Subagent[];
   member: Member;
+  newAgent: NewAgentForm | null;
   mainAgent: Agent | null;
   rail: Rail;
+  onAgents: () => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onOpenAgent: (agentId: string, tab?: AgentTab) => void;
@@ -431,9 +443,11 @@ function Pane({
       <Agents
         agents={agents}
         subagents={subagents}
+        newAgent={newAgent}
         onOpen={onOpenAgent}
         onOpenSubagent={onOpenSubagent}
         onNewChat={onNewChat}
+        onAgents={onAgents}
       />
     );
   }

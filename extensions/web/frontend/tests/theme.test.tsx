@@ -203,7 +203,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "mine" }),
   });
   location.hash = "#/c/" + CONVO_ID;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const agentSide = (await screen.findByText("reply")).closest("[data-role=agent]")!;
   expect(agentSide.className).toContain("leading-reading");
@@ -242,7 +242,7 @@ test("both notice tones keep the chrome type size", () => {
 
 test("the wordmark reads as one word in the sidebar", async () => {
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const brand = await screen.findByText("ufo");
   expect(brand.textContent).toBe("ufo");

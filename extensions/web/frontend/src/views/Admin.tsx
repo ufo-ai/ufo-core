@@ -1,15 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
-import { Checkbox, Field, FieldGroup, Hint, Input, Label, Textarea } from "@/components/ui/field";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Hint, Input } from "@/components/ui/field";
 import { Td } from "@/components/ui/table";
 import {
   type NoticeState,
@@ -23,7 +16,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
-import { getJson, postIntent } from "@/lib/api";
+import { postIntent } from "@/lib/api";
 import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
 
@@ -45,16 +38,11 @@ function seatLine(seats: AdminPayload["seats"]): string {
 export function Admin() {
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const [copying, setCopying] = useState<AdminAgent | null>(null);
   const state = usePanelRead<AdminPayload>("/api/admin", reloads);
 
-  async function intent(agentId: string, envelope: unknown, prefix?: string) {
+  async function intent(agentId: string, envelope: unknown) {
     const outcome = await postIntent(agentId, envelope);
-    setNotice(
-      prefix && outcome.applied
-        ? { text: prefix + " " + outcome.message, refused: false }
-        : outcomeNotice(outcome),
-    );
+    setNotice(outcomeNotice(outcome));
     if (outcome.applied) setReloads((count) => count + 1);
   }
 
@@ -91,32 +79,11 @@ export function Admin() {
                 {(agent) => (
                   <AgentRow
                     agent={agent}
-                    onCopy={() => {
-                      setCopying(agent);
-                      setNotice({
-                        text: "Copying " + agent.name + " — configuration only.",
-                        refused: false,
-                      });
-                    }}
                     onAudience={(verb, email) => intent(agent.id, { verb, email })}
                   />
                 )}
               </DataTable>
             </Section>
-
-            {mainAgent ? (
-              <CreateAgent
-                payload={payload}
-                copying={copying}
-                onCreated={(name, spec) =>
-                  intent(
-                    mainAgent.id,
-                    { verb: "apply", kind: "agent", name, spec },
-                    "Created " + name + ".",
-                  )
-                }
-              />
-            ) : null}
 
             <Section title="Members">
               <Hint className="m-0">{seatLine(payload.seats)}</Hint>
@@ -200,11 +167,9 @@ export function Admin() {
 
 function AgentRow({
   agent,
-  onCopy,
   onAudience,
 }: {
   agent: AdminAgent;
-  onCopy: () => void;
   onAudience: (verb: string, email: string) => void;
 }) {
   const [email, setEmail] = useState("");
@@ -222,9 +187,6 @@ function AgentRow({
       <Td>{agent.main ? "Every member" : agent.web_audience.concat("admins").join(", ")}</Td>
       <Td>
         <div className="flex flex-wrap items-stretch gap-xs">
-          <Button variant="row" onClick={onCopy}>
-            Copy
-          </Button>
           {agent.main ? null : (
             <>
               <Input
@@ -299,115 +261,5 @@ function MemberRow({
         </div>
       </Td>
     </>
-  );
-}
-
-function CreateAgent({
-  payload,
-  copying,
-  onCreated,
-}: {
-  payload: AdminPayload;
-  copying: AdminAgent | null;
-  onCreated: (name: string, spec: Record<string, unknown>) => void;
-}) {
-  const [name, setName] = useState("");
-  const [model, setModel] = useState(copying?.model ?? payload.models[0]);
-  const [reasoning, setReasoning] = useState(payload.reasoning_levels[0]);
-  const [internet, setInternet] = useState(copying ? copying.internet_access_allowed : true);
-  const [prompt, setPrompt] = useState("");
-
-  useEffect(() => {
-    if (!copying) return;
-    setModel(copying.model);
-    setInternet(copying.internet_access_allowed);
-    let live = true;
-    getJson<{ agent: { prompt: string }; spec: { reasoning: string } }>(
-      "/agents/" + copying.id + "/overview",
-    ).then((result) => {
-      if (!live || !result.ok) return;
-      setPrompt(result.payload.agent.prompt);
-      setReasoning(result.payload.spec.reasoning);
-    });
-    return () => {
-      live = false;
-    };
-  }, [copying]);
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    onCreated(name.trim(), {
-      model,
-      internet_access_allowed: internet,
-      reasoning,
-      prompt,
-    });
-  }
-
-  return (
-    <Section title="Create agent">
-      <FieldGroup
-        onSubmit={submit}
-        submit={
-          <Button type="submit" variant="send">
-            Create
-          </Button>
-        }
-      >
-        <Field label="Name" htmlFor="new-agent-name">
-          <Input
-            id="new-agent-name"
-            required
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </Field>
-        <Field label="Model" htmlFor="new-agent-model">
-          <Select value={model} onValueChange={setModel}>
-            <SelectTrigger id="new-agent-model">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {payload.models.map((id) => (
-                <SelectItem key={id} value={id}>
-                  {id}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        <Field label="Reasoning" htmlFor="new-agent-reasoning">
-          <Select value={reasoning} onValueChange={setReasoning}>
-            <SelectTrigger id="new-agent-reasoning">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {payload.reasoning_levels.map((level) => (
-                <SelectItem key={level} value={level}>
-                  {level}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        <Label htmlFor="new-agent-internet" className="flex items-center gap-sm font-inherit">
-          <Checkbox
-            id="new-agent-internet"
-            checked={internet}
-            onChange={(event) => setInternet(event.target.checked)}
-          />
-          Public internet
-        </Label>
-        <Field label="System prompt" htmlFor="new-agent-prompt">
-          <Textarea
-            id="new-agent-prompt"
-            required
-            rows={4}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-          />
-        </Field>
-      </FieldGroup>
-    </Section>
   );
 }

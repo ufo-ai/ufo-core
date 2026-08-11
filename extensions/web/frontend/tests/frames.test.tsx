@@ -12,7 +12,7 @@ async function streaming() {
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -223,7 +223,7 @@ test("a send whose answer is not json ends the wait instead of disabling the com
     "/transcript": () => json({ messages: [] }),
     "/chat": () => new Response("<html>", { status: 200 }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 

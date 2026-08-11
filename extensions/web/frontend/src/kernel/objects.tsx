@@ -589,19 +589,30 @@ function specFact(field: string, value: ObjectValue, schema: SpecSchema | null):
   };
 }
 
+/** One mutation of one object as the lane takes it: the verb, the kind, the name the member typed,
+ *  and the spec the schema's own fields produced. */
+export type SpecEnvelope = {
+  verb: "apply";
+  kind: string;
+  name: string;
+  spec: Record<string, SpecValue>;
+};
+
 /** The one form a typed object is written through, for both the act that creates it and the act
  *  that changes it. Six schema fields under the records push the records off the screen and read as
  *  a seventh section of the page; in a dialog they are the act the member asked for, committed or
  *  cancelled, with the index still behind them. `lead` is for the one field the schema cannot
  *  state: which agent's namespace the new row lands in, which only a view listing across agents
- *  knows to ask. */
-function SpecDialog({
+ *  knows to ask. `options` is for the one facet the schema cannot state: a field whose choices are
+ *  the deploy's rather than the type's, as an agent's model is. */
+export function SpecDialog({
   schema,
   kind,
   name,
   spec,
   title,
   lead,
+  options,
   onDone,
   onClose,
 }: {
@@ -611,7 +622,8 @@ function SpecDialog({
   spec: Record<string, ObjectValue> | null;
   title: string;
   lead?: ReactNode;
-  onDone: (envelope: unknown) => Promise<NoticeState>;
+  options?: Record<string, string[] | null>;
+  onDone: (envelope: SpecEnvelope) => Promise<NoticeState>;
   onClose: () => void;
 }) {
   const properties = schema.properties ?? {};
@@ -669,6 +681,7 @@ function SpecDialog({
             schema={schema}
             fields={fields}
             values={values}
+            options={options}
             onChange={(field, value) => setValues((held) => ({ ...held, [field]: value }))}
           />
         </form>

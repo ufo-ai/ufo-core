@@ -103,43 +103,17 @@ test("an admin is offered administration, which reads the admin projection", asy
         members: [{ id: "m1", email: "member@example.com", admin: true, seated: true }],
         seats: { limit: 5, included: 3 },
         caps: [],
-        models: ["opus"],
-        reasoning_levels: ["high"],
         deploy: { sandbox_internet: true, extensions: [] },
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   expect(await screen.findByText("5 seats, 3 included in the plan.")).toBeTruthy();
   expect(screen.getByText("Every member")).toBeTruthy();
   expect(screen.getByText("No spend caps are set.")).toBeTruthy();
   expect(location.hash).toBe("#/admin");
-});
-
-test("every control the create-agent form asks for carries its own name", async () => {
-  wire({
-    "/api/admin": () =>
-      json({
-        agents: [ADMIN_AGENT],
-        members: [],
-        seats: { limit: null, included: null },
-        caps: [],
-        models: ["opus"],
-        reasoning_levels: ["high"],
-        deploy: { sandbox_internet: true, extensions: [] },
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
-
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
-  expect(await screen.findByLabelText("Name")).toBeTruthy();
-  expect(screen.getByLabelText("Model")).toBeTruthy();
-  expect(screen.getByLabelText("Reasoning")).toBeTruthy();
-  expect(screen.getByLabelText("Public internet")).toBeTruthy();
-  expect(screen.getByLabelText("System prompt")).toBeTruthy();
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
@@ -153,8 +127,6 @@ test("the admin agent row grants and revokes web access by email", async () => {
         members: [],
         seats: { limit: null, included: null },
         caps: [],
-        models: ["opus"],
-        reasoning_levels: ["high"],
         deploy: { sandbox_internet: false, extensions: [] },
       }),
     "/intents": (_url, init) => {
@@ -163,7 +135,7 @@ test("the admin agent row grants and revokes web access by email", async () => {
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   await userEvent.type(await screen.findByPlaceholderText("email@work.com"), "new@work.com");
@@ -194,7 +166,7 @@ test("a failed administration read stays inside the scrolling frame the view own
     "/api/admin": () => new Response("no", { status: 500 }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   const message = await screen.findByText("Error 500 — reload to retry.");
@@ -213,7 +185,7 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
     "/api/admin": () => new Promise<Response>(() => {}),
   });
   location.hash = "#/admin";
-  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   const loading = await screen.findByTestId("admin-loading");
   expect(loading.closest("main")).not.toBeNull();
@@ -236,14 +208,12 @@ test("a refused audience change tones the administration notice", async () => {
             on_breach: "warn",
           },
         ],
-        models: ["opus"],
-        reasoning_levels: ["high"],
         deploy: { sandbox_internet: false, extensions: [] },
       }),
     "/intents": () => json({ applied: false, message: "Only an admin grants access." }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} />);
+  render(<App agents={[second]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
   await userEvent.type(await screen.findByPlaceholderText("email@work.com"), "new@work.com");

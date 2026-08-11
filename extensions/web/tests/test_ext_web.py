@@ -973,6 +973,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             {"name": "deep_research", "model": "claude-opus-4-8"},
             {"name": "general_purpose", "model": None},
         ],
+        "new_agent": None,
     }
     empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
     assert empty_rail.status_code == 200
@@ -1063,6 +1064,49 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     )
     assert reachable.status_code == 400
     assert reachable.text == "conversation is required"
+
+
+async def test_boot_read_carries_the_create_form_for_an_admin_and_for_nobody_else(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The Agents screen draws its create act from the boot read: the `agent` kind's own spec
+    schema, `prompt` among the required fields because the kind refuses a create without one, and
+    the deploy's model ids for the one field the schema cannot enumerate. A member the kind admits
+    no create from is sent none of it, so the act is drawn exactly where the lane honours it."""
+    client, workspace_id, _agent_id = web
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    admin_view = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    form = admin_view.json()["new_agent"]
+    assert form["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
+    assert sorted(form["spec_schema"]["properties"]) == [
+        "internet_access_allowed",
+        "model",
+        "prompt",
+        "reasoning",
+    ]
+    assert sorted(form["spec_schema"]["required"]) == [
+        "internet_access_allowed",
+        "model",
+        "prompt",
+        "reasoning",
+    ]
+    assert form["spec_schema"]["properties"]["reasoning"]["enum"] == [
+        "auto",
+        "off",
+        "low",
+        "medium",
+        "high",
+    ]
+    assert form["spec_schema"]["properties"]["internet_access_allowed"]["title"] == (
+        "Internet Access Allowed"
+    )
+    member_view = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
+    )
+    assert member_view.json()["new_agent"] is None
 
 
 async def _seed_connection(
@@ -5656,12 +5700,12 @@ async def test_audience_intents_write_the_grant_store(
         assert await web_extension().store.list(AUDIENCE_PREFIX) == ()
 
 
-async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
+async def test_admin_payload_names_the_ids_its_controls_address(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The administration view's forms need targets: every agent row carries its id (the intent
-    lane is per-agent), every member row carries the stable member id the member kind applies to,
-    and the create form's model choice is the deploy's own list."""
+    """The administration view's controls need targets: every agent row carries its id (the intent
+    lane is per-agent) and every member row carries the stable member id the member kind applies
+    to."""
     client, workspace_id, agent_id = web
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     view = await client.get(
@@ -5670,8 +5714,6 @@ async def test_admin_payload_names_ids_and_models_for_the_mutation_forms(
     payload = view.json()
     assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
     assert [entry["id"] for entry in payload["members"]] == [str(admin_id)]
-    assert payload["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
-    assert payload["reasoning_levels"] == ["auto", "off", "low", "medium", "high"]
 
 
 async def _seed_agent_conversation(

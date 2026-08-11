@@ -399,6 +399,13 @@ A form's outcome notice renders inside the dialog and only when it has words —
 re-centres itself, so there is no layout to reserve against. A refusal therefore leaves the dialog
 standing with what the member typed still in it; only an applied act closes it.
 
+Whether the act is drawn at all is the kind's own answer, carried by the read that draws the
+screen — the boot payload holds the create form's schema and its deploy-supplied choices for a
+member the `agent` kind admits a create from, and holds nothing for anyone else, as an object index
+carries `applies`. A role test written into the view beside the kind's gate is a second answer to
+who may write, and the one that drifts. The lane the intent rides follows the same authority: the
+`agent` kind takes a create only from the main agent, so that is the lane the act posts to.
+
 A form asks for the values, never the file. A skill is stored as `SKILL.md` with frontmatter whose
 `name` the lane requires to equal the name the skill is filed under, so a box holding the raw file
 asks the member to state the name twice and makes a refusal reachable by typo. The dialog takes
@@ -535,7 +542,8 @@ Copy a known-good implementation instead of composing from rules:
 - `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.
-- `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card.
+- `views/Agents.tsx` — two card sections over a prop, the row's own primary act on the card, and a
+  typed object's create act in the bar of a screen that is not that kind's index.
 - `views/Skills.tsx` — a Customize tab whose records belong to an agent the member picks from
   the bar, the pick riding the place.
 - `views/Connectors.tsx` — one read stated twice: the member's grants under Customize, and what

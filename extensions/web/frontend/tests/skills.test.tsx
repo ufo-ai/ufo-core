@@ -44,7 +44,7 @@ function placed() {
 test("the customize tab lists the main agent's skills and names the agents to pick", async () => {
   location.hash = "#/customize/skills";
   skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("the first agent's skill")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
@@ -57,7 +57,7 @@ test("the customize tab lists the main agent's skills and names the agents to pi
 test("picking an agent reads that agent's skills, names it in the hash, and Back returns", async () => {
   location.hash = "#/customize/skills";
   const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("the first agent's skill")).toBeTruthy();
 
@@ -76,7 +76,7 @@ test("picking an agent reads that agent's skills, names it in the hash, and Back
 test("a reloaded pick lands on that agent, which the empty line names", async () => {
   location.hash = customizeHash("skills", { agent: SECOND_ID });
   wire({ "/skills": () => json({ skills: [] }), "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No skill has been saved onto second yet.")).toBeTruthy();
 });
@@ -92,7 +92,7 @@ test("a save is admitted into the lane of the agent the member picked", async ()
     },
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await pick("Agent", "second");
   await userEvent.click(await screen.findByRole("button", { name: "New skill" }));
@@ -108,7 +108,7 @@ test("a save is admitted into the lane of the agent the member picked", async ()
 test("a hash naming an agent this member cannot reach reports it", async () => {
   location.hash = customizeHash("skills", { agent: "99999999-9999-4999-8999-999999999999" });
   const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
   expect(calls.some((url) => url.includes("/skills"))).toBe(false);
@@ -117,7 +117,7 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
 test("picking an agent reads it once", async () => {
   location.hash = "#/customize/skills";
   const { calls } = skills();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("the first agent's skill")).toBeTruthy();
   await pick("Agent", "second");

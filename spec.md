@@ -555,11 +555,13 @@ action — no model round, no fold into a live chat turn — so a submit applies
 the kind's refusal, the turn is the audit record, and the per-conversation partition runs a
 member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
 chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
-at stream time, never in a transcript or an intent response. The administration view mutates
-through the same lane: agent creation (admin-only, on the main agent's lane, taking the initial
-prompt — the one prompt write that is not an edit; copy prefills the form from a read and carries
-configuration only), member role and seat changes through the member kind's guards, and
-web-audience grants riding the target agent's own lane to the same store the chat verbs write.
+at stream time, never in a transcript or an intent response. The Agents screen creates an agent
+through the same lane — admin-only, on the main agent's lane, taking the initial prompt, the one
+prompt write that is not an edit — and the boot read carries the kind's spec schema only to a
+member it admits a create from, so the act is drawn exactly where the lane honours it. The
+administration view mutates through the lane as well: member role and seat changes through the
+member kind's guards, and web-audience grants riding the target agent's own lane to the same store
+the chat verbs write.
 Agent delete stays refused — the cascade over an agent's conversations, memory, and resources is
 unbuilt. A workspace-scoped view has no agent of its own, so its intents ride the main agent's
 lane — the agent every surface already routes an unbound member to: a source's resync, share, and

@@ -70,6 +70,9 @@ type SpecFieldProps = {
   onChange: (value: SpecValue) => void;
 };
 
+/** One schema field as the control its shape asks for. A required field carries the requirement so
+ *  the browser's own validity applies to it — except a boolean, which holds a value either way: a
+ *  checkbox reads `required` as "must be ticked", which would refuse every spec that means false. */
 function SpecField({ name, prop, value, options, required, onChange }: SpecFieldProps) {
   const id = "spec-" + name;
   const choices = options ?? prop.enum;
@@ -80,7 +83,6 @@ function SpecField({ name, prop, value, options, required, onChange }: SpecField
       <div className="flex items-center gap-sm">
         <Checkbox
           id={id}
-          required={required}
           checked={value === true}
           onChange={(event) => onChange(event.target.checked)}
         />

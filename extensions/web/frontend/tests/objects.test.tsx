@@ -190,7 +190,7 @@ test("a value the kind's spec declares as an enum reads as its own chip", async 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/sites";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
 
@@ -217,7 +217,7 @@ test("the sites section of a deploy without the extension states that, not an er
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/sites";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
   expect(screen.queryByText(/^Error /)).toBeNull();
@@ -513,7 +513,7 @@ test("the scheduled section is reached by its own hash and lists across the audi
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/scheduled";
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 1, name: "Scheduled" })).toBeTruthy();
   expect(screen.getByRole("link", { name: "weekly-roll" })).toBeTruthy();
@@ -531,7 +531,7 @@ test("the scheduled tab of an agent is that agent's own scheduled_task index", a
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/scheduled";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByRole("link", { name: "daily-brief" })).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
@@ -549,7 +549,7 @@ test("landing on another agent's scheduled tab leaves the first agent's detail b
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/scheduled";
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("daily-brief");
   await screen.findByRole("heading", { name: "daily-brief" });
@@ -572,7 +572,7 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/scheduled";
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("weekly-roll");
 
@@ -594,7 +594,7 @@ test("the sites section is the site index on the main agent", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/sites";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText(NO_SITES)).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);

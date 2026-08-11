@@ -31,7 +31,20 @@ export type Conversation = {
   disclosable: boolean;
 };
 
-export type AgentsPayload = { agents: Agent[]; subagents: Subagent[]; member: Member };
+/** What the create act draws its form from: the `agent` kind's own spec schema and the model ids
+ *  this deploy serves. The boot read carries it for a workspace admin and null for everyone else —
+ *  the kind admits a create from nobody else, and an act that cannot land is not drawn. */
+export type NewAgentForm = {
+  spec_schema: { properties?: Record<string, SchemaProperty>; required?: string[] };
+  models: string[];
+};
+
+export type AgentsPayload = {
+  agents: Agent[];
+  subagents: Subagent[];
+  member: Member;
+  new_agent: NewAgentForm | null;
+};
 
 export type SeatSummary = { limit: number | null; included: number | null };
 
@@ -50,8 +63,6 @@ export type AdminPayload = {
   members: Member[];
   seats: SeatSummary;
   caps: SpendCap[];
-  models: string[];
-  reasoning_levels: string[];
   deploy: { sandbox_internet: boolean; extensions: DeployExtension[] };
 };
 

@@ -66,7 +66,7 @@ test("the overview states the agent's facts, renders its schema, and submits a s
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Main agent")).toBeTruthy();
   expect(fact("Installations")).toBe("web");
   expect(fact("Updated")).toBe("Jul 30 2026");
@@ -93,7 +93,7 @@ test("an overview that fails to read states the error and offers no form", async
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
@@ -128,7 +128,7 @@ test("the scheduled index lists declared fields and its detail pauses through th
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/scheduled";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const listed = (await screen.findByRole("button", { name: "digest" })).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
@@ -177,7 +177,7 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/sites";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
 
@@ -204,7 +204,7 @@ test("skills name where each came from, and save posts one skill file", async ()
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/customize/skills";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("member skill")).toBeTruthy();
   expect(screen.getByText("deploy skill")).toBeTruthy();
   expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
@@ -268,7 +268,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/customize/connectors";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Private")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
@@ -301,7 +301,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.queryByText("notion")).toBeNull();
@@ -313,7 +313,7 @@ test("a 404 usage read says it is not shared", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/usage";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("Usage for this agent is not shared with you.")).toBeTruthy();
 });
@@ -343,7 +343,7 @@ test("a workspace-shared conversation reads as shared, in its row and its detail
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const label = "Shared · " + shared.slice(0, 8);
   const row = await screen.findByRole("button", { name: new RegExp(label) });
@@ -380,7 +380,7 @@ test("a conversation row names what it is about and who spoke, and the keyboard 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", {
     name: /can you take a look at the failing deploy/,
@@ -473,7 +473,7 @@ test("conversations open a turn tree that nests a subagent under the turn that s
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: /Rename the deploy job/ }));
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
@@ -517,7 +517,7 @@ test("a conversation nobody shared offers no opener", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect((await screen.findAllByText(/Not shared with you/)).length).toBe(2);
   expect(screen.queryAllByRole("button", { name: /Channel or room/ })).toEqual([]);
   const rows = screen.getAllByText(/Not shared with you/).map((meta) => meta.closest("li")!);
@@ -651,7 +651,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [] }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
   expect(location.hash).toBe("#/agents");
@@ -693,6 +693,8 @@ test("the agents view lists the deploy's subagents below the agents, opening not
         { name: "general_purpose", model: null },
       ]}
       member={MEMBER}
+      newAgent={null}
+      onAgents={() => {}}
     />,
   );
 
@@ -723,7 +725,7 @@ test("the agents view lists the deploy's subagents below the agents, opening not
 
 test("a member who is not an admin is offered no administration control", () => {
   wire({ "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
@@ -733,7 +735,7 @@ test("the agent tab strip opens the tab named in the hash", async () => {
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No connector is shared with assistant yet.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
@@ -747,7 +749,7 @@ test("the model field offers the deploy's models, which its schema alone cannot 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
     "opus",
     "sonnet",
@@ -777,7 +779,7 @@ test("a conversation the member may not read says so instead of reporting a stat
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "/conversations";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: /a shared thread/ }));
   expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
   expect(screen.queryByText(/Error 404/)).toBeNull();
@@ -808,7 +810,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/customize/connectors";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),
@@ -856,7 +858,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
         caps: [],
       }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("No spend cap is set on this agent.")).toBeTruthy();
 });
 
@@ -885,7 +887,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/customize/connectors";
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
     await screen.findByLabelText("Provider"),

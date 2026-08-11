@@ -109,7 +109,7 @@ from ufo.sdk.surfaces import (
 )
 from ufo.sdk.tools import FILE_CHANGE_RESULT_TYPE, REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
-from ufo_ext_web.panels import ApplyIntent, agent_overview, reasoning_levels, submit_intent
+from ufo_ext_web.panels import ApplyIntent, agent_create_schema, agent_overview, submit_intent
 
 SURFACE_WEB = "web"
 SOURCE = "ufo web"
@@ -431,7 +431,10 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     — and the deploy's subagent profiles, the same roster for every member because a subagent
     belongs to none of them. Each profile rides as its summary, the boot read narrowed to what a
     list shows: its own page carries the instructions and the work it did. `agents` stays the set a
-    member may open and message, so the roster never reaches the chat paths."""
+    member may open and message, so the roster never reaches the chat paths. `new_agent` is the
+    create form's source — the kind's spec schema and the deploy's model ids — and is null for
+    everyone but a workspace admin, the only member the `agent` kind admits a create from, so the
+    portal draws that act exactly where the lane would honour it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -444,6 +447,11 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 for agent in audience.agents
             ],
             "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
+            "new_agent": (
+                {"spec_schema": agent_create_schema(), "models": list(ctx.models)}
+                if audience.admin
+                else None
+            ),
         }
     )
 
@@ -2148,8 +2156,6 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for entry in snapshot.members
             ],
-            "models": list(ctx.models),
-            "reasoning_levels": reasoning_levels(),
             "seats": {"limit": snapshot.limit, "included": snapshot.included},
             "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
             "deploy": {

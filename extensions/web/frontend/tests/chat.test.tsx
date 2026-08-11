@@ -35,7 +35,7 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 });
 
 function open() {
-  return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 }
 
 test("an empty conversation states it, and the composer sends a message and streams the reply", async () => {
@@ -854,7 +854,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
   const first = screen.getByTestId("log");

@@ -95,7 +95,7 @@ test("a deep link waits while the rail loads instead of denying the conversation
         return;
       }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findAllByText("Loading…")).toHaveLength(2);
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
@@ -104,7 +104,7 @@ test("a deep link waits while the rail loads instead of denying the conversation
 test("a new-conversation link naming no agent of this workspace says so", async () => {
   location.hash = "#/new/99999999-9999-4999-8999-999999999999";
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
 });
@@ -117,7 +117,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
       return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello there" });
     },
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -138,7 +138,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
       }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "early words" }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "early words");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -161,7 +161,7 @@ test("a rail row opens its conversation's transcript", async () => {
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => json({ messages: [{ role: "user", text: "earlier words" }] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
 
@@ -187,7 +187,7 @@ test("sending from an existing conversation posts to it and bumps its rail row",
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: older.title }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
   await userEvent.type(screen.getByLabelText("Message the agent"), "follow-up");
@@ -211,7 +211,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
     title: "An ops question",
   };
   wire({ "/api/chats": () => json({ chats: [foreign] }) });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
   expect(railRow.textContent).toContain("second");
@@ -220,7 +220,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
 test("a conversation no read of this account's answers is named unshared, not missing", async () => {
   location.hash = "#/c/99999999-9999-4999-8999-999999999999";
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText(NOT_SHARED)).toBeTruthy();
 });
@@ -233,7 +233,7 @@ test("a permalink read refused for the session offers sign-in rather than a deni
         ? new Response("missing or unknown session cookie", { status: 401 })
         : json({ chats: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("Session ended")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login");
@@ -246,7 +246,7 @@ test("a permalink read the server faults on states the fault rather than a denia
     "/api/chats": (url) =>
       url.includes("conversation=") ? new Response("boom", { status: 500 }) : json({ chats: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
@@ -293,7 +293,7 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
       }),
     ["/conversations/" + CONVO_ID + "/files"]: () => json({ files: [] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
@@ -309,14 +309,14 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
 
 test("the new-conversation control targets the main agent, or picks among several", async () => {
   wire({});
-  const single = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  const single = render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   await userEvent.click(await screen.findByRole("button", { name: "second" }));
   expect(location.hash).toBe("#/new/" + SECOND_ID);
@@ -326,7 +326,7 @@ test("the new-conversation control targets the main agent, or picks among severa
 test("the agents index opens a conversation; the agent's own page states settings only", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
   wire({ "/connections": () => json({ connections: [] }) });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await screen.findByRole("main");
   expect(
     within(screen.getByRole("main")).queryByRole("button", { name: "New conversation" }),
@@ -347,7 +347,7 @@ test("the chat header names the agent and opens its page", async () => {
     "/transcript": () => json({ messages: [] }),
     "/overview": () => new Response("nope", { status: 503 }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
   await userEvent.click(
@@ -361,7 +361,7 @@ test("the chat header names the agent and opens its page", async () => {
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({ "/api/chats": () => new Response("nope", { status: 500 }) });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const notes = await screen.findAllByText("Couldn't load conversations.");
   expect(notes.length).toBe(2);
@@ -381,7 +381,7 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
     "/transcript": () => json({ messages: [] }),
     "/chat": () => new Response("nope", { status: 500 }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
   await userEvent.type(screen.getByLabelText("Message the agent"), "doomed");
@@ -399,7 +399,7 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
       url.includes("conversation=") ? json({ chats: [CHAT_ROW] }) : json({ chats: [] }),
     "/transcript": () => json({ messages: [{ role: "user", text: "linked words" }] }),
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("linked words")).toBeTruthy();
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
@@ -408,7 +408,7 @@ test("a linked conversation past the rail's bound resolves by id", async () => {
 test("a hash naming an agent this member cannot reach reports it", async () => {
   location.hash = "#/agents/99999999-9999-4999-8999-999999999999/connectors";
   wire({});
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such agent.")).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
@@ -423,7 +423,7 @@ test("the sidebar marks the section the member is in and leaves the others off",
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/overview": () => new Response("nope", { status: 503 }),
   });
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
     ["Agents", "Scheduled", "Artifacts", "Sites", "Customize", "Workspace"].filter(
@@ -459,7 +459,7 @@ test("a failed rail read states it and retries on demand", async () => {
       return failures === 1 ? new Response("nope", { status: 500 }) : json({ chats: [CHAT_ROW] });
     },
   });
-  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} />);
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("Couldn't load conversations.")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
