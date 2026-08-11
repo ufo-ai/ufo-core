@@ -54,6 +54,7 @@ METRICS = (
     "compaction_verified_total",
     "sandbox_egress_total",
     "sandbox_prepare_deferred_total",
+    "sandbox_prepare_retried_total",
     "sandbox_exec_timeout_total",
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_offload_failed_total",

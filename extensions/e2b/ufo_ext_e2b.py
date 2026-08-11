@@ -95,6 +95,8 @@ CA_INSTALL_TIMEOUT_SECONDS = 30
 SANDBOX_USER = "user"
 WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
 RESUME_PREPARE_TIMEOUT_SECONDS = 5
+PREPARE_ATTEMPTS = 3
+PREPARE_RETRY_SECONDS = 1.0
 RESUME_TRANSPORT_RETRIES = 2
 RESUME_RETRY_DELAY_SECONDS = 1.0
 RESUME_TOTAL_TIMEOUT_SECONDS = 90.0
@@ -197,8 +199,6 @@ class E2BSandbox(Protocol):
 
     def get_host(self, port: int) -> str: ...
 
-    async def kill(self) -> bool: ...
-
 
 class E2BSdk(Protocol):
     async def create(
@@ -246,6 +246,8 @@ class E2BCarrier:
     resume_prepare_seconds: float = RESUME_PREPARE_TIMEOUT_SECONDS
     """How long a resumed box's `envd` is given to re-assert preparation before the turn goes on
     without it."""
+    prepare_retry_seconds: float = PREPARE_RETRY_SECONDS
+    """How long a fresh box is left alone after its `envd` connection dropped mid-preparation."""
     resume_retry_delay_seconds: float = RESUME_RETRY_DELAY_SECONDS
     """How long to wait before re-issuing a resume the provider's control plane left unanswered."""
     resume_total_timeout_seconds: float = RESUME_TOTAL_TIMEOUT_SECONDS
@@ -268,13 +270,14 @@ class E2BCarrier:
         because the CA in hand is the only one the proxy will present and a resumed box may hold an
         older one. On a box this call just opened it must succeed: nothing is installed yet, so an
         unprepared box reaches no host and holds no workspace. On a resumed box it is already true
-        and this is a re-assertion, so it is bounded here and its silence tolerated: preparation
-        runs through `envd`, which stops answering while a loaded container thrashes. The bound is
-        this repo's own because the SDK has none to offer — `request_timeout` covers a stream's
-        setup and send, never its read, so a silent `envd` holds a command open with nothing to
-        expire. A deferred preparation costs nothing: the trust store still holds the CA installed
-        when the box was made, the install command replaces it the first turn `envd` answers, and a
-        command meeting a container still too busy to talk gets the exit code `exec` maps for it.
+        and this is a re-assertion, so it is bounded here and both its silence and a dropped
+        connection are tolerated: preparation runs through `envd`, which stops answering while a
+        loaded container thrashes and drops the connection when it comes back. The bound is this
+        repo's own because the SDK has none to offer — `request_timeout` covers a stream's setup and
+        send, never its read, so a silent `envd` holds a command open with nothing to expire. A
+        deferred preparation costs nothing: the trust store still holds the CA installed when the
+        box was made, the install command replaces it the first turn `envd` answers, and a command
+        meeting a container still too busy to talk gets the exit code `exec` maps for it.
 
         What makes deferring safe is which box it is allowed for: the one `spec.resume_id` names,
         and only that one. That id comes off the conversation's durable handle, which is written
@@ -282,6 +285,11 @@ class E2BCarrier:
         prepared that container. A box reached any other way carries no such proof: this process's
         own cache can name one whose preparation just failed, and a fresh container has nothing on
         it yet. Both prepare strictly.
+
+        A strict preparation retries a transport fault — the provider dropping its own connection to
+        a container it just started, the one uncertainty here that is external — because both steps
+        behind it are idempotent. A non-zero install exit is the box's own deterministic answer and
+        is reported on the first attempt.
 
         A strict preparation that fails drops the lease and raises. The lease goes because the
         deadline it holds is only evidence while the container answers to it, and this one just
@@ -306,7 +314,7 @@ class E2BCarrier:
             try:
                 async with asyncio.timeout(self.resume_prepare_seconds):
                     await self._prepare(sandbox, spec.proxy.ca_cert)
-            except TimeoutError:
+            except (TimeoutError, httpx.TransportError):
                 log(
                     "sandbox.e2b.prepare_deferred",
                     conversation_id=str(spec.conversation_id),
@@ -314,11 +322,7 @@ class E2BCarrier:
                 )
                 emit_metric("sandbox_prepare_deferred_total", carrier=CARRIER_NAME)
         else:
-            try:
-                await self._prepare(sandbox, spec.proxy.ca_cert)
-            except BaseException:
-                self._drop(spec.conversation_id, "create")
-                raise
+            await self._prepare_strictly(sandbox, spec)
         self._live[spec.conversation_id] = _Lease(sandbox, opened + SANDBOX_LEASE_SECONDS)
         return SandboxHandle(
             conversation_id=spec.conversation_id,
@@ -390,6 +394,24 @@ class E2BCarrier:
                 "check the template"
             )
         return sandbox
+
+    async def _prepare_strictly(self, sandbox: E2BSandbox, spec: SandboxSpec) -> None:
+        for remaining in reversed(range(PREPARE_ATTEMPTS)):
+            try:
+                await self._prepare(sandbox, spec.proxy.ca_cert)
+                return
+            except BaseException as error:
+                if remaining == 0 or not isinstance(error, httpx.TransportError):
+                    self._drop(spec.conversation_id, "create")
+                    raise
+                log(
+                    "sandbox.e2b.prepare_retried",
+                    conversation_id=str(spec.conversation_id),
+                    sandbox_id=sandbox.sandbox_id,
+                    error_class=type(error).__name__,
+                )
+                emit_metric("sandbox_prepare_retried_total", carrier=CARRIER_NAME)
+                await asyncio.sleep(self.prepare_retry_seconds)
 
     async def _connected(self, conversation_id: UUID, sandbox_id: str, span: int) -> E2BSandbox:
         """`connect` on the sandbox `sandbox_id` names, re-issued up to RESUME_TRANSPORT_RETRIES

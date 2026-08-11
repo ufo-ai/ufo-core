@@ -50,6 +50,7 @@ from ufo_ext_e2b import (
     INSTALL_CA_COMMAND,
     NODE_GLOBAL_MODULES,
     PLAYWRIGHT_BROWSERS_DIR,
+    PREPARE_ATTEMPTS,
     RESUME_RETRY_DELAY_SECONDS,
     RESUME_TOTAL_TIMEOUT_SECONDS,
     RESUME_TRANSPORT_RETRIES,
@@ -194,6 +195,7 @@ class _Files:
     closed: int = 0
     missing: bool = False
     raises: Exception | None = None
+    raise_writes: int | None = None
     hangs: bool = False
 
     async def read(self, path: str, format: str) -> _Stream:
@@ -205,7 +207,9 @@ class _Files:
     async def write(self, path: str, data: str | bytes, *, user: str | None = None) -> object:
         if self.hangs:
             await asyncio.Event().wait()
-        if self.raises is not None:
+        if self.raises is not None and (self.raise_writes is None or self.raise_writes > 0):
+            if self.raise_writes is not None:
+                self.raise_writes -= 1
             raise self.raises
         self.written.append((path, data))
         self.write_users.append(user)
@@ -219,18 +223,9 @@ class _Sandbox:
     commands: _Commands
     files: _Files
     traffic_access_token: str | None = "traffic-tok"
-    killed: bool = False
-    kill_raises: Exception | None = None
 
     def get_host(self, port: int) -> str:
         return f"{port}-{self.sandbox_id}.e2b.test"
-
-    async def kill(self) -> bool:
-        if self.kill_raises is not None:
-            raise self.kill_raises
-        already_gone = self.killed
-        self.killed = True
-        return not already_gone
 
 
 @dataclass
@@ -249,7 +244,7 @@ class _Sdk:
     on_call: Callable[[], None] | None = None
     traffic_access_token: str | None = "traffic-tok"
     file_write_raises: Exception | None = None
-    kill_raises: Exception | None = None
+    file_write_raise_count: int | None = None
     connect_faults: list[Exception] = field(default_factory=list)
 
     async def create(
@@ -278,8 +273,7 @@ class _Sdk:
                 timeout_on=self.command_timeout_on,
                 timeout_counts=dict(self.command_timeout_counts),
             ),
-            files=_Files(raises=self.file_write_raises),
-            kill_raises=self.kill_raises,
+            files=_Files(raises=self.file_write_raises, raise_writes=self.file_write_raise_count),
         )
         self.sandboxes[sandbox_id] = sandbox
         self.created.append(
@@ -308,7 +302,7 @@ class _Sdk:
         if self.connect_faults:
             raise self.connect_faults.pop(0)
         sandbox = self.sandboxes.get(sandbox_id)
-        if sandbox is None or sandbox.killed:
+        if sandbox is None:
             raise SandboxNotFoundException(f"Paused sandbox {sandbox_id} not found")
         sandbox.provider.lease(timeout)
         return sandbox
@@ -382,12 +376,17 @@ async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
 async def test_a_failed_trust_update_raises_a_named_ca_install_error() -> None:
     """The CA install is the precondition for every HTTPS call a sandbox makes, so its failure
     detail is what an operator reads when egress starts refusing. Mapping `CommandExitException`
-    to a named RuntimeError is all that stands between them and a bare provider exception."""
+    to a named RuntimeError is all that stands between them and a bare provider exception. The exit
+    is the box's own deterministic answer, the same one a further attempt would get, so it is raised
+    on the first attempt rather than retried."""
     sdk = _Sdk(command_fail_counts={"update-ca-certificates": 1})
     carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
 
     with pytest.raises(RuntimeError, match="sandbox CA install failed"):
         await carrier.create(_spec(uuid4()))
+
+    runs = sdk.sandboxes["sbx-1"].commands.runs
+    assert [command for command, _, _ in runs] == [INSTALL_CA_COMMAND]
 
 
 async def test_a_box_reached_off_the_cache_is_prepared_again_not_deferred() -> None:
@@ -407,11 +406,11 @@ async def test_a_box_reached_off_the_cache_is_prepared_again_not_deferred() -> N
     assert sdk.connected == ["sbx-1"]
 
 
-async def test_a_cached_box_whose_preparation_failed_is_never_killed() -> None:
-    """The cache can name a container holding a whole conversation's work, so a preparation that
-    fails on it is reported and the box left standing — the kill is for a fresh box alone."""
+async def test_a_cached_box_whose_preparation_failed_drops_its_lease() -> None:
+    """The lease's deadline is evidence only while the container answers to it, and this one just
+    did not — so it goes, and the next open reaches the provider instead of reading it back."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, prepare_retry_seconds=0.0)
     spec = _spec(uuid4())
 
     await carrier.create(spec)
@@ -420,8 +419,80 @@ async def test_a_cached_box_whose_preparation_failed_is_never_killed() -> None:
     with pytest.raises(httpx.ReadError):
         await carrier.create(spec)
 
-    assert not sdk.sandboxes["sbx-1"].killed
     assert carrier._leased(spec.conversation_id) is None
+
+
+async def test_a_dropped_ca_upload_is_tried_again_on_the_same_new_box(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sdk = _Sdk(
+        file_write_raises=httpx.ReadError("envd dropped the connection"),
+        file_write_raise_count=1,
+    )
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, prepare_retry_seconds=0.0)
+    conversation = uuid4()
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        handle = await carrier.create(_spec(conversation))
+
+    assert handle.container_id == "sbx-1"
+    assert len(sdk.created) == 1
+    assert _events(caplog, "sandbox.e2b.prepare_retried") == [
+        {
+            "conversation_id": str(conversation),
+            "sandbox_id": "sbx-1",
+            "error_class": "ReadError",
+        }
+    ]
+    sandbox = sdk.sandboxes["sbx-1"]
+    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
+    assert [command for command, _, _ in sandbox.commands.runs] == [
+        INSTALL_CA_COMMAND,
+        ENSURE_WORKSPACE_COMMAND,
+    ]
+
+
+async def test_a_drop_that_outlasts_the_attempts_ends_the_turn_on_the_provider_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attempts are what bounds the retry, so the last one's fault is the answer — the member
+    reads the provider's failure rather than a wait that never ends."""
+    reader = _counters(monkeypatch)
+    sdk = _Sdk(
+        file_write_raises=httpx.ReadError("envd dropped the connection"),
+        file_write_raise_count=PREPARE_ATTEMPTS,
+    )
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, prepare_retry_seconds=0.0)
+    conversation = uuid4()
+
+    with pytest.raises(httpx.ReadError):
+        await carrier.create(_spec(conversation))
+
+    assert _counted(reader, "ufo.sandbox_prepare_retried_total") == [
+        (PREPARE_ATTEMPTS - 1, {"carrier": CARRIER_NAME})
+    ]
+    assert carrier._leased(conversation) is None
+
+
+async def test_a_resumed_box_whose_upload_drops_is_deferred(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.sandboxes[opened.container_id].files.raises = httpx.ReadError("envd dropped it")
+
+    restarted = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        resumed = await restarted.create(
+            replace(_spec(conversation), resume_id=opened.container_id)
+        )
+
+    assert resumed.container_id == opened.container_id
+    assert _events(caplog, "sandbox.e2b.prepare_deferred") == [
+        {"conversation_id": str(conversation), "sandbox_id": opened.container_id}
+    ]
 
 
 async def test_a_resume_the_control_plane_never_answers_is_retried(
@@ -531,13 +602,12 @@ async def test_a_fresh_box_is_not_lease_visible_until_it_is_prepared() -> None:
     working on and may be about to fail out of."""
     conversation = uuid4()
     sdk = _Sdk(file_write_raises=httpx.ReadError("connection broken"))
-    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk)
+    carrier = E2BCarrier(api_key="k", template="t", sdk=sdk, prepare_retry_seconds=0.0)
 
     with pytest.raises(httpx.ReadError):
         await carrier.create(_spec(conversation))
 
     assert carrier._leased(conversation) is None
-    assert sdk.sandboxes["sbx-1"].killed is False
 
 
 async def test_every_connect_in_the_carrier_retries_an_unanswered_control_plane() -> None:
