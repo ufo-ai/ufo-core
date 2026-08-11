@@ -75,6 +75,9 @@ reminder.
 
 ## Files and artifacts
 
-The agent produces reports, spreadsheets, slide decks, PDFs, documents, and websites, and shares them
-back as downloadable files. A file the customer cannot see until it is shared is not delivered, so the
-agent always shares the artifact rather than naming a path.
+The agent produces reports, spreadsheets, slide decks, PDFs, and documents, and shares them back as
+downloadable files. A file the customer cannot see until it is shared is not delivered, so the agent
+always shares the artifact rather than naming a path.
+
+A website is different: the agent hosts it and shares a permanent link instead of a file to
+download.

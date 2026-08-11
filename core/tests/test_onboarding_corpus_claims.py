@@ -31,6 +31,8 @@ SEATS = "core/src/ufo/seats.py"
 WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
 SCHEDULING = "core/src/ufo/scheduling.py"
+BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
+SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,20 @@ CLAIMS = (
             r"if validated_schedule is None or spec\.prompt is None:\n"
             r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
         ),
+    ),
+    Claim(
+        claim="a document artifact is shared back as a downloadable file",
+        corpus="references/capabilities.md",
+        phrase="shares them back as\ndownloadable files",
+        source=BUILTIN_TOOLS_SOURCE,
+        pattern=r'name="share_file"',
+    ),
+    Claim(
+        claim="a website is hosted and shared as a permanent link, not a downloadable file",
+        corpus="references/capabilities.md",
+        phrase="the agent hosts it and shares a permanent link instead of a file to\ndownload",
+        source=SITES_TOOLS,
+        pattern=r"register that port as a hosted site and return its\n`site_url`",
     ),
     Claim(
         claim="an expiry stops a scheduled task from running again",
