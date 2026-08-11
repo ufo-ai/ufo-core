@@ -20,7 +20,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
-from dbos import DBOS
+from dbos import DBOS, DBOSClient
 from sqlalchemy.engine import make_url
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -28,6 +28,7 @@ from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo.workspace import init_workspace_credentials
 from ufo_testsupport.tables import reset_workspace_data
+from ufo_testsupport.workflows import drain_workflows
 
 POSTGRES_TEST_URL = os.environ.get(
     "UFO_TEST_POSTGRES_URL",
@@ -53,6 +54,14 @@ def integration_dependency_available(available: bool, reason: str) -> bool:
     if not available and os.environ.get(INTEGRATION_REQUIRED_ENV):
         raise RuntimeError(f"required integration dependency unavailable: {reason}")
     return available
+
+
+async def _drain_dbos(database_url: str) -> None:
+    client = DBOSClient(system_database_url=DatabaseConfig(url=database_url).system_url)
+    try:
+        await drain_workflows(client)
+    finally:
+        await asyncio.to_thread(client.destroy)
 
 
 async def reset_postgres_database(name: str) -> None:
@@ -100,7 +109,9 @@ def _reset_workspace_credentials() -> Iterator[None]:
 
 
 @pytest.fixture
-async def db(database_url: str, tmp_path: Path) -> AsyncIterator[None]:
+async def db(
+    database_url: str, tmp_path: Path, request: pytest.FixtureRequest
+) -> AsyncIterator[None]:
     """One initialized engine per test over the test's own database, disposed however the test
     ends (`init_db` guards a process global, so the dispose is in a `finally`).
 
@@ -117,7 +128,11 @@ async def db(database_url: str, tmp_path: Path) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            await dispose_db()
+            try:
+                if "dbos_launched" in request.fixturenames:
+                    await _drain_dbos(database_url)
+            finally:
+                await dispose_db()
         return
     init_db(database_url)
     try:
@@ -125,7 +140,11 @@ async def db(database_url: str, tmp_path: Path) -> AsyncIterator[None]:
             await reset_workspace_data(connection)
         yield
     finally:
-        await dispose_db()
+        try:
+            if "dbos_launched" in request.fixturenames:
+                await _drain_dbos(database_url)
+        finally:
+            await dispose_db()
 
 
 @pytest.fixture(scope="session")

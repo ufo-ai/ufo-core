@@ -114,3 +114,38 @@ def test_the_db_fixture_disposes_when_its_own_wipe_raises(pytester: pytest.Pytes
     assert outcomes.get("passed") == 1, result.stdout.str()
     result.stdout.fnmatch_lines(["*database is locked*"])
     assert "db already initialized" not in result.stdout.str()
+
+
+WORKFLOW_DRAIN_SESSION = """
+import asyncio
+
+from dbos import DBOS
+
+finished = []
+
+
+@DBOS.workflow()
+async def finish_after_test():
+    await asyncio.sleep(0.1)
+    finished.append(True)
+
+
+
+async def test_runtime_test_finishes(db, dbos_launched):
+    await DBOS.start_workflow_async(finish_after_test)
+
+
+def test_the_next_test_sees_the_completed_drain(database_url):
+    assert finished == [True]
+"""
+
+
+def test_a_runtime_test_drains_before_the_next_postgres_wipe(pytester: pytest.Pytester) -> None:
+    if not postgres_reachable():
+        pytest.skip("Postgres service is not reachable")
+    pytester.makeini("[pytest]\nasyncio_mode = auto\n")
+    pytester.makepyfile(inner_session=WORKFLOW_DRAIN_SESSION)
+
+    result = pytester.runpytest_subprocess("-q", "-k", "postgres", "inner_session.py")
+
+    result.assert_outcomes(passed=2)
