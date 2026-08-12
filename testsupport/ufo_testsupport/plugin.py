@@ -8,15 +8,27 @@ two test roots are collected together — the wedge this plugin exists to preven
 
 It also stamps every test under a `tests/integration/` path `integration` + `serial`, so `-m
 integration` selects the whole live suite wherever it lives and each live module declares only the
-dependency gate it needs."""
+dependency gate it needs.
+
+And it records where a run's wall-clock went: one row per test and one run summary per invocation,
+written once at session end under `--timings-dir` (see `_TimingsRecorder`), which CI uploads per job
+so `.github/scripts/ci_timings_report.py` can merge many runs."""
 
 import asyncio
+import csv
 import hashlib
+import json
 import os
+import platform
 import shutil
 import socket
-from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
+import sys
+import time
+from collections import Counter
+from collections.abc import AsyncIterator, Generator, Iterator
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 import asyncpg
 import pytest
@@ -36,10 +48,38 @@ POSTGRES_TEST_URL = os.environ.get(
     "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo_test",
 )
 INTEGRATION_REQUIRED_ENV = "UFO_INTEGRATION_REQUIRED"
+TIMINGS_DIR_ENV = "UFO_TEST_TIMINGS_DIR"
+DEFAULT_TIMINGS_DIR = ".pytest-timings"
+TIMINGS_SCHEMA = 1
+SLOWEST_IN_SUMMARY = 10
+ROW_FIELDS = (
+    "nodeid",
+    "file",
+    "directory",
+    "outcome",
+    "rerun",
+    "database",
+    "param_id",
+    "worker",
+    "setup_seconds",
+    "call_seconds",
+    "teardown_seconds",
+    "total_seconds",
+    "start",
+    "stop",
+)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--shard", help="Run one deterministic INDEX/COUNT shard")
+    parser.addoption(
+        "--timings-dir",
+        default=os.environ.get(TIMINGS_DIR_ENV, DEFAULT_TIMINGS_DIR),
+        help=(
+            "Where this run writes its per-test timing artifacts, relative to the invocation "
+            f"directory (default {DEFAULT_TIMINGS_DIR}, or ${TIMINGS_DIR_ENV}); empty writes none"
+        ),
+    )
 
 
 def postgres_reachable() -> bool:
@@ -202,3 +242,272 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         (selected if digest % count == index - 1 else deselected).append(item)
     items[:] = selected
     config.hook.pytest_deselected(items=deselected)
+
+
+@dataclass
+class _Attempt:
+    """One run of one test: the three phase durations plus the wall window they occupied."""
+
+    nodeid: str
+    file: str
+    worker: str
+    rerun: bool
+    database: str = ""
+    param_id: str = ""
+    outcome: str = ""
+    setup: float = 0.0
+    call: float = 0.0
+    teardown: float = 0.0
+    start: float = 0.0
+    stop: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return self.setup + self.call + self.teardown
+
+    def row(self) -> dict[str, Any]:
+        phases = [round(self.setup, 6), round(self.call, 6), round(self.teardown, 6)]
+        return {
+            "nodeid": self.nodeid,
+            "file": self.file,
+            "directory": str(PurePosixPath(self.file).parent) if self.file else "",
+            "outcome": self.outcome or "passed",
+            "rerun": self.rerun,
+            "database": self.database,
+            "param_id": self.param_id,
+            "worker": self.worker,
+            "setup_seconds": phases[0],
+            "call_seconds": phases[1],
+            "teardown_seconds": phases[2],
+            # the sum of the columns as published, so a reader's own addition matches this one
+            "total_seconds": round(sum(phases), 6),
+            "start": round(self.start, 6),
+            "stop": round(self.stop, 6),
+        }
+
+
+@dataclass
+class _FixtureCost:
+    """What one fixture cost this process, summed over its setups — for a session fixture, the once
+    it paid. It times the fixture's own body, so a fixture that resolves another lazily carries that
+    one too; the cost a test paid for the whole tree is its row's `setup_seconds`."""
+
+    setups: int = 0
+    seconds: float = 0.0
+    slowest: float = 0.0
+    errors: int = 0
+
+
+def _phase_outcome(report: pytest.TestReport) -> str | None:
+    """pytest's headline for one phase, or None when the phase says nothing — a plain passing setup
+    or teardown. A failure outside `call` is an error, the same distinction the terminal draws."""
+    if hasattr(report, "wasxfail"):
+        return "xpassed" if report.passed else "xfailed"
+    if report.skipped:
+        return "skipped"
+    if report.failed:
+        return "failed" if report.when == "call" else "error"
+    return None
+
+
+def _pull_request_number() -> str:
+    ref = os.environ.get("GITHUB_REF", "")
+    parts = ref.split("/")
+    return parts[2] if len(parts) > 3 and parts[1] == "pull" else ""
+
+
+class _TimingsRecorder:
+    """Where a run's wall-clock went, written once at session end.
+
+    Rows are written by whichever process ran the tests — each xdist worker writes its own
+    `tests-gwN.*` and `fixtures-gwN.json`, so no two writers share a file and per-worker gaps and
+    the idle tail stay computable — while the process that owns the session writes the single
+    `run-summary.json`. Under `-n` the controller sees every worker's reports, so its summary is the
+    whole invocation; without `-n` one process does both.
+
+    Every write is best-effort: instrumentation that cannot land degrades to a warning, never to a
+    failed run.
+    """
+
+    def __init__(self, config: pytest.Config, directory: Path) -> None:
+        self._config = config
+        self._directory = directory
+        workerinput = getattr(config, "workerinput", None)
+        self._worker = str(workerinput["workerid"]) if workerinput else "master"
+        self._is_worker = workerinput is not None
+        self._processes = int(config.getoption("numprocesses", default=None) or 0)
+        self._collected: dict[str, tuple[str, str, str]] = {}
+        self._open: dict[str, _Attempt] = {}
+        self._attempts: list[_Attempt] = []
+        self._seen: set[str] = set()
+        self._fixtures: dict[tuple[str, str], _FixtureCost] = {}
+        self._session_start = 0.0
+        self._session_stop = 0.0
+
+    def pytest_sessionstart(self) -> None:
+        self._session_start = time.time()
+
+    def pytest_runtest_setup(self, item: pytest.Item) -> None:
+        """The file a test lives in and how it was parametrized are properties of the item, not of
+        its reports: read them here, so a row carries a path relative to the checkout (a report's
+        own path is relative to whichever rootdir the invocation found) and separates the sqlite
+        pass from the postgres one."""
+        callspec = getattr(item, "callspec", None)
+        database = str(callspec.params.get("database_url", "")) if callspec is not None else ""
+        param_id = str(callspec.id) if callspec is not None else ""
+        self._collected[item.nodeid] = (self._relative_file(item), database, param_id)
+
+    def _relative_file(self, item: pytest.Item) -> str:
+        path = getattr(item, "path", None)
+        if path is None:
+            return ""
+        try:
+            return str(path.relative_to(self._config.invocation_params.dir))
+        except ValueError:
+            return str(path)
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        attempt = self._open.get(report.nodeid)
+        if attempt is None:
+            file, database, param_id = self._collected.pop(
+                report.nodeid, (report.location[0], "", "")
+            )
+            attempt = _Attempt(
+                nodeid=report.nodeid,
+                file=file,
+                worker=self._worker,
+                rerun=report.nodeid in self._seen,
+                database=database,
+                param_id=param_id,
+                start=float(getattr(report, "start", 0.0)),
+            )
+            self._open[report.nodeid] = attempt
+        duration = float(getattr(report, "duration", 0.0))
+        if report.when == "setup":
+            attempt.setup = duration
+        elif report.when == "call":
+            attempt.call = duration
+        elif report.when == "teardown":
+            attempt.teardown = duration
+        attempt.start = min(attempt.start, float(getattr(report, "start", attempt.start)))
+        attempt.stop = max(attempt.stop, float(getattr(report, "stop", 0.0)))
+        attempt.outcome = attempt.outcome or (_phase_outcome(report) or "")
+        if report.when == "teardown":
+            del self._open[report.nodeid]
+            self._seen.add(report.nodeid)
+            self._attempts.append(attempt)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(
+        self, fixturedef: pytest.FixtureDef[Any]
+    ) -> Generator[None, object, object]:
+        started = time.perf_counter()
+        cost = self._fixtures.setdefault(
+            (fixturedef.argname, str(fixturedef.scope)), _FixtureCost()
+        )
+        try:
+            result = yield
+        except BaseException:
+            cost.errors += 1
+            raise
+        finally:
+            elapsed = time.perf_counter() - started
+            cost.setups += 1
+            cost.seconds += elapsed
+            cost.slowest = max(cost.slowest, elapsed)
+        return result
+
+    def pytest_sessionfinish(self, exitstatus: int | pytest.ExitCode) -> None:
+        self._session_stop = time.time()
+        try:
+            self._write(int(exitstatus))
+        except Exception as error:  # instrumentation never fails a run
+            self._warn(f"timing artifacts not written: {error!r}")
+
+    def _write(self, exitstatus: int) -> None:
+        self._directory.mkdir(parents=True, exist_ok=True)
+        if self._is_worker or not self._processes:
+            rows = [attempt.row() for attempt in self._attempts]
+            with (self._directory / f"tests-{self._worker}.jsonl").open("w") as stream:
+                for row in rows:
+                    stream.write(f"{json.dumps(row)}\n")
+            with (self._directory / f"tests-{self._worker}.csv").open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(ROW_FIELDS))
+                writer.writeheader()
+                writer.writerows(rows)
+            (self._directory / f"fixtures-{self._worker}.json").write_text(
+                json.dumps(self._fixture_costs(), indent=2) + "\n"
+            )
+        if not self._is_worker:
+            (self._directory / "run-summary.json").write_text(
+                json.dumps(self._summary(exitstatus), indent=2) + "\n"
+            )
+
+    def _fixture_costs(self) -> dict[str, Any]:
+        return {
+            "schema": TIMINGS_SCHEMA,
+            "worker": self._worker,
+            "fixtures": sorted(
+                (
+                    {
+                        "name": name,
+                        "scope": scope,
+                        "setups": cost.setups,
+                        "total_seconds": round(cost.seconds, 6),
+                        "slowest_seconds": round(cost.slowest, 6),
+                        "errors": cost.errors,
+                    }
+                    for (name, scope), cost in self._fixtures.items()
+                ),
+                key=lambda entry: entry["total_seconds"],
+                reverse=True,
+            ),
+        }
+
+    def _summary(self, exitstatus: int) -> dict[str, Any]:
+        counts = Counter(attempt.outcome or "passed" for attempt in self._attempts)
+        slowest = sorted(self._attempts, key=lambda attempt: attempt.total, reverse=True)
+        return {
+            "schema": TIMINGS_SCHEMA,
+            "sha": os.environ.get("GITHUB_SHA", ""),
+            "ref": os.environ.get("GITHUB_REF", ""),
+            "ref_name": os.environ.get("GITHUB_REF_NAME", ""),
+            "pull_request": _pull_request_number(),
+            "workflow": os.environ.get("GITHUB_WORKFLOW", ""),
+            "job": os.environ.get("GITHUB_JOB", ""),
+            "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            "shard": self._config.getoption("--shard") or "",
+            "runner_os": os.environ.get("RUNNER_OS") or platform.system(),
+            "python": platform.python_version(),
+            "workers": self._processes or 1,
+            "exit_status": exitstatus,
+            "session_start": round(self._session_start, 6),
+            "session_stop": round(self._session_stop, 6),
+            "wall_seconds": round(self._session_stop - self._session_start, 6),
+            "tests": len(self._attempts),
+            "counts": dict(sorted(counts.items())),
+            "slowest": [
+                {"nodeid": attempt.nodeid, "total_seconds": round(attempt.total, 6)}
+                for attempt in slowest[:SLOWEST_IN_SUMMARY]
+            ],
+        }
+
+    def _warn(self, message: str) -> None:
+        reporter = self._config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is None or self._is_worker:
+            print(f"ufo-timings: {message}", file=sys.stderr)
+            return
+        reporter.write_line(f"ufo-timings: {message}", yellow=True)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    value = str(config.getoption("--timings-dir") or "")
+    if not value:
+        return
+    directory = Path(value)
+    if not directory.is_absolute():
+        # the invocation directory, not the rootdir: `control` roots its own pytest config, and one
+        # directory per checkout is what a CI job can name as a single upload path.
+        directory = config.invocation_params.dir / directory
+    config.pluginmanager.register(_TimingsRecorder(config, directory), "ufo-timings")

@@ -9,6 +9,7 @@ extensions/web/frontend/tsconfig.tsbuildinfo
 .local/
 dist/
 .pytest_cache/
+.pytest-timings/
 .ruff_cache/
 implementation-details.md
 ufo.toml

@@ -179,6 +179,20 @@ as a portfolio, not a single bet:
   One file or one test goes through `make test-one FILE=…`, which is serial: every xdist worker
   boots and migrates a database of its own, so `-n auto` only pays above roughly 100 tests.
 - `uv run pytest`, `uv run ruff`. uv for everything Python.
+- **Every pytest run records where its wall-clock went** — the shared plugin writes `.pytest-timings/`
+  (gitignored): a row per test in `tests-<worker>.jsonl` and `tests-<worker>.csv` (nodeid, directory,
+  outcome, setup/call/teardown seconds, xdist worker, `database_url` param, start/stop), what each
+  fixture cost that process in `fixtures-<worker>.json`, and one `run-summary.json` (sha, PR, job,
+  shard, worker count, wall seconds, counts by outcome, ten slowest tests). `--timings-dir` moves the
+  directory; `--timings-dir ""` writes nothing.
+- **To find CI time, merge those artifacts — never re-time the suite locally.** Every pytest job
+  uploads its directory as `test-timings-test-shard-<0-5>` / `-control-test` / `-rls` /
+  `-integration` (`if: always()`, kept 14 days; an artifact name takes no `/`, so the shard is
+  spelled in full inside each `run-summary.json`). `gh run download <run-id> --dir /tmp/timings
+  --pattern 'test-timings-*'` then `python3 .github/scripts/ci_timings_report.py /tmp/timings
+  [--merged-csv merged.csv]` prints per-job wall time, shard balance, the slowest tests, directories
+  and fixtures, the sqlite-vs-postgres split, and tests whose outcome moved between runs. Rankings
+  settle around ten runs.
 
 ## Completing work
 

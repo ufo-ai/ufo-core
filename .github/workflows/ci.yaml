@@ -122,6 +122,16 @@ jobs:
           name: portal-static
           path: extensions/web/ufo_ext_web/static
       - run: uv run pytest -n auto --shard "${{ matrix.shard }}" -m "not serial and not integration and not docker" -q
+      # Artifact names take no `/`, so the shard is in the index here and spelled in full inside
+      # each `run-summary.json`.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-timings-test-shard-${{ strategy.job-index }}
+          path: .pytest-timings
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   control-test:
     runs-on: ubuntu-latest
@@ -134,6 +144,14 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: make test-control
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-timings-control-test
+          path: .pytest-timings
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   integration:
     uses: ./.github/workflows/integration.yaml
@@ -179,3 +197,11 @@ jobs:
       - run: uv run --project control pytest control/tests/test_rls.py -q
         env:
           UFO_RLS_REQUIRED: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-timings-rls
+          path: .pytest-timings
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

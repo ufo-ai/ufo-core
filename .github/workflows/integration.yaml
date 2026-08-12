@@ -79,3 +79,11 @@ jobs:
       # model) skip with a clear reason; Docker, Postgres, Chrome, and the DevTools ports are
       # required and fail loudly when unavailable so the gate proves its declared coverage.
       - run: make test-integration
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-timings-integration
+          path: .pytest-timings
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
