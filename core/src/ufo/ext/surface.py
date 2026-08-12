@@ -2009,10 +2009,10 @@ class SurfaceContext:
         )
 
     async def workspace_domain(self) -> str | None:
-        """The workspace's own email domain, read through the one derivation `add_member` admits
-        by, so the domain a panel advertises and the addresses the verb accepts cannot diverge.
-        None only when the workspace has no member yet, since every stored address carries a
-        domain; a caller reading None has no domain to advertise and admits no added address."""
+        """The workspace's own email domain — its first member's, the vetted domain a sign-in
+        resolves a workspace by and a chat-surface join matches against. None only when the
+        workspace has no member yet, since every stored address carries a domain; a caller reading
+        None has no domain to match against and joins nobody."""
         async with workspace_tx() as connection:
             return await workspace_domain(connection, self.workspace_id)
 

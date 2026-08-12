@@ -1972,10 +1972,8 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
     """The workspace roster: who the members are, which of them administer the workspace, and who
     holds a seat — the same rows the `member` kind lists to a member asking the main agent, so the
     panel shows a non-admin exactly what chat would tell them. `can_add` reports whether this
-    member may add another, and the domain names what an added address must match — both read
-    back from the verb's own authorities (the same `member.is_admin` row its gate checks, and the
-    one workspace-domain derivation it admits by), never a second copy; the verb refuses
-    regardless."""
+    member may add another, read back from the verb's own authority (the same `member.is_admin` row
+    its gate checks), never a second copy; the verb refuses regardless."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1987,7 +1985,6 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
                 for entry in await ctx.list_members()
             ],
             "can_add": audience.admin,
-            "domain": await ctx.workspace_domain(),
         }
     )
 

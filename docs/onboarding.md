@@ -67,20 +67,30 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- code submitted -------------------> verify claim
   |
-  +-- existing workspace for domain -----> join it
+  +-- one membership/domain candidate ---> join it
   |
-  +-- domain holds a live grant ---------> burn it, then create workspace
+  +-- several candidates ----------------> choose workspace
   |
-  +-- domain holds no live grant --------> say why, name the waitlist, exit
+  +-- membership plus live grant --------> choose membership or new workspace
+  |
+  +-- no candidate, live domain grant ---> burn it, then create workspace
+  |
+  +-- no candidate or grant -------------> say why, name the waitlist, exit
   |
   +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
                                             admin: choose (billing) · teammate: ask
 ```
 
-The initial member's email domain identifies the workspace. Resolution fails if that domain
-identifies more than one; creation derives the workspace UUID from the domain.
-`SharedWorkspaces.ensure` reports whether the member is an admin (`EnsuredWorkspace.admin`), and
+The verified address identifies every exact membership plus the workspace its email domain names.
+One candidate opens directly; several are offered as a `choose` before a token is minted. Selecting
+a domain workspace creates the member there, while selecting an exact membership changes no other
+workspace. A live domain grant adds creation as another choice when the address already belongs to
+a workspace. With no candidate, creating the domain workspace still requires that grant. A domain
+claimed by two workspaces fails loud without creating another. Creation derives the workspace UUID
+from the domain.
+`SharedWorkspaces.create` and `join` report whether the member is an admin
+(`EnsuredWorkspace.admin`), and
 the last screen turns on it: an admin is offered `Set up billing` as a `choose`, a joined teammate
 gets the ordinary `ask` prompt. The `workspace` directive has already landed by then, so whichever
 option the admin picks posts to
@@ -124,7 +134,10 @@ grants a waitlist object's domain and emails the invitation to it, and the flow 
 live grant and stamps the claim's `invite_id` in one transaction — no third prompt, and nothing for
 the member to carry from the invitation back into the terminal. The invitation therefore holds no
 secret, and a colleague at the granted domain is identified by the same grant, which is who usually
-runs the installer. `SharedWorkspaces.exists` decides create versus join. Delivery rides the
+runs the installer. An exact membership admits its workspace without spending a domain grant. A
+live grant appears as a separate creation choice when that address already holds a membership, so
+the member decides which workspace becomes active and the grant cannot be spent into the wrong one.
+Delivery rides the
 gateway's own SES sender, read before the object spends its one live grant; a grant whose invitation
 fails to send still stands, so the verb reports that rather than withdrawing it.
 
@@ -380,7 +393,7 @@ control/src/ufo_control/
   gateway_slack_connect.py
                           the signup Slack Connect delivery: table, client, leased workflow
   gateway_token.py        bearer minting
-  gateway_shared.py       workspace/member/default-agent writes
+  gateway_shared.py       domain/roster workspace resolution, member/default-agent writes
   gateway_store.py        claim custody
   schema.py               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
   rls.py                  shared serve role and workspace policies

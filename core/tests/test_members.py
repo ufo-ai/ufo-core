@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -381,12 +380,29 @@ async def test_a_child_agent_cannot_add_a_member(db: None) -> None:
     assert await _member_row(workspace_id, "new@example.com") is None
 
 
-async def test_an_email_outside_the_workspace_domain_is_refused(db: None) -> None:
+async def test_an_email_outside_the_workspace_domain_is_added(db: None) -> None:
+    """A contractor, an advisor, or a colleague at a sister company is a member an admin can staff
+    the workspace with: the speaking admin is the vetting, so no domain is compared."""
     workspace_id, main_agent, _, admin_id, _ = await _seed()
-    refusal = re.escape("admits example.com addresses")
-    with ws(workspace_id), pytest.raises(ValueError, match=refusal):
-        await _add(_context(workspace_id, main_agent, admin_id), email="outsider@other.com")
-    assert await _member_row(workspace_id, "outsider@other.com") is None
+    with ws(workspace_id):
+        answer = await _add(
+            _context(workspace_id, main_agent, admin_id), email="contractor@other.com"
+        )
+    row = await _member_row(workspace_id, "contractor@other.com")
+    assert row is not None and not row.is_admin
+    assert "contractor@other.com is a workspace member" in answer
+
+
+async def test_an_email_outside_the_workspace_domain_is_added_as_an_admin(db: None) -> None:
+    workspace_id, main_agent, _, admin_id, _ = await _seed()
+    with ws(workspace_id):
+        await _add(
+            _context(workspace_id, main_agent, admin_id),
+            email="advisor@other.com",
+            admin=True,
+        )
+    row = await _member_row(workspace_id, "advisor@other.com")
+    assert row is not None and row.is_admin
 
 
 async def test_a_malformed_address_is_refused(db: None) -> None:
@@ -564,17 +580,10 @@ async def test_the_success_report_names_the_role_it_wrote(db: None) -> None:
     assert as_member == "hand@example.com is a workspace member. They can speak to the agent now."
 
 
-async def test_a_dotless_workspace_domain_admits_its_own_addresses(db: None) -> None:
-    """A self-hosted deploy initialized at a dotless domain (`ufoctl init --email admin@internal`)
-    admits its own teammates: the advertised domain and the admitted set are one derivation, so
-    the panel cannot promise a domain every add refuses."""
+async def test_a_dotless_domain_is_admitted(db: None) -> None:
+    """A self-hosted deploy's internal addresses (`ufoctl init --email admin@internal`) parse as one
+    `local@domain`, so the shape gate admits them."""
     workspace_id, main_agent, _, admin_id, _ = await _seed()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.member)
-            .where(tables.member.c.workspace_id == workspace_id)
-            .values(email=sa.func.replace(tables.member.c.email, "@example.com", "@internal"))
-        )
     with ws(workspace_id):
         answer = await _add(_context(workspace_id, main_agent, admin_id), email="bob@internal")
     assert "bob@internal is a workspace member" in answer
@@ -710,9 +719,9 @@ async def test_membership_is_not_managed_in_an_externally_shared_channel(db: Non
     assert untouched is False
 
 
-async def test_a_workspace_whose_own_address_has_no_domain_refuses_and_says_why(db: None) -> None:
-    """`ufoctl init --email root` mints a workspace with no domain of its own. The refusal names
-    that cause rather than claiming the asking admin is not a member."""
+async def test_a_workspace_whose_own_address_has_no_domain_still_adds_a_member(db: None) -> None:
+    """`ufoctl init --email root` mints a workspace with no domain of its own, which nothing is
+    compared against: the adding admin is the authority, not the workspace's own address."""
     workspace_id, main_agent, _, admin_id, _ = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -720,5 +729,6 @@ async def test_a_workspace_whose_own_address_has_no_domain_refuses_and_says_why(
             .where(tables.member.c.workspace_id == workspace_id)
             .values(email=sa.func.replace(tables.member.c.email, "@example.com", ""))
         )
-    with ws(workspace_id), pytest.raises(ValueError, match="carries no domain"):
+    with ws(workspace_id):
         await _add(_context(workspace_id, main_agent, admin_id), email="bob@example.com")
+    assert await _member_row(workspace_id, "bob@example.com") is not None

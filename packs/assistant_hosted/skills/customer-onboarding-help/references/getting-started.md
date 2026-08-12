@@ -19,8 +19,10 @@ every agent there; other agents appear once an admin shares them (see `capabilit
    works once per domain, and lapses if it goes unused for a couple of weeks.
 4. **Joining an existing workspace needs no invitation.** A teammate whose email domain already has a
    workspace signs in and joins it directly. An admin can also add someone ahead of their first
-   sign-in — by asking the agent, or from the portal's Team view — optionally as an admin. Either
-   way the address must be at the workspace's own domain.
+   sign-in — by asking the agent, or from the portal's Team view — optionally as an admin, and at any
+   email domain, so a contractor or an advisor is added the same way as a colleague. Signing in
+   opens the one workspace their verified address can enter, or asks them to choose when an exact
+   membership and their email domain name different workspaces. An exact membership needs no invite.
 5. **A workspace admin is offered billing setup at the end.** In the terminal the admin gets a choice
    on the concluding screen; picking it starts a chat with the agent, which returns a link for saving
    a payment method. A joined teammate gets the ordinary prompt instead, and signing in through the
@@ -32,15 +34,17 @@ every agent there; other agents appear once an admin shares them (see `capabilit
 
 "Your invitation covers your company's email domain, so there is nothing to type in. Your teammates
 do not need one at all: they sign in with their work email and join the workspace you already have.
-If you want someone set up before they sign in, ask me to add them by their work email and I will."
+If you want someone set up before they sign in, ask me to add them by their email and I will — any
+domain, so an outside contractor works too. After they verify that address, they choose the workspace
+when they can enter more than one."
 
 ## Boundaries
 
 - A refusal ends the session with the reason rather than asking again, because the member holds no
   secret that could change the outcome. Three shapes: the domain has no invitation, so they join the
   waitlist; the invitation lapsed, so they reply to it; the invitation was already used with no
-  workspace to show for it, which only the team can sort out. A refusal happens only when the domain
-  has no workspace, so in every shape there is nothing for them to sign in to yet.
+  workspace to show for it, which only the team can sort out. A verified exact membership bypasses
+  these creation refusals because it already grants one workspace.
 - The invitation is spent atomically: if signup crashes partway, it is not silently lost and the team
   can confirm where it stands.
 - A customer cannot invite another company. Only the UFO team issues invitations.

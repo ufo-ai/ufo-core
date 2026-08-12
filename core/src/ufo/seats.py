@@ -340,10 +340,10 @@ def email_domain(email: str) -> str:
 async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> str | None:
     """The workspace's own email domain: its first member's, the vetted domain a sign-in resolves
     a workspace by and a chat-surface join matches against. The one derivation every consumer
-    reads — what `add_member` admits, what `join_member` matches, what the operator check compares,
-    and what the portal advertises cannot diverge. None only when the workspace has no member yet,
-    the state a chat-surface join meets before anyone has onboarded: every stored address carries a
-    domain, because `create_member` admits none that does not."""
+    reads — what `join_member` matches and what the operator check compares cannot diverge. None
+    only when the workspace has no member yet, the state a chat-surface join meets before anyone has
+    onboarded: every stored address carries a domain, because `create_member` admits none that does
+    not."""
     email = (
         await connection.execute(
             sa.select(tables.member.c.email)

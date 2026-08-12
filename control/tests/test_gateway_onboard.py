@@ -104,4 +104,4 @@ async def test_onboarding_resolves_claim_verified_by_concurrent_turn(
     )
     assert directives["workspace"] == WORKSPACE_URL
     assert "token" in directives
-    assert await flow.workspaces.exists(domain)
+    assert len(await flow.workspaces.choices(domain, email)) == 1

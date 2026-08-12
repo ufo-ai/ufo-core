@@ -23,6 +23,7 @@ SLACK_TOOLS = "extensions/slack/ufo_ext_slack/tools.py"
 METRONOME = "extensions/metronome/ufo_ext_metronome.py"
 GATEWAY = "control/src/ufo_control/gateway.py"
 GATEWAY_WEB = "control/src/ufo_control/gateway_web.py"
+GATEWAY_SHARED = "control/src/ufo_control/gateway_shared.py"
 INVITES = "control/src/ufo_control/gateway_invite.py"
 SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
@@ -95,7 +96,21 @@ CLAIMS = (
         corpus="references/not-yet.md",
         phrase="One workspace exists per email domain",
         source=GATEWAY,
-        pattern=r"workspaces\.ensure\(claim\.email_domain",
+        pattern=r"workspaces\.create\(claim\.email_domain",
+    ),
+    Claim(
+        claim="a sign-in offers every workspace the verified address can enter",
+        corpus="references/getting-started.md",
+        phrase="asks them to choose when an exact",
+        source=GATEWAY_SHARED,
+        pattern=r"where matching\.email = \$1",
+    ),
+    Claim(
+        claim="an exact membership bypasses the new-workspace invite gate",
+        corpus="references/getting-started.md",
+        phrase="An exact membership needs no invite",
+        source=GATEWAY,
+        pattern=r"if not choices:",
     ),
     Claim(
         claim="an admin is offered billing setup at the end of signup",
@@ -256,11 +271,11 @@ CLAIMS = (
         pattern=r'ADD_MEMBER_TOOL = "add_member"',
     ),
     Claim(
-        claim="an added address must be at the workspace's own domain",
+        claim="an added address may be at any email domain",
         corpus="references/getting-started.md",
-        phrase="must be at the workspace's own domain",
+        phrase="at any email domain",
         source=MEMBERS,
-        pattern=r'raise ValueError\(f"this workspace admits \{own\} addresses"\)',
+        pattern=r"have ever contacted the agent, at any email domain",
     ),
     Claim(
         claim="a member an admin adds is seated while an included seat is open",

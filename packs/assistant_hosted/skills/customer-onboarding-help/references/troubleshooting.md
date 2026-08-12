@@ -23,7 +23,7 @@ second-hand, from an admin asking about someone else.
 | "My colleague's messages are being refused" | No open seat. An admin approves one, it bills as overage, and you confirm once it is done. |
 | "I can't add another seat at all" | The hard cap is reached. Raising it is not a chat act — say you are passing it to the team. |
 | "We took someone's seat away and they are still working" | Their next message is refused at once, and a turn already running holds at its next step rather than stopping mid-act. |
-| An admin asks why a new teammate never got their sign-in code | It goes to the address they typed: check spam and confirm the address. A personal address is refused outright — it has to be a work address on the company's domain. If the address was right and nothing arrived, say you are raising it. |
+| An admin asks why a new teammate never got their sign-in code | It goes to the address they typed: check spam and confirm the address. A personal address is refused outright — it has to be a work address. Someone added at another company's domain signs in with that address and chooses the workspace when more than one is available. If the address was right and nothing arrived, say you are raising it. |
 
 ## Memory and context
 

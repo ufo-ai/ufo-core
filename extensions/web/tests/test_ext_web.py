@@ -7515,7 +7515,6 @@ async def test_team_view_lists_the_roster_for_every_member(
     ]
     assert "id" not in body["members"][0]
     assert body["can_add"] is False
-    assert body["domain"] == "example.com"
 
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     assert admin_view.json()["can_add"] is True
@@ -7581,32 +7580,31 @@ async def test_the_team_panel_adds_a_member_through_the_intent_lane(
         ).one_or_none() is None
 
 
-async def test_the_team_panel_refuses_a_foreign_domain(
+async def test_the_team_panel_adds_a_member_at_another_domain(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """An address outside the workspace's own domain is refused with the verb's own words and no
-    row: a sign-in resolves its workspace by the address's domain, so such a member could never
-    answer for this one."""
+    """An address outside the workspace's own domain lands as a member: an admin staffing the
+    workspace with a contractor or an advisor types the address they have, and the panel writes the
+    row the verb writes."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    refused = await client.post(
+    added = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "add_member", "email": "outsider@other.test", "admin": False},
+        json={"verb": "add_member", "email": "contractor@other.test", "admin": False},
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
-    assert refused.status_code == 200
-    assert refused.json()["applied"] is False
-    assert "example.com" in refused.json()["message"]
+    assert added.status_code == 200
+    assert added.json()["applied"] is True, added.json()["message"]
     async with workspace_tx() as connection:
         assert (
             await connection.execute(
                 sa.select(tables.member.c.id).where(
                     tables.member.c.workspace_id == workspace_id,
-                    tables.member.c.email == "outsider@other.test",
+                    tables.member.c.email == "contractor@other.test",
                 )
             )
-        ).one_or_none() is None
+        ).one_or_none() is not None
 
 
 async def test_subagent_page_reads_the_profile_and_refuses_an_unknown_name(

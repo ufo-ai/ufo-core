@@ -27,6 +27,7 @@ from ufo.db import (
 from ufo.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.seats import create_member
 from ufo.workspace import ws
 
 from ufo_control import gateway, rls
@@ -399,20 +400,24 @@ async def _members_in(workspace_id: str) -> list[str]:
     return [row.email for row in rows]
 
 
-async def test_shared_ensure_writes_workspace_and_members(
+async def test_shared_create_and_join_write_workspace_and_members(
     shared_role_env: SharedRoleEnv,
 ) -> None:
     pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
     shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
     try:
-        assert not await shared.exists("sharedco.io")
-        founder = await shared.ensure("sharedco.io", "Founder@Sharedco.io")
+        assert await shared.choices("sharedco.io", "founder@sharedco.io") == ()
+        founder = await shared.create("sharedco.io", "Founder@Sharedco.io")
         workspace_id = founder.workspace_id
-        assert await shared.exists("sharedco.io")
         assert workspace_id == str(uuid5(NAMESPACE_DNS, "sharedco.io"))
         assert founder.admin
-        assert await shared.ensure("sharedco.io", "founder@sharedco.io") == founder
-        colleague = await shared.ensure("sharedco.io", "colleague@sharedco.io")
+        founder_choice = await shared.choices("sharedco.io", "founder@sharedco.io")
+        assert [(str(choice.workspace_id), choice.label) for choice in founder_choice] == [
+            (workspace_id, "sharedco.io")
+        ]
+        assert await shared.join(founder_choice[0], "sharedco.io", "founder@sharedco.io") == founder
+        colleague_choice = await shared.choices("sharedco.io", "colleague@sharedco.io")
+        colleague = await shared.join(colleague_choice[0], "sharedco.io", "colleague@sharedco.io")
         assert colleague.workspace_id == workspace_id
         assert not colleague.admin
         assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
@@ -423,9 +428,9 @@ async def test_shared_ensure_writes_workspace_and_members(
                     .values(seat_limit=2, updated_at=sa.func.now())
                     .where(tables.workspace.c.id == UUID(workspace_id))
                 )
-        assert (await shared.ensure("sharedco.io", "third@sharedco.io")).workspace_id == (
-            workspace_id
-        )
+        third_choice = await shared.choices("sharedco.io", "third@sharedco.io")
+        third = await shared.join(third_choice[0], "sharedco.io", "third@sharedco.io")
+        assert third.workspace_id == workspace_id
         with ws(UUID(workspace_id)):
             async with workspace_tx() as connection:
                 seated = (
@@ -457,16 +462,17 @@ async def _default_agents_in(workspace_id: str) -> list[tuple[str, str, str]]:
     return [(row.name, row.prompt, row.model) for row in rows]
 
 
-async def test_shared_ensure_seeds_the_default_agent(shared_role_env: SharedRoleEnv) -> None:
+async def test_shared_create_seeds_the_default_agent(shared_role_env: SharedRoleEnv) -> None:
     pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
     shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
     try:
-        workspace_id = (await shared.ensure("agentco.io", "founder@agentco.io")).workspace_id
+        workspace_id = (await shared.create("agentco.io", "founder@agentco.io")).workspace_id
         expected = [(DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL)]
         assert await _default_agents_in(workspace_id) == expected
-        assert (
-            await shared.ensure("agentco.io", "founder@agentco.io")
-        ).workspace_id == workspace_id
+        choice = (await shared.choices("agentco.io", "founder@agentco.io"))[0]
+        assert (await shared.join(choice, "agentco.io", "founder@agentco.io")).workspace_id == (
+            workspace_id
+        )
         assert await _default_agents_in(workspace_id) == expected
     finally:
         await pool.close()
@@ -493,7 +499,125 @@ async def test_shared_domain_lookup_rejects_ambiguous_workspaces(
     try:
         shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
         with pytest.raises(RuntimeError, match=r"domain ambiguousco\.io maps to 2 workspaces"):
-            await shared.exists("ambiguousco.io")
+            await shared.choices("ambiguousco.io", "owner@ambiguousco.io")
+        assert not await pool.fetchval(
+            "select 1 from workspace where id = $1", uuid5(NAMESPACE_DNS, "ambiguousco.io")
+        )
+    finally:
+        await pool.close()
+
+
+async def test_shared_resolution_finds_the_workspace_an_outside_address_was_added_to(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        host = await shared.create("hostco.io", "founder@hostco.io")
+        with ws(UUID(host.workspace_id)):
+            async with workspace_tx() as connection:
+                await create_member(connection, UUID(host.workspace_id), "Contractor@Outside.dev")
+        choices = await shared.choices("outside.dev", "contractor@outside.dev")
+        assert [(str(choice.workspace_id), choice.label) for choice in choices] == [
+            (host.workspace_id, "hostco.io")
+        ]
+        joined = await shared.join(choices[0], "outside.dev", "contractor@outside.dev")
+        assert joined.workspace_id == host.workspace_id
+        assert not joined.admin
+        assert await _members_in(host.workspace_id) == [
+            "contractor@outside.dev",
+            "founder@hostco.io",
+        ]
+        assert not await pool.fetchval(
+            "select 1 from workspace where id = $1", uuid5(NAMESPACE_DNS, "outside.dev")
+        )
+    finally:
+        await pool.close()
+
+
+async def test_shared_join_does_not_recreate_a_removed_exact_membership(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        host = await shared.create("removedco.io", "founder@removedco.io")
+        with ws(UUID(host.workspace_id)):
+            async with workspace_tx() as connection:
+                await create_member(connection, UUID(host.workspace_id), "gone@outside.dev")
+        choice = (await shared.choices("outside.dev", "gone@outside.dev"))[0]
+        with ws(UUID(host.workspace_id)):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.member).where(tables.member.c.email == "gone@outside.dev")
+                )
+        with pytest.raises(RuntimeError, match="is no longer a member"):
+            await shared.join(choice, "outside.dev", "gone@outside.dev")
+        assert await _members_in(host.workspace_id) == ["founder@removedco.io"]
+    finally:
+        await pool.close()
+
+
+async def test_shared_resolution_offers_the_domain_workspace_and_exact_membership(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        host = await shared.create("addedco.io", "founder@addedco.io")
+        with ws(UUID(host.workspace_id)):
+            async with workspace_tx() as connection:
+                await create_member(connection, UUID(host.workspace_id), "Alice@Bigco.io")
+        own = await shared.create("bigco.io", "founder@bigco.io")
+        assert own.workspace_id != host.workspace_id
+        choices = await shared.choices("bigco.io", "alice@bigco.io")
+        assert [(str(choice.workspace_id), choice.label) for choice in choices] == [
+            (host.workspace_id, "addedco.io"),
+            (own.workspace_id, "bigco.io"),
+        ]
+        joined = await shared.join(choices[1], "bigco.io", "alice@bigco.io")
+        assert joined.workspace_id == own.workspace_id
+        assert not joined.admin
+        assert await _members_in(own.workspace_id) == ["alice@bigco.io", "founder@bigco.io"]
+        assert await _members_in(host.workspace_id) == ["alice@bigco.io", "founder@addedco.io"]
+    finally:
+        await pool.close()
+
+
+async def test_shared_create_founds_a_domain_over_a_roster_holding_the_address(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        host = await shared.create("grantedhost.io", "founder@grantedhost.io")
+        with ws(UUID(host.workspace_id)):
+            async with workspace_tx() as connection:
+                await create_member(connection, UUID(host.workspace_id), "boss@granted.io")
+        founded = await shared.create("granted.io", "boss@granted.io")
+        assert founded.workspace_id == str(uuid5(NAMESPACE_DNS, "granted.io"))
+        assert founded.admin
+    finally:
+        await pool.close()
+
+
+async def test_shared_resolution_offers_every_exact_membership(
+    shared_role_env: SharedRoleEnv,
+) -> None:
+    pool = await asyncpg.create_pool(shared_role_env.owner_dsn)
+    shared = SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool)
+    try:
+        first = await shared.create("firstco.io", "founder@firstco.io")
+        second = await shared.create("secondco.io", "founder@secondco.io")
+        for workspace_id in (first.workspace_id, second.workspace_id):
+            with ws(UUID(workspace_id)):
+                async with workspace_tx() as connection:
+                    await create_member(connection, UUID(workspace_id), "contractor@twice.dev")
+        choices = await shared.choices("twice.dev", "contractor@twice.dev")
+        assert [(str(choice.workspace_id), choice.label) for choice in choices] == [
+            (first.workspace_id, "firstco.io"),
+            (second.workspace_id, "secondco.io"),
+        ]
     finally:
         await pool.close()
 

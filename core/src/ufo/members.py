@@ -30,7 +30,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
-from ufo.seats import Seats, create_member, email_domain, member_is_admin, workspace_domain
+from ufo.seats import Seats, create_member, email_domain, member_is_admin
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws_current
@@ -284,9 +284,7 @@ def _detail(row: sa.Row) -> ObjectDetail[MemberSpec]:
 
 class AddMemberInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    email: str = Field(
-        description="The work email of the person to add, at the workspace's own domain."
-    )
+    email: str = Field(description="The email of the person to add, at any domain.")
     admin: bool = Field(
         default=False,
         description="Whether they administer the workspace — a workspace admin manages every "
@@ -300,11 +298,12 @@ class AddMemberInput(BaseModel):
 @dataclass(frozen=True)
 class AddMember:
     """Mint a member before their first contact, so an admin can staff a workspace instead of
-    waiting for each person to arrive. Every other creation path is self-service — hosted
-    onboarding's first admin, a domain-matching teammate speaking on a verified chat surface, a
-    login that resolves this workspace — and each anchors on the workspace's own email domain, so
-    this one anchors there too: the gateway resolves a sign-in by the address's domain, so a row
-    minted for any other domain could never sign in to answer for it."""
+    waiting for each person to arrive. Every other creation path is self-service and anchors on the
+    workspace's own email domain — hosted onboarding's first admin, a domain-matching teammate
+    speaking on a verified chat surface, a login that resolves this workspace. This one does not:
+    a contractor, an advisor, or a colleague at a sister company is admitted at whatever domain
+    their address carries, because a speaking admin vetted them, which is the same authority the
+    role and seat fields carry."""
 
     async def add(self, ctx: ToolContext, args: AddMemberInput) -> ToolResult:
         if ctx.speaker_member_id is None or not await ctx.agent_is_main():
@@ -312,8 +311,7 @@ class AddMember:
         if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
             raise AdminRequired(ADD_MEMBER_ROOM)
         email = args.email.strip().lower()
-        domain = email_domain(email)
-        if not domain:
+        if not email_domain(email):
             raise ValueError(f"{args.email!r} is not an email address")
         async with workspace_tx() as connection:
             await connection.execute(
@@ -325,7 +323,6 @@ class AddMember:
                 connection, ws_current().workspace_id, ctx.speaker_member_id
             ):
                 raise AdminRequired(ADD_MEMBER_GATE)
-            await self._domain_matches(connection, domain)
             await self._absent(connection, email)
             member_id = await create_member(
                 connection, ws_current().workspace_id, email, is_admin=args.admin
@@ -342,18 +339,6 @@ class AddMember:
             else "They hold no seat, so the agent refuses them until an admin grants one."
         )
         return ToolResult(content=(TextContent(text=f"{email} is {role}. {seat}"),))
-
-    async def _domain_matches(self, connection: AsyncConnection, domain: str) -> None:
-        """The one derivation the portal also advertises, so the domain a panel shows and the
-        domain this admits cannot diverge."""
-        own = await workspace_domain(connection, ws_current().workspace_id)
-        if own is None:
-            raise ValueError(
-                "this workspace's own address carries no domain, so no added address can be "
-                "matched against it"
-            )
-        if domain != own:
-            raise ValueError(f"this workspace admits {own} addresses")
 
     async def _absent(self, connection: AsyncConnection, email: str) -> None:
         existing = (
@@ -374,10 +359,11 @@ class AddMember:
 ADD_MEMBER_TOOL_DEF = ToolDef(
     name=ADD_MEMBER_TOOL,
     description=(
-        "Add someone to this workspace by their work email, optionally as an admin, before they "
-        "have ever contacted the agent. Only a workspace admin using the main agent may add a "
-        "member, and only at the workspace's own email domain. Changing an existing member's role "
-        "or seat is an apply on the member object, not this."
+        "Add someone to this workspace by their email, optionally as an admin, before they "
+        "have ever contacted the agent, at any email domain — an outside contractor or advisor is "
+        "added the same way as a colleague. Only a workspace admin using the main agent may add a "
+        "member. Changing an existing member's role or seat is an apply on the member object, not "
+        "this."
     ),
     input_model=AddMemberInput,
     handler=AddMember().add,

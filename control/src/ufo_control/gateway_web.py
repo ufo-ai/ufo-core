@@ -68,8 +68,9 @@ LOGIN_PAGE = r"""<!doctype html>
   #prompt-row { display: none; margin-top: 14px; }
   #prompt-label { display: block; font-size: 13px; margin-bottom: 4px; }
   .row { display: flex; gap: 8px; }
-  input { flex: 1; padding: 10px 12px; border-radius: 8px; background: Field; color: FieldText;
-          border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  input, select { flex: 1; padding: 10px 12px; border-radius: 8px; background: Field;
+                  color: FieldText;
+                  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
   button { padding: 10px 18px; border: 0; border-radius: 8px; background: CanvasText; color: Canvas;
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: 0.4; cursor: default; }
@@ -96,6 +97,7 @@ LOGIN_PAGE = r"""<!doctype html>
       <label id="prompt-label" for="answer"></label>
       <div class="row">
         <input id="answer" autocomplete="off" autofocus>
+        <select id="choice" style="display:none"></select>
         <button type="submit" id="go">Continue</button>
       </div>
     </form>
@@ -122,6 +124,7 @@ const log = document.getElementById('log');
 const promptRow = document.getElementById('prompt-row');
 const promptLabel = document.getElementById('prompt-label');
 const answer = document.getElementById('answer');
+const choice = document.getElementById('choice');
 const go = document.getElementById('go');
 const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(
   new URLSearchParams(location.search).get('c') || '');
@@ -132,6 +135,7 @@ let workspace = null;
 let debuggerUrl = null;
 let email = null;
 let askedEmail = false;
+let choosing = false;
 let finished = false;
 let lastPrompt = null;
 
@@ -143,16 +147,21 @@ function line(text, cls) {
   return el;
 }
 
-function prompt(text) {
+function prompt(text, options) {
   if (finished) return;
   lastPrompt = text;
   promptLabel.textContent = text;
   promptRow.style.display = 'block';
+  choosing = Boolean(options && options.length);
+  promptLabel.htmlFor = choosing ? 'choice' : 'answer';
   askedEmail = text.includes('email');
   answer.type = askedEmail ? 'email' : 'text';
   answer.inputMode = text.includes('code') ? 'numeric' : 'text';
+  answer.style.display = choosing ? 'none' : 'block';
+  choice.style.display = choosing ? 'block' : 'none';
+  choice.replaceChildren(...(options || []).map((option) => new Option(option, option)));
   go.disabled = false;
-  answer.focus();
+  (choosing ? choice : answer).focus();
 }
 
 function complete() {
@@ -179,6 +188,7 @@ function handle(directive) {
   const arg = directive.fields[0] || '';
   if (directive.verb === 'say') line(arg);
   else if (directive.verb === 'ask') prompt(arg);
+  else if (directive.verb === 'choose') prompt(arg, directive.fields.slice(1));
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
@@ -213,7 +223,7 @@ async function advance(body) {
 
 promptRow.addEventListener('submit', (event) => {
   event.preventDefault();
-  const value = answer.value.trim();
+  const value = (choosing ? choice.value : answer.value).trim();
   if (!value) return;
   if (askedEmail) email = value.toLowerCase();
   answer.value = '';

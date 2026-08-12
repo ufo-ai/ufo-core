@@ -498,16 +498,20 @@ is internal: a child agent and an externally shared channel answer the speaker's
 whoever asks, so a channel another organization sits in never hears the staff list; a portal
 session is always the signed-in member's own audience, so the panel needs no such branch.
 Adding someone is `add_member`, the one verb that mints a member before their first contact: a
-speaking admin on the main agent names a work email at the workspace's own domain — the domain
-every join path already anchors on, and the one a sign-in resolves a workspace by, so a row at any
-other domain could never answer for this workspace — and optionally makes them an admin in the
-same act, since both fields carry the identical gate. An address that is already a member is
-refused rather than silently promoted; changing an existing member's role or seat stays the
-`member` kind's admin-gated apply. The new member is auto-seated while an included seat is open
+speaking admin on the main agent names an email at any domain and may make them an admin in the same
+act. The hosted sign-in resolves the verified address to every exact `member.email` row plus the
+workspace its domain names. One candidate opens directly; several are offered for the member to
+choose before the workspace-scoped token is minted. An exact membership grants only its workspace,
+while a domain match grants the domain's workspace. With no candidate, the domain needs a live
+invite before its workspace is created. A live invite remains a creation choice when the address
+already belongs to another workspace, so neither authority captures the other. A domain claimed by
+two workspaces fails loud as fleet data that needs operator repair. An address that is already a
+member is refused rather than silently promoted; changing an existing member's role or seat stays
+the `member` kind's admin-gated apply. The new member is auto-seated while an included seat is open
 and the verb reports which happened, because an unseated member is one the agent refuses. The
-address must also parse as one `local@domain` with no whitespace: every creation path crosses that
-shape gate, so an address no sign-in could normalize to and no channel-verified join could equal
-never becomes a seated member the `member` kind cannot delete. Membership is managed in an internal
+address must parse as one `local@domain` with no whitespace: every creation path crosses that shape
+gate, so an address no sign-in could normalize to and no channel-verified join could equal never
+becomes a seated member the `member` kind cannot delete. Membership is managed in an internal
 conversation only — the verb refuses in an externally shared channel, where its refusal would
 confirm a colleague's membership and its success would mint a member.
 The usage view answers every member their own window — the ledger rows their

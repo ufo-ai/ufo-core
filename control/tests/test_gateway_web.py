@@ -2,7 +2,9 @@
 self-containment, and the full email → code walk over the real `onboard_claim` table and
 `SharedWorkspaces`. Both terminal shapes are asserted, since the page can only end on one of them:
 the signed-in card and a gate refusal that ends on `exit`. The `debugger` directive is asserted at
-both poles: emitted with the exact URL for an operator-domain email, absent for everyone else."""
+both poles: emitted with the exact URL for an operator-domain email, absent for everyone else.
+Workspace resolution is asserted at all three of its poles too: a domain that creates a workspace,
+an exact membership at another domain, and a verified member choosing among multiple workspaces."""
 
 import asyncio
 import re
@@ -127,6 +129,12 @@ def test_login_page_asks_for_the_email_once() -> None:
     assert "work email" not in LOGIN_PAGE
 
 
+def test_login_page_renders_a_workspace_choice() -> None:
+    assert '<select id="choice"' in LOGIN_PAGE
+    assert "directive.verb === 'choose'" in LOGIN_PAGE
+    assert "prompt(arg, directive.fields.slice(1))" in LOGIN_PAGE
+
+
 def test_login_page_hands_the_token_off_by_post_after_the_whole_batch() -> None:
     """The debugger handoff is a form POST (the bearer never rides a URL), and the signed-in card
     completes only after every directive in a batch has been handled — `debugger` arrives after
@@ -163,6 +171,36 @@ def _grant(dsn: str, object_number: int, email: str) -> None:
     asyncio.run(_mint())
 
 
+def _add_member(dsn: str, workspace_id: UUID, email: str) -> None:
+    async def _insert() -> None:
+        connection = await asyncpg.connect(dsn)
+        try:
+            await connection.execute(
+                "insert into member (id, workspace_id, email, seated_at, created_at, updated_at) "
+                "values ($1, $2, $3, now(), now(), now())",
+                uuid.uuid4(),
+                workspace_id,
+                email,
+            )
+        finally:
+            await connection.close()
+
+    asyncio.run(_insert())
+
+
+def _workspace_exists(dsn: str, workspace_id: UUID) -> bool:
+    async def _read() -> bool:
+        connection = await asyncpg.connect(dsn)
+        try:
+            return bool(
+                await connection.fetchval("select 1 from workspace where id = $1", workspace_id)
+            )
+        finally:
+            await connection.close()
+
+    return asyncio.run(_read())
+
+
 def _advance(client: TestClient, session: str, body: str) -> list[dict[str, object]]:
     response = client.post("/v1/onboard/web", headers={"x-ufo-session": session}, content=body)
     assert response.status_code == 200
@@ -181,13 +219,17 @@ def _fields(directives: list[dict[str, object]], verb: str) -> list[str]:
     return collected
 
 
+def _directive_fields(directives: list[dict[str, object]], verb: str) -> list[str]:
+    matching = [entry for entry in directives if entry["verb"] == verb]
+    assert len(matching) == 1
+    fields = matching[0]["fields"]
+    assert isinstance(fields, list)
+    return [str(field) for field in fields]
+
+
 def test_web_channel_walks_email_then_code_to_the_signed_in_card(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The web renderer end to end, in the two prompts a granted domain now costs, and the one
-    directive it must never receive: this member administers the workspace they just created, but
-    the page ends on its signed-in card rather than a prompt, so it is never handed a `choose` menu
-    it has no way to drive. The terminal admin's billing choice is asserted in test_rls."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     sender = RecordingSender()
     monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
@@ -214,6 +256,116 @@ def test_web_channel_walks_email_then_code_to_the_signed_in_card(
     assert all(token not in text for text in _fields(signed_in, "say"))
     assert not _fields(signed_in, "choose")
     assert _fields(signed_in, "ask") == [PROMPT]
+
+
+def test_web_channel_lets_a_member_choose_between_an_exact_membership_and_their_domain(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    host_founder = "boss@addedco.io"
+    own_founder = "boss@bigco.io"
+    alice = "alice@bigco.io"
+    _grant(gateway_postgres, 74, host_founder)
+    _grant(gateway_postgres, 75, own_founder)
+    host_id = UUID(str(uuid5(NAMESPACE_DNS, "addedco.io")))
+    own_id = UUID(str(uuid5(NAMESPACE_DNS, "bigco.io")))
+    with TestClient(gateway_app()) as client:
+        hosting = str(uuid.uuid4())
+        _advance(client, hosting, "")
+        _advance(client, hosting, host_founder)
+        _advance(client, hosting, sender.sent[host_founder])
+
+        _add_member(gateway_postgres, host_id, alice)
+
+        founding = str(uuid.uuid4())
+        _advance(client, founding, "")
+        _advance(client, founding, own_founder)
+        _advance(client, founding, sender.sent[own_founder])
+
+        signing_in = str(uuid.uuid4())
+        _advance(client, signing_in, "")
+        _advance(client, signing_in, alice)
+        offered = _advance(client, signing_in, sender.sent[alice])
+        signed_in = _advance(client, signing_in, "bigco.io")
+
+    assert _directive_fields(offered, "choose") == [
+        gateway.WORKSPACE_PROMPT,
+        "addedco.io",
+        "bigco.io",
+    ]
+    (token,) = _fields(signed_in, "token")
+    assert verify_token(token, own_id) == alice
+    assert verify_token(token, host_id) is None
+    assert not any("invite" in text for text in _fields(signed_in, "say"))
+
+
+def test_web_channel_signs_in_an_exact_member_without_a_grant_for_their_domain(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    founder = "boss@gatedco.io"
+    advisor = "advisor@outsideco.dev"
+    _grant(gateway_postgres, 76, founder)
+    workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "gatedco.io")))
+    with TestClient(gateway_app()) as client:
+        opened = str(uuid.uuid4())
+        _advance(client, opened, "")
+        _advance(client, opened, founder)
+        _advance(client, opened, sender.sent[founder])
+
+        _add_member(gateway_postgres, workspace_id, advisor)
+
+        member_session = str(uuid.uuid4())
+        _advance(client, member_session, "")
+        _advance(client, member_session, advisor)
+        signed_in = _advance(client, member_session, sender.sent[advisor])
+
+    (token,) = _fields(signed_in, "token")
+    assert verify_token(token, workspace_id) == advisor
+    assert not _fields(signed_in, "exit")
+    assert not _workspace_exists(gateway_postgres, uuid5(NAMESPACE_DNS, "outsideco.dev"))
+
+
+def test_web_channel_lets_an_added_member_use_a_grant_to_create_their_domain_workspace(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path, gateway_postgres)
+    sender = RecordingSender()
+    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    founder = "boss@opengateco.io"
+    advisor = "advisor@openadvisor.dev"
+    _grant(gateway_postgres, 77, founder)
+    _grant(gateway_postgres, 78, advisor)
+    workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "opengateco.io")))
+    own_id = UUID(str(uuid5(NAMESPACE_DNS, "openadvisor.dev")))
+    with TestClient(gateway_app()) as client:
+        opened = str(uuid.uuid4())
+        _advance(client, opened, "")
+        _advance(client, opened, founder)
+        _advance(client, opened, sender.sent[founder])
+
+        _add_member(gateway_postgres, workspace_id, advisor)
+
+        joined = str(uuid.uuid4())
+        _advance(client, joined, "")
+        _advance(client, joined, advisor)
+        offered = _advance(client, joined, sender.sent[advisor])
+        signed_in = _advance(client, joined, "Create openadvisor.dev workspace")
+
+    assert _directive_fields(offered, "choose") == [
+        gateway.WORKSPACE_PROMPT,
+        "opengateco.io",
+        "Create openadvisor.dev workspace",
+    ]
+    (token,) = _fields(signed_in, "token")
+    assert verify_token(token, own_id) == advisor
+    assert verify_token(token, workspace_id) is None
+    assert not _fields(signed_in, "exit")
+    assert _workspace_exists(gateway_postgres, own_id)
 
 
 def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(

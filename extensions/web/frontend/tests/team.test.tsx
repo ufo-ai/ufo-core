@@ -19,7 +19,6 @@ const ROSTER = {
     { email: "member@example.com", admin: false, seated: false },
   ],
   can_add: true,
-  domain: "example.com",
 };
 
 beforeEach(() => {
@@ -51,7 +50,7 @@ test("an admin adds a member by email, optionally as an admin, through the inten
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   const submit = await openAdd();
-  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.type(screen.getByPlaceholderText("email@work.com"), "new@example.com");
   await pick("Role", "Admin");
   await userEvent.click(submit);
 
@@ -153,7 +152,7 @@ test("only the refused rows stay behind, so a second press cannot re-add what la
       const body = String(init?.body);
       bodies.push(body);
       return body.includes("bad@example.com")
-        ? json({ applied: false, message: "bad@example.com is not at example.com." })
+        ? json({ applied: false, message: "bad@example.com is already a member." })
         : json({ applied: true, message: "Added good@example.com." });
     },
   });
@@ -165,7 +164,7 @@ test("only the refused rows stay behind, so a second press cannot re-add what la
   await userEvent.type(screen.getByLabelText("Email 2"), "bad@example.com");
   await userEvent.click(submit);
 
-  await refusedNotice("bad@example.com is not at example.com.");
+  await refusedNotice("bad@example.com is already a member.");
   expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("bad@example.com");
 
   await userEvent.click(submit);
@@ -181,12 +180,12 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   const submit = await openAdd();
-  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "x@example.com");
+  await userEvent.type(screen.getByPlaceholderText("email@work.com"), "x@example.com");
   await userEvent.click(submit);
 
   await refusedNotice("Only an admin adds a member.");
   expect(screen.getByRole("dialog")).toBeTruthy();
-  expect((screen.getByPlaceholderText("email@example.com") as HTMLInputElement).value).toBe(
+  expect((screen.getByPlaceholderText("email@work.com") as HTMLInputElement).value).toBe(
     "x@example.com",
   );
 });
@@ -221,7 +220,7 @@ test("an add already in flight is not sent twice", async () => {
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   const submit = await openAdd();
-  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.type(screen.getByPlaceholderText("email@work.com"), "new@example.com");
   await userEvent.click(submit);
   await waitFor(() => expect(submit.getAttribute("aria-disabled")).toBe("true"));
   await userEvent.click(submit);
@@ -238,11 +237,14 @@ test("a member who may not add reads the roster with no form", async () => {
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
 });
 
-test("the placeholder names the workspace domain an address must match", async () => {
-  wire({ "/workspace/team": () => json({ ...ROSTER, domain: null }) });
+test("the form admits an address at any domain and hints a neutral one", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
   await openAdd();
+  expect(
+    screen.getByText("Each address is added to this workspace, at any email domain."),
+  ).toBeTruthy();
   expect(screen.getByPlaceholderText("email@work.com")).toBeTruthy();
 });
 
@@ -296,7 +298,7 @@ test("an outcome notice does not follow the member to another view", async () =>
 
   await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
   const submit = await openAdd();
-  await userEvent.type(screen.getByPlaceholderText("email@example.com"), "new@example.com");
+  await userEvent.type(screen.getByPlaceholderText("email@work.com"), "new@example.com");
   await userEvent.click(submit);
   expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
 

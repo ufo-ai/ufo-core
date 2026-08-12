@@ -444,6 +444,21 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "outside-contractor-sign-in",
+        "I added contractor@agency.dev to our workspace. Can they sign in here, or does their "
+        "email domain send them somewhere else?",
+        corpus_scorer("getting-started.md"),
+        samples=3,
+        digest_tag="onboarding:outside-contractor-sign-in",
+        rubric=(
+            "The answer says the exact membership lets the contractor sign in to this workspace "
+            "without an invitation for agency.dev.",
+            "The answer says the contractor chooses a workspace if that address can enter more "
+            "than one, and does not say they must use Slack or are forced into their domain's "
+            "workspace.",
+        ),
+    ),
+    CapabilityCase(
         "promised-credits",
         "Your team told us at signup we'd get $2,000 in credits to start. Can you apply that to "
         "our account?",

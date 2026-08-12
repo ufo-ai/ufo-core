@@ -43,6 +43,8 @@ member = sa.Table(
     sa.UniqueConstraint("workspace_id", "id", name="member_workspace_identity"),
 )
 
+sa.Index("member_email", member.c.email)
+
 surface_identity = sa.Table(
     "surface_identity",
     metadata,

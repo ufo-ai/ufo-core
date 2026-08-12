@@ -25,7 +25,7 @@ surface.
 | `gateway_claim.py` | Email-code expiry, hashing, and attempt limits. |
 | `gateway_email.py` | Work-email policy and SES delivery. |
 | `gateway_invite.py` | One-time domain-grant custody. |
-| `gateway_shared.py` | Workspace, member, and default-agent writes. |
+| `gateway_shared.py` | Workspace candidates from verified membership and domain; member and default-agent writes. |
 | `gateway_store.py` | The platform onboarding ledger. |
 | `gateway_token.py` | Bearer minting; the ufo surface owns verification. |
 | `rls.py` | Shared database role and policy bootstrap. |

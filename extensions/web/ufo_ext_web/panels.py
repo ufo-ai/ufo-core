@@ -122,8 +122,8 @@ class CorrectionIntent(BaseModel):
 
 class AddMemberIntent(BaseModel):
     """One member added from the team panel — the same admin-only `add_member` chat verb, which
-    mints the member at the workspace's own email domain and reports whether they took a seat.
-    Changing an existing member's role or seat is an apply on the member kind, never this."""
+    mints the member at whatever email domain their address carries and reports whether they took a
+    seat. Changing an existing member's role or seat is an apply on the member kind, never this."""
 
     verb: Literal["add_member"]
     email: str

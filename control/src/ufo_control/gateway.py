@@ -48,6 +48,7 @@ DEBUG_SURFACE_PATH = "/surface/debug"
 FIRST_MOVE_PROMPT = "What first?"
 BILLING_CHOICE = "Set up billing"
 TOUR_CHOICE = "Show me what you can do"
+WORKSPACE_PROMPT = "Choose a workspace:"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
@@ -89,7 +90,7 @@ class Onboarding:
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
-        return await self._resolve(claim, install)
+        return await self._resolve(claim, body, install)
 
     async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes:
         if not body:
@@ -116,17 +117,44 @@ class Onboarding:
         except ClaimError as error:
             current = await self.store.live_claim(claim.surface, claim.surface_ref)
             if current is not None and current.verified_at is not None:
-                return await self._resolve(current, install)
+                return await self._resolve(current, "", install)
             prompt = "Enter the code:" if current is not None else "Enter your work email:"
             return render(install, directive("say", str(error)), directive("ask", prompt))
-        return await self._resolve(claim, install)
+        return await self._resolve(claim, "", install)
 
-    async def _resolve(self, claim: OnboardClaim, install: bytes) -> bytes:
-        if self.invite_required and not await self.workspaces.exists(claim.email_domain):
-            refusal = await self._invite_gate(claim, install)
-            if refusal is not None:
-                return refusal
-        ensured = await self.workspaces.ensure(claim.email_domain, claim.email)
+    async def _resolve(self, claim: OnboardClaim, body: str, install: bytes) -> bytes:
+        choices = await self.workspaces.choices(claim.email_domain, claim.email)
+        if not choices:
+            if self.invite_required:
+                refusal = await self._invite_gate(claim, install)
+                if refusal is not None:
+                    return refusal
+            ensured = await self.workspaces.create(claim.email_domain, claim.email)
+        else:
+            create_available = claim.invite_id is not None or await self.invites.available(
+                claim.email_domain
+            )
+            if len(choices) == 1 and not create_available:
+                ensured = await self.workspaces.join(choices[0], claim.email_domain, claim.email)
+            else:
+                create_label = f"Create {claim.email_domain} workspace"
+                options = [choice.label for choice in choices]
+                if create_available:
+                    options.append(create_label)
+                if body == create_label and create_available:
+                    refusal = await self._invite_gate(claim, install)
+                    if refusal is not None:
+                        return refusal
+                    ensured = await self.workspaces.create(claim.email_domain, claim.email)
+                else:
+                    selected = next((choice for choice in choices if choice.label == body), None)
+                    if selected is None:
+                        return render(
+                            install,
+                            directive("say", "Choose a listed workspace.") if body else b"",
+                            directive("choose", WORKSPACE_PROMPT, *options),
+                        )
+                    ensured = await self.workspaces.join(selected, claim.email_domain, claim.email)
         await self.store.complete(claim.claim_id, ensured.workspace_id)
         return self._signed_in(claim, ensured, install)
 

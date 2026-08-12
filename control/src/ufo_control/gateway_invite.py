@@ -89,6 +89,17 @@ class InviteCodes:
     pool: asyncpg.Pool
     ttl: timedelta = INVITE_TTL
 
+    async def available(self, email_domain: str) -> bool:
+        """Whether this domain holds a live grant that can create its workspace."""
+        async with self.pool.acquire() as connection:
+            return bool(
+                await connection.fetchval(
+                    f"select 1 from {TABLE} "
+                    "where email_domain = $1 and consumed_at is null and expires_at > now()",
+                    email_domain,
+                )
+            )
+
     async def mint(self, object_number: int, email: str) -> MintedInvite:
         address, domain = normalize_email(email)
         WorkEmailPolicy().validate(address)

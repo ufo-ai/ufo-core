@@ -34,7 +34,7 @@ import { useMainAgent } from "@/lib/mainAgent";
 
 type Member = { email: string; admin: boolean; seated: boolean };
 
-type Roster = { members: Member[]; can_add: boolean; domain: string | null };
+type Roster = { members: Member[]; can_add: boolean };
 
 type Draft = { email: string; admin: boolean };
 
@@ -116,7 +116,7 @@ export function Team({
 
   return (
     <Panel state={state}>
-      {({ members, can_add, domain }) => {
+      {({ members, can_add }) => {
         const found = members.filter((entry) =>
           entry.email.toLowerCase().includes(query.trim().toLowerCase()),
         );
@@ -164,9 +164,7 @@ export function Team({
                 <DialogHeader>
                   <DialogTitle>Add Members</DialogTitle>
                   <DialogDescription>
-                    {domain
-                      ? "Each address must be at " + domain + "."
-                      : "Each address is added to this workspace."}
+                    Each address is added to this workspace, at any email domain.
                   </DialogDescription>
                 </DialogHeader>
                 <OutcomeNotice state={notice} />
@@ -177,7 +175,7 @@ export function Team({
                         type="email"
                         required
                         aria-label={drafts.length > 1 ? "Email " + (index + 1) : "Email"}
-                        placeholder={domain ? "email@" + domain : "email@work.com"}
+                        placeholder="email@work.com"
                         className="max-w-none flex-1"
                         value={row.email}
                         onChange={(event) => edit(index, { email: event.target.value })}
