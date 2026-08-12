@@ -307,6 +307,8 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "ab_reversal",
         "red_after_green",
         "slack_silence",
+        "skill_authoring",
+        "skill_gtm",
     }
 
 

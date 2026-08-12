@@ -38,6 +38,9 @@ from evals.harness.registry import (
     selected_tasks,
 )
 from evals.scenario_env import frontier, lookups, multistep, restraint, writes
+from evals.skill_authoring.catalog import CASES as SKILL_AUTHORING_CASES
+from evals.skill_authoring.runner import skill_authoring_task
+from evals.skill_gtm import CASES as SKILL_GTM_CASES
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
 from evals.skill_loading.runner import skill_loading_task
 from evals.slack_silence import CASES as SLACK_SILENCE_CASES
@@ -102,6 +105,8 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("connector_connections", connector_connections.CASES, serial=True),
     skill_loading_task(SKILL_LOADING_CASES),
+    skill_authoring_task("skill_authoring", SKILL_AUTHORING_CASES),
+    skill_authoring_task("skill_gtm", SKILL_GTM_CASES),
     capability_task("github_connections", github_connections.CASES, serial=True),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(

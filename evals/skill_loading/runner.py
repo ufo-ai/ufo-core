@@ -17,10 +17,14 @@ from hashlib import sha256
 from typing import Protocol, cast
 from uuid import UUID
 
-import sqlalchemy as sa
-
 from evals.harness.capability import WorkspaceFile
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
+from evals.harness.mounts import (
+    TERMINAL_STATUSES,
+    MountObservation,
+    TurnControl,
+    watch_mounts,
+)
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import (
     CapabilityTarget,
@@ -28,17 +32,9 @@ from evals.harness.target import (
     capability_output,
     trajectory_snapshot,
 )
-from ufo.db import workspace_tx
-from ufo.sandbox.session import WORKSPACE_DIR
-from ufo.schema import tables
-from ufo.schema.records import TurnStatus
-from ufo.sdk.context import Trajectory
-from ufo.skills.runtime import SKILL_MD, SKILLS_MOUNT_DIR
 
 GRADER_REVISION = "expected-present-3"
 LOAD_DEADLINE_SECONDS = 120.0
-MOUNT_POLL_SECONDS = 0.5
-TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
 @dataclass(frozen=True)
@@ -80,18 +76,7 @@ class SkillLoadCase:
         return payload
 
 
-@dataclass(frozen=True)
-class SkillLoadObservation:
-    """What the watcher saw at decision time: which watched skills were mounted, the turn's
-    status, whether this run cancelled it, and how long the load took to appear."""
-
-    mounted: tuple[str, ...]
-    status: TurnStatus | None
-    cancelled: bool
-    elapsed_seconds: float
-
-
-def skill_load_verdict(case: SkillLoadCase, observation: SkillLoadObservation) -> tuple[bool, str]:
+def skill_load_verdict(case: SkillLoadCase, observation: MountObservation) -> tuple[bool, str]:
     """Expected-present wins: a forbidden mount fails the case only when the expected skill has
     not mounted — one agentic round can load several skills at once, and a companion grabbed
     alongside the right pick is not a routing miss. The exception is a forbidden CHILD of the
@@ -119,12 +104,6 @@ def skill_load_verdict(case: SkillLoadCase, observation: SkillLoadObservation) -
         f"did not load {case.expected!r} within {LOAD_DEADLINE_SECONDS:g}s "
         f"(status {observation.status})"
     )
-
-
-class TurnControl(Protocol):
-    async def cancel(self, turn_id: UUID) -> bool: ...
-
-    async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
 
 
 class SkillLoadRunTarget(Protocol):
@@ -207,7 +186,13 @@ class SkillLoadingSuite:
                 reason=f"invoke raised: {type(error).__name__}: {error}",
                 evidence=self._evidence(case, None, conversation_id),
             )
-        observation = await self._observe(case, target, conversation_id, turn_id)
+        observation = await watch_mounts(
+            target,
+            conversation_id,
+            turn_id,
+            (case.expected, *case.forbidden),
+            LOAD_DEADLINE_SECONDS,
+        )
         passed, reason = skill_load_verdict(case, observation)
         evidence = self._evidence(case, observation, conversation_id)
         evidence["attempts"] = [
@@ -216,50 +201,10 @@ class SkillLoadingSuite:
         evidence["selectedAttempt"] = 0
         return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
-    async def _observe(
-        self,
-        case: SkillLoadCase,
-        target: SkillLoadRunTarget,
-        conversation_id: UUID,
-        turn_id: UUID,
-    ) -> SkillLoadObservation:
-        """Poll the watched mount paths and the turn row until a watched skill mounts, the turn
-        reaches its own terminal, or the deadline fires — then end the turn if it still runs.
-        Status reads before mounts, so a terminal status guarantees the mount set is final."""
-        watch = (case.expected, *case.forbidden)
-        clock = asyncio.get_running_loop().time
-        started = clock()
-        while True:
-            async with workspace_tx() as connection:
-                status = (
-                    await connection.execute(
-                        sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
-                    )
-                ).scalar_one_or_none()
-            mounted = tuple(
-                name
-                for name in watch
-                if target.conversations.workspace_path(
-                    conversation_id,
-                    f"{SKILLS_MOUNT_DIR}/{name}/{SKILL_MD}".removeprefix(f"{WORKSPACE_DIR}/"),
-                ).exists()
-            )
-            elapsed = clock() - started
-            terminal = status in TERMINAL_STATUSES
-            if mounted or terminal or elapsed >= LOAD_DEADLINE_SECONDS:
-                cancelled = False if terminal else await target.outcome.cancel(turn_id)
-                return SkillLoadObservation(
-                    mounted=mounted,
-                    status=status,
-                    cancelled=cancelled,
-                    elapsed_seconds=elapsed,
-                )
-            await asyncio.sleep(MOUNT_POLL_SECONDS)
-
     def _evidence(
         self,
         case: SkillLoadCase,
-        observation: SkillLoadObservation | None,
+        observation: MountObservation | None,
         conversation_id: UUID | None,
     ) -> JsonObject:
         evidence: JsonObject = {
@@ -272,6 +217,7 @@ class SkillLoadingSuite:
         }
         if observation is not None:
             evidence["mounted"] = list(observation.mounted)
+            evidence["present"] = list(observation.present)
             evidence["status"] = observation.status
             evidence["cancelled"] = observation.cancelled
             evidence["elapsedSeconds"] = round(observation.elapsed_seconds, 1)
@@ -281,7 +227,7 @@ class SkillLoadingSuite:
         self,
         passed: bool,
         reason: str,
-        observation: SkillLoadObservation,
+        observation: MountObservation,
         target: SkillLoadRunTarget,
         conversation_id: UUID,
         turn_id: UUID,

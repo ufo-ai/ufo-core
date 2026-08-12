@@ -6,11 +6,11 @@ silently exclude forever, and forbidding a child's own parent would fail every c
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from evals.harness.mounts import MountObservation
 from evals.skill_loading.catalog import CASES
 from evals.skill_loading.runner import (
     SkillLoadCase,
     SkillLoadingSuite,
-    SkillLoadObservation,
     skill_load_verdict,
     skill_loading_task,
 )
@@ -27,8 +27,8 @@ CASE = SkillLoadCase(
 
 def _observed(
     mounted: tuple[str, ...] = (), status: TurnStatus | None = "running"
-) -> SkillLoadObservation:
-    return SkillLoadObservation(
+) -> MountObservation:
+    return MountObservation(
         mounted=mounted, status=status, cancelled=status == "running", elapsed_seconds=3.0
     )
 
