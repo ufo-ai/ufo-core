@@ -2,10 +2,11 @@
 
 @theme {
   --color-surface: Canvas;
-  --color-ink: CanvasText;
+  --color-ink: color-mix(in srgb, CanvasText 90%, Canvas);
   --color-field: Field;
   --color-field-ink: FieldText;
 
+  --color-edge-faint: color-mix(in srgb, CanvasText 5%, transparent);
   --color-edge-soft: color-mix(in srgb, CanvasText 12%, transparent);
   --color-edge: color-mix(in srgb, CanvasText 15%, transparent);
   --color-edge-strong: color-mix(in srgb, CanvasText 20%, transparent);
@@ -16,13 +17,15 @@
 
   --color-ink-hover: color-mix(in srgb, CanvasText 88%, transparent);
 
-  --color-fill-subtle: color-mix(in srgb, CanvasText 6%, transparent);
+  --color-fill-subtle: color-mix(in srgb, CanvasText 5%, transparent);
   --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
   --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
   --color-scrim: color-mix(in srgb, CanvasText 40%, transparent);
 
   --color-attention: Mark;
   --color-attention-ink: MarkText;
+
+  --color-sidebar: color-mix(in srgb, CanvasText 1%, Canvas);
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, CanvasText 10%, transparent),
@@ -48,7 +51,7 @@
   }
 
   --muted: 0.6;
-  --muted-strong: 0.55;
+  --muted-strong: 0.5;
   --muted-soft: 0.7;
   --muted-faint: 0.75;
   --disabled: 0.4;
@@ -70,6 +73,7 @@
   --radius-control: 6px;
   --radius-panel: 8px;
   --radius-bubble: 12px;
+  --radius-menu: 16px;
   --radius-card: 28px;
 
   --font-sans: system-ui, sans-serif;
@@ -91,6 +95,7 @@
   --breakpoint-narrow: 720px;
 
   --container-sidebar: 240px;
+  --container-rail: 48px;
   --container-drawer: min(520px, 100vw);
   --container-card: min(440px, calc(100vw - 32px));
   --container-dialog: min(560px, calc(100vw - 32px));
@@ -101,15 +106,20 @@
   --container-empty: 44ch;
   --container-control: 40ch;
   --container-control-row: 20ch;
+  --container-menu: 160px;
 
   --media-tall: 60vh;
   --media-card: 20rem;
   --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
+  --size-avatar: 24px;
   --size-band: 128px;
   --size-fact: 16ch;
+  --size-glyph: 16px;
   --size-icon: 1em;
   --size-reveal: 280px;
+  --size-row: 32px;
   --size-textarea: 12em;
+  --size-wordmark: 13px;
   --size-notice: 1em;
   --marker-width: 2px;
 }

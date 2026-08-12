@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -33,7 +33,7 @@ test("the roster names each member, who administers, and who holds a seat", asyn
   const lead = await screen.findByText("lead@example.com");
   expect(lead.closest("tr")?.textContent).toContain("Admin");
   expect(lead.closest("tr")?.textContent).toContain("Seated");
-  const plain = screen.getByText("member@example.com");
+  const plain = within(screen.getByRole("main")).getByText("member@example.com");
   expect(plain.closest("tr")?.textContent).toContain("Member");
   expect(plain.closest("tr")?.textContent).toContain("No seat");
 });
@@ -94,7 +94,7 @@ test("a search narrows the roster to the members whose address matches", async (
   await userEvent.type(await screen.findByLabelText("Search members"), "LEAD");
 
   expect(screen.getByText("lead@example.com")).toBeTruthy();
-  expect(screen.queryByText("member@example.com")).toBeNull();
+  expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
 });
 
 test("a search that matches nobody says so in a row, and the table holds", async () => {

@@ -107,7 +107,7 @@ test("the agents cards state admin-visible web reach", async () => {
   expect(
     await screen.findByText("The agent this workspace answers with by default. · Every member"),
   ).toBeTruthy();
-  expect(screen.getByText("member@example.com")).toBeTruthy();
+  expect(within(screen.getByRole("main")).getByText("member@example.com")).toBeTruthy();
   expect(screen.getByText("No member grants — admins only")).toBeTruthy();
 });
 

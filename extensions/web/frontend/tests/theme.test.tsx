@@ -64,13 +64,13 @@ test("every colour the portal paints resolves through the system-colour tokens",
   expect(authoredColours(css)).toEqual([]);
   const basis = {
     "--color-surface": "Canvas",
-    "--color-ink": "CanvasText",
+    "--color-ink": String.raw`color-mix\(in srgb,\s*CanvasText 90%,\s*Canvas\)`,
     "--color-field": "Field",
     "--color-field-ink": "FieldText",
     "--color-link": "LinkText",
   };
   for (const [token, system] of Object.entries(basis)) {
-    expect(new RegExp(`${token}:\\s*${system}\\b`).test(css)).toBe(true);
+    expect(new RegExp(`${token}:\\s*${system}`).test(css)).toBe(true);
   }
   expect(css.replace(/:\s+/g, ":")).toContain("color-scheme:light dark");
 });
@@ -231,13 +231,12 @@ test("both notice tones keep the chrome type size", () => {
   }
 });
 
-test("the wordmark reads as one word in the sidebar", async () => {
+test("the wordmark is the drawn ufo mark in the sidebar", async () => {
   wire({});
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const brand = await screen.findByText("ufo");
-  expect(brand.textContent).toBe("ufo");
-  expect(brand.className).not.toContain("tracking");
+  const brand = await screen.findByRole("img", { name: "ufo" });
+  expect(brand.getAttribute("class")).not.toContain("tracking");
 });
 
 test("a field shows the member that it is disabled, or that they left it invalid", () => {

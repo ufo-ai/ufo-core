@@ -117,6 +117,29 @@ test("an admin is offered administration, which reads the admin projection", asy
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
+test("a collapsed sidebar keeps the admin entry for the narrow strip", async () => {
+  wire({});
+  render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+  const gear = screen.getByRole("button", { name: "Administration", hidden: true });
+  expect(gear.className).toContain("max-narrow:block");
+});
+
+test("a collapsed sidebar drops the wordmark and expands from the header toggle", async () => {
+  wire({});
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+  expect(screen.getByRole("img", { name: "ufo", hidden: true }).getAttribute("class")).toContain(
+    "hidden",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+});
+
 test("the admin agent row grants and revokes web access by email", async () => {
   const posted: unknown[] = [];
   const second = { ...ADMIN_AGENT, id: "22222222-2222-4222-8222-222222222222", name: "second", main: false };

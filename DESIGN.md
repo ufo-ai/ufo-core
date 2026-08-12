@@ -16,7 +16,7 @@ surface outside this system.
 | No `dark:` variant — `color-scheme` carries the scheme | `gates.py` `_portal_style_failures` |
 | Every colour resolves through the system-colour tokens | `theme.test.tsx` |
 | Reduced motion, `100dvh` + safe-area insets, table overflow | `theme.test.tsx` |
-| Wordmark is `ufo`, one word, no tracking | `theme.test.tsx` |
+| Wordmark is the drawn ufo mark, an inline SVG labelled `ufo` | `theme.test.tsx` |
 | Hash grammar, place keys, push/replace/back history | `route.ts` types + `urlstate.test.tsx` |
 | A workspace tab or a section without a view is a compile error | `registry.tsx` totality |
 | Only the field primitives draw a field surface (`bg-field`) | `theme.test.tsx` |
@@ -34,10 +34,23 @@ the inline alternative.
 ## Navigation
 
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
-`--breakpoint-narrow` it flips to a top strip. The sidebar holds, in order: wordmark, new
-conversation, the conversation rail, section buttons — Agents, Scheduled, Artifacts, Sites,
-Customize, Workspace — footer (member email, admin entry). No icons. Selection is the 2px left
-marker (`border-l-ink`) plus `aria-current`.
+`--breakpoint-narrow` it flips to a top strip. The sidebar sits on its own surface (`bg-sidebar`,
+a hair of ink mixed into `Canvas`) behind a soft edge, and holds, in order: wordmark, the primary
+rows — New conversation, Agents, Scheduled, Artifacts, Sites, Customize, Workspace, each led by
+its glyph — the conversation rail, and the member footer: the initial in a `--size-avatar` circle,
+the email over the role (`Admin`/`Member`), and for admins the settings glyph opening
+Administration. The sidebar's row glyphs come from `@tabler/icons-react` — the icon set the Figma
+nav names its icons from — rendered on `currentColor` at `size-icon`; rows outside the sidebar stay
+glyphless. Every row —
+primary, picker, rail — is the same pill: `rounded-control p-sm`, `hover:bg-fill-hover`; selection
+is the filled row (`bg-fill-subtle`) plus `aria-current`, never a marker border.
+
+The sidebar collapses to a `--container-rail` icon rail behind a header toggle using the layout-sidebar
+glyph. Collapsed rows keep their names as tooltips — the shadcn/Radix tooltip drawn as an ink pill to
+the row's right — while the rail, labels, and member details yield to the icons; the choice persists
+per browser. Collapsed, the header holds only that toggle where the wordmark was — the one control
+that undoes the state stands where the member last saw it — and the member footer stays pinned to
+the foot of the rail, the avatar alone.
 
 A destination the sidebar reaches directly is a top-level section: the hash is `#/<section>`, the
 name is one member of `SECTIONS` in `lib/route.ts` and one entry in `SECTION_VIEWS`, and it holds
@@ -67,8 +80,8 @@ is already ordered by recency and already grouped under `Today` / `Yesterday`, s
 row restates the group it sits in, in the one place with the least width to spare. A second line
 appears only where the row carries a fact the group cannot: a conversation held by an agent other
 than the main one names that agent, and a conversation from another surface names its origin. The
-group label is the smaller, lighter type
-(`text-small opacity-(--muted-strong)`, no bold) so the eye reads titles first and the labels as
+group label is the smaller, muted type
+(`text-label font-medium opacity-(--muted)`) so the eye reads titles first and the labels as
 the scaffolding between them.
 
 Tabs are `kernel/tabs.tsx` — `TabStrip` and `TabPanel`, always as a pair, sharing one `group`
@@ -463,8 +476,8 @@ path connects and attaches in one flow.
 The order sits on the head of the column it orders, never in a picker beside the search. A picker
 states the field names a second time, in a control wide enough to push the act off the bar, and it
 asks the member to name a column they are already pointing at. A pressable head carries `aria-sort`
-and, on the active column only, a caret drawn inline in `kernel/table.tsx` — the third glyph in the
-portal, and still not an icon package. Pressing the head the order already sits on reverses it.
+and, on the active column only, a caret drawn inline in `kernel/table.tsx`. Pressing the head the
+order already sits on reverses it.
 
 An intent can answer with a credential request instead of a result. `Listing` holds that request
 and `ListingSpec.credentials` renders it, so the state machine stays in the kernel and the form
@@ -524,8 +537,8 @@ it. What the member wants from a scheduled task is the channel it posts into, an
 from the name they already read. The record's own page keeps a `View` in the acts column: a name
 that leads somewhere else must not be the only way to reach the record it names.
 
-The blank draws no icon. Seven settings screens would want seven glyphs, which is the vocabulary
-that earns an icon set — and the portal has none by decision. Midday's own settings blanks carry
+The blank draws no icon. The portal's glyph vocabulary belongs to the sidebar's rows and to
+nothing else — a blank's heading already names what is absent. Midday's own settings blanks carry
 title, body, and one button with no glyph, so the pattern is complete without it.
 
 An act that needs more than one field opens a `Dialog` rather than sitting under the records — the
@@ -618,10 +631,9 @@ reaches. The content caps at `--radix-select-content-available-height` and scrol
 Only the parts a view uses ship: no group, label, or separator exists until something selects with
 one.
 
-The chevron and the tick are drawn inline in `select.tsx`. The portal carries no icon set and does
-not earn one at four glyphs — these two, the sort caret, and the leaving arrow, each drawn where it
-is used and each taking `currentColor`, so none needs a token and an icon package would be a
-dependency with a vocabulary of four.
+The chevron, tick, sort caret, and leaving arrow stay drawn inline where they are used on
+`currentColor`; the sidebar's row icons are the one place a package (`@tabler/icons-react`)
+supplies the drawing, because they follow the Figma's Tabler vocabulary.
 
 A row that pairs controls is `items-stretch`, never `items-center`. Two controls on the same
 surface still resolve their heights from their own content, and centring unequal boxes leaves the

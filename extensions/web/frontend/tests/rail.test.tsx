@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { bumpChat, groupChats, mergeChats, type ChatRow } from "@/lib/rail";
+import { bumpChat, groupChats, groupChatsByAgent, mergeChats, type ChatRow } from "@/lib/rail";
 
 import {
   AGENT,
@@ -72,6 +72,19 @@ test("chats group by recency in rail order and empty groups are absent", () => {
     ["e"],
   ]);
   expect(groupChats([row("a", hoursAgo(4))], NOW)).toHaveLength(1);
+});
+
+test("agent sort groups rows under their agent and keeps recency within each group", () => {
+  const grouped = groupChatsByAgent([
+    row("a", hoursAgo(1)),
+    { ...row("b", hoursAgo(2)), agent_name: "support" },
+    row("c", hoursAgo(3)),
+  ]);
+  expect(grouped.map((group) => group.label)).toEqual(["assistant", "support"]);
+  expect(grouped.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
+    ["a", "c"],
+    ["b"],
+  ]);
 });
 
 test("bumping a conversation moves it to the top", () => {

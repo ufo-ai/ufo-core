@@ -42,6 +42,16 @@ export function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
   }));
 }
 
+export type RailSort = "recency" | "agent";
+
+export function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
+  const buckets = new Map<string, ChatRow[]>();
+  for (const row of rows) {
+    buckets.set(row.agent_name, (buckets.get(row.agent_name) ?? []).concat(row));
+  }
+  return [...buckets.entries()].map(([label, grouped]) => ({ label, rows: grouped }));
+}
+
 export function stampIso(at: Date): string {
   return at.toISOString();
 }

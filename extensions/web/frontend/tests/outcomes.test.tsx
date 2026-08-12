@@ -115,7 +115,7 @@ test("credentials group, sort, and render slot state and literals", async () => 
 
   expect(await screen.findByText("Credential values are shared across the workspace.")).toBeTruthy();
   expect(await screen.findByText("Filled", { selector: '[data-part="status"]' })).toBeTruthy();
-  expect([...document.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
+  expect([...document.querySelectorAll("main h2")].map((heading) => heading.textContent)).toEqual([
     "Credentials",
     "Model providers",
     "Service keys",

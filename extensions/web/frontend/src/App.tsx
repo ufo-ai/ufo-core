@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  IconAdjustments,
+  IconAdjustmentsHorizontal,
+  IconClock,
+  IconEdit,
+  IconFolder,
+  IconLayoutSidebarRight,
+  IconSettings,
+  IconSparkles,
+  IconUsers,
+  IconWorld,
+} from "@tabler/icons-react";
 
-import { Button } from "@/components/ui/button";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { AgentPane } from "@/views/AgentPane";
 import { Agents } from "@/views/Agents";
@@ -17,12 +29,24 @@ import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   bumpChat,
   groupChats,
+  groupChatsByAgent,
   mergeChats,
   stampIso,
   type ChatRow,
   type ChatsPayload,
+  type RailSort,
 } from "@/lib/rail";
 import {
   AGENT_TABS,
@@ -79,6 +103,18 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const [reloads, setReloads] = useState(0);
   const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
   const [linked, setLinked] = useState<Record<string, OwnedConversation>>({});
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar") === "collapsed");
+  const setSidebarCollapsed = useCallback((next: boolean) => {
+    setCollapsed(next);
+    localStorage.setItem("sidebar", next ? "collapsed" : "expanded");
+  }, []);
+  const [railSort, setRailSort] = useState<RailSort>(() =>
+    localStorage.getItem("rail-sort") === "agent" ? "agent" : "recency",
+  );
+  const setRailSortHeld = useCallback((next: RailSort) => {
+    setRailSort(next);
+    localStorage.setItem("rail-sort", next);
+  }, []);
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   const routeRef = useRef(route);
   routeRef.current = route;
@@ -281,75 +317,120 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   return (
     <Viewer.Provider value={member.email}>
       <MainAgentProvider agents={agents}>
-        <div className="grid h-dvh grid-cols-[var(--container-sidebar)_1fr] max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]">
-          <nav className="flex min-h-0 flex-col border-r border-edge max-narrow:flex-row max-narrow:items-center max-narrow:border-r-0 max-narrow:border-b">
-            <div className="px-2xl py-lg font-strong max-narrow:px-lg max-narrow:py-md">ufo</div>
-            <div className="px-lg pb-sm max-narrow:p-0">
-              <NewChat agents={agents} mainAgent={mainAgent} onNewChat={openNewChat} />
+        <div className={cn("grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]", collapsed ? "grid-cols-[var(--container-rail)_1fr]" : "grid-cols-[var(--container-sidebar)_1fr]")}>
+          <TooltipProvider>
+          <nav className="flex min-h-0 flex-col gap-sm border-r border-edge-faint bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
+            <div className={cn("flex items-center justify-between px-2xl max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
+              <svg
+                viewBox="17.22 9.24 34.54 13"
+                role="img"
+                aria-label="ufo"
+                className={cn("h-(--size-wordmark) w-auto", collapsed && "hidden max-narrow:block")}
+              >
+                <path fill="currentColor" d="M18.98 22.22V20.52H17.22V9.24H19.76V19.5H24.28V9.24H26.84V20.52H25.06V22.22H18.98ZM29.8708 22.22V9.24H37.7108V10.96H39.4908V13.68H36.9308V11.98H32.4108V14.38H35.9508V17.08H32.4108V22.22H29.8708ZM43.8909 22.22V20.52H42.1309V10.96H43.8909V9.24H49.9709V10.96H51.7509V20.52H49.9709V22.22H43.8909ZM44.6709 19.5H49.1909V11.98H44.6709Z" />
+              </svg>
+              <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
+                <SidebarToggle
+                  label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                  onClick={() => setSidebarCollapsed(!collapsed)}
+                />
+              </SidebarTooltip>
             </div>
-            <div className="flex-1 overflow-y-auto py-2xs max-narrow:flex max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0">
+            <ul className="m-0 flex list-none flex-col gap-px px-sm py-0 max-narrow:flex-row max-narrow:items-center max-narrow:overflow-x-auto max-narrow:p-0">
+              <li>
+                <NewChat agents={agents} mainAgent={mainAgent} collapsed={collapsed} onExpand={() => setSidebarCollapsed(false)} onNewChat={openNewChat} />
+              </li>
+              <li>
+                <NavRow
+                  icon={<AgentsGlyph />}
+                  current={
+                    route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
+                  }
+                  collapsed={collapsed}
+                  label="Agents"
+                  onClick={openAgents}
+                >
+                  Agents
+                </NavRow>
+              </li>
+              {SECTIONS.map((section) => (
+                <li key={section}>
+                  <NavRow
+                    icon={SECTION_GLYPHS[section]}
+                    current={route.kind === "section" && route.section === section}
+                    collapsed={collapsed}
+                    label={SECTION_VIEWS[section].label}
+                    onClick={() => placeSection(section, {}, "push")}
+                  >
+                    {SECTION_VIEWS[section].label}
+                  </NavRow>
+                </li>
+              ))}
+              <li>
+                <NavRow
+                  icon={<CustomizeGlyph />}
+                  current={route.kind === "customize"}
+                  collapsed={collapsed}
+                  label="Customize"
+                  onClick={() => placeCustomize(CUSTOMIZE_TABS[0], {}, "push")}
+                >
+                  Customize
+                </NavRow>
+              </li>
+              <li>
+                <NavRow
+                  icon={<WorkspaceGlyph />}
+                  current={route.kind === "workspace"}
+                  collapsed={collapsed}
+                  label="Workspace"
+                  onClick={() => placeWorkspace("team", {}, "push")}
+                >
+                  Workspace
+                </NavRow>
+              </li>
+            </ul>
+            <div className={cn("flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm max-narrow:flex-row max-narrow:items-center max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:p-0", collapsed && "hidden max-narrow:flex")}>
               <RailList
                 rail={rail}
                 route={route}
                 mainAgent={mainAgent}
+                sort={railSort}
+                onSort={setRailSortHeld}
                 onOpen={openChat}
                 onRetry={() => setReloads((count) => count + 1)}
               />
             </div>
-            <ul className="m-0 list-none border-t border-edge py-2xs max-narrow:flex max-narrow:overflow-y-hidden max-narrow:overflow-x-auto max-narrow:border-t-0 max-narrow:p-0">
-              <li>
-                <SidebarButton
-                  current={
-                    route.kind === "agents" || route.kind === "agent" || route.kind === "subagent"
-                  }
-                  onClick={openAgents}
+            <footer className={cn("flex items-center gap-sm px-lg max-narrow:ml-auto max-narrow:px-lg max-narrow:py-md", collapsed && "mt-auto justify-center px-sm max-narrow:mt-0 max-narrow:px-lg")}>
+              <SidebarTooltip collapsed={collapsed} label={member.email}>
+                <span
+                  aria-hidden="true"
+                  className="flex size-(--size-avatar) shrink-0 items-center justify-center rounded-full bg-fill text-small max-narrow:hidden"
                 >
-                  Agents
-                </SidebarButton>
-              </li>
-              {SECTIONS.map((section) => (
-                <li key={section}>
-                  <SidebarButton
-                    current={route.kind === "section" && route.section === section}
-                    onClick={() => placeSection(section, {}, "push")}
-                  >
-                    {SECTION_VIEWS[section].label}
-                  </SidebarButton>
-                </li>
-              ))}
-              <li>
-                <SidebarButton
-                  current={route.kind === "customize"}
-                  onClick={() => placeCustomize(CUSTOMIZE_TABS[0], {}, "push")}
-                >
-                  Customize
-                </SidebarButton>
-              </li>
-              <li>
-                <SidebarButton
-                  current={route.kind === "workspace"}
-                  onClick={() => placeWorkspace("team", {}, "push")}
-                >
-                  Workspace
-                </SidebarButton>
-              </li>
-            </ul>
-            <footer className="flex flex-col gap-2xs border-t border-edge px-2xl py-lg font-mono text-mono max-narrow:ml-auto max-narrow:border-t-0 max-narrow:px-lg max-narrow:py-md">
-              <span className="max-narrow:hidden">
-                {member.email}
-                {member.admin ? " · admin" : ""}
+                  {member.email.slice(0, 1).toUpperCase()}
+                </span>
+              </SidebarTooltip>
+              <span className={cn("flex min-w-0 flex-1 flex-col max-narrow:hidden", collapsed && "hidden")}>
+                <span className="truncate">{member.email}</span>
+                <span className="text-small opacity-(--muted)">
+                  {member.admin ? "Admin" : "Member"}
+                </span>
               </span>
               {member.admin ? (
                 <button
                   type="button"
+                  aria-label="Administration"
                   onClick={openAdmin}
-                  className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
+                  className={cn(
+                    "rounded-control border-0 bg-transparent p-2xs opacity-(--muted) hover:bg-fill-hover",
+                    collapsed && "hidden max-narrow:block",
+                  )}
                 >
-                  Administration
+                  <SettingsGlyph />
                 </button>
               ) : null}
             </footer>
           </nav>
+          </TooltipProvider>
           <Pane
             route={route}
             agents={agents}
@@ -632,10 +713,14 @@ function PaneNote({ children }: { children: React.ReactNode }) {
 function NewChat({
   agents,
   mainAgent,
+  collapsed,
+  onExpand,
   onNewChat,
 }: {
   agents: Agent[];
   mainAgent: Agent | null;
+  collapsed: boolean;
+  onExpand: () => void;
   onNewChat: (agentId: string) => void;
 }) {
   const [picking, setPicking] = useState(false);
@@ -659,29 +744,34 @@ function NewChat({
   if (!mainAgent) return null;
   if (agents.length === 1) {
     return (
-      <Button
-        onClick={() => onNewChat(mainAgent.id)}
-        className="w-full text-left max-narrow:w-auto max-narrow:whitespace-nowrap"
-      >
+      <NavRow icon={<NewChatGlyph />} current={false} collapsed={collapsed} label="New conversation" onClick={() => onNewChat(mainAgent.id)}>
         New conversation
-      </Button>
+      </NavRow>
     );
   }
   return (
     <div
       ref={held}
-      className="flex flex-col gap-2xs max-narrow:flex-row max-narrow:items-center"
+      className="flex flex-col gap-hair max-narrow:flex-row max-narrow:items-center"
     >
-      <Button
-        aria-expanded={picking}
-        aria-controls={PICKER_ID}
-        onClick={() => setPicking((open) => !open)}
-        className="w-full text-left max-narrow:w-auto max-narrow:whitespace-nowrap"
-      >
-        New conversation
-      </Button>
+      <SidebarTooltip collapsed={collapsed} label="New conversation">
+        <button
+          type="button"
+          aria-expanded={picking}
+          aria-controls={PICKER_ID}
+          onClick={() => {
+            if (collapsed) onExpand();
+            setPicking((open) => (collapsed ? true : !open));
+          }}
+          aria-label="New conversation"
+          className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", picking && "bg-fill-subtle")}
+        >
+          <NewChatGlyph />
+          <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>New conversation</span>
+        </button>
+      </SidebarTooltip>
       {picking ? (
-        <ul id={PICKER_ID} className="m-0 flex list-none flex-col p-0 max-narrow:flex-row">
+        <ul id={PICKER_ID} className="m-0 flex list-none flex-col gap-hair p-0 max-narrow:flex-row">
           {agents.map((agent) => (
             <li key={agent.id}>
               <button
@@ -690,7 +780,7 @@ function NewChat({
                   setPicking(false);
                   onNewChat(agent.id);
                 }}
-                className="block w-full border-0 bg-transparent py-xs pl-xl pr-lg text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap"
+                className="block w-full rounded-control border-0 bg-transparent py-xs pl-4xl pr-sm text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap"
               >
                 {agent.name}
               </button>
@@ -706,23 +796,57 @@ function RailList({
   rail,
   route,
   mainAgent,
+  sort,
+  onSort,
   onOpen,
   onRetry,
 }: {
   rail: Rail;
   route: Route;
   mainAgent: Agent | null;
+  sort: RailSort;
+  onSort: (sort: RailSort) => void;
   onOpen: (conversationId: string) => void;
   onRetry: () => void;
 }) {
   const now = new Date();
   return (
     <>
+      <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
+        <h2 className="m-0 text-label font-medium opacity-(--muted-strong)">Conversations</h2>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Conversation settings"
+              className="rounded-control border-0 bg-transparent p-2xs opacity-(--muted) hover:bg-fill-hover data-[state=open]:bg-fill-subtle"
+            >
+              <IconAdjustments className="size-(--size-glyph)" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger value={sort === "agent" ? "Agent" : "Recency"}>
+                Sort by
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  value={sort}
+                  onValueChange={(value) => onSort(value === "agent" ? "agent" : "recency")}
+                >
+                  <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="agent">Agent</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       {rail.phase === "loading" ? (
-        <div className="px-2xl py-sm opacity-(--muted)">Loading…</div>
+        <div className="p-sm opacity-(--muted)">Loading…</div>
       ) : null}
       {rail.phase === "failed" ? (
-        <div className="flex flex-col gap-2xs px-2xl py-sm opacity-(--muted)">
+        <div className="flex flex-col gap-2xs p-sm opacity-(--muted)">
           <span>Couldn't load conversations.</span>
           <button
             type="button"
@@ -733,15 +857,15 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {groupChats(rail.rows, now).map((group) => (
+      {(sort === "agent" ? groupChatsByAgent(rail.rows) : groupChats(rail.rows, now)).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 px-2xl pb-2xs pt-lg text-small opacity-(--muted-strong) max-narrow:hidden">
+          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium opacity-(--muted-strong) max-narrow:hidden">
             {group.label}
           </h2>
-          <ul className="m-0 list-none p-0 max-narrow:flex">
+          <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
             {group.rows.map((row) => (
               <li key={row.conversation_id}>
-                <SidebarButton
+                <RailRow
                   current={
                     (route.kind === "chat" || route.kind === "conversation-slot") &&
                     route.conversationId === row.conversation_id
@@ -756,7 +880,7 @@ function RailList({
                         .join(" · ")}
                     </span>
                   ) : null}
-                </SidebarButton>
+                </RailRow>
               </li>
             ))}
           </ul>
@@ -766,7 +890,58 @@ function RailList({
   );
 }
 
-function SidebarButton({
+const NAV_ROW =
+  "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0 bg-transparent px-sm text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap";
+
+function SidebarTooltip({ collapsed, label, children }: { collapsed: boolean; label: string; children: React.ReactElement }) {
+  if (!collapsed) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs opacity-(--muted) hover:bg-fill-hover max-narrow:hidden">
+      <IconLayoutSidebarRight className="size-(--size-glyph)" aria-hidden />
+    </button>
+  );
+}
+
+function NavRow({
+  icon,
+  current,
+  collapsed = false,
+  label,
+  onClick,
+  children,
+}: {
+  icon: React.ReactNode;
+  current: boolean;
+  collapsed?: boolean;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-label={collapsed ? label : undefined}
+      aria-current={current}
+      onClick={onClick}
+      className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", current && "bg-fill-subtle")}
+    >
+      {icon}
+      <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>{children}</span>
+    </button>
+  );
+  return <SidebarTooltip collapsed={collapsed} label={label}>{button}</SidebarTooltip>;
+}
+
+function RailRow({
   current,
   onClick,
   children,
@@ -781,15 +956,29 @@ function SidebarButton({
       aria-current={current}
       onClick={onClick}
       className={cn(
-        "block w-full border-0 border-l-(length:--marker-width) border-l-transparent bg-transparent",
-        "py-sm pl-xl pr-2xl text-left text-inherit hover:bg-fill-hover",
-        "max-narrow:w-auto max-narrow:whitespace-nowrap max-narrow:border-l-0",
-        "max-narrow:border-b-(length:--marker-width) max-narrow:border-b-transparent",
-        current &&
-          "border-l-ink bg-fill-subtle max-narrow:border-b-ink max-narrow:border-l-transparent",
+        "flex min-h-(--size-row) w-full flex-col justify-center rounded-control border-0 bg-transparent px-sm py-2xs text-left text-inherit hover:bg-fill-hover",
+        "max-narrow:w-auto max-narrow:whitespace-nowrap",
+        current && "bg-fill-subtle",
       )}
     >
       {children}
     </button>
   );
 }
+
+const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;
+const AgentsGlyph = () => <IconSparkles className="size-(--size-glyph) shrink-0" aria-hidden />;
+const ScheduledGlyph = () => <IconClock className="size-(--size-glyph) shrink-0" aria-hidden />;
+const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
+const SitesGlyph = () => <IconWorld className="size-(--size-glyph) shrink-0" aria-hidden />;
+const CustomizeGlyph = () => (
+  <IconAdjustmentsHorizontal className="size-(--size-glyph) shrink-0" aria-hidden />
+);
+const WorkspaceGlyph = () => <IconUsers className="size-(--size-glyph) shrink-0" aria-hidden />;
+const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-0" aria-hidden />;
+
+const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
+  scheduled: <ScheduledGlyph />,
+  artifacts: <ArtifactsGlyph />,
+  sites: <SitesGlyph />,
+};
