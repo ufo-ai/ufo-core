@@ -176,6 +176,8 @@ as a portfolio, not a single bet:
   the seam (that core calls correctly, and that forbidden acts raise), never a subsystem's logic —
   those keep their real end-to-end proofs.
 - Run the focused tests for the touched path before claiming done; never the full suite locally.
+  One file or one test goes through `make test-one FILE=…`, which is serial: every xdist worker
+  boots and migrates a database of its own, so `-n auto` only pays above roughly 100 tests.
 - `uv run pytest`, `uv run ruff`. uv for everything Python.
 
 ## Completing work

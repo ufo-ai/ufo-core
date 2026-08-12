@@ -27,6 +27,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo.workspace import init_workspace_credentials
+from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.tables import reset_workspace_data
 from ufo_testsupport.workflows import drain_workflows
 
@@ -82,7 +83,7 @@ def database_url(
 ) -> str:
     if request.param == "sqlite":
         url = f"sqlite+aiosqlite:///{tmp_path_factory.mktemp('db') / 'ufo_test.db'}"
-        apply_migrations(url)
+        apply_cached_migrations(url)
         return url
     if not integration_dependency_available(
         postgres_reachable(), "Postgres service is not reachable"

@@ -23,7 +23,9 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
-from ufo_testsupport.tables import reset_workspace_data
+from ufo_testsupport import migrations
+from ufo_testsupport.migrations import TEMPLATE_CACHE_OFF_ENV, apply_cached_migrations
+from ufo_testsupport.tables import POSTGRES_TABLES, reset_workspace_data
 
 import ufo.db
 from ufo import o11y
@@ -64,12 +66,119 @@ def test_migrations_are_idempotent(database_url: str) -> None:
     apply_migrations(database_url)
 
 
+def _sqlite_shape(database: Path) -> tuple[frozenset[tuple[str, str]], frozenset[str]]:
+    with sqlite3.connect(database) as connection:
+        schema = frozenset(
+            (row[0], row[1] or "")
+            for row in connection.execute("select name, sql from sqlite_master")
+        )
+        heads = frozenset(
+            row[0] for row in connection.execute("select version_num from alembic_version")
+        )
+    return schema, heads
+
+
+def _refuse_migration(url: str, pack: str | None = None) -> None:
+    raise AssertionError(f"a cached template should have served {url}")
+
+
+def test_a_migrated_sqlite_template_is_cached_across_pytest_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`upgrade heads` over core's chain plus every extension branch costs ~2 s, paid by every
+    pytest process and again by every per-test fixture that migrates a database of its own. The
+    first call fills the cache and the second is the byte copy a sealed migrated file already
+    allows — proved by taking the real migration away before it."""
+    monkeypatch.setattr(migrations, "SQLITE_TEMPLATE_DIR", tmp_path / "templates")
+    first = tmp_path / "first.db"
+    apply_cached_migrations(f"sqlite+aiosqlite:///{first}")
+    monkeypatch.setattr(migrations, "apply_migrations", _refuse_migration)
+
+    second = tmp_path / "second.db"
+    apply_cached_migrations(f"sqlite+aiosqlite:///{second}")
+
+    assert _sqlite_shape(second) == _sqlite_shape(first)
+
+
+def test_a_changed_migration_set_misses_the_cached_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is a digest of every migration file that would run, so an edited or added migration
+    is never served the schema it replaced. Dropping the extension locations stands in for that
+    edit: the digest moves, the real migration runs again, and both templates are kept."""
+    templates = tmp_path / "templates"
+    monkeypatch.setattr(migrations, "SQLITE_TEMPLATE_DIR", templates)
+    apply_cached_migrations(f"sqlite+aiosqlite:///{tmp_path / 'first.db'}")
+    migrated: list[str] = []
+    real = migrations.apply_migrations
+
+    def recording(url: str, pack: str | None = None) -> None:
+        migrated.append(url)
+        real(url, pack)
+
+    monkeypatch.setattr(migrations, "migration_locations", lambda pack: ())
+    monkeypatch.setattr(migrations, "apply_migrations", recording)
+    second = tmp_path / "second.db"
+
+    apply_cached_migrations(f"sqlite+aiosqlite:///{second}")
+
+    assert migrated == [f"sqlite+aiosqlite:///{second}"]
+    assert len(list(templates.glob("*.db"))) == 2
+
+
+def test_the_sqlite_template_cache_switches_off_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    templates = tmp_path / "templates"
+    monkeypatch.setattr(migrations, "SQLITE_TEMPLATE_DIR", templates)
+    monkeypatch.setenv(TEMPLATE_CACHE_OFF_ENV, "1")
+    database = tmp_path / "uncached.db"
+
+    apply_cached_migrations(f"sqlite+aiosqlite:///{database}")
+
+    _, heads = _sqlite_shape(database)
+    assert heads
+    assert not templates.exists()
+
+
+def test_a_database_that_already_exists_is_migrated_rather_than_copied_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`apply_migrations` over a database already at heads is a no-op — `test_migrations_are_
+    idempotent` asserts it — and the cached path stands in for it at every call site, so it has to
+    keep that. A byte copy would replace the file instead, taking the rows and whatever a `-wal`
+    beside it still holds with it."""
+    monkeypatch.setattr(migrations, "SQLITE_TEMPLATE_DIR", tmp_path / "templates")
+    database = tmp_path / "seeded.db"
+    url = f"sqlite+aiosqlite:///{database}"
+    apply_cached_migrations(url)
+    seeding = sqlite3.connect(database)
+    seeding.execute(
+        "insert into workspace (id, created_at, updated_at) "
+        "values (:id, '2026-01-01', '2026-01-01')",
+        {"id": uuid4().hex},
+    )
+    seeding.commit()
+    seeding.close()
+
+    apply_cached_migrations(url)
+
+    reader = sqlite3.connect(database)
+    kept = next(reader.execute("select count(*) from workspace"))[0]
+    reader.close()
+    assert kept == 1
+
+
 async def test_reset_wipes_every_application_table_and_keeps_the_stamp(
     db: None, database_url: str
 ) -> None:
     """`reset_workspace_data`'s own contract, asserted directly: a core row, an extension row, and
     an index chunk all vanish; the alembic stamp survives; and on sqlite the FTS5 virtual table is
-    emptied through its own surface, leaving the index writable afterwards."""
+    emptied through its own surface, leaving the index writable afterwards.
+
+    Postgres deletes only the tables a test dirtied, and its characteristic failure is a table the
+    probe does not account for, so the postgres arm ends by asserting the state the narrowing has
+    to leave: every application table in the schema empty, not only the three seeded here."""
     workspace_id = uuid4()
     sqlite = database_url.startswith("sqlite")
     async with workspace_tx() as connection:
@@ -139,6 +248,154 @@ async def test_reset_wipes_every_application_table_and_keeps_the_stamp(
                 )
             ).scalar_one()
             assert matched == 1
+
+    if not sqlite:
+        async with workspace_tx() as connection:
+            names = (await connection.execute(POSTGRES_TABLES)).scalars().all()
+            probe = " union all ".join(
+                f"(select '{name}' as name from \"{name}\" limit 1)" for name in names
+            )
+            left = (await connection.execute(sa.text(probe))).scalars().all()
+        assert list(left) == []
+
+
+async def test_the_wipe_deletes_the_tables_a_test_dirtied_children_first(
+    db: None, database_url: str
+) -> None:
+    """`truncate table … cascade` over all 41 application tables rewrote 41 relfilenodes per test,
+    and its median climbed from 59 ms at the start of a postgres session to 614 ms 900 tests in.
+    One probe finds the tables a test actually dirtied and only those are deleted, in the
+    child-first order the live foreign-key graph gives — `member` before the `workspace` its
+    NO ACTION key points at, which is the order a delete has to take and truncate never needed."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("deleting what is dirty is the postgres arm; sqlite copies a fresh file")
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    executed: list[str] = []
+
+    def record(
+        connection: sa.Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        executed.append(statement)
+
+    async with workspace_tx() as connection:
+        sa.event.listen(connection.sync_connection, "before_cursor_execute", record)
+        try:
+            await reset_workspace_data(connection)
+        finally:
+            sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
+
+    assert [line for line in executed if line.startswith("delete from")] == [
+        'delete from "member"',
+        'delete from "workspace"',
+    ]
+    async with workspace_tx() as connection:
+        for table in ("member", "workspace"):
+            count = (
+                await connection.execute(sa.text(f"select count(*) from {table}"))
+            ).scalar_one()
+            assert count == 0, table
+
+
+async def test_the_wipe_waits_out_a_writer_that_is_still_in_flight(
+    db: None, database_url: str
+) -> None:
+    """`truncate table … cascade` took ACCESS EXCLUSIVE on every table, so a transaction that had
+    written and not yet committed blocked the wipe and had its rows removed once it committed. A
+    probe and a delete take no lock and see only their own snapshot: without the explicit lock the
+    writer here is invisible, its table is judged clean, no statement is spent on it, and its row
+    lands in the next test on a database every test on the worker shares. The harness has this
+    shape for real — `drain_workflows` exists because a test can finish while its workflow still
+    owns a transaction, and `test_cli_e2e` resets while servers run in threads."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("the wipe is the postgres arm; sqlite copies a fresh file per test")
+    written = asyncio.Event()
+
+    async def writer() -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=uuid4(), created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            written.set()
+            await asyncio.sleep(0.5)
+
+    in_flight = asyncio.create_task(writer())
+    await written.wait()
+    async with workspace_tx() as connection:
+        await reset_workspace_data(connection)
+    await in_flight
+
+    async with workspace_tx() as connection:
+        left = (await connection.execute(sa.text("select count(*) from workspace"))).scalar_one()
+    assert left == 0
+
+
+async def test_a_foreign_key_cycle_leaves_no_delete_order_and_is_refused(
+    db: None, database_url: str
+) -> None:
+    """A cycle has no child-first order, and every order a wipe could pick trips one of its keys.
+    The order is derived from the live catalog so a new migration needs no change here — and one
+    that closes a cycle names it in the raise instead of failing as an arbitrary delete. The two
+    tables exist only inside this transaction, which the raise rolls back."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("deleting what is dirty is the postgres arm; sqlite copies a fresh file")
+    with pytest.raises(RuntimeError, match="foreign key cycle has no delete order: cycle_"):
+        async with workspace_tx() as connection:
+            await connection.execute(sa.text("create table cycle_head (id uuid primary key)"))
+            await connection.execute(
+                sa.text(
+                    "create table cycle_tail (id uuid primary key, "
+                    "head_id uuid references cycle_head (id))"
+                )
+            )
+            await connection.execute(
+                sa.text("alter table cycle_head add column tail_id uuid references cycle_tail (id)")
+            )
+            await reset_workspace_data(connection)
+
+
+async def test_no_table_carries_a_sequence_the_delete_wipe_would_leave_unreset(
+    db: None, database_url: str
+) -> None:
+    """`delete` leaves a sequence where `truncate` restarted it. Every key in this schema is a
+    caller-assigned uuid, so no sequence exists for a wipe to reset — a migration that adds a serial
+    or identity column fails here rather than leaking its counter into the next test. The one
+    counter the schema does carry is `workspace.page_revision`, which the `assign_page_revision`
+    trigger increments; it returns to zero because the workspace row holding it is deleted too."""
+    if database_url.startswith("sqlite"):
+        pytest.skip("postgres owns the sequences truncate would have restarted")
+    async with workspace_tx() as connection:
+        sequences = (
+            (
+                await connection.execute(
+                    sa.text("select sequencename from pg_sequences where schemaname = 'public'")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert list(sequences) == []
 
 
 DUPLICATE_PROBE = """\"\"\"duplicate revision probe\"\"\"

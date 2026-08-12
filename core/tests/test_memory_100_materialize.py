@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from ufo_ext_index_default import DefaultIndex, pack_embedding
 from ufo_ext_memory import manifest as memory_manifest
 from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
+from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.memory_100.materialize import Memory100Materializer
 from evals.memory_100.models import (
@@ -21,7 +22,7 @@ from evals.memory_100.snapshot import content_digest, load_snapshot, write_snaps
 from evals.memory_100.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
-from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import ScopedStore, SourceReader, context_for
 from ufo.sandbox.containment import ContainmentError
 from ufo.schema import tables
@@ -46,7 +47,7 @@ def memory_100_database_url(database_url: str, tmp_path: Path) -> str:
     if database_url.startswith("postgresql"):
         pytest.skip("memory_100 materialization proof uses SQLite's real default index")
     url = f"sqlite+aiosqlite:///{tmp_path / 'memory_100.db'}"
-    apply_migrations(url)
+    apply_cached_migrations(url)
     return url
 
 

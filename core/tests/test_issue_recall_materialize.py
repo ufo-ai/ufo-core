@@ -23,6 +23,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL
 from ufo_ext_memory.events import MAX_RECALLED_MEMORY_IDS
 from ufo_ext_memory.store import MemoryStore, memory_item, recall_subjects
+from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.issue_recall.corpus import (
     ABSENT_FILINGS,
@@ -38,7 +39,7 @@ from evals.issue_recall.runner import load_issue_recall
 from evals.issue_recall.state import CorpusAttestor
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
-from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import SourceReader, context_for
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
@@ -111,7 +112,7 @@ def issue_recall_database_url(database_url: str, tmp_path: Path) -> str:
     if database_url.startswith("postgresql"):
         pytest.skip("issue_recall materialization proof uses SQLite's real default index")
     url = f"sqlite+aiosqlite:///{tmp_path / 'issue_recall.db'}"
-    apply_migrations(url)
+    apply_cached_migrations(url)
     return url
 
 

@@ -4,9 +4,10 @@ WEB := extensions/web/frontend
 DEBUGGER := extensions/debugger/frontend
 EMAIL ?= $(shell git config user.email)
 T ?=
+FILE ?=
 
 .PHONY: help install reinstall build init serve chat portal stack stack-down db \
-	check fmt test test-control test-web test-integration
+	check fmt test test-one test-control test-web test-integration
 
 help: ## List targets
 	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
@@ -61,6 +62,10 @@ fmt: ## Format the tree
 
 test: ## Run the parallel suite; T=<paths> narrows it to a focused run
 	uv run pytest $(if $(T),,-n auto) -m "not serial and not integration and not docker" -q $(T)
+
+test-one: ## Run one file or node id serially (FILE=path) — xdist only pays above ~100 tests
+	@test -n "$(FILE)" || { echo "FILE is required: make test-one FILE=core/tests/test_hooks.py"; exit 1; }
+	uv run pytest -m "not integration and not docker" -q $(FILE)
 
 test-control: ## Run the control (gateway) suite
 	uv run --project control pytest control/tests --ignore=control/tests/test_rls.py -q
