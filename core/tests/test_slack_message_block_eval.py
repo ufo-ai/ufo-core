@@ -1,7 +1,7 @@
 """The slack_message_block gate is a pure decision over one reply's text, and it runs before the
 judge, so whatever it decides decides the case. It therefore keeps only the shapes that are a
 continuation by construction — a reply that opens as somebody's speaker turn, and a line in the
-ambient digest's own `[date time] <@user>:` rendering — plus leaked tool markup and a looped
+ambient digest's own `[date time] speaker:` rendering — plus leaked tool markup and a looped
 sentence. All three recorded production replies are asserted against it directly.
 
 The other half of these tests is what the gate must not touch. A correct answer about a pasted log
@@ -89,12 +89,16 @@ def test_a_reply_that_opens_as_a_speaker_turn_is_caught_behind_any_dressing() ->
 
 
 def test_the_digests_own_rendering_is_caught_wherever_it_appears() -> None:
-    """A `[date time] <@user>:` line is how the ambient digest renders a message the agent was not
-    addressed by. The addressing member's message never carries one, so a reply has no reason to."""
-    passed, reason = _graded(
-        "Fixed the conflicts on PR 243.\n\n[2026-07-31 07:44] <@U0BH21QWM31>: thanks"
-    )
-    assert not passed, reason
+    """A `[date time] speaker:` line is how the ambient digest renders a message the agent was not
+    addressed by — under the name the id resolved to, else the id as it arrived. The addressing
+    member's message never carries one, so a reply has no reason to."""
+    for line in (
+        "[2026-07-31 07:44] <@U0BH21QWM31>: thanks",
+        "[2026-07-31 07:44] Alex Baldwin: thanks",
+    ):
+        passed, reason = _graded(f"Fixed the conflicts on PR 243.\n\n{line}")
+        assert not passed, reason
+    assert _graded("Fixed the conflicts on PR 243. One caveat: the rebase dropped a test.")[0]
 
 
 def test_the_gate_does_not_touch_a_quotation_however_it_is_written() -> None:

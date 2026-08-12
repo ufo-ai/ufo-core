@@ -1070,10 +1070,15 @@ async def _open_handoffs(
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The rail: every readable conversation this member may see across the agents their web
-    audience holds, newest activity first. Web conversations use the chat row this surface stores;
-    another surface's conversations use their opening message, and their origin names the surface.
-    A same-surface conversation without a chat row is dropped: the member's prepared-intent lane."""
+    """The rail: every conversation this member opened, across the agents their web audience holds,
+    newest activity first. Opened, not merely readable — a workspace-shared conversation is readable
+    by everyone, so a review an extension triggered and a public channel's thread another member
+    started would otherwise stand in this member's rail and displace their own work under the bound.
+    What the workspace holds is the agent's conversations directory; this is the member's own.
+
+    Web conversations use the chat row this surface stores; another surface's conversations use
+    their opening message, and their origin names the surface. A same-surface conversation without
+    a chat row is dropped: the member's prepared-intent lane."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1085,7 +1090,7 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     rows: list[dict[str, object]] = []
     for agent in audience.agents:
         listed = await ctx.list_agent_conversations(
-            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT
+            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT, initiated=True
         )
         records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
         for entry in listed:

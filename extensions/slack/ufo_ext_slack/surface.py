@@ -78,7 +78,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
@@ -124,6 +124,12 @@ from ufo.sdk.surfaces import (
     mint_marker,
 )
 from ufo_ext_slack.attribution import addressing_mention, message_bodies
+from ufo_ext_slack.mentions import (
+    mentioned_channels,
+    mentioned_users,
+    render_markup,
+    unescape,
+)
 
 SLACK_EXTENSION = "slack"
 """This extension's own name, which the manifest takes from here. It is the key space of the
@@ -131,6 +137,11 @@ SLACK_EXTENSION = "slack"
 writes below and the read the send hook makes — so naming it once makes that join true by
 construction instead of by two matching literals."""
 SELF_USER_ID_STORE_KEY = "self_user_id"
+NAME_STORE_PREFIX = "name/"
+NAME_CACHE_TTL_SECONDS = 86400.0
+NAME_CHAR_LIMIT = 64
+NAME_FORBIDDEN = str.maketrans("", "", "<>")
+MENTION_RESOLVE_MAX = 32
 SURFACE_SLACK = "slack"
 SLACK_BOT_TOKEN_SLOT = "slack_bot_token"
 SLACK_SIGNING_SECRET_SLOT = "slack_signing_secret"
@@ -1394,10 +1405,12 @@ async def _admit_inbound(
     """Everything an admitted message costs beyond the event ack: the sender, permalink and ambient
     context reads, the member and conversation resolution, and the admission itself."""
     marker = mint_marker()
-    sender, context, source = await asyncio.gather(
+    names = SlackNames(bot_token)
+    sender, context, source, mentioned = await asyncio.gather(
         _slack_user(bot_token, inbound.slack_user_id),
         _ambient_context(ctx, bot_token, inbound, identity, marker),
         _slack_permalink(bot_token, inbound.queue_key.partition(":")[0], inbound.ts),
+        names.of([inbound.body]),
     )
     member_id = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     audience = conversation_audience(member_id) if inbound.audience is None else inbound.audience
@@ -1409,7 +1422,8 @@ async def _admit_inbound(
         if inbound.files
         else ""
     )
-    body = fence_member_message(marker, context, inbound.body, attachments)
+    said = unescape(render_markup(inbound.body, mentioned))
+    body = fence_member_message(marker, context, said, attachments)
     admitted = await ctx.admit(
         conversation_id,
         body,
@@ -1630,6 +1644,87 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
         email=email.strip() if isinstance(email, str) and email.strip() else None,
         timezone=timezone if isinstance(timezone, str) and timezone else None,
     )
+
+
+@dataclass(frozen=True)
+class SlackNames:
+    """The names behind the ids a Slack message mentions.
+
+    Slack encodes a mention as an id, so a message arrives reading `<@U0BG8632NDS>` until something
+    asks Slack who that is. The answer changes rarely and is wanted on the inbound path, so it is
+    kept in this extension's own store and re-read after `NAME_CACHE_TTL_SECONDS` — a member who
+    renames themselves corrects the next day's messages, and a busy channel's regulars cost no
+    lookup at all.
+
+    Best effort throughout, on the ambient fetch's short timeout: ingest answers inside Slack's
+    event ack, so an id this cannot resolve keeps its encoded form, and the message is admitted
+    either way. `MENTION_RESOLVE_MAX` bounds one message's lookups — a digest quoting a crowd
+    resolves the first of them rather than opening a hundred concurrent reads on the hot path."""
+
+    bot_token: str
+
+    async def of(self, texts: Sequence[str], users: Sequence[str] = ()) -> dict[str, str]:
+        """What each id these texts mention is called, absent where Slack did not answer."""
+        wanted = {id_: SLACK_USERS_INFO_URL for text in texts for id_ in mentioned_users(text)} | {
+            id_: SLACK_USERS_INFO_URL for id_ in users
+        }
+        wanted |= {
+            id_: SLACK_CONVERSATIONS_INFO_URL for text in texts for id_ in mentioned_channels(text)
+        }
+        known = await self._remembered(list(wanted))
+        missing = sorted(id_ for id_ in wanted if id_ not in known)[:MENTION_RESOLVE_MAX]
+        if not missing:
+            return known
+        found = await asyncio.gather(*(self._name(id_, wanted[id_]) for id_ in missing))
+        fetched = {id_: name for id_, name in zip(missing, found, strict=True) if name is not None}
+        await self._remember(fetched)
+        return known | fetched
+
+    async def _remembered(self, ids: Sequence[str]) -> dict[str, str]:
+        if not ids:
+            return {}
+        try:
+            rows = await ScopedStore(SLACK_EXTENSION).get_many(
+                [f"{NAME_STORE_PREFIX}{id_}" for id_ in ids]
+            )
+        except Exception:
+            _LOG.warning("slack name cache read failed", exc_info=True)
+            return {}
+        stale = datetime.now(UTC).timestamp() - NAME_CACHE_TTL_SECONDS
+        remembered: dict[str, str] = {}
+        for id_ in ids:
+            row = rows.get(f"{NAME_STORE_PREFIX}{id_}")
+            if not isinstance(row, dict):
+                continue
+            name, at = row.get("name"), row.get("at")
+            if isinstance(name, str) and name and isinstance(at, int | float) and at > stale:
+                remembered[id_] = name
+        return remembered
+
+    async def _name(self, id_: str, url: str) -> str | None:
+        """What Slack calls this id, as one bounded line carrying no wire delimiter. A member sets
+        their own display name and `users.info` returns it unescaped, so a name is admitted under
+        the same bound as the `[A-Z0-9]` id it stands in for: one line, no `<` or `>`, 64 chars."""
+        raw: object = None
+        if url == SLACK_USERS_INFO_URL:
+            user = await _slack_user(self.bot_token, id_)
+            raw = None if user is None else user.name
+        else:
+            info = await _channel_info(self.bot_token, id_)
+            raw = None if info is None else info.get("name")
+        if not isinstance(raw, str):
+            return None
+        name = " ".join(raw.translate(NAME_FORBIDDEN).split())[:NAME_CHAR_LIMIT]
+        return name or None
+
+    async def _remember(self, names: Mapping[str, str]) -> None:
+        at = datetime.now(UTC).timestamp()
+        store = ScopedStore(SLACK_EXTENSION)
+        for id_, name in names.items():
+            try:
+                await store.put(f"{NAME_STORE_PREFIX}{id_}", {"name": name, "at": at})
+            except Exception:
+                _LOG.warning("slack name cache write failed for %s", id_, exc_info=True)
 
 
 async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None:
@@ -1872,7 +1967,21 @@ async def _ambient_context(
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return ""
-    return ambient_digest(messages, bot_user_id, note, marker)
+    return ambient_digest(
+        messages, bot_user_id, note, marker, await _digest_names(bot_token, messages)
+    )
+
+
+async def _digest_names(bot_token: str, messages: Sequence[object]) -> dict[str, str]:
+    """What every id these messages name is called: their authors, and whoever their words mention.
+    One resolution for the whole digest, so a channel's regulars cost one lookup between them."""
+    said = [str(item.get("text") or "") for item in messages if isinstance(item, dict)]
+    authors = [
+        str(item["user"])
+        for item in messages
+        if isinstance(item, dict) and isinstance(item.get("user"), str)
+    ]
+    return await SlackNames(bot_token).of(said, authors)
 
 
 async def _unseen_tail(
@@ -1915,10 +2024,22 @@ async def _unseen_tail(
             break
         unseen.append(item)
     unseen.reverse()
-    return ambient_digest(unseen, identity.bot_user_id, AMBIENT_UNSEEN_NOTE, marker)
+    return ambient_digest(
+        unseen,
+        identity.bot_user_id,
+        AMBIENT_UNSEEN_NOTE,
+        marker,
+        await _digest_names(bot_token, unseen),
+    )
 
 
-def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: str) -> str:
+def ambient_digest(
+    messages: list[object],
+    bot_user_id: str,
+    note: str,
+    marker: str,
+    names: Mapping[str, str],
+) -> str:
     """Fetched Slack messages rendered as bounded context lines: member messages only, the bot's
     own replies and any message mentioning the bot outside our own attribution footer dropped —
     every mention was gated in as its own turn, so it already lives in the transcript, while a
@@ -1926,14 +2047,21 @@ def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: 
     (the thread root, the "summarize this" anchor) and the newest lines that fit survive, with the
     omission marked.
 
-    Each message is another principal's words, so any tag-shaped delimiter in it is escaped before
-    it is interpolated. The digest carries messages the agent was not addressed by, and in a Slack
-    Connect channel their author can be one `_author_is_foreign` says the app never serves; relayed
-    raw, a bystander closes an element and opens their own, and their words arrive as the words the
-    turn must answer — under a `sender:` they chose, if they forge the engine's `<context>`. The
-    escape is by shape rather than by a list of names, so it holds for every element in the prompt
-    including ones this module does not own. Slack's own `<@U…>` mentions and `<https://…|label>`
-    links are not tag-shaped and reach the model as written.
+    Each message is another principal's words, so any tag-shaped delimiter in it stays escaped as
+    Slack delivered it — `render_markup` names entities and `unescape` is never reached from here.
+    One message is one line: a line here opens with a stamp and the speaker's own name, which is
+    plain text nobody has to escape to spell, so the newline is what a bystander would need to
+    write a second speaker's words and the whitespace it arrived in collapses before it can.
+    The digest carries messages the agent was not addressed by, and in a Slack Connect channel
+    their author can be one `_author_is_foreign` says the app never serves; unescaped, a bystander
+    closes an element and opens their own, and their words arrive as the words the turn must
+    answer — under a `sender:` they chose, if they forge the engine's `<context>`. The escape is by
+    shape rather than by a list of names, so it holds for every element in the prompt including
+    ones this module does not own.
+
+    Each line names its author rather than quoting the id Slack keys them by, and the mentions and
+    links inside it read the same way: `names` carries what the ids are called, and an id it could
+    not answer for stays as it arrived.
 
     The addressing member's own words never pass through here. Forging an element in your own turn
     buys nothing — it is already your message — and the model reads a typed tag for what it is. The
@@ -1956,7 +2084,8 @@ def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: 
             minute = datetime.fromtimestamp(stamp, tz=UTC).strftime("%Y-%m-%d %H:%M")
         except (ValueError, OverflowError, OSError):
             continue
-        kept.append((stamp, f"[{minute}] <@{user}>: {text[:AMBIENT_MESSAGE_CHAR_LIMIT]}"))
+        said = " ".join(render_markup(text, names).split())[:AMBIENT_MESSAGE_CHAR_LIMIT]
+        kept.append((stamp, f"[{minute}] {names.get(user) or f'<@{user}>'}: {said}"))
     kept.sort(key=lambda entry: entry[0])
     lines = [line for _, line in kept]
     if not lines:

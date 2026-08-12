@@ -183,8 +183,10 @@ def mint_marker() -> str:
     Minted per message, so no text the prompt carries can name one: a bystander's words were already
     frozen in the ambient digest when it did not exist, and the member's own text is their own
     message anyway. That is what makes the elements a boundary rather than a convention, and why
-    nothing escapes anybody's words: Slack's `<@U…>` mentions and `<https://…|label>` links, an
-    inequality, a tag a member typed on purpose all reach the model as written."""
+    core escapes nobody's words: an inequality and a tag a member typed on purpose reach the model
+    as written. What a surface renders before it hands the text over is its own — Slack resolves the
+    ids in `<@U…>` and `<#C…|…>` to names, since nobody can act on an id — and core neither
+    inspects nor undoes it."""
     return token_hex(MARKER_BYTES)
 
 
@@ -2409,11 +2411,14 @@ class SurfaceContext:
         limit: int,
         surface: str | None = None,
         conversation_id: UUID | None = None,
+        initiated: bool = False,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
         `surface` narrows to one surface's conversations in the query, before the bound, so a
-        member's rows are never displaced by another surface's newer traffic under the cap. Each
+        member's rows are never displaced by another surface's newer traffic under the cap.
+        `initiated` narrows the same way to the ones this member opened — `_initiated` defines
+        that — which is what a rail lists and what an agent's directory does not. Each
         entry carries `readable` (content this viewer reads now) and `disclosable` (an admin may
         acknowledge and read another member's private one — `record_transcript_access` is the
         act). Subagent conversations are absent: they are the agent's own work on a request,
@@ -2465,6 +2470,8 @@ class SurfaceContext:
             query = query.where(tables.conversation.c.surface == surface)
         if conversation_id is not None:
             query = query.where(tables.conversation.c.id == conversation_id)
+        if initiated:
+            query = query.where(self._initiated(member_id))
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
         async with workspace_tx() as connection:
@@ -2497,6 +2504,34 @@ class SurfaceContext:
                 speakers=speakers.get(row.id, ()),
             )
             for row in rows
+        )
+
+    def _initiated(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether this member opened the conversation: it is bound to them, or they spoke its
+        first member turn. A conversation an extension opened — a trigger run, a review, an
+        agent's own errand — carries no member and has no member turn to be first in, so it
+        belongs to nobody's rail; a public channel's thread carries no member either and belongs
+        to whoever spoke into it first. Later turns do not qualify: a member who answers in
+        another's thread has joined it, not opened it.
+
+        Correlated on the row being listed rather than grouped over the workspace: `turn_spoken`
+        indexes exactly this lookup, so each candidate costs one seek instead of every turn in the
+        workspace being reduced to a first-speaker table the bound then throws most of away."""
+        spoke_first = (
+            sa.select(tables.turn.c.speaker_member_id)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.speaker_member_id.is_not(None),
+            )
+            .order_by(tables.turn.c.seq)
+            .limit(1)
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+        return sa.or_(
+            tables.conversation.c.member_id == member_id,
+            spoke_first == member_id,
         )
 
     async def _conversation_openings(self, listed: Sequence[UUID]) -> dict[UUID, str]:

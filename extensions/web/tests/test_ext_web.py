@@ -2931,8 +2931,9 @@ async def test_the_rail_reads_every_surface_under_its_bound(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rail reads every surface under its bound: newer Slack traffic occupies a slot and uses
-    its opening message, while a same-surface prepared-intent row without a chat record drops."""
+    """The rail reads every surface under its bound: newer Slack traffic this member opened occupies
+    a slot and uses its opening message, while a same-surface prepared-intent row without a chat
+    record drops."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
@@ -2970,13 +2971,65 @@ async def test_the_rail_reads_every_surface_under_its_bound(
                     updated_at=sa.func.now(),
                 )
             )
-    await _seed_listed_turn(workspace_id, slack_id, agent_id, seq=1, inbound="new Slack traffic")
+    await _seed_listed_turn(
+        workspace_id,
+        slack_id,
+        agent_id,
+        seq=1,
+        inbound="new Slack traffic",
+        speaker_member_id=member_id,
+    )
     monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 2)
     rail = await client.get("/surface/web/api/chats", headers=cookie)
     rows = rail.json()["chats"]
     assert [row["conversation_id"] for row in rows] == [str(slack_id)]
     assert rows[0]["title"] == "new Slack traffic"
     assert rows[0]["origin"] == "slack"
+
+
+async def test_the_rail_lists_only_the_conversations_this_member_opened(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A workspace-shared conversation is readable by everyone, so the rail asks who opened it. The
+    member's own public-channel thread stands; a thread another member opened, and a run an
+    extension triggered with no member turn at all, do not. Answering in another's thread is
+    joining it, not opening it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    mine_id, theirs_id, triggered_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        for conversation_id, surface, queue_key in (
+            (mine_id, "slack", "C42:1723.0"),
+            (theirs_id, "slack", "C42:1723.1"),
+            (triggered_id, "coding", "review/9"),
+        ):
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface=surface,
+                    queue_key=queue_key,
+                    member_id=None,
+                    audience="shared",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    await _seed_listed_turn(
+        workspace_id, mine_id, agent_id, seq=1, inbound="mine", speaker_member_id=member_id
+    )
+    await _seed_listed_turn(
+        workspace_id, theirs_id, agent_id, seq=1, inbound="theirs", speaker_member_id=peer_id
+    )
+    await _seed_listed_turn(
+        workspace_id, theirs_id, agent_id, seq=2, inbound="i answered", speaker_member_id=member_id
+    )
+    await _seed_listed_turn(workspace_id, triggered_id, agent_id, seq=1, inbound="review run")
+    rail = await client.get("/surface/web/api/chats", headers=cookie)
+    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(mine_id)]
 
 
 async def test_an_answer_into_a_fresh_conversation_is_refused(

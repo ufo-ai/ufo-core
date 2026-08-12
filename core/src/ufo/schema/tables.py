@@ -204,6 +204,14 @@ turn = sa.Table(
         sqlite_where=sa.text("status = 'parked'"),
     ),
     sa.Index(
+        "turn_spoken",
+        "workspace_id",
+        "conversation_id",
+        "seq",
+        postgresql_where=sa.text("speaker_member_id is not null"),
+        sqlite_where=sa.text("speaker_member_id is not null"),
+    ),
+    sa.Index(
         "turn_parent",
         "parent_turn_id",
         postgresql_where=sa.text("parent_turn_id is not null"),

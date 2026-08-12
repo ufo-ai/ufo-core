@@ -732,7 +732,7 @@ class ExtensionContext:
         """Get-or-create the conversation this extension keys by `key`, held by `agent_id` and by
         no member — the conversation a trigger opens rather than a member does. The work an event
         starts is one conversation of the agent that does that work: it lists under that agent,
-        reaches no member's rail (which reads the conversations a member opened on a member
+        reaches no member's rail (which reads the conversations a member opened, on whatever
         surface), holds its own queue partition, and takes its own sandbox, so two of them neither
         serialize against each other nor share a checkout tree.
 

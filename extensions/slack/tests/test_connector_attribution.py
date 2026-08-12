@@ -353,7 +353,7 @@ def test_a_footered_message_stays_visible_in_the_ambient_digest() -> None:
         {"user": "U_MEMBER", "ts": "1700000000.000100", "text": footered},
         {"user": "U_OTHER", "ts": "1700000060.000200", "text": f"<@{BOT_USER_ID}> already a turn"},
     ]
-    digest = slack.ambient_digest(messages, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK)
+    digest = slack.ambient_digest(messages, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {})
 
     assert AMBIENT_CONTEXT_ELEMENT in digest
     assert SENT_TEXT in digest

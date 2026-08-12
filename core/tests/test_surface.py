@@ -2696,6 +2696,54 @@ async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_pat
     assert [entry.summary.id for entry in linked] == [older]
 
 
+async def test_agent_conversations_narrow_to_the_ones_this_member_opened(
+    db: None, tmp_path
+) -> None:
+    """`initiated` keeps the conversations bound to this member and the shared ones whose first
+    member turn is theirs. A shared conversation another member opened, and one with no member turn
+    at all, drop — answering second in another's thread does not open it. Without the narrowing all
+    four still list: readable and opened are two different questions."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
+    bound = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="bound",
+        audience=f"member:{member_id}",
+        member_id=member_id,
+    )
+    mine = await _seed_conversation(
+        workspace_id, agent_id, queue_key="mine", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    theirs = await _seed_conversation(
+        workspace_id, agent_id, queue_key="theirs", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    triggered = await _seed_conversation(
+        workspace_id, agent_id, queue_key="triggered", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_conversation_turn(
+        workspace_id, mine, agent_id, seq=1, inbound="mine", speaker_member_id=member_id
+    )
+    await _seed_conversation_turn(
+        workspace_id, theirs, agent_id, seq=1, inbound="theirs", speaker_member_id=peer_id
+    )
+    await _seed_conversation_turn(
+        workspace_id, theirs, agent_id, seq=2, inbound="answered", speaker_member_id=member_id
+    )
+    await _seed_conversation_turn(
+        workspace_id, triggered, agent_id, seq=1, inbound="run", admission_source="internal"
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    opened = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, initiated=True
+    )
+    assert {entry.summary.id for entry in opened} == {bound, mine}
+    readable = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+    assert {entry.summary.id for entry in readable} == {bound, mine, theirs, triggered}
+
+
 async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
     db: None, tmp_path
 ) -> None:
