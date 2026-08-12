@@ -75,15 +75,18 @@ function Block(props: { block: ContentBlock }) {
           <pre>{block.summary.join("\n")}</pre>
         </details>
       );
-    case "tool_use":
+    case "tool_use": {
+      const description = block.input.user_description;
       return (
         <details>
           <summary>
             tool_use · <code>{block.name}</code>
+            {typeof description === "string" && ` · ${description}`}
           </summary>
           <pre>{JSON.stringify(block.input, null, 2)}</pre>
         </details>
       );
+    }
     case "tool_result":
       return (
         <details>

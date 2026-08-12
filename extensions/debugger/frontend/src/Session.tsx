@@ -240,12 +240,12 @@ function TurnBody(props: {
           </>
         )}
       </dl>
-      <details>
+      <details open>
         <summary>inbound</summary>
         <pre>{turn.inbound}</pre>
       </details>
       {terminal && (
-        <details>
+        <details open>
           <summary>terminal frame</summary>
           <pre>{JSON.stringify(terminal, null, 2)}</pre>
         </details>
