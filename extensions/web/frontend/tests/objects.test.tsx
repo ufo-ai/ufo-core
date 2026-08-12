@@ -14,7 +14,7 @@ import {
   AGENT_ID,
   CONVO_ID,
   MEMBER,
-  NO_SITES,
+  NO_ARTIFACTS,
   NO_TASKS,
   SECOND,
   SECOND_ID,
@@ -202,10 +202,11 @@ test("a value the kind's spec declares as an enum reads as its own chip", async 
       }),
     "/objects/site": () =>
       objectIndex(SITE_KIND, [{ name: "docs-abc", summary: "docs", visibility: "workspace" }]),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/sites";
+  location.hash = "#/artifacts";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
@@ -226,16 +227,17 @@ test("an empty index states that the kind has no objects here", async () => {
   expect(screen.queryByRole("table")).toBeNull();
 });
 
-test("the sites section of a deploy without the extension states that, not an error", async () => {
+test("a deploy without the sites extension leaves the shelf to its files alone", async () => {
   wire({
     "/objects/site": () => new Response("no object kind named 'site'", { status: 404 }),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/sites";
+  location.hash = "#/artifacts";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No sites extension is installed.")).toBeTruthy();
+  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
   expect(screen.queryByText(/^Error /)).toBeNull();
 });
 
@@ -660,20 +662,21 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
   expect(await screen.findByRole("link", { name: "daily-brief" })).toBeTruthy();
 });
 
-test("the sites section is the site index on the main agent", async () => {
+test("the artifacts section reads the site index on the main agent", async () => {
   const reads: string[] = [];
   wire({
     "/objects/site": (url) => {
       reads.push(url);
       return objectIndex(SITE_KIND, []);
     },
+    "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/sites";
+  location.hash = "#/artifacts";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText(NO_SITES)).toBeTruthy();
+  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
   expect(screen.queryByText(NO_TASKS)).toBeNull();
 });

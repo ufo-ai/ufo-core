@@ -3,11 +3,10 @@ import type { ReactNode } from "react";
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { CustomizeTab, Section, WorkspaceTab } from "@/lib/route";
-import { ARTIFACTS } from "@/views/Artifacts";
+import { Artifacts } from "@/views/Artifacts";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { Scheduled } from "@/views/Scheduled";
-import { Sites } from "@/views/Sites";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
@@ -55,8 +54,11 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
   scheduled: { label: "Scheduled", remountOnPlace: false, render: () => <Scheduled /> },
-  artifacts: declared("Artifacts", ARTIFACTS),
-  sites: { label: "Sites", remountOnPlace: false, render: () => <Sites /> },
+  artifacts: {
+    label: "Artifacts",
+    remountOnPlace: false,
+    render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
+  },
 };
 
 export const CUSTOMIZE_VIEWS: Record<CustomizeTab, PaneView> = {

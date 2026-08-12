@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -6,8 +6,11 @@ import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
   AGENT,
+  AGENT_ID,
+  NO_ARTIFACTS,
   PlacedSection,
   SITE_KIND,
+  TASK_KIND,
   json,
   objectIndex,
   useStreamFake,
@@ -16,6 +19,24 @@ import {
 } from "./harness";
 
 const TEXT_URL = "/dl/notes.txt";
+const DOCS_URL = "https://ufo.example/surface/sites/signed-docs";
+
+const DOCS = {
+  name: "docs-abc",
+  summary: "docs · workspace · sandbox port 3000",
+  conversation: "c1",
+  created_at: "2026-07-01T09:00:00Z",
+  visibility: "workspace",
+  site_url: DOCS_URL,
+};
+
+const NOTES = {
+  name: "notes-def",
+  summary: "notes · private · sandbox port 3001",
+  conversation: "c2",
+  created_at: "2026-07-02T09:00:00Z",
+  visibility: "private",
+};
 
 const artifact = (over: Record<string, unknown> = {}) => ({
   id: "a1",
@@ -46,6 +67,15 @@ function streamOf(chunks: Uint8Array[], offered: { count: number }) {
   });
 }
 
+function only(artifacts: unknown[]) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) =>
+      url.includes("/objects/site") ? objectIndex(SITE_KIND, []) : json({ artifacts }),
+    ),
+  );
+}
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -73,6 +103,7 @@ test("the artifact listing sends search and media filters to its read", async ()
 
 test("narrowing a paged listing reads from the start, not from the page it was on", async () => {
   const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [artifact()], older: "page-2" }),
   });
   render(
@@ -97,6 +128,7 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       return new Response("hello from the file");
     }),
@@ -122,6 +154,7 @@ test("the listing stays reachable behind an open viewer", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       return new Response("hello from the file");
     }),
@@ -144,6 +177,7 @@ test("leaving the section takes the viewer with it", async () => {
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/workspace/team"))
         return json({ members: [], can_add: false, domain: null });
       return new Response("hello from the file");
@@ -160,7 +194,7 @@ test("leaving the section takes the viewer with it", async () => {
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="sites" />
+      <PlacedSection section="scheduled" />
     </MainAgentProvider>,
   );
 
@@ -174,6 +208,7 @@ test("the viewer bounds a long read by bytes, not characters, and cancels the re
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) {
         return json({ artifacts: [artifact({ size_bytes: 200 * 1024 })] });
       }
@@ -199,6 +234,7 @@ test("a body of exactly the bound renders whole and claims nothing about truncat
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) {
         return json({ artifacts: [artifact({ size_bytes: 64 * 1024 })] });
       }
@@ -221,6 +257,7 @@ test("a read that fails mid-body states the fault instead of staying on Loading"
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       return new Response(
         new ReadableStream<Uint8Array>({
@@ -246,6 +283,7 @@ test("a read whose request never lands states the fault instead of staying on Lo
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       throw new Error("the request died");
     }),
@@ -262,10 +300,7 @@ test("a read whose request never lands states the fault instead of staying on Lo
 });
 
 test("an image whose link expired states it rather than showing an empty panel", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => json({ artifacts: [artifact({ media_type: "image/png", filename: "shot.png" })] })),
-  );
+  only([artifact({ media_type: "image/png", filename: "shot.png" })]);
   render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedSection section="artifacts" />
@@ -285,12 +320,7 @@ test("an image whose link expired states it rather than showing an empty panel",
 });
 
 test("a type with no preview says to download it, and the viewer offers that download", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      json({ artifacts: [artifact({ media_type: "application/zip", filename: "bundle.zip" })] }),
-    ),
-  );
+  only([artifact({ media_type: "application/zip", filename: "bundle.zip" })]);
   render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedSection section="artifacts" />
@@ -306,7 +336,7 @@ test("a type with no preview says to download it, and the viewer offers that dow
 });
 
 test("an artifact with no link stays plain text and opens nothing", async () => {
-  vi.stubGlobal("fetch", vi.fn(async () => json({ artifacts: [artifact({ url: null })] })));
+  only([artifact({ url: null })]);
   render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedSection section="artifacts" />
@@ -321,6 +351,7 @@ test("Escape dismisses the viewer", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       return new Response("body");
     }),
@@ -343,6 +374,7 @@ test("closing the viewer discards a body still in flight", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) {
         return json({
           artifacts: [artifact(), artifact({ id: "a2", filename: "second.txt", url: "/dl/second.txt" })],
@@ -377,6 +409,7 @@ test("the artifacts listing renders as cards, each led by its own band", async (
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       return new Response("x");
     }),
@@ -401,12 +434,7 @@ test("the artifacts listing renders as cards, each led by its own band", async (
 });
 
 test("an image artifact fills its band, and a dead link leaves the placeholder", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      json({ artifacts: [artifact({ media_type: "image/png", filename: "shot.png" })] }),
-    ),
-  );
+  only([artifact({ media_type: "image/png", filename: "shot.png" })]);
   render(
     <MainAgentProvider agents={[AGENT]}>
       <PlacedSection section="artifacts" />
@@ -423,4 +451,133 @@ test("an image artifact fills its band, and a dead link leaves the placeholder",
 
   image.dispatchEvent(new Event("error"));
   await waitFor(() => expect(band.querySelector("img")).toBeNull());
+});
+
+function shelf(objects: unknown[], artifacts: unknown[]) {
+  const term = (url: string) => new URLSearchParams(url.split("?")[1] ?? "").get("q") ?? "";
+  return wire({
+    "/objects/site": (url) =>
+      objectIndex(
+        SITE_KIND,
+        objects.filter((row) => (row as { name: string }).name.includes(term(url))),
+      ),
+    "/workspace/artifacts": (url) =>
+      json({
+        artifacts: artifacts.filter((entry) =>
+          (entry as { filename: string }).filename.includes(term(url)),
+        ),
+      }),
+  });
+}
+
+function open() {
+  return render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+}
+
+test("a file card binds its parts to the artifact payload", async () => {
+  shelf([], [artifact({ filename: "report.txt", subject: "member@example.com" })]);
+  open();
+
+  const card = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("report.txt"),
+  );
+  expect(card?.querySelector('[data-part="primary"]')?.textContent).toBe("report.txt");
+  expect(card?.querySelector('[data-part="body"]')?.textContent).toBe("member@example.com");
+  expect(card?.querySelector('[data-part="status"]')?.textContent).toBe("Jul 31 2026");
+  expect(screen.queryAllByRole("columnheader")).toEqual([]);
+});
+
+test("a site is a card carrying its band, its visibility, and its summary", async () => {
+  shelf([DOCS], []);
+  open();
+
+  const card = (await screen.findAllByRole("listitem"))[0];
+  expect(card.querySelector('[data-part="primary"]')?.textContent).toBe("docs-abc");
+  expect(card.querySelector('[data-part="status"]')?.textContent).toBe("Workspace");
+  expect(card.querySelector('[data-part="body"]')?.textContent).toBe(DOCS.summary);
+  const band = card.querySelector('[data-part="mark"]');
+  expect(band?.className).toContain("h-(--size-band)");
+  expect(band?.getAttribute("aria-hidden")).toBe("true");
+});
+
+test("a site with a link opens it in a new tab, and one without draws no Open", async () => {
+  shelf([DOCS, NOTES], []);
+  open();
+
+  const docs = (await screen.findByText("docs-abc")).closest("li");
+  const link = within(docs!).getByRole("link", { name: "Open" });
+  expect(link.getAttribute("href")).toBe(DOCS_URL);
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(within(docs!).getByRole("button", { name: "View" })).toBeTruthy();
+
+  const notes = screen.getByText("notes-def").closest("li");
+  expect(within(notes!).queryByRole("link", { name: "Open" })).toBeNull();
+  expect(within(notes!).getByRole("button", { name: "View" })).toBeTruthy();
+});
+
+test("the sites lead the files, and the shelf reads them on the main agent", async () => {
+  const { calls } = shelf([DOCS], [artifact()]);
+  open();
+
+  await screen.findByText("docs-abc");
+  const names = screen
+    .getAllByRole("listitem")
+    .map((card) => card.querySelector('[data-part="primary"]')?.textContent);
+  expect(names).toEqual(["docs-abc", "notes.txt"]);
+  expect(calls.some((url) => url.includes("/objects/site?agent=" + AGENT_ID))).toBe(true);
+});
+
+test("the family tabs narrow the shelf to sites or to one media kind", async () => {
+  const { calls } = shelf([DOCS], [artifact()]);
+  open();
+
+  await screen.findByText("docs-abc");
+  await userEvent.click(screen.getByRole("tab", { name: "Sites" }));
+
+  expect(screen.getByRole("tab", { name: "Sites" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByText("notes.txt")).toBeNull();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Documents" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("media=document"))).toBe(true));
+  expect(await screen.findByText("notes.txt")).toBeTruthy();
+  expect(screen.queryByText("docs-abc")).toBeNull();
+});
+
+test("the search reaches both families", async () => {
+  const { calls } = shelf([DOCS], [artifact()]);
+  open();
+
+  await screen.findByText("docs-abc");
+  await userEvent.type(screen.getByPlaceholderText("Search"), "docs{Enter}");
+
+  await waitFor(() =>
+    expect(calls.filter((url) => url.includes("q=docs")).length).toBe(2),
+  );
+  expect(await screen.findByText("docs-abc")).toBeTruthy();
+  expect(screen.queryByText("notes.txt")).toBeNull();
+});
+
+test("a deploy with no sites extension lists its files and states no fault", async () => {
+  wire({
+    "/objects/site": () => new Response("no object kind named 'site'", { status: 404 }),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  open();
+
+  expect(await screen.findByText("notes.txt")).toBeTruthy();
+  expect(screen.queryByText(/^Error /)).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Sites" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Images" })).toBeTruthy();
+});
+
+test("an empty shelf states what lands in it", async () => {
+  shelf([], []);
+  open();
+
+  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 });

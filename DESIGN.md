@@ -36,7 +36,7 @@ the inline alternative.
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
 `--breakpoint-narrow` it flips to a top strip. The sidebar sits on its own surface (`bg-sidebar`,
 a hair of ink mixed into `Canvas`) behind a soft edge, and holds, in order: wordmark, the primary
-rows — New conversation, Agents, Scheduled, Artifacts, Sites, Customize, Workspace, each led by
+rows — New conversation, Agents, Scheduled, Artifacts, Customize, Workspace, each led by
 its glyph — the conversation rail, and the member footer: the initial in a `--size-avatar` circle,
 the email over the role (`Admin`/`Member`), and for admins the settings glyph opening
 Administration. The sidebar's row glyphs come from `@tabler/icons-react` — the icon set the Figma
@@ -62,11 +62,28 @@ keys a workspace tab's does and a row opened in a section answers Back exactly t
 under a tab does.
 
 A screen earns the sidebar when the member comes to it for what the agents produced rather than to
-change how the workspace behaves. Scheduled, Artifacts and Sites are that work, read as often as a
+change how the workspace behaves. Scheduled and Artifacts are that work, read as often as a
 conversation is, and a record two clicks deep behind a strip of settings tabs is a record the
 member does not know is there; Workspace keeps what governs the workspace — team, sources,
 credentials, memory, usage. Scheduled could not have stayed a tab in any case: it lists one kind
 across the whole audience, which no single agent's tab can head.
+
+Artifacts is what the agents produced, so a hosted site is one of its records and not a section
+beside it. A member who wants what came out of a conversation does not first decide whether it was
+a file or a site, and two sidebar buttons over one question is the split to refuse. The two are
+families of one shelf: the sites lead as the small named family, the shared files follow as the
+directory behind them, and one segmented filter (`Sites`, then `Images`, `Documents`, `Data`,
+`Other`) is how a member reads one alone. The axis is the family, not the source: sites are one
+family and the four media kinds are the file directory's own, so every option names a kind of
+record and the tablist stays one row. There is no `Files`, because the directory's four families
+already narrow it and sites are few enough to read past. Both reads narrow on the server, so the
+one search box and the pick travel to each — a member who searches is asking the workspace, never
+the page. A site's visibility is a fact of the record and rides its card's status slot; who made
+it rides the meta line, as a file's owner does. The files walk is the shelf's own read: it fails
+the section, and its cursor is the one page the pager continues, so the pager is drawn only where
+the files are shown. A deploy with no sites extension answers that read with a 404, which is a
+family that does not exist here rather than a fault — the shelf is then its files alone, the
+`Sites` option is not drawn, and every other refusal is stated.
 
 A section and an agent tab may hold the same kind, and Scheduled does: the section is every
 agent's, the tab is that agent's own. They carry the same label, because the label names the kind
@@ -168,7 +185,7 @@ takes one of two shapes. A record with no picture of its own takes `shape: "squa
 `size-6xl rounded-panel bg-fill-subtle` block inset top-left, the status on its line (Credentials).
 A record that has or will have one takes `shape: "band"` — a full-bleed `h-(--size-band)` strip
 above the card body, filled by the record's own image where it has one and left as the subtle fill
-where it does not (Artifacts, Sites); the status then rides the name's line. A band that fails to
+where it does not (Artifacts); the status then rides the name's line. A band that fails to
 load falls back to the same fill rather than to a broken image. A record that will never earn a
 picture takes no mark at all, and its status rides the name's line (Skills).
 
@@ -195,12 +212,12 @@ A card's name is text, never a link and never a button. The act is a `Button var
 card's foot saying what it does — `View` where it opens the record. A name that is also the control
 makes the card's one target invisible until hover and reads as a different affordance on every
 screen; a labelled button reads the same everywhere. Where the row carries an act the member came
-for rather than an act on the record — Agents' `New conversation`, Sites' `Open` — that one takes
+for rather than an act on the record — Agents' `New conversation`, a site's `Open` — that one takes
 `send` and leads the foot, with `View` beside it: a card grid is a launcher as much as a directory,
 and the filled button says which of the two the screen expects.
 
-An act that leaves the portal is an `<a>`, and it is drawn only where the row can answer it. Sites'
-`Open` carries the site's own link and so takes `target="_blank"` and `rel="noopener noreferrer"`,
+An act that leaves the portal is an `<a>`, and it is drawn only where the row can answer it. A
+site's `Open` carries its own link and so takes `target="_blank"` and `rel="noopener noreferrer"`,
 while `View` beside it opens the record in the pane — one foot, two destinations, each named by the
 word for where it goes. A site whose row carries no link draws no `Open` at all rather than a dead
 control: the field is absent exactly when the deploy configures no public base URL, and a button
@@ -709,10 +726,9 @@ Copy a known-good implementation instead of composing from rules:
 - `views/Team.tsx` — a searchable table whose act opens a repeating dialog form and reports by toast.
 - `views/Memory.tsx` — a bespoke section (server-side search, dynamic filters) wearing the same
   bar, tablist, table, and dialog as the declared listings.
-- `views/Artifacts.tsx` — a declared listing whose face is cards led by an image band.
-- `views/Sites.tsx` — a bespoke section over a typed object kind, reading the same `CardGrid` the
-  declared listings do, with server-side `Mine` narrowing and a leaving-the-portal anchor beside
-  the row's `View`.
+- `views/Artifacts.tsx` — a bespoke section merging two server-narrowed reads into one `CardGrid`:
+  a typed object kind's small family ahead of the paged file directory, one search and one family
+  filter reaching both, with a leaving-the-portal anchor beside the row's `View`.
 - `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.

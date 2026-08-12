@@ -43,6 +43,7 @@ function serve() {
     "fetch",
     vi.fn(async (url: string) => {
       calls.push(url);
+      if (url.includes("/objects/site")) return json({ objects: [] });
       if (url.includes("/workspace/artifacts")) {
         const paged = url.includes("after=");
         return json({
@@ -105,7 +106,7 @@ test("a workspace tab and a section carry the same place and parse back to it", 
     place,
   });
   expect(parseHash("#/workspace/artifacts")).toEqual({ kind: "home" });
-  expect(parseHash("#/workspace/sites")).toEqual({ kind: "home" });
+  expect(parseHash("#/sites")).toEqual({ kind: "home" });
   expect(parseHash("#/workspace/memory")).toEqual({ kind: "home" });
 });
 
@@ -323,6 +324,7 @@ test("a cursor the surface refuses leaves a way back to the first page", async (
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return json({ objects: [] });
       if (url.includes("after=")) return new Response("malformed listing cursor", { status: 400 });
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [NEWER], older: null });
       if (url.includes("/api/chats")) return json({ chats: [] });

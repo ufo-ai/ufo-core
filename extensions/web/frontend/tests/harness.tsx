@@ -184,7 +184,7 @@ export const CHAT_ROW = {
 export const json = (payload: unknown) => Response.json(payload);
 
 export const NO_TASKS = "No scheduled task is visible to you.";
-export const NO_SITES = "No sites yet.";
+export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is listed here.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",

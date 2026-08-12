@@ -13,7 +13,7 @@ export const CUSTOMIZE_TABS = ["memory"] as const;
 
 export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
 
-export const SECTIONS = ["scheduled", "artifacts", "sites"] as const;
+export const SECTIONS = ["scheduled", "artifacts"] as const;
 
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type SubagentTab = (typeof SUBAGENT_TABS)[number];

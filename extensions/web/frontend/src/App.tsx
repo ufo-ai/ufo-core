@@ -9,7 +9,6 @@ import {
   IconSettings,
   IconSparkles,
   IconUsers,
-  IconWorld,
 } from "@tabler/icons-react";
 
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
@@ -970,7 +969,6 @@ const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" ar
 const AgentsGlyph = () => <IconSparkles className="size-(--size-glyph) shrink-0" aria-hidden />;
 const ScheduledGlyph = () => <IconClock className="size-(--size-glyph) shrink-0" aria-hidden />;
 const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
-const SitesGlyph = () => <IconWorld className="size-(--size-glyph) shrink-0" aria-hidden />;
 const CustomizeGlyph = () => (
   <IconAdjustmentsHorizontal className="size-(--size-glyph) shrink-0" aria-hidden />
 );
@@ -980,5 +978,4 @@ const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-
 const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
   scheduled: <ScheduledGlyph />,
   artifacts: <ArtifactsGlyph />,
-  sites: <SitesGlyph />,
 };

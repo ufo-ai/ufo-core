@@ -7,8 +7,9 @@ import { App } from "@/App";
 import {
   AGENT,
   MEMBER,
-  NO_SITES,
+  NO_TASKS,
   SITE_KIND,
+  TASK_KIND,
   json,
   objectIndex,
   useStreamFake,
@@ -36,6 +37,7 @@ function serve() {
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [ARTIFACT] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/workspace/team")) return json({ members: [], can_add: false, domain: null });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
@@ -52,11 +54,11 @@ test("the artifact viewer is torn down when the member navigates to another view
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
+  await userEvent.click(screen.getByRole("button", { name: "Scheduled" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-  expect(await screen.findByText(NO_SITES)).toBeTruthy();
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
 });
 
 test("the artifact viewer is torn down when the member returns to a conversation", async () => {

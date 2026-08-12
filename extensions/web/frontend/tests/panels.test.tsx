@@ -13,7 +13,7 @@ import {
   MEMBER,
   PlacedWorkspace,
   SECOND,
-  NO_SITES,
+  NO_ARTIFACTS,
   NO_TASKS,
   SITE_KIND,
   StreamFake,
@@ -213,10 +213,11 @@ test("a detail whose kind the lane refuses offers no control and no prose about 
           visibility: "workspace",
         },
       ]),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/sites";
+  location.hash = "#/artifacts";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await viewCard("docs-abc"));
@@ -779,6 +780,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   expect(location.hash).toBe("#/artifacts");
+  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Customize" }));
   expect(location.hash).toBe("#/customize/memory");
@@ -789,9 +791,6 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");
-  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
-  expect(location.hash).toBe("#/sites");
-  expect(await screen.findByText(NO_SITES)).toBeTruthy();
 });
 
 test("the agents view lists the deploy's subagents below the agents, opening nothing", async () => {

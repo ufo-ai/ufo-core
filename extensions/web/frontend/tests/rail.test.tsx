@@ -11,7 +11,7 @@ import {
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
-  NO_SITES,
+  NO_ARTIFACTS,
   SECOND,
   SECOND_ID,
   TURN_ID,
@@ -481,12 +481,13 @@ test("the sidebar marks the section the member is in and leaves the others off",
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     "/skills": () => json({ skills: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
     "/overview": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
-    ["Agents", "Scheduled", "Artifacts", "Sites", "Customize", "Workspace"].filter(
+    ["Agents", "Scheduled", "Artifacts", "Customize", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
@@ -498,9 +499,9 @@ test("the sidebar marks the section the member is in and leaves the others off",
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Team" }).getAttribute("aria-selected")).toBe("true");
 
-  await userEvent.click(screen.getByRole("button", { name: "Sites" }));
-  await waitFor(() => expect(marked()).toEqual(["Sites"]));
-  expect(await screen.findByText(NO_SITES)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+  await waitFor(() => expect(marked()).toEqual(["Artifacts"]));
+  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
   expect(marked()).toEqual(["Agents"]);

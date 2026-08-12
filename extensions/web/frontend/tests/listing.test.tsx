@@ -6,16 +6,16 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { ARTIFACTS } from "@/views/Artifacts";
 import { SOURCES } from "@/views/Sources";
 import { App } from "@/App";
 
 import {
   AGENT,
   MEMBER,
-  PlacedSection,
   PlacedWorkspace,
+  SITE_KIND,
   json,
+  objectIndex,
   refusedNotice,
   wire,
 } from "./harness";
@@ -101,7 +101,6 @@ test("the declaration alone proves nothing — it is the renderer that must be p
     "Errors",
     "Next Sync",
   ]);
-  expect(ARTIFACTS.paged).toBe(true);
 });
 
 test("a listing renders the columns it declares, in order, reading the fields it names", async () => {
@@ -747,43 +746,6 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
 });
 
-test("the artifacts declaration binds its parts to the artifact payload", async () => {
-  wire({
-    "/workspace/artifacts": () =>
-      json({
-        artifacts: [
-          {
-            filename: "report.txt",
-            subject: "member@example.com",
-            media_type: "text/plain",
-            size_bytes: 2048,
-            created_at: "2026-08-01T06:00:00",
-            url: null,
-          },
-        ],
-      }),
-  });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="artifacts" />
-    </MainAgentProvider>,
-  );
-
-  const item = (await screen.findAllByRole("listitem")).find((entry) =>
-    entry.textContent?.includes("report.txt"),
-  );
-  expect(item?.querySelector('[data-part="primary"]')?.textContent).toBe(
-    "report.txt",
-  );
-  expect(item?.querySelector('[data-part="body"]')?.textContent).toBe(
-    "member@example.com",
-  );
-  expect(item?.querySelector('[data-part="status"]')?.textContent).toBe(
-    "Aug 1 2026",
-  );
-  expect(screen.queryAllByRole("columnheader")).toEqual([]);
-});
-
 test("an outcome released after the member left never resets the view they are on", async () => {
   let release: (value: Response) => void = () => {};
   const held = new Promise<Response>((resolve) => (release = resolve));
@@ -823,6 +785,7 @@ test("an outcome released after the member left never resets the view they are o
         newer: null,
       });
     },
+    "/objects/site": () => objectIndex(SITE_KIND, []),
     "/intents": () => held,
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -845,18 +808,6 @@ test("an outcome released after the member left never resets the view they are o
 });
 
 test("every declaration keys its rows on fields its own payload carries", () => {
-  const artifact = {
-    filename: "report.txt",
-    subject: null,
-    media_type: "text/plain",
-    size_bytes: 1,
-    created_at: "2026-08-01T06:00:00",
-    url: null,
-    owner_email: null,
-    origin: null,
-    conversation_id: "c1",
-  };
-  expect(ARTIFACTS.rowKey(artifact)).toBe("2026-08-01T06:00:00|report.txt");
   expect(
     SOURCES.rows({
       sources: [
