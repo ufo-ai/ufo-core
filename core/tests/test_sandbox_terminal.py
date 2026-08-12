@@ -3,7 +3,11 @@ client's 85s-held streams make routine, never answering a turn with silence — 
 every op is asked over it, the test playing the connected terminal."""
 
 import asyncio
+import base64
 import json
+import shutil
+import subprocess
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -447,17 +451,66 @@ def test_exec_js_spells_the_python_constants() -> None:
 
 def test_the_program_bundle_writes_a_self_contained_file_for_every_op() -> None:
     """The gateway injects this block into the served client, so it must land one runnable file per
-    op the wire can name — the shared prelude, the op's own JS, and the param-free `run` entry that
-    reads `op.json`."""
+    op the wire can name, once per runtime — the op's own JS and the param-free `run` entry that
+    reads `op.json`, folded onto a prelude the runtime can run."""
     bundle = terminal.client_program_bundle()
     for op in ("exec", "read", "edit", "write", "grep", "glob", "changes"):
         assert f'cat > "$UFO_HOME/programs/{op}.js"' in bundle
-        program = terminal.client_program_source(op)
-        assert "function __start__" in program
-        assert "function main" in program
-        assert 'readFile(WORKDIR + "/op.json")' in program
+        assert f'cat > "$UFO_HOME/programs/{op}.node.js"' in bundle
+        osascript = terminal.client_program_source(op)
+        node = terminal.client_program_node_source(op)
+        for program in (osascript, node):
+            assert "function main" in program
+            assert 'readFile(WORKDIR + "/op.json")' in program
+        assert 'ObjC.import("Foundation")' in osascript
+        assert "process.argv" not in osascript
+
+
+def test_the_node_program_carries_node_io_and_calls_run_itself() -> None:
+    """node runs no top-level `run` handler and cannot reach JXA, so the node variant folds in the
+    `fs`-backed prelude and ends by invoking `run` with the argv after the program."""
+    node = terminal.client_program_node_source("edit")
+    assert 'require("node:fs")' in node
+    assert "ObjC" not in node and "$.NS" not in node
+    assert node.rstrip().endswith("run(process.argv.slice(2));")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="the node variant runs under node")
+def test_the_node_edit_program_runs_and_answers_json(tmp_path: Path) -> None:
+    """The node variant, run the way the relay runs it: params land beside it as `op.json` and
+    `node <program> run <workdir>` reads them, editing the subject and answering one JSON object —
+    the byte-exact parity against the oracle is proven in test_sandbox_walks.py under node."""
+    program = tmp_path / "edit.node.js"
+    program.write_text(terminal.client_program_node_source("edit"))
+    subject = tmp_path / "subject.txt"
+    subject.write_bytes(b"alpha beta\n")
+    (tmp_path / "op.json").write_text(
+        json.dumps(
+            {
+                "path": str(subject),
+                "edits": [
+                    {
+                        "old_string_b64": base64.b64encode(b"beta", altchars=b"-_").decode(),
+                        "new_string_b64": base64.b64encode(b"BETA", altchars=b"-_").decode(),
+                        "replace_all": False,
+                    }
+                ],
+            }
+        )
+    )
+    run = subprocess.run(
+        [shutil.which("node"), str(program), "run", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert run.stdout, run.stderr
+    result = json.loads(run.stdout)
+    assert result["replacements"] == 1
+    assert subject.read_bytes() == b"alpha BETA\n"
 
 
 def test_an_unknown_op_has_no_client_program() -> None:
     with pytest.raises(RuntimeError, match="no client program"):
         terminal.client_program_source("teleport")
+    with pytest.raises(RuntimeError, match="no client program"):
+        terminal.client_program_node_source("teleport")

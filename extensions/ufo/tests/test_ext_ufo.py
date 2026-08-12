@@ -348,7 +348,9 @@ def test_the_shell_client_splits_a_linkless_file_without_reading_the_size_as_a_u
 
 
 OSASCRIPT = shutil.which("osascript")
+NODE = shutil.which("node")
 requires_osascript = pytest.mark.skipif(OSASCRIPT is None, reason="osascript is not installed")
+requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
 def _exec_params(argv: list[str], env: dict[str, str] | None = None) -> str:
@@ -358,22 +360,26 @@ def _exec_params(argv: list[str], env: dict[str, str] | None = None) -> str:
 
 
 def _relay_shell(
-    setup: str, line: bytes, osa: str | None = OSASCRIPT
+    setup: str, line: bytes, osa: str | None = OSASCRIPT, node: str | None = NODE
 ) -> subprocess.CompletedProcess[bytes]:
     """Drive both shipped `run` arms verbatim: the client extracts its bundled programs, the
-    directive arm parses `line`, then the `run)` dispatch runs the op naming a bundled program, and
-    the harness reports the reply the loop would post. The bundle is the production
-    `client_program_bundle()` written into a scratch `UFO_HOME`, so the op runs the byte-identical
-    program a served client holds. `setup` seeds the variables (`WORKDIR`, `UFO_CWD`, and, for the
-    copy arms, the surface state and stub `curl`)."""
+    directive arm parses `line`, then the `run)` dispatch runs the op naming a bundled program under
+    the selected runtime, and the harness reports the reply the loop would post. The bundle is the
+    production `client_program_bundle()` written into a scratch `UFO_HOME`, so the op runs the
+    byte-identical program a served client holds, and `run_js` is lifted from the client so the
+    interpreter selection is the shipped one. `setup` seeds the variables (`WORKDIR`, `UFO_CWD`, and
+    the surface state and stub `curl` for the copy arms)."""
     directive_arm = _shell_slice("      run)\n", "      token)")
     dispatch_arm = _shell_slice("      run)\n        # Only exec", "      exit)")
+    run_js = _shell_slice("run_js() {", "\npost() {")
     home = tempfile.mkdtemp(prefix="ufo-home.")
     harness = f"""set -eu
 TAB=$(printf '\\t')
 OSA='{osa or ""}'
+NODE='{node or ""}'
 UFO_HOME='{home}'
 {client_program_bundle()}
+{run_js}
 SEND_OP='' SEND_OP_ERR='' SEND_OP_BODY=''
 {setup}
 NEXT=end
@@ -551,15 +557,85 @@ def test_an_unknown_op_kind_is_named_in_the_error_reply(tmp_path: Path) -> None:
     assert fields["SEND_OP_ERR"] == "unknown op kind: teleport"
 
 
-def test_a_run_op_without_osascript_is_an_enosys_error_reply(tmp_path: Path) -> None:
-    """A machine that cannot run ops sends no `x-ufo-cwd`, so the server never binds it; a run
-    directive arriving anyway is refused rather than silently dropped."""
+def test_a_run_op_without_any_runtime_is_an_enosys_error_reply(tmp_path: Path) -> None:
+    """A machine with neither osascript nor node cannot run ops and sends no `x-ufo-cwd`, so the
+    server never binds it; a run directive arriving anyway is refused rather than silently dropped,
+    and the refusal names the runtime to install."""
     work = tmp_path / "work"
     work.mkdir()
     line = directive("run", "0" * 32, "exec", "exec", "10", "", _exec_params(["printf", "hi"]))
-    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa=""))
+    fields = _op_fields(
+        _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa="", node="")
+    )
     assert fields["SEND_OP"] == "0" * 32
-    assert fields["SEND_OP_ERR"] == "ENOSYS: osascript is not available on this machine"
+    assert fields["SEND_OP_ERR"] == (
+        "ENOSYS: this machine has no JavaScript runtime; install node from https://nodejs.org"
+    )
+
+
+@requires_node
+def test_an_exec_op_runs_under_node_when_osascript_is_absent(tmp_path: Path) -> None:
+    """The Linux/unix-terminal arm: with no osascript, the dispatch picks `<op>.node.js` and runs it
+    under node, and the exec op still packages its stdout as hex — the same reply the osascript arm
+    posts."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive(
+        "run", "a" * 32, "exec", "exec", "10", "", _exec_params(["printf", "%s", "hi"])
+    )
+    fields = _op_fields(
+        _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa="", node=NODE)
+    )
+    assert fields["SEND_OP"] == "a" * 32
+    assert fields["SEND_OP_ERR"] == ""
+    reply = json.loads((work / "reply.json").read_text())
+    assert bytes.fromhex(reply["stdout_hex"]) == b"hi"
+    assert reply["exit_code"] == 0
+
+
+@requires_node
+def test_a_fileop_runs_under_node_when_osascript_is_absent(tmp_path: Path) -> None:
+    """A fileop with no osascript runs `<op>.node.js` under node: the edit op mutates the file and
+    answers one JSON object the loop posts as the reply body."""
+    work = tmp_path / "work"
+    work.mkdir()
+    subject = tmp_path / "subject.txt"
+    subject.write_bytes(b"alpha beta\n")
+    edit = {
+        "path": str(subject),
+        "edits": [
+            {
+                "old_string_b64": base64.b64encode(b"beta", altchars=b"-_").decode(),
+                "new_string_b64": base64.b64encode(b"BETA", altchars=b"-_").decode(),
+                "replace_all": False,
+            }
+        ],
+    }
+    line = directive("run", "b" * 32, "fileop", "edit", "60", "", json.dumps(edit))
+    fields = _op_fields(
+        _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa="", node=NODE)
+    )
+    assert fields["SEND_OP"] == "b" * 32
+    assert fields["SEND_OP_ERR"] == ""
+    reply = json.loads((work / "reply.json").read_text())
+    assert reply["replacements"] == 1
+    assert subject.read_bytes() == b"alpha BETA\n"
+
+
+def test_a_run_op_naming_an_unbundled_program_under_node_is_an_enoent_error_reply(
+    tmp_path: Path,
+) -> None:
+    """With no osascript, the missing-program refusal looks for `<op>.node.js`; a program this
+    bundle predates is refused the same way the osascript arm refuses a missing `<op>.js`, so the
+    guard does not depend on a runtime being present."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "1" * 32, "fileop", "quantum", "60", "", "{}")
+    fields = _op_fields(
+        _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa="", node=NODE or "/x")
+    )
+    assert fields["SEND_OP"] == "1" * 32
+    assert fields["SEND_OP_ERR"] == "ENOENT: no bundled program for quantum"
 
 
 @requires_osascript
@@ -576,7 +652,7 @@ def test_a_run_op_naming_an_unbundled_program_is_an_enoent_error_reply(tmp_path:
 
 
 def _post_args(
-    send_op: str, send_op_err: str, send_op_body: str, *, osa: str, workspace: str
+    send_op: str, send_op_err: str, send_op_body: str, *, osa: str, workspace: str, node: str = ""
 ) -> tuple[list[str], str]:
     """The arguments the shipped `post` hands `curl` for one call, plus the op state it leaves
     behind. `curl` is stubbed to record its argv; every other variable `post` reads is seeded."""
@@ -592,6 +668,7 @@ UFO_URL=https://onboard.test
 WORKSPACE_URL='{workspace}'
 UFO_CHANNEL=chan
 OSA='{osa}'
+NODE='{node}'
 UFO_CWD=/home/me/proj
 SEND_OP='{send_op}'
 SEND_OP_ERR='{send_op_err}'
@@ -634,12 +711,19 @@ def test_post_sends_an_op_failure_as_a_header_with_no_body() -> None:
     assert left == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee|ENOENT: /x|"
 
 
-def test_post_omits_the_cwd_header_when_no_osascript_is_present() -> None:
-    """A machine that cannot run ops never offers to: with no runner, `post` sends no `x-ufo-cwd`,
-    so the surface leaves the conversation on the deploy's own carrier."""
-    args, _ = _post_args("", "", "", osa="", workspace=WORKSPACE_BASE)
+def test_post_omits_the_cwd_header_when_no_runtime_is_present() -> None:
+    """A machine that cannot run ops never offers to: with neither osascript nor node, `post` sends
+    no `x-ufo-cwd`, so the surface leaves the conversation on the deploy's own carrier."""
+    args, _ = _post_args("", "", "", osa="", node="", workspace=WORKSPACE_BASE)
     assert not any(arg.startswith("x-ufo-cwd:") for arg in args)
     assert "the message" in args
+
+
+def test_post_sends_the_cwd_header_when_only_node_is_present() -> None:
+    """A Linux client has no osascript but runs ops under node, so it offers its cwd and the surface
+    binds the terminal — the header rides on either runtime, not on osascript alone."""
+    args, _ = _post_args("", "", "", osa="", node="/usr/bin/node", workspace=WORKSPACE_BASE)
+    assert "x-ufo-cwd: /home/me/proj" in args
 
 
 def test_the_op_reply_state_is_cleared_after_the_fork_so_the_next_message_is_a_turn() -> None:

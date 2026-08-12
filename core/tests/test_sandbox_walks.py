@@ -2,17 +2,27 @@
 
 `sbxfs` is the oracle and runs as a subprocess, installed onto a scratch PATH exactly as the local
 carrier installs it, with `PATH` pinned to the stock directories so a walk is compared against the
-stdlib branch a machine without ripgrep takes. The subject is the bundled program itself —
-`client_program_source(op)`, the source the client holds — run the way the relay runs it: the params
-land beside it as `op.json` and `osascript -l JavaScript <program> run <workdir>` reads them. Both
-sides get the same params and the same tree; a mutating op (`edit`, `write`) runs each side against
-its own copy of the tree, and the whole tree state is compared after. The assertion is on the parsed
-JSON, since one side spells non-ASCII as an escape and the other as itself.
+stdlib branch a machine without ripgrep takes. The subject is the bundled program itself, run the
+way the relay runs it under each JavaScript runtime the machine has — `osascript -l JavaScript
+<program> run <workdir>` on macOS, `node <program> run <workdir>` elsewhere — with the params
+landing beside it as `op.json`. The two runtimes ship different preludes (`prelude.js` over JXA,
+`prelude_node.js` over node's `fs`), so running every walk under each proves the node prelude
+byte-exact against the same oracle the osascript one already matches. Both sides get the same params
+and the same tree; a
+mutating op (`edit`, `write`) runs each side against its own copy of the tree, and the whole tree
+state is compared after. The assertion is on the parsed JSON, since one side spells non-ASCII as an
+escape and the other as itself.
+
+Every op runs on both platforms: the enumeration `WALK_ENUMERATION` shells out to is the production
+one, which picks the `stat` flavor itself (BSD `-f` on macOS, GNU `-c` on Linux) and otherwise uses
+POSIX `find`/`git`/`xargs`. So macOS runs each walk under osascript and node, and Linux CI runs it
+under node against GNU `stat` — which is where the node prelude and the portable enumeration are
+proven byte-exact against the oracle. Only a platform missing `find`/`stat`/`git`/`xargs` skips.
 
 A program cannot list a directory, so enumeration arrives as a file in the session workdir, written
-by one command the carrier issues first. `ENUMERATION` holds that command per op, verbatim, reading
-`$UFO_WALK_ROOT` (`path` or `workspace` for `grep`, `workspace` for the other two) and writing
-`$UFO_OP_WORKDIR/<params.enum>`:
+by one command the carrier issues first. The test runs the production `WALK_ENUMERATION` itself — no
+second copy to drift from it — per op, reading `$UFO_WALK_ROOT` (`path` or `workspace` for `grep`,
+`workspace` for the other two) and writing `$UFO_OP_WORKDIR/<params.enum>`:
 
     grep     one `find` listing every directory and regular file, pruning the skipped names. The
              directories carry the order — `os.walk` visits a directory's own files, sorted, before
@@ -23,7 +33,9 @@ by one command the carrier issues first. `ENUMERATION` holds that command per op
              the same order. `stat` has no record terminator a filename cannot contain, so the names
              arrive `find`-terminated and the measurements arrive positionally; the program refuses
              sections whose lengths disagree, which is the answer the oracle gives when a file
-             leaves between its listing and its `stat`. `%z %.9Fm` is BSD; GNU spells it `%s %.9Y`.
+             leaves between its listing and its `stat`. The `<size> <sec>.<9-digit-nanos>` line is
+             `-f '%z %.9Fm'` on BSD and `-c '%s %.9Y'` on GNU, the enumeration choosing by
+             `stat --version`; both reconstruct the double `os.stat` reports.
     changes  one `find` naming each checkout, and one `git status` plus one `git diff HEAD` a
              checkout — the two commands the oracle runs — framed into `\\0` fields.
 
@@ -36,9 +48,11 @@ exactly, since `stat`'s nanosecond format reconstructs the same double `os.stat`
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -47,7 +61,12 @@ from types import ModuleType
 import pytest
 
 from ufo.sandbox.local import _provision_scratch
-from ufo.sandbox.terminal import client_program_source
+from ufo.sandbox.terminal import (
+    WALK_ENUMERATION,
+    WALK_SKIP_NAMES,
+    client_program_node_source,
+    client_program_source,
+)
 
 SANDBOX = Path(__file__).parents[1] / "src" / "ufo" / "sandbox"
 CLIENT = SANDBOX / "client"
@@ -56,54 +75,62 @@ STOCK_PATH = "/usr/bin:/bin"
 GIT = "/usr/bin/git"
 GREP_LINE_CHAR_CAP = 2000
 GLOB_MAX_RESULTS = 1000
+SKIP_NAMES = WALK_SKIP_NAMES
 
-SKIP_NAMES = (
-    ".cache",
-    ".git",
-    ".mypy_cache",
-    ".next",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".svelte-kit",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "target",
-    "vendor",
-    "venv",
+
+@dataclass(frozen=True)
+class Runtime:
+    """One JavaScript runtime the op programs run under: the source variant it takes and the argv
+    that invokes it on a program file. `command` appends the mode and the op's own args, so
+    `osascript -l JavaScript <p> run <workdir>` and `node <p> run <workdir>` differ only in this
+    prefix — the mode-and-args tail is identical, which is why one op body serves both."""
+
+    name: str
+    source: Callable[[str], str]
+    argv: Callable[[Path], list[str]]
+
+    def command(self, program: Path, mode: str, *args: str) -> list[str]:
+        return [*self.argv(program), mode, *args]
+
+
+def _runtimes() -> list[Runtime]:
+    found: list[Runtime] = []
+    if Path(RUNNER).exists():
+        found.append(
+            Runtime(
+                "osascript",
+                client_program_source,
+                lambda program: [RUNNER, "-l", "JavaScript", str(program)],
+            )
+        )
+    node = shutil.which("node")
+    if node is not None:
+        found.append(
+            Runtime("node", client_program_node_source, lambda program, n=node: [n, str(program)])
+        )
+    return found
+
+
+RUNTIMES = _runtimes()
+
+pytestmark = pytest.mark.skipif(not RUNTIMES, reason="no JavaScript runtime for the op programs")
+
+
+# The tree walks shell out to `find`, `stat`, `git` and `xargs`; the production enumeration picks
+# the `stat` flavor itself (BSD on macOS, GNU on Linux), so the walks run under every runtime on
+# both — this only skips a platform missing one of the four.
+requires_enumeration = pytest.mark.skipif(
+    not all(Path("/usr/bin", name).exists() for name in ("find", "stat", "git", "xargs")),
+    reason="the tree walks need find/stat/git/xargs",
 )
-SKIPPED = " -o ".join(f"-name '{name}'" for name in SKIP_NAMES)
-UNSKIPPED_ROOT = r'! -path "$UFO_WALK_ROOT"'
-REPOSITORY_COMMANDS = rf"""[ -n "$1" ] || exit 0
-r=${{1%/.git}}
-printf "R\000%s\000" "$r"
-{GIT} -C "$r" -c core.quotePath=false status --porcelain=v1 -z --no-renames -uall
-printf "D\000%s\000" "$({GIT} -C "$r" -c core.quotePath=false diff HEAD --no-renames -U3 \
-2>/dev/null)"
-"""
-
-ENUMERATION = {
-    "grep": rf"""/usr/bin/find "$UFO_WALK_ROOT" \( {UNSKIPPED_ROOT} -a \( {SKIPPED} \) \) -prune \
--o \( -type d -o -type f \) -print0 > "$UFO_OP_WORKDIR/grep-enum"
-""",
-    "glob": r"""/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$UFO_OP_WORKDIR/glob-enum"
-printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
-/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 \
-| /usr/bin/xargs -0 /usr/bin/stat -f '%z %.9Fm' >> "$UFO_OP_WORKDIR/glob-enum"
-""",
-    "changes": rf"""r='{REPOSITORY_COMMANDS}'
-/usr/bin/find "$UFO_WALK_ROOT" \( {UNSKIPPED_ROOT} -a -name '.git' \) -prune -print0 \
--o \( {UNSKIPPED_ROOT} -a \( {SKIPPED} \) \) -prune \
-| /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
-""",
-}
-
-pytestmark = pytest.mark.skipif(
-    not Path(RUNNER).exists(), reason="the op programs run under osascript"
+requires_osascript = pytest.mark.skipif(
+    not Path(RUNNER).exists(), reason="the constants are read back under osascript"
 )
+
+
+@pytest.fixture(params=RUNTIMES, ids=lambda runtime: runtime.name)
+def runtime(request: pytest.FixtureRequest) -> Runtime:
+    return request.param
 
 
 @pytest.fixture(scope="module")
@@ -150,24 +177,26 @@ def _oracle(installed: Path, home: Path, op: str, params: dict[str, object]) -> 
     return parsed
 
 
-def _walked(op: str, params: dict[str, object], workdir: Path, home: Path) -> dict:
+def _walked(
+    runtime: Runtime, op: str, params: dict[str, object], workdir: Path, home: Path
+) -> dict:
     root = params.get("path") if op == "grep" and params.get("path") else params["workspace"]
     listing = subprocess.run(
-        ["/bin/sh", "-c", ENUMERATION[op]],
+        ["/bin/sh", "-c", WALK_ENUMERATION[op]],
         capture_output=True,
         text=True,
         env={**_environment(home), "UFO_OP_WORKDIR": str(workdir), "UFO_WALK_ROOT": str(root)},
     )
     assert listing.returncode == 0, listing.stderr
-    return _run(op, params, workdir)
+    return _run(runtime, op, params, workdir)
 
 
-def _run(op: str, params: dict[str, object], workdir: Path) -> dict:
-    program = workdir / f"{op}.js"
-    program.write_text(client_program_source(op))
+def _run(runtime: Runtime, op: str, params: dict[str, object], workdir: Path) -> dict:
+    program = workdir / f"{op}.{runtime.name}.js"
+    program.write_text(runtime.source(op))
     (workdir / "op.json").write_text(json.dumps(params))
     run = subprocess.run(
-        [RUNNER, "-l", "JavaScript", str(program), "run", str(workdir)],
+        runtime.command(program, "run", str(workdir)),
         capture_output=True,
         text=True,
     )
@@ -308,19 +337,23 @@ GREP_CASES: tuple[dict[str, object], ...] = (
 )
 
 
+@requires_enumeration
 @pytest.mark.parametrize("case", GREP_CASES, ids=lambda case: json.dumps(case, sort_keys=True))
 def test_grep_matches_sbxfs(
-    tree: Path, session: Path, installed: Path, case: dict[str, object]
+    runtime: Runtime, tree: Path, session: Path, installed: Path, case: dict[str, object]
 ) -> None:
     home = session.parent / "home"
     params: dict[str, object] = {**case, "workspace": str(tree)}
     if isinstance(case.get("path"), str):
         params["path"] = str(tree / str(case["path"]))
     expected = _oracle(installed, home, "grep", params)
-    assert _walked("grep", {**params, "enum": "grep-enum"}, session, home) == expected
+    assert _walked(runtime, "grep", {**params, "enum": "grep-enum"}, session, home) == expected
 
 
-def test_grep_refuses_an_unknown_output_mode(tree: Path, session: Path, installed: Path) -> None:
+@requires_enumeration
+def test_grep_refuses_an_unknown_output_mode(
+    runtime: Runtime, tree: Path, session: Path, installed: Path
+) -> None:
     home = session.parent / "home"
     params: dict[str, object] = {
         "pattern": "needle",
@@ -328,24 +361,28 @@ def test_grep_refuses_an_unknown_output_mode(tree: Path, session: Path, installe
         "workspace": str(tree),
     }
     expected = _oracle(installed, home, "grep", params)
-    answered = _walked("grep", {**params, "enum": "grep-enum"}, session, home)
+    answered = _walked(runtime, "grep", {**params, "enum": "grep-enum"}, session, home)
     assert answered == expected == {"error": "invalid output_mode: lines"}
 
 
-def test_grep_refuses_an_invalid_pattern(tree: Path, session: Path, installed: Path) -> None:
+@requires_enumeration
+def test_grep_refuses_an_invalid_pattern(
+    runtime: Runtime, tree: Path, session: Path, installed: Path
+) -> None:
     """Both engines refuse it and both say so under the same key; only the message is the engine's
-    own, since one is Python's `re` and the other JavaScriptCore's RegExp."""
+    own, since one is Python's `re` and the other the runtime's own RegExp."""
     home = session.parent / "home"
     params: dict[str, object] = {"pattern": "needle(", "workspace": str(tree)}
     expected = _oracle(installed, home, "grep", params)
-    answered = _walked("grep", {**params, "enum": "grep-enum"}, session, home)
+    answered = _walked(runtime, "grep", {**params, "enum": "grep-enum"}, session, home)
     assert str(expected["error"]).startswith("invalid regex: ")
     assert str(answered["error"]).startswith("invalid regex: ")
     assert answered != expected
 
 
+@requires_enumeration
 def test_a_name_holding_a_line_break_is_read_like_any_other(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     """The `jsc` shell's `readFile` dropped a line break from the path it was given; the prelude's
     `NSData` reader takes the path whole, so the one name a walk could list but not open now reads —
@@ -358,7 +395,7 @@ def test_a_name_holding_a_line_break_is_read_like_any_other(
     (root / "line\nbreak.txt").write_text("needle in a name with a line break\n")
     grep: dict[str, object] = {"pattern": "needle", "workspace": str(root), "enum": "grep-enum"}
     expected = _oracle(installed, home, "grep", {"pattern": "needle", "workspace": str(root)})
-    answered = _walked("grep", grep, session, home)
+    answered = _walked(runtime, "grep", grep, session, home)
     assert sorted(str(name) for name in expected["files"]) == sorted(
         [str(root / "line\nbreak.txt"), str(root / "plain.txt")]
     )
@@ -366,7 +403,11 @@ def test_a_name_holding_a_line_break_is_read_like_any_other(
     listed = _oracle(installed, home, "glob", {"pattern": "*.txt", "workspace": str(root)})
     assert (
         _walked(
-            "glob", {"pattern": "*.txt", "workspace": str(root), "enum": "glob-enum"}, session, home
+            runtime,
+            "glob",
+            {"pattern": "*.txt", "workspace": str(root), "enum": "glob-enum"},
+            session,
+            home,
         )
         == listed
     )
@@ -392,9 +433,10 @@ GLOB_CASES: tuple[dict[str, object], ...] = (
 )
 
 
+@requires_enumeration
 @pytest.mark.parametrize("case", GLOB_CASES, ids=lambda case: json.dumps(case, sort_keys=True))
 def test_glob_matches_sbxfs(
-    tree: Path, session: Path, installed: Path, case: dict[str, object]
+    runtime: Runtime, tree: Path, session: Path, installed: Path, case: dict[str, object]
 ) -> None:
     home = session.parent / "home"
     for index, path in enumerate(sorted(path for path in tree.rglob("*") if path.is_file())):
@@ -403,24 +445,26 @@ def test_glob_matches_sbxfs(
     if isinstance(case.get("path"), str):
         params["path"] = str(tree / str(case["path"]))
     expected = _oracle(installed, home, "glob", params)
-    assert _walked("glob", {**params, "enum": "glob-enum"}, session, home) == expected
+    assert _walked(runtime, "glob", {**params, "enum": "glob-enum"}, session, home) == expected
 
 
+@requires_enumeration
 @pytest.mark.parametrize("pattern", ("../outside/*.txt", "/elsewhere/*.txt"))
 def test_glob_refuses_a_pattern_that_leaves_the_workspace(
-    tree: Path, session: Path, installed: Path, pattern: str
+    runtime: Runtime, tree: Path, session: Path, installed: Path, pattern: str
 ) -> None:
     home = session.parent / "home"
     params: dict[str, object] = {"pattern": pattern, "workspace": str(tree)}
     expected = _oracle(installed, home, "glob", params)
-    answered = _walked("glob", {**params, "enum": "glob-enum"}, session, home)
+    answered = _walked(runtime, "glob", {**params, "enum": "glob-enum"}, session, home)
     assert answered == expected
     assert "error" in expected
 
 
+@requires_enumeration
 @pytest.mark.parametrize("names", ([""], ["a/b"], ["a\\b"]))
 def test_glob_refuses_a_name_that_is_not_a_component(
-    tree: Path, session: Path, installed: Path, names: list[str]
+    runtime: Runtime, tree: Path, session: Path, installed: Path, names: list[str]
 ) -> None:
     home = session.parent / "home"
     params: dict[str, object] = {
@@ -429,12 +473,15 @@ def test_glob_refuses_a_name_that_is_not_a_component(
         "workspace": str(tree),
     }
     expected = _oracle(installed, home, "glob", params)
-    answered = _walked("glob", {**params, "enum": "glob-enum"}, session, home)
+    answered = _walked(runtime, "glob", {**params, "enum": "glob-enum"}, session, home)
     assert answered == expected
     assert expected == {"error": "exclude_names must be a list of path component names"}
 
 
-def test_glob_caps_and_reports_the_overflow(tmp_path: Path, session: Path, installed: Path) -> None:
+@requires_enumeration
+def test_glob_caps_and_reports_the_overflow(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     home = session.parent / "home"
     root = tmp_path / "workspace"
     root.mkdir()
@@ -442,17 +489,22 @@ def test_glob_caps_and_reports_the_overflow(tmp_path: Path, session: Path, insta
         (root / f"file-{index:05d}.txt").write_text("x\n")
     params: dict[str, object] = {"pattern": "*.txt", "workspace": str(root)}
     expected = _oracle(installed, home, "glob", params)
-    answered = _walked("glob", {**params, "enum": "glob-enum"}, session, home)
+    answered = _walked(runtime, "glob", {**params, "enum": "glob-enum"}, session, home)
     assert answered["truncated"] is True
     assert answered["count"] == expected["count"] == GLOB_MAX_RESULTS
     assert answered == expected
 
 
-def test_changes_matches_sbxfs(checkout: Path, session: Path, installed: Path) -> None:
+@requires_enumeration
+def test_changes_matches_sbxfs(
+    runtime: Runtime, checkout: Path, session: Path, installed: Path
+) -> None:
     home = session.parent / "home"
     params: dict[str, object] = {"workspace": str(checkout)}
     expected = _oracle(installed, home, "changes", params)
-    assert _walked("changes", {**params, "enum": "changes-enum"}, session, home) == expected
+    assert (
+        _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home) == expected
+    )
 
 
 def test_changes_reads_every_kind_of_pending_change(
@@ -476,15 +528,16 @@ def test_changes_reads_every_kind_of_pending_change(
     assert not [path for path in by_path if "vendored/" in path]
 
 
+@requires_enumeration
 def test_changes_carries_the_patch_of_a_tracked_name_with_a_space(
-    checkout: Path, session: Path, installed: Path
+    runtime: Runtime, checkout: Path, session: Path, installed: Path
 ) -> None:
     """`git diff` appends a tab to the `---`/`+++` paths of a name holding a space — git's own
     disambiguator, not part of the name — so both sides strip it and the file carries its patch."""
     home = session.parent / "home"
     params: dict[str, object] = {"workspace": str(checkout)}
     expected = _oracle(installed, home, "changes", params)
-    answered = _walked("changes", {**params, "enum": "changes-enum"}, session, home)
+    answered = _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home)
     spaced = next(
         change for change in expected["changes"] if change["path"] == "main/spaced name.txt"
     )
@@ -492,7 +545,10 @@ def test_changes_carries_the_patch_of_a_tracked_name_with_a_space(
     assert answered == expected
 
 
-def test_changes_truncates_at_the_file_cap(tmp_path: Path, session: Path, installed: Path) -> None:
+@requires_enumeration
+def test_changes_truncates_at_the_file_cap(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     home = session.parent / "home"
     root = tmp_path / "workspace"
     root.mkdir()
@@ -501,14 +557,15 @@ def test_changes_truncates_at_the_file_cap(tmp_path: Path, session: Path, instal
         (root / f"new-{index:04d}.txt").write_text(f"file {index}\n")
     params: dict[str, object] = {"workspace": str(root)}
     expected = _oracle(installed, home, "changes", params)
-    answered = _walked("changes", {**params, "enum": "changes-enum"}, session, home)
+    answered = _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home)
     assert expected["truncated"] is True
     assert len(expected["changes"]) == 100
     assert answered == expected
 
 
+@requires_enumeration
 def test_changes_truncates_a_long_untracked_file(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     home = session.parent / "home"
     root = tmp_path / "workspace"
@@ -524,14 +581,15 @@ def test_changes_truncates_a_long_untracked_file(
     (root / "huge.txt").write_text("x" * 30_000 + "\n")
     params: dict[str, object] = {"workspace": str(root)}
     expected = _oracle(installed, home, "changes", params)
-    answered = _walked("changes", {**params, "enum": "changes-enum"}, session, home)
+    answered = _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home)
     assert all(change["truncated"] for change in expected["changes"])
     assert all(len(change["patch"]) == 10_000 for change in expected["changes"])
     assert answered == expected
 
 
+@requires_enumeration
 def test_changes_stops_at_the_character_budget(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     home = session.parent / "home"
     root = tmp_path / "workspace"
@@ -541,14 +599,15 @@ def test_changes_stops_at_the_character_budget(
         (root / f"bulk-{index:03d}.txt").write_text(f"line {index}\n" * 900)
     params: dict[str, object] = {"workspace": str(root)}
     expected = _oracle(installed, home, "changes", params)
-    answered = _walked("changes", {**params, "enum": "changes-enum"}, session, home)
+    answered = _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home)
     assert expected["truncated"] is True
     assert 0 < len(expected["changes"]) < 40
     assert answered == expected
 
 
+@requires_enumeration
 def test_changes_answers_a_workspace_holding_no_checkout(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     home = session.parent / "home"
     root = tmp_path / "workspace"
@@ -556,12 +615,13 @@ def test_changes_answers_a_workspace_holding_no_checkout(
     (root / "loose.txt").write_text("not in a checkout\n")
     params: dict[str, object] = {"workspace": str(root)}
     expected = _oracle(installed, home, "changes", params)
-    answered = _walked("changes", {**params, "enum": "changes-enum"}, session, home)
+    answered = _walked(runtime, "changes", {**params, "enum": "changes-enum"}, session, home)
     assert answered == expected == {"changes": [], "truncated": False}
 
 
+@requires_enumeration
 def test_a_file_the_reader_cannot_open_ends_the_oracles_scan_and_not_the_programs(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     """A second difference, and this one favours the program. `_contained_text` lets a
     `PermissionError` out, so one unreadable file turns the whole scan into a refusal; `readFile`
@@ -576,7 +636,7 @@ def test_a_file_the_reader_cannot_open_ends_the_oracles_scan_and_not_the_program
     closed.chmod(0o000)
     params: dict[str, object] = {"pattern": "needle", "workspace": str(root)}
     expected = _oracle(installed, home, "grep", params)
-    answered = _walked("grep", {**params, "enum": "grep-enum"}, session, home)
+    answered = _walked(runtime, "grep", {**params, "enum": "grep-enum"}, session, home)
     assert str(expected["error"]).startswith("PermissionError: ")
     assert answered == {"files": [str(root / "open.txt")], "count": 1, "truncated": False}
 
@@ -644,7 +704,7 @@ READ_CASES: tuple[dict[str, object], ...] = (
 
 @pytest.mark.parametrize("case", READ_CASES, ids=lambda case: json.dumps(case, sort_keys=True))
 def test_read_matches_sbxfs(
-    readable: Path, session: Path, installed: Path, case: dict[str, object]
+    runtime: Runtime, readable: Path, session: Path, installed: Path, case: dict[str, object]
 ) -> None:
     """Windows, numbering, caps, image results and the refusals — including the mislabeled-image
     message, whose `data[:8]!r` is a Python bytes repr the program reproduces byte for byte."""
@@ -655,22 +715,26 @@ def test_read_matches_sbxfs(
         "workspace": str(readable),
     }
     expected = _oracle(installed, home, "read", params)
-    assert _run("read", params, session) == expected
+    assert _run(runtime, "read", params, session) == expected
 
 
-def test_read_refuses_an_image_over_the_cap(tmp_path: Path, session: Path, installed: Path) -> None:
+def test_read_refuses_an_image_over_the_cap(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     home = session.parent / "home"
     root = tmp_path / "big"
     root.mkdir()
     (root / "huge.png").write_bytes(PNG_BYTES + b"\x00" * (5 * 1024 * 1024))
     params: dict[str, object] = {"path": str(root / "huge.png"), "workspace": str(root)}
     expected = _oracle(installed, home, "read", params)
-    answered = _run("read", params, session)
+    answered = _run(runtime, "read", params, session)
     assert answered == expected
     assert "image read cap" in str(expected["error"])
 
 
-def test_a_pdf_read_stays_on_the_deploy(readable: Path, session: Path, installed: Path) -> None:
+def test_a_pdf_read_stays_on_the_deploy(
+    runtime: Runtime, readable: Path, session: Path, installed: Path
+) -> None:
     """The one read the client does not answer: poppler lives on the server, so the program refuses
     in the `{"error": …}` shape and the carrier routes the pull server-side — while `sbxfs` itself,
     with poppler absent from the stock PATH, still answers a text-free pdf result. Asserted as the
@@ -678,7 +742,7 @@ def test_a_pdf_read_stays_on_the_deploy(readable: Path, session: Path, installed
     home = session.parent / "home"
     params: dict[str, object] = {"path": str(readable / "doc.pdf"), "workspace": str(readable)}
     expected = _oracle(installed, home, "read", params)
-    answered = _run("read", params, session)
+    answered = _run(runtime, "read", params, session)
     assert expected["type"] == "pdf" and expected["render_unavailable"] is True
     assert answered == {"error": f"{readable / 'doc.pdf'} is a pdf; a pdf read runs on the deploy"}
 
@@ -714,6 +778,7 @@ def _rootless(result: dict, root: Path) -> dict:
 
 
 def _mutated(
+    runtime: Runtime,
     op: str,
     params: dict[str, object],
     tmp_path: Path,
@@ -726,7 +791,7 @@ def _mutated(
     oracle_ws, client_ws = _twins(tmp_path, build)
     home = session.parent / "home"
     expected = _oracle(installed, home, op, _placed(params, oracle_ws))
-    answered = _run(op, _placed(params, client_ws), session)
+    answered = _run(runtime, op, _placed(params, client_ws), session)
     assert _rootless(answered, client_ws) == _rootless(expected, oracle_ws)
     assert _tree_state(client_ws) == _tree_state(oracle_ws)
     return expected, answered
@@ -775,6 +840,7 @@ EDIT_CASES: tuple[tuple[bytes, list[dict[str, object]]], ...] = (
 
 @pytest.mark.parametrize("content,edits", EDIT_CASES, ids=lambda value: repr(value)[:60])
 def test_edit_matches_sbxfs(
+    runtime: Runtime,
     tmp_path: Path,
     session: Path,
     installed: Path,
@@ -789,11 +855,11 @@ def test_edit_matches_sbxfs(
         (root / "subject.txt").chmod(0o750)
 
     params: dict[str, object] = {"path": "WS/subject.txt", "edits": edits}
-    _mutated("edit", params, tmp_path, session, installed, build)
+    _mutated(runtime, "edit", params, tmp_path, session, installed, build)
 
 
 def test_edit_aliases_invalid_utf8_the_way_sbxfs_does(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     """Both sides edit the `errors="replace"` decoding, so a byte the edit never touched is still
     rewritten: the lone `\\xe9` comes back as U+FFFD's three bytes from each. Pinned as the shared
@@ -803,13 +869,13 @@ def test_edit_aliases_invalid_utf8_the_way_sbxfs_does(
         (root / "subject.txt").write_bytes(b"caf\xe9 x\n")
 
     params: dict[str, object] = {"path": "WS/subject.txt", "edits": [_edit("x", "y")]}
-    _mutated("edit", params, tmp_path, session, installed, build)
+    _mutated(runtime, "edit", params, tmp_path, session, installed, build)
     edited = (tmp_path / "client-ws" / "subject.txt").read_bytes()
     assert edited == b"caf\xef\xbf\xbd y\n"
 
 
 def test_edit_refuses_text_that_is_not_base64(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     def build(root: Path) -> None:
         (root / "subject.txt").write_text("hello\n")
@@ -818,16 +884,18 @@ def test_edit_refuses_text_that_is_not_base64(
         "path": "WS/subject.txt",
         "edits": [{"old_string_b64": "!!!", "new_string_b64": _b64("x"), "replace_all": False}],
     }
-    expected, _ = _mutated("edit", params, tmp_path, session, installed, build)
+    expected, _ = _mutated(runtime, "edit", params, tmp_path, session, installed, build)
     assert expected == {"error": "text must be base64 encoded"}
 
 
-def test_edit_reports_the_missing_file(tmp_path: Path, session: Path, installed: Path) -> None:
+def test_edit_reports_the_missing_file(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     def build(root: Path) -> None:
         pass
 
     params: dict[str, object] = {"path": "WS/absent.txt", "edits": [_edit("a", "b")]}
-    expected, _ = _mutated("edit", params, tmp_path, session, installed, build)
+    expected, _ = _mutated(runtime, "edit", params, tmp_path, session, installed, build)
     assert str(expected["error"]).endswith("absent.txt not found")
 
 
@@ -845,11 +913,17 @@ def _staged_writer(
 
 
 def test_write_creates_and_carries_the_staged_mode(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     params: dict[str, object] = {"path": "WS/target.txt", "staged_path": "WS/staged.tmp"}
     expected, _ = _mutated(
-        "write", params, tmp_path, session, installed, _staged_writer(b"fresh body\n", 0o600)
+        runtime,
+        "write",
+        params,
+        tmp_path,
+        session,
+        installed,
+        _staged_writer(b"fresh body\n", 0o600),
     )
     assert expected == {"created": True}
     assert (tmp_path / "client-ws" / "target.txt").stat().st_mode & 0o777 == 0o600
@@ -857,7 +931,7 @@ def test_write_creates_and_carries_the_staged_mode(
 
 
 def test_write_overwrite_keeps_the_targets_mode(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     params: dict[str, object] = {
         "path": "WS/target.txt",
@@ -865,6 +939,7 @@ def test_write_overwrite_keeps_the_targets_mode(
         "allow_existing": True,
     }
     expected, _ = _mutated(
+        runtime,
         "write",
         params,
         tmp_path,
@@ -878,10 +953,11 @@ def test_write_overwrite_keeps_the_targets_mode(
 
 
 def test_write_refuses_an_unread_target_and_still_removes_the_staged_copy(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     params: dict[str, object] = {"path": "WS/target.txt", "staged_path": "WS/staged.tmp"}
     expected, _ = _mutated(
+        runtime,
         "write",
         params,
         tmp_path,
@@ -895,43 +971,49 @@ def test_write_refuses_an_unread_target_and_still_removes_the_staged_copy(
 
 
 def test_write_reports_the_missing_staged_file(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     params: dict[str, object] = {"path": "WS/target.txt", "staged_path": "WS/absent.tmp"}
-    expected, _ = _mutated("write", params, tmp_path, session, installed, lambda root: None)
+    expected, _ = _mutated(
+        runtime, "write", params, tmp_path, session, installed, lambda root: None
+    )
     assert str(expected["error"]).endswith("absent.tmp not found")
 
 
 def test_write_refuses_a_staged_path_that_is_the_target(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     params: dict[str, object] = {"path": "WS/staged.tmp", "staged_path": "WS/staged.tmp"}
     expected, _ = _mutated(
-        "write", params, tmp_path, session, installed, _staged_writer(b"kept\n", 0o600)
+        runtime, "write", params, tmp_path, session, installed, _staged_writer(b"kept\n", 0o600)
     )
     assert expected == {"error": "staged file must differ from its target"}
     assert (tmp_path / "client-ws" / "staged.tmp").read_bytes() == b"kept\n"
 
 
-def test_write_creates_the_targets_parents(tmp_path: Path, session: Path, installed: Path) -> None:
+def test_write_creates_the_targets_parents(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     params: dict[str, object] = {"path": "WS/a/b/c.txt", "staged_path": "WS/staged.tmp"}
     expected, _ = _mutated(
-        "write", params, tmp_path, session, installed, _staged_writer(b"nested\n", 0o644)
+        runtime, "write", params, tmp_path, session, installed, _staged_writer(b"nested\n", 0o644)
     )
     assert expected == {"created": True}
     assert (tmp_path / "client-ws" / "a" / "b" / "c.txt").read_bytes() == b"nested\n"
 
 
-def test_write_lands_on_a_name_with_a_space(tmp_path: Path, session: Path, installed: Path) -> None:
+def test_write_lands_on_a_name_with_a_space(
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
+) -> None:
     params: dict[str, object] = {"path": "WS/with space.txt", "staged_path": "WS/staged.tmp"}
     expected, _ = _mutated(
-        "write", params, tmp_path, session, installed, _staged_writer(b"spaced\n", 0o644)
+        runtime, "write", params, tmp_path, session, installed, _staged_writer(b"spaced\n", 0o644)
     )
     assert expected == {"created": True}
 
 
 def test_a_staged_path_outside_the_workspace_is_only_refused_by_the_oracle(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     """The pinned containment divergence: `sbxfs` confines the staged path to the workspace and
     refuses one outside it, while the client program checks nothing the member's own shell would
@@ -952,6 +1034,7 @@ def test_a_staged_path_outside_the_workspace_is_only_refused_by_the_oracle(
         },
     )
     answered = _run(
+        runtime,
         "write",
         {
             "path": str(client_ws / "target.txt"),
@@ -967,7 +1050,7 @@ def test_a_staged_path_outside_the_workspace_is_only_refused_by_the_oracle(
 
 
 def test_a_directory_target_refuses_in_two_voices(
-    tmp_path: Path, session: Path, installed: Path
+    runtime: Runtime, tmp_path: Path, session: Path, installed: Path
 ) -> None:
     """The second pinned write divergence: the oracle's `lstat` names the shape (`is a directory`),
     the program's `rename(2)` names the act it refused. Both refuse, both remove the staged copy."""
@@ -984,17 +1067,20 @@ def test_a_directory_target_refuses_in_two_voices(
         "allow_existing": True,
     }
     expected = _oracle(installed, home, "write", _placed(params, oracle_ws))
-    answered = _run("write", _placed(params, client_ws), session)
+    answered = _run(runtime, "write", _placed(params, client_ws), session)
     assert str(expected["error"]).endswith("target.txt is a directory")
     assert "Could not rename" in str(answered["error"])
     assert not (oracle_ws / "staged.tmp").exists()
     assert not (client_ws / "staged.tmp").exists()
 
 
+@requires_osascript
 def test_the_programs_carry_what_sbxfs_holds_as_constants(session: Path) -> None:
     """The one thing the differential cannot see: a set drifting apart from the op it mirrors. Each
     program declares its own classification and caps, so they are read back out of the shipped file
-    — by the same trailer mechanism that calls `main` — and compared with `sbxfs` itself."""
+    — by the same trailer mechanism that calls `main` — and compared with `sbxfs` itself. The
+    constants live in the runtime-neutral op body, so reading them back under one runtime pins them
+    for both."""
     oracle = _oracle_module()
     stated = _stated(session, "grep", ("TEXT_EXTENSIONS", "BINARY_EXTENSIONS", "TYPE_EXTENSIONS"))
     assert frozenset(stated["TEXT_EXTENSIONS"]) == oracle.TEXT_EXTENSIONS

@@ -41,6 +41,7 @@ CR=$(printf '\r')
 CHOICES=''
 CHOSEN=''
 OSA=''
+NODE=''
 UFO_CWD=''
 SEND_OP=''
 SEND_OP_ERR=''
@@ -598,12 +599,27 @@ find_osascript() {
   OSA=$(command -v osascript 2> /dev/null) || OSA=''
 }
 
+# osascript is macOS-only; a Linux or unix-terminal client has none, so ops run their same JS under
+# node instead. osascript is preferred where present, node is the fallback, and a machine with
+# neither runs no ops.
+find_node() {
+  NODE=$(command -v node 2> /dev/null) || NODE=''
+}
+
 # The gateway injects the op programs below, so a served client holds its own copy and the wire
 # never carries a program. The script's version hash covers the injected block, so a program edit
 # moves the version and the client re-fetches on its next install.
 write_programs() {
 # ufo:programs
 :
+}
+
+run_js() { # run the selected JS runtime on $OP_PROGRAM_FILE with the given mode and args
+  if [ -n "$OSA" ]; then
+    "$OSA" -l JavaScript "$OP_PROGRAM_FILE" "$@"
+  else
+    "$NODE" "$OP_PROGRAM_FILE" "$@"
+  fi
 }
 
 post() {
@@ -622,7 +638,7 @@ post() {
     set -- "$@" -H "authorization: Bearer $TOKEN"
   fi
   set -- "$@" -H "x-ufo-session: $SID"
-  if [ -n "$OSA" ] && [ -n "$WORKSPACE_URL" ]; then
+  if { [ -n "$OSA" ] || [ -n "$NODE" ]; } && [ -n "$WORKSPACE_URL" ]; then
     set -- "$@" -H "x-ufo-cwd: $UFO_CWD"
   fi
   installed=0
@@ -930,6 +946,7 @@ main() {
   mkfifo "$FIFO"
   trap cleanup EXIT
   find_osascript
+  find_node
   write_programs
   UFO_CWD=$(pwd -P)
   [ -s "$CREDENTIALS" ] && TOKEN=$(cat "$CREDENTIALS")
@@ -971,14 +988,19 @@ main() {
         input=''
         ;;
       run)
-        # Only exec and fileop need the runner; write, read and an unknown kind answer without it,
-        # so the missing-runner refusal guards those two arms alone, never the whole dispatch.
+        # Only exec and fileop need a JS runtime; write, read and an unknown kind answer without one,
+        # so the missing-runtime refusal guards those two arms alone, never the whole dispatch. The
+        # program file is picked by runtime: osascript runs `<op>.js`, node runs `<op>.node.js`.
         SEND_OP=$OP_ID
-        OP_PROGRAM_FILE="$UFO_HOME/programs/$OP_NAME.js"
+        if [ -n "$OSA" ]; then
+          OP_PROGRAM_FILE="$UFO_HOME/programs/$OP_NAME.js"
+        else
+          OP_PROGRAM_FILE="$UFO_HOME/programs/$OP_NAME.node.js"
+        fi
         case "$OP_KIND" in
           exec | fileop)
-            if [ -z "$OSA" ]; then
-              SEND_OP_ERR='ENOSYS: osascript is not available on this machine'
+            if [ -z "$OSA" ] && [ -z "$NODE" ]; then
+              SEND_OP_ERR='ENOSYS: this machine has no JavaScript runtime; install node from https://nodejs.org'
               OP_KIND=refused
             elif [ ! -f "$OP_PROGRAM_FILE" ]; then
               SEND_OP_ERR="ENOENT: no bundled program for $OP_NAME"
@@ -992,7 +1014,7 @@ main() {
         esac
         case "$OP_KIND" in
             exec)
-              "$OSA" -l JavaScript "$OP_PROGRAM_FILE" emit "$WORKDIR" > "$WORKDIR/run.sh"
+              run_js emit "$WORKDIR" > "$WORKDIR/run.sh"
               OP_CODE=0
               # The command leads its own process group (`set -m`), and only a timeout kills that
               # group: a command that exits on its own leaves its group alone, so a backgrounded
@@ -1011,12 +1033,12 @@ main() {
                 kill "$_watch" 2> /dev/null
                 exit "$_code"
               ) 2> /dev/null || OP_CODE=$?
-              "$OSA" -l JavaScript "$OP_PROGRAM_FILE" package "$WORKDIR" \
+              run_js package "$WORKDIR" \
                 "$WORKDIR/run.out" "$WORKDIR/run.err" "$OP_CODE" > "$WORKDIR/reply.json"
               SEND_OP_BODY="$WORKDIR/reply.json"
               ;;
             fileop)
-              if "$OSA" -l JavaScript "$OP_PROGRAM_FILE" run "$WORKDIR" \
+              if run_js run "$WORKDIR" \
                 > "$WORKDIR/reply.json" 2> "$WORKDIR/op.err"; then
                 SEND_OP_BODY="$WORKDIR/reply.json"
               else

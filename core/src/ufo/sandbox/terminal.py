@@ -82,10 +82,16 @@ WALK_ENUMERATION = {
     "grep": rf"""/usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a \( {_SKIPPED} \) \) -prune \
 -o \( -type d -o -type f \) -print0 > "$UFO_OP_WORKDIR/grep-enum"
 """,
-    "glob": r"""/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$UFO_OP_WORKDIR/glob-enum"
+    "glob": r"""measure() {
+if /usr/bin/stat --version > /dev/null 2>&1; then
+/usr/bin/xargs -0 -r /usr/bin/stat -c '%s %.9Y'
+else
+/usr/bin/xargs -0 /usr/bin/stat -f '%z %.9Fm'
+fi
+}
+/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$UFO_OP_WORKDIR/glob-enum"
 printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
-/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 \
-| /usr/bin/xargs -0 /usr/bin/stat -f '%z %.9Fm' >> "$UFO_OP_WORKDIR/glob-enum"
+/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 | measure >> "$UFO_OP_WORKDIR/glob-enum"
 """,
     "changes": rf"""r='{_REPOSITORY_COMMANDS}'
 /usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a -name '.git' \) -prune -print0 \
@@ -97,7 +103,11 @@ printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
 its listing in the relay's scratch dir, where the program's `enum` param names it. The walks read
 the listing rather than the tree because the runner has no subprocess and must not re-decide what a
 walk visits — `find` meets entries in the `readdir` order `os.walk` does, which is what keeps a
-truncated result identical to `sbxfs`'s."""
+truncated result identical to `sbxfs`'s. Only glob measures with `stat`, whose flags split by OS:
+`stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
+(macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the program
+parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
+`git`, and `xargs` are POSIX across both."""
 ARRIVAL_GRACE_SECONDS = 30.0
 """How long an op or an open waits for the terminal to reconnect. The client's stream ends at every
 hold and reconnects on a ~1s poll, so work landing in that gap is the normal case — a different
@@ -433,7 +443,8 @@ class TerminalCarrier:
     """The carrier whose sandbox is the member's own terminal: `/workspace` is the directory they
     launched `ufo` in, commands run as their subprocesses, and every op is asked over the rendezvous
     rather than dialed. The op logic itself is JavaScript this process ships in the payload, run
-    under the client machine's stock `osascript` — the shell relay pipes and never parses.
+    under the client machine's stock `osascript` where it has one and `node` otherwise — the shell
+    relay pipes and never parses.
 
     No isolation: the agent acts as the member, on their machine, guarded by nothing the member's
     own shell is not. The container carriers are where `containment` is load-bearing."""
@@ -635,33 +646,53 @@ _GENERIC_TRAILER = (
 the work dir rather than baking them in, so an op's directive names a program by op and carries no
 source. The relay writes `op.json` before running the program."""
 
+_NODE_ENTRY = "run(process.argv.slice(2));"
+"""osascript auto-invokes a top-level `run` handler with the argv after the program; node runs no
+handler on its own, so the node variant calls `run` with `mode`, `workdir`, and the op's own args —
+`process.argv[0]` is the node binary and `[1]` the program path."""
+
 _OP_PROGRAMS = ("exec", "read", "edit", "write", "grep", "glob", "changes")
 """The op programs the client runs — the copy-in and copy-out primitives are shell arms and carry
-no program. The prelude is folded into each, so a bundled client holds one self-contained file per
-op."""
+no program. A prelude is folded into each, so a bundled client holds one self-contained file per op
+per runtime."""
 
 
 def client_program_source(op: str) -> str:
-    """One op as the ready-to-run program a bundled client holds: the shared prelude, the op's own
-    JS, and the param-free `run` entry that reads `op.json` for its params."""
+    """One op as the osascript program a bundled client holds: the JXA prelude, the op's own JS, and
+    the param-free `run` entry osascript auto-invokes with the argv after the program path."""
     return f"{_client_program('prelude')}\n{_client_program(op)}\n{_GENERIC_TRAILER}"
+
+
+def client_program_node_source(op: str) -> str:
+    """The same op as a node program, for a client whose machine has no osascript. The node prelude
+    implements the identical contract over `fs` with byte-exact latin1 I/O; the op JS and `run`
+    entry are the shared runtime-neutral source; the trailing call invokes `run`, since node runs no
+    top-level handler the way osascript does."""
+    return (
+        f"{_client_program('prelude_node')}\n{_client_program(op)}\n"
+        f"{_GENERIC_TRAILER}\n{_NODE_ENTRY}"
+    )
 
 
 def client_program_bundle() -> str:
     """The shell that writes the op programs to `$UFO_HOME/programs/` — the block the gateway
     injects into the served client so a member's own copy holds them and the wire never carries a
-    program. Each program lands through a quoted heredoc, so its JS is copied verbatim; the
-    delimiter is unique per op and cannot occur in the source. The script's version hash covers this
-    block, so any edit to a program moves it and the client's own auto-update re-fetches the
-    bundle."""
+    program. Each op ships twice: `<op>.js` for osascript and `<op>.node.js` for node, so the client
+    picks a file and an interpreter by which runtime its machine has. Each program lands through a
+    quoted heredoc, so its JS is copied verbatim; the delimiter is unique per file and cannot occur
+    in the source. The script's version hash covers this block, so any edit to a program moves it
+    and the client's own auto-update re-fetches the bundle."""
     blocks = ['mkdir -p "$UFO_HOME/programs"']
     for op in _OP_PROGRAMS:
-        delimiter = f"UFO_PROGRAM_EOF_{op.upper()}"
-        blocks.append(
-            f"cat > \"$UFO_HOME/programs/{op}.js\" <<'{delimiter}'\n"
-            f"{client_program_source(op)}\n"
-            f"{delimiter}"
+        variants = (
+            (f"{op}.js", op.upper(), client_program_source(op)),
+            (f"{op}.node.js", f"{op.upper()}_NODE", client_program_node_source(op)),
         )
+        for name, tag, source in variants:
+            delimiter = f"UFO_PROGRAM_EOF_{tag}"
+            blocks.append(
+                f"cat > \"$UFO_HOME/programs/{name}\" <<'{delimiter}'\n{source}\n{delimiter}"
+            )
     return "\n".join(blocks)
 
 
