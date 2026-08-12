@@ -16,7 +16,7 @@ from sandbox.build_template import DOCKER_BASE_IMAGE, pod_dockerfile
 ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 IMAGE_KEY_SCRIPT = ROOT / ".github" / "scripts" / "sandbox_image_key.sh"
-REUSE_STEP = "Reuse the published sandbox image when it matches this commit"
+REUSE_STEP = "Reclaim runner disk and reuse the published sandbox image"
 PUBLISH_STEP = "Publish the sandbox image under its definition key"
 IMAGE_REPOSITORY_EXPRESSION = "ghcr.io/${{ github.repository_owner }}/ufo-sandbox"
 IMAGE_REPOSITORY = "ghcr.io/metalcraftai/ufo-sandbox"
@@ -72,6 +72,10 @@ case "$*" in
 esac
 """
 
+SUDO_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >>"$SUDO_CALLS"
+"""
+
 
 def _sandbox(tmp_path: Path, name: str = "run", rendered: str = RENDERED) -> Path:
     root = tmp_path / name
@@ -79,6 +83,7 @@ def _sandbox(tmp_path: Path, name: str = "run", rendered: str = RENDERED) -> Pat
     binaries.mkdir(parents=True)
     (binaries / "uv").write_text(UV_STUB)
     (binaries / "docker").write_text(DOCKER_STUB)
+    (binaries / "sudo").write_text(SUDO_STUB)
     for stub in binaries.iterdir():
         stub.chmod(0o755)
     (root / "rendered").write_text(rendered)
@@ -90,6 +95,7 @@ def _env(root: Path, **overrides: str) -> dict[str, str]:
         "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
         "RENDERED_DOCKERFILE": str(root / "rendered"),
         "DOCKER_CALLS": str(root / "docker-calls"),
+        "SUDO_CALLS": str(root / "sudo-calls"),
         "BASE_DIGEST": BASE_DIGEST,
         **overrides,
     }
@@ -274,6 +280,15 @@ def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> No
         f"{conftest.PREBUILT_IMAGE_ENV}={pushed[0]}"
     ]
     assert f"pull -q {pushed[0]}" in _calls(consumer)
+    assert (consumer / "sudo-calls").read_text().split() == [
+        "rm",
+        "-rf",
+        "/usr/local/lib/android",
+        "/usr/share/dotnet",
+        "/opt/ghc",
+        "/usr/local/share/boost",
+        "/opt/hostedtoolcache/CodeQL",
+    ]
 
 
 @pytest.mark.parametrize("miss", [{"UV_EXIT": "3"}, {"PULL_EXIT": "1"}])
@@ -292,9 +307,17 @@ def test_a_miss_leaves_the_integration_job_its_tests(tmp_path: Path, miss: dict[
 @pytest.mark.parametrize(
     ("stalled", "reached", "notice"),
     [
-        ({"UV_SLEEP": HANG_SECONDS}, [], UNDERIVED_NOTICE),
-        ({"LOGIN_SLEEP": HANG_SECONDS}, ["buildx", "login"], DERIVED_NOTICE),
-        ({"PULL_SLEEP": HANG_SECONDS}, ["buildx", "login", "pull"], DERIVED_NOTICE),
+        ({"UV_SLEEP": HANG_SECONDS}, ["system", "image", "image"], UNDERIVED_NOTICE),
+        (
+            {"LOGIN_SLEEP": HANG_SECONDS},
+            ["system", "image", "buildx", "login", "image"],
+            DERIVED_NOTICE,
+        ),
+        (
+            {"PULL_SLEEP": HANG_SECONDS},
+            ["system", "image", "buildx", "login", "pull", "image"],
+            DERIVED_NOTICE,
+        ),
     ],
     ids=["derivation", "login", "pull"],
 )
