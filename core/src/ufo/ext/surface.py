@@ -302,16 +302,52 @@ WRITEBACK_CLAIM_BATCH = 16
 WRITEBACK_WORKSPACE_BATCH = 16
 WRITEBACK_WORKSPACE_CONCURRENCY = 4
 WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
+MEDIA_CLAIMS: dict[str, tuple[tuple[str, str], ...]] = {
+    "image": (("like", "image/%"),),
+    "data": (
+        ("eq", "application/json"),
+        ("eq", "text/csv"),
+        ("eq", "application/vnd.ms-excel"),
+        ("like", "application/vnd.openxmlformats-officedocument.spreadsheetml%"),
+    ),
+    "document": (
+        ("like", "text/%"),
+        ("eq", "application/pdf"),
+        ("like", "application/vnd.openxmlformats-officedocument%"),
+        ("eq", "application/msword"),
+    ),
+}
+MEDIA_FILTERS = frozenset((*MEDIA_CLAIMS, "other"))
+
+
+def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElement[bool]:
+    claims = tuple(
+        sa.or_(
+            *(
+                column == value if operator == "eq" else column.ilike(value)
+                for operator, value in operators
+            )
+        )
+        for operators in MEDIA_CLAIMS.values()
+    )
+    if media == "other":
+        return sa.not_(sa.or_(*claims))
+    if media not in MEDIA_FILTERS:
+        raise ValueError(f"unknown artifact media filter: {media}")
+    selected = claims[tuple(MEDIA_CLAIMS).index(media)]
+    earlier = claims[: tuple(MEDIA_CLAIMS).index(media)]
+    return sa.and_(selected, *(sa.not_(claim) for claim in earlier))
 
 
 @dataclass(frozen=True)
 class ListedArtifact:
-    """One row of the portal's artifacts view: the shared file (the exact record the link
-    minter signs) and when its turn shared it."""
+    """One row of the portal's artifacts view with its owner, origin, and conversation."""
 
     artifact: "SharedArtifact"
     created_at: datetime
     owner_email: str | None
+    origin: str | None
+    conversation_id: UUID
 
 
 @dataclass(frozen=True)
@@ -1781,6 +1817,8 @@ class SurfaceContext:
         admin: bool,
         limit: int,
         cursor: "ListingCursor | None" = None,
+        q: str | None = None,
+        media: str | None = None,
     ) -> "ListingPage[ListedArtifact]":
         """One keyset page of the files turns have shared, as the portal's artifacts view lists
         them: a member sees their own conversations' artifacts, an admin the workspace's — newest
@@ -1798,6 +1836,9 @@ class SurfaceContext:
                 tables.shared_artifact.c.size_bytes,
                 tables.shared_artifact.c.created_at,
                 tables.member.c.email,
+                tables.conversation.c.surface_label,
+                tables.conversation.c.surface,
+                tables.conversation.c.id.label("conversation_id"),
             )
             .select_from(
                 tables.shared_artifact.join(
@@ -1812,7 +1853,16 @@ class SurfaceContext:
             .where(tables.shared_artifact.c.workspace_id == self.workspace_id)
         )
         if not admin:
-            query = query.where(tables.conversation.c.member_id == member_id)
+            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        if q:
+            query = query.where(
+                sa.or_(
+                    tables.shared_artifact.c.filename.ilike(f"%{q}%"),
+                    tables.shared_artifact.c.subject.ilike(f"%{q}%"),
+                )
+            )
+        if media is not None:
+            query = query.where(_media_predicate(tables.shared_artifact.c.media_type, media))
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -1839,6 +1889,8 @@ class SurfaceContext:
                 ),
                 created_at=row.created_at,
                 owner_email=row.email,
+                origin=row.surface_label or (row.surface if row.surface != "web" else None),
+                conversation_id=row.conversation_id,
             ),
             position=lambda row: (
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
@@ -1902,6 +1954,8 @@ class SurfaceContext:
                 ),
                 created_at=row.created_at,
                 owner_email=row.email,
+                origin=None,
+                conversation_id=conversation_id,
             )
             for row in rows
         )

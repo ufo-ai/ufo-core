@@ -238,6 +238,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "next_run_at": listed.task.next_run_at.isoformat(),
                     "paused": listed.task.paused,
                     "owner_email": emails.get(listed.task.created_by_member_id),
+                    "origin": listed.surface_label or "Portal",
+                    "mine": listed.task.created_by_member_id == member_id,
                 },
             )
             for listed in listed_rows
@@ -407,10 +409,12 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
-        "Listing returns each task's name, schedule, description, and creator (`owner_email`), "
+        "Listing returns each task's name, schedule, description, creator (`owner_email`), and "
+        "`origin` — the surface label of the conversation it reports into, else `Portal` — "
         "and filters and orders on "
-        "`next_run_at` and `paused` — order by `next_run_at` asc for what fires next, or filter "
-        "`paused: true` for what is stopped; get shows the latest run's response and a "
+        "`next_run_at`, `paused`, and `mine` — order by `next_run_at` asc for what fires next, "
+        "filter `paused: true` for what is stopped, or `mine: true` for the caller's own; get "
+        "shows the latest run's response and a "
         "`reports_to` link naming the conversation it posts into. A run's per-run output is not "
         "durable memory — it belongs "
         "in the reply the run posts, not in a saved fact; keep in-task state in files or todo "
@@ -418,7 +422,9 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
-    list_fields=frozenset({"conversation", "next_run_at", "paused", "owner_email"}),
+    list_fields=frozenset(
+        {"conversation", "next_run_at", "paused", "owner_email", "origin", "mine"}
+    ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )
 

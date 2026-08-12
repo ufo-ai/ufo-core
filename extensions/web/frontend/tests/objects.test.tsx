@@ -39,7 +39,9 @@ const TASK_ROW = owned({
   name: "daily-brief",
   summary: "0 9 * * * — daily brief",
   conversation: CONVO_ID,
+  mine: true,
   next_run_at: IN_THREE_HOURS,
+  origin: "#general",
   paused: false,
   owner_email: "mel@example.com",
 });
@@ -136,6 +138,7 @@ test("an index is a table: one column per field the kind declares, headed by a m
     "Created By",
     "Summary",
     "Next Run At",
+    "Origin",
     "Paused",
     "",
   ]);
@@ -145,7 +148,8 @@ test("an index is a table: one column per field the kind declares, headed by a m
   expect(said[2]).toBe("mel@example.com");
   expect(said[3]).toBe("0 9 * * * — daily brief");
   expect(said[4]).toContain("in ");
-  expect(said[5]).toBe("No");
+  expect(said[5]).toBe("#general");
+  expect(said[6]).toBe("No");
 });
 
 test("a record's conversation is where its name leads, never a column of uuids", async () => {
@@ -180,7 +184,7 @@ test("a boolean cell answers its column, and a field the record lacks takes a da
 
   await screen.findByRole("link", { name: "daily-brief" });
   expect(cells("daily-brief")[4]).toBe("—");
-  expect(cells("daily-brief")[5]).toBe("Yes");
+  expect(cells("daily-brief")[6]).toBe("Yes");
 });
 
 test("a value the kind's spec declares as an enum reads as its own chip", async () => {
@@ -275,6 +279,23 @@ test("ordering and a boolean filter ride the read, so the kind applies them", as
   await waitFor(() => expect(reads.at(-1)).toContain("paused=true"));
 });
 
+test("Mine narrows the scheduled-task read and names its empty scope", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      reads.push(url);
+      return objectIndex(TASK_KIND, url.includes("mine=true") ? [] : [TASK_ROW]);
+    },
+  });
+  mount();
+
+  await screen.findByRole("link", { name: "daily-brief" });
+  await userEvent.click(screen.getByRole("tab", { name: "Mine" }));
+
+  expect(reads.at(-1)).toContain("mine=true");
+  expect(await screen.findByText("You have not created a scheduled task.")).toBeTruthy();
+});
+
 test("a filter that narrows to nothing keeps the control that clears it", async () => {
   wire({
     "/objects/scheduled_task": (url) =>
@@ -293,6 +314,7 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
     "Created By",
     "Summary",
     "Next Run At",
+    "Origin",
     "Paused",
     "",
   ]);
@@ -337,6 +359,7 @@ test("the order sits on the head of the column it orders, and only there", async
     "Created By",
     "Summary",
     "Next Run At",
+    "Origin",
     "Paused",
     null,
   ]);
@@ -376,7 +399,15 @@ test("one agent's index names that agent, so it neither reads nor draws the owne
 
   await screen.findByRole("link", { name: "daily-brief" });
   expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(headings()).toEqual(["Name", "Created By", "Summary", "Next Run At", "Paused", ""]);
+  expect(headings()).toEqual([
+    "Name",
+    "Created By",
+    "Summary",
+    "Next Run At",
+    "Origin",
+    "Paused",
+    "",
+  ]);
   expect(screen.queryByRole("link", { name: "assistant" })).toBeNull();
 });
 

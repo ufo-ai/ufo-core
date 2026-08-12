@@ -124,6 +124,7 @@ MAX_MEMORY_QUERY_CHARS = 500
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
+ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 SUBAGENT_ACTIVITY_LIMIT = 40
@@ -1069,13 +1070,10 @@ async def _open_handoffs(
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The rail: every conversation this member opened here, across the agents their web audience
-    holds, newest activity first — the surface narrowing runs inside the core read, under its
-    bound, so another surface's newer traffic never displaces a rail row. Titles come from the
-    chat rows this surface writes before each conversation exists — a crash between the two
-    leaves an inert row, never a rowless conversation. One same-surface conversation carries no
-    chat row and is dropped after taking a slot under the bound: the member's prepared-intent
-    lane."""
+    """The rail: every readable conversation this member may see across the agents their web
+    audience holds, newest activity first. Web conversations use the chat row this surface stores;
+    another surface's conversations use their opening message, and their origin names the surface.
+    A same-surface conversation without a chat row is dropped: the member's prepared-intent lane."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1087,20 +1085,28 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     rows: list[dict[str, object]] = []
     for agent in audience.agents:
         listed = await ctx.list_agent_conversations(
-            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT, surface=SURFACE_WEB
+            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT
         )
         records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
         for entry in listed:
             value = records.get(_chat_row_key(entry.summary.id))
             if value is None:
-                continue
-            record = ChatRecord.model_validate(value)
+                if entry.summary.surface == SURFACE_WEB or not entry.readable:
+                    continue
+                title = _chat_title(entry.opening_message, ())
+            else:
+                title = ChatRecord.model_validate(value).title
             rows.append(
                 {
                     "conversation_id": str(entry.summary.id),
                     "agent_id": str(agent.id),
                     "agent_name": agent.name,
-                    "title": record.title,
+                    "title": title,
+                    "origin": (
+                        None
+                        if entry.summary.surface == SURFACE_WEB
+                        else entry.surface_label or entry.summary.surface
+                    ),
                     "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
                 }
             )
@@ -2004,15 +2010,16 @@ async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
-    """One keyset page of the files turns have shared with this member — their own conversations'
-    artifacts, every conversation's for an admin — each with the same signed TTL download link a
-    delivery would carry, or none when artifact delivery is unconfigured. A cursor this surface
-    never minted is the client's error, not a silent walk back to the newest page."""
+    """One searchable, filterable keyset page of the files turns have shared with this member."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
     raw_cursor = request.query_params.get("after", "").strip()
+    q = request.query_params.get("q") or None
+    media = request.query_params.get("media") or None
+    if media is not None and media not in ARTIFACT_MEDIA_FILTERS:
+        return Response("invalid artifact media filter", status_code=400)
     cursor: ListingCursor | None = None
     if raw_cursor:
         try:
@@ -2020,7 +2027,12 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
         except MalformedCursor:
             return Response("malformed listing cursor", status_code=400)
     page = await ctx.list_artifacts(
-        member_id, admin=audience.admin, limit=ARTIFACT_LIST_LIMIT, cursor=cursor
+        member_id,
+        admin=audience.admin,
+        limit=ARTIFACT_LIST_LIMIT,
+        cursor=cursor,
+        q=q,
+        media=media,
     )
     return JSONResponse(
         {
@@ -2033,6 +2045,8 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
                     "size_bytes": entry.artifact.size_bytes,
                     "created_at": _iso(entry.created_at),
                     "url": ctx.artifact_link(entry.artifact),
+                    "origin": entry.origin,
+                    "conversation_id": str(entry.conversation_id),
                 }
                 for entry in page.rows
             ],

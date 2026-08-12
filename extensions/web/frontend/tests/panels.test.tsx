@@ -152,7 +152,10 @@ test("the scheduled index lists declared fields and its detail pauses through th
         owned({
           name: "digest",
           summary: "0 9 * * * — summarize",
+          mine: true,
           next_run_at: "2026-08-01T09:00:00Z",
+          origin: "#general",
+          owner_email: "member@example.com",
           paused: false,
         }),
       ]),
@@ -167,10 +170,11 @@ test("the scheduled index lists declared fields and its detail pauses through th
 
   const listed = (await screen.findByRole("button", { name: "digest" })).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
-  expect(said[1]).toBe("Workspace");
+  expect(said[1]).toBe("You");
   expect(said[2]).toBe("0 9 * * * — summarize");
   expect(said[3]).toContain(" ago");
-  expect(said[4]).toBe("No");
+  expect(said[4]).toBe("#general");
+  expect(said[5]).toBe("No");
 
   await userEvent.click(screen.getByRole("button", { name: "digest" }));
   await userEvent.click(await screen.findByRole("button", { name: "Edit" }));

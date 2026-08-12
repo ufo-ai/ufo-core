@@ -59,6 +59,7 @@ HOSTING_UNCONFIGURED = (
 NOT_FOUND_BODY = "no such site"
 UNCONFIGURED_BODY = "Site hosting is not configured on this deployment."
 CSRF_REJECTED_BODY = "the visibility form did not match this session; reload the page and retry"
+PUBLIC_VISIBILITY_UNAVAILABLE = "public sharing is not available for new sites"
 LOGIN_PATH = "/login"
 NOT_SIGNED_IN_PAGE = (
     "<main><p>This site is not public, and this browser is not signed in to the workspace that "
@@ -184,6 +185,8 @@ async def set_visibility(ctx: SurfaceContext, request: Request) -> Response:
         level = visibility_level(str(form.get(VISIBILITY_FIELD, "")))
     except ValueError as error:
         return PlainTextResponse(str(error), status_code=400)
+    if level == "public" and site.visibility != "public":
+        return PlainTextResponse(PUBLIC_VISIBILITY_UNAVAILABLE, status_code=400)
     await _sites(ctx).set_visibility(site.conversation_id, site.name, level)
     return RedirectResponse(f"{FRAME_PATH}/{request.path_params[TOKEN_PARAM]}", status_code=303)
 
@@ -270,9 +273,13 @@ def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: s
 
 
 def _selector(current: Visibility, frame_path: str, csrf: str) -> str:
+    levels: tuple[Visibility, ...] = ("private", "workspace") + (
+        ("public",) if current == "public" else ()
+    )
     options = "".join(
-        f"<option value={level}{' selected' if level == current else ''}>{label}</option>"
-        for level, label in VISIBILITY_LABELS.items()
+        f"<option value={level}{' selected' if level == current else ''}>"
+        f"{VISIBILITY_LABELS[level]}</option>"
+        for level in levels
     )
     return (
         f'<form method=post action="{html.escape(frame_path, quote=True)}/visibility">'

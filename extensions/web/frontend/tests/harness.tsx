@@ -178,6 +178,7 @@ export const CHAT_ROW = {
   agent_name: "assistant",
   title: "Pick one thread",
   last_at: "2026-08-01T09:00:00.000Z",
+  origin: null,
 };
 
 export const json = (payload: unknown) => Response.json(payload);
@@ -187,7 +188,7 @@ export const NO_SITES = "No sites yet.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["conversation", "next_run_at", "paused", "owner_email"],
+  fields: ["conversation", "mine", "next_run_at", "origin", "paused", "owner_email"],
   spec_schema: {
     properties: {
       schedule: { type: "string" },

@@ -30,6 +30,7 @@ from ufo_ext_scheduled_tasks.tools import (
     ScheduledTaskSpec,
     pause_and_wait,
 )
+from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.object_tools import (
@@ -186,6 +187,62 @@ async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
             )
         )
     return workspace_id, agent_id, conversation_id
+
+
+async def test_list_reported_carries_audience_and_surface_label(db: None) -> None:
+    workspace_id, agent_id, private_conversation = await _seed()
+    async with workspace_tx() as connection:
+        creator = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.email == "who@example.com",
+                )
+            )
+        ).scalar_one()
+    shared_conversation = uuid4()
+    other_member = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=shared_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="slack",
+                surface_label="#general",
+                queue_key="shared",
+                audience="shared",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id), agent(agent_id):
+        await ScheduleStore().create(
+            private_conversation,
+            "private",
+            DAILY_9AM,
+            "private prompt",
+            "private task",
+            datetime.now(UTC),
+            created_by_member_id=creator,
+        )
+        await ScheduleStore().create(
+            shared_conversation,
+            "shared",
+            DAILY_9AM,
+            "shared prompt",
+            "shared task",
+            datetime.now(UTC),
+            created_by_member_id=creator,
+        )
+        listed = await ScheduleStore().list_reported()
+
+    by_name = {row.task.name: row for row in listed}
+    assert by_name["shared"].audience == "shared"
+    assert by_name["shared"].surface_label == "#general"
+    assert by_name["private"].surface_label is None
+    assert task_content_visible(by_name["shared"], other_member)
+    assert not task_content_visible(by_name["private"], other_member)
 
 
 async def _second_agent(workspace_id: UUID) -> tuple[UUID, UUID]:

@@ -66,7 +66,8 @@ A rail row states the conversation's title, and nothing else the member did not 
 is already ordered by recency and already grouped under `Today` / `Yesterday`, so a stamp on every
 row restates the group it sits in, in the one place with the least width to spare. A second line
 appears only where the row carries a fact the group cannot: a conversation held by an agent other
-than the main one names that agent. The group label is the smaller, lighter type
+than the main one names that agent, and a conversation from another surface names its origin. The
+group label is the smaller, lighter type
 (`text-small opacity-(--muted-strong)`, no bold) so the eye reads titles first and the labels as
 the scaffolding between them.
 
@@ -349,16 +350,13 @@ own private row carries no audience label, because the exception is what gets la
 zero-authored-colour test refuses; `border` reaches the same hairline through the tokens.
 
 A listing is a section like any other. `Listing` wraps itself in `Section` at `max-w-section`,
-headed by the tab's own label — the string the member clicked to arrive — with the search, the
-filter tablist, and `Refresh` in the `bar` slot, left with the heading. A tab that renders one listing therefore
+headed by the tab's own label — the string the member clicked to arrive — with the search and the
+filter tablist in the `bar` slot, left with the heading. A tab that renders one listing therefore
 sits on the same left edge and the same width as Team's members table, and the tab strip names the
 section rather than leaving the records unheaded.
 
 Every screen that lists records shares one bar, in one order and on one line: the search at
-`max-w-control-row`, the `Filter` tablist, the `send` act that adds a record, then `Refresh` where
-the screen draws one. Skills draws no `Refresh`: a record lands from the bar's own act — which
-re-reads — or from chat, and the tab re-reads on every visit, so the button re-states what the
-screen already does. The
+`max-w-control-row`, the `Filter` tablist, then the `send` act that adds a record. The
 bar does not wrap — a control that drops to a second line reads as an orphan of whatever is under
 it, and the search is the item that has to give, since a name is short and the table beneath it
 carries the whole record anyway. `Section` draws the row `items-stretch`, so every control in it
@@ -496,17 +494,16 @@ page of grey bars, which reads as a fault rather than as speed. The delay is CSS
 already running, never a timer holding the render back.
 
 A read whose path changes — a filter picked, a page turned — keeps the answer it has until the next
-one lands (`usePanelRead`). Only a first read, which has nothing to hold, shows the skeleton.
+one lands (`usePanelRead`). The visible pane re-reads at a fixed interval, holds the answer it has
+until the next one lands, and a hidden tab does not poll. Only a first read, which has nothing to
+hold, shows the skeleton.
 Dropping to the skeleton on every filter press would unmount the tablist the member is pressing,
 since the tabs are drawn from the payload.
 
-The blank carries the act that would fill it, and it is the only copy of that act on screen: a
-listing whose records are absent drops its whole filter bar, so the `Refresh` it would have offered
-in the bar moves into the card as an `outline`. It stays `outline` and never `send`: re-reading is
-not the act the screen is for, and the one filled button on a settings screen is reserved for the
-act that commits something. Where records are registered in chat rather than in the portal,
-`Refresh` is still the right act — the body states where the record comes from, and the button
-re-reads for one that has landed since.
+The blank carries the act that would fill it, and it is the only copy of that act on screen. It stays
+`outline` and never `send`: the one filled button on a settings screen is reserved for the act that
+commits something. Where records are registered in chat rather than in the portal, the body states
+where the record comes from and polling reads one that has landed since.
 
 A filter that matches nothing leaves the table standing and says so in a row. `TableNote` spans
 every column with the reason (`Nothing matches.`, `That filter is not available.`), so the header,
@@ -648,7 +645,7 @@ above. Bolding the active tab remeasures its text, so every tab after it slides 
 member moves along the strip and the strip they are aiming at is not where they saw it. The
 sliding pill and full opacity against `--muted-soft` say the same thing at a fixed width. The section bar
 stretches its controls
-(`items-stretch`), so the search, the tablist, and `Refresh` share one height instead of three. A
+(`items-stretch`), so the search and the tablist share one height instead of three. A
 search box carries no button beside it, whether it narrows what is loaded or asks the server: the
 box is the control, `Enter` submits it, and a second control saying the word again is chrome.
 Numbers are tabular: `Td` and `Th` carry
@@ -704,7 +701,8 @@ Copy a known-good implementation instead of composing from rules:
   bar, tablist, table, and dialog as the declared listings.
 - `views/Artifacts.tsx` — a declared listing whose face is cards led by an image band.
 - `views/Sites.tsx` — a bespoke section over a typed object kind, reading the same `CardGrid` the
-  declared listings do, with a leaving-the-portal anchor beside the row's `View`.
+  declared listings do, with server-side `Mine` narrowing and a leaving-the-portal anchor beside
+  the row's `View`.
 - `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.

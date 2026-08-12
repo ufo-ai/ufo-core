@@ -1,5 +1,3 @@
-import { useState } from "react";
-
 import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
@@ -186,10 +184,8 @@ function SubagentConversations({
   conversationId?: string;
   rootConversationId?: string;
 }) {
-  const [reloads, setReloads] = useState(0);
   const state = usePanelRead<{ conversations: Conversation[] }>(
     conversationId ? null : base + "/conversations",
-    reloads,
   );
 
   if (conversationId) {
@@ -208,7 +204,6 @@ function SubagentConversations({
         <ConversationList
           rows={payload.conversations}
           blank="No conversation this subagent ran is shared with you."
-          onRefresh={() => setReloads((count) => count + 1)}
           onOpen={(conversation) => {
             location.hash = subagentConversationHash(name, conversation.id);
           }}

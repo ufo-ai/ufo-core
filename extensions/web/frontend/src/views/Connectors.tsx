@@ -194,7 +194,6 @@ function ConnectorList({
             <Button variant="send" onClick={() => setAdding(true)}>
               Add connector
             </Button>
-            <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
           </>
         }
       >

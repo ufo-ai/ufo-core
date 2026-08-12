@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
@@ -186,23 +186,12 @@ test("a card listing renders each face and its row action", async () => {
   expect(screen.getAllByRole("button", { name: /Act/ })).toHaveLength(2);
 });
 
-test("the blank state carries the one refresh, and it re-reads", async () => {
-  let served = 0;
-  wire({
-    "/workspace/probe": () => {
-      served += 1;
-      return json({ rows: served === 1 ? [] : ROWS });
-    },
-  });
+test("an empty listing has no action", async () => {
+  wire({ "/workspace/probe": () => json({ rows: [] }) });
   mount(spec());
 
-  const refresh = await screen.findByRole("button", { name: "Refresh" });
-  expect(screen.getAllByRole("button", { name: "Refresh" }).length).toBe(1);
-  expect(refresh.className).toContain("border-edge-control");
-  expect(refresh.className).not.toContain("bg-ink");
-
-  await userEvent.click(refresh);
-  expect(await screen.findByText("alpha")).toBeTruthy();
+  expect(await screen.findByText("Nothing listed yet.")).toBeTruthy();
+  expect(screen.getByText("Nothing listed yet.").closest("button")).toBeNull();
 });
 
 test("an unavailable payload says so instead of showing the empty listing", async () => {
@@ -864,6 +853,8 @@ test("every declaration keys its rows on fields its own payload carries", () => 
     created_at: "2026-08-01T06:00:00",
     url: null,
     owner_email: null,
+    origin: null,
+    conversation_id: "c1",
   };
   expect(ARTIFACTS.rowKey(artifact)).toBe("2026-08-01T06:00:00|report.txt");
   expect(
@@ -887,7 +878,7 @@ test("every declaration keys its rows on fields its own payload carries", () => 
   ).toEqual(["notion-main"]);
 });
 
-test("refresh re-reads the listing in place", async () => {
+test("a visible listing polls and a hidden listing does not", async () => {
   let served = 0;
   wire({
     "/workspace/probe": () => {
@@ -897,13 +888,37 @@ test("refresh re-reads the listing in place", async () => {
       });
     },
   });
-  mount(spec());
-
-  await screen.findByText("alpha");
-  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-
-  expect(await screen.findByText("gamma")).toBeTruthy();
-  expect(screen.queryByText("alpha")).toBeNull();
+  const visibility = Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState");
+  vi.useFakeTimers();
+  try {
+    mount(spec());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText("alpha")).toBeTruthy();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(served).toBe(1);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText("gamma")).toBeTruthy();
+    expect(screen.queryByText("alpha")).toBeNull();
+  } finally {
+    Reflect.deleteProperty(document, "visibilityState");
+    if (visibility) Object.defineProperty(Document.prototype, "visibilityState", visibility);
+    vi.useRealTimers();
+  }
 });
 
 test("a listing that declares no search offers no search box", async () => {
@@ -988,7 +1003,7 @@ test("a tab remains available when its searched set is empty", async () => {
   expect(await screen.findByText("Nothing matches.")).toBeTruthy();
 });
 
-test("refresh hides while loading and on an unavailable payload, and recovers a failed read", async () => {
+test("a failed listing states the error", async () => {
   let served = 0;
   wire({
     "/workspace/probe": () => {
@@ -1000,13 +1015,10 @@ test("refresh hides while loading and on an unavailable payload, and recovers a 
   });
   mount(spec());
 
-  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  expect(await screen.findByText("alpha")).toBeTruthy();
 });
 
-test("an unavailable listing offers no refresh, where re-reading cannot change the answer", async () => {
+test("an unavailable listing states that it is not installed", async () => {
   wire({ "/workspace/probe": () => json({ rows: [], available: false }) });
   mount(
     spec({
@@ -1015,7 +1027,6 @@ test("an unavailable listing offers no refresh, where re-reading cannot change t
   );
 
   expect(await screen.findByText("Not installed.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
 });
 
 test("an applied intent keeps the selected tab and the typed search term", async () => {
@@ -1178,7 +1189,7 @@ test("the sources declaration searches and filters by access with live counts", 
   expect(screen.getByRole("tab", { name: "Workspace" })).toBeTruthy();
 });
 
-test("a refresh keeps the controls row and the caretted search box while the re-read is in flight", async () => {
+test("a re-read keeps the controls row and the caret in the search box", async () => {
   let release: (value: Response) => void = () => {};
   let served = 0;
   wire({
@@ -1194,10 +1205,10 @@ test("a refresh keeps the controls row and the caretted search box while the re-
 
   await screen.findByText("alpha");
   await userEvent.type(screen.getByRole("searchbox"), "a");
-  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  const read = screen.getByRole("searchbox");
+  read.focus();
+  expect((read as HTMLInputElement).value).toBe("a");
 
-  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("a");
-  expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
   expect(document.activeElement).not.toBe(document.body);
 
   release(Response.json({ rows: ROWS }));

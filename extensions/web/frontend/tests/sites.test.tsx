@@ -71,16 +71,28 @@ test("a site with a link opens it in a new tab, and one without draws no Open", 
   expect(within(notes!).getByRole("button", { name: "View" })).toBeTruthy();
 });
 
-test("the visibility tabs narrow the cards to one class", async () => {
-  wire({ "/objects/site": () => objectIndex(SITE_KIND, [DOCS, NOTES]) });
+test("Mine asks the server for sites created by the member", async () => {
+  const { calls } = wire({
+    "/objects/site": (url) =>
+      objectIndex(SITE_KIND, url.includes("mine=true") ? [NOTES] : [DOCS, NOTES]),
+  });
   open();
 
   expect(await screen.findByText("docs-abc")).toBeTruthy();
-  await userEvent.click(screen.getByRole("tab", { name: "Private" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Mine" }));
 
-  expect(screen.getByRole("tab", { name: "Private" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Mine" }).getAttribute("aria-selected")).toBe("true");
   expect(screen.getByText("notes-def")).toBeTruthy();
-  expect(screen.queryByText("docs-abc")).toBeNull();
+  await waitFor(() => expect(calls.some((url) => url.includes("mine=true"))).toBe(true));
+});
+
+test("empty sites names the selected scope", async () => {
+  wire({ "/objects/site": () => objectIndex(SITE_KIND, []) });
+  open();
+
+  expect(await screen.findByText("No sites yet.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("tab", { name: "Mine" }));
+  expect(await screen.findByText("You have not created a site yet.")).toBeTruthy();
 });
 
 test("a search asks the kind for the match rather than filtering the page", async () => {

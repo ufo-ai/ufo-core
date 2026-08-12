@@ -62,6 +62,7 @@ class ListedTask:
 
     task: ScheduledTask
     audience: str
+    surface_label: str | None
 
 
 class ScheduleInvoker(Protocol):
@@ -602,7 +603,7 @@ class ScheduleStore:
         into — the read a member-facing surface answers visibility from. A fire never asks, so the
         join is paid only where the answer is needed."""
         query = self._listing(
-            (*_COLUMNS, tables.conversation.c.audience),
+            (*_COLUMNS, tables.conversation.c.audience, tables.conversation.c.surface_label),
             conversation_id=conversation_id,
             names=names,
             visible_to_member_id=visible_to_member_id,
@@ -616,7 +617,12 @@ class ScheduleStore:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).mappings().all()
-        return tuple(ListedTask(task=_task(row), audience=row["audience"]) for row in rows)
+        return tuple(
+            ListedTask(
+                task=_task(row), audience=row["audience"], surface_label=row["surface_label"]
+            )
+            for row in rows
+        )
 
     async def claim_due(
         self, now: datetime, lease_seconds: int, limit: int = CLAIM_BATCH_MAX_TASKS

@@ -59,8 +59,7 @@ export function Team({
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
   const landed = useRef<string[]>([]);
-  const [reloads, setReloads] = useState(0);
-  const state = usePanelRead<Roster>("/workspace/team", reloads);
+  const state = usePanelRead<Roster>("/workspace/team");
   const ready = drafts.every((row) => row.email.trim());
 
   function open() {
@@ -139,7 +138,6 @@ export function Team({
                       Add member
                     </Button>
                   ) : null}
-                  <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
                 </>
               }
             >

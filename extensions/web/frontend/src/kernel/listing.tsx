@@ -42,7 +42,7 @@ export type Part<Row> = {
 
 export type Column<Row> = Part<Row> & { label: string };
 
-export type Chip<Row> = { label: string; has: (row: Row) => boolean };
+export type Chip<Row> = { label: string; has?: (row: Row) => boolean };
 
 export type RowLine<Row> = {
   primary: Part<Row>;
@@ -71,6 +71,8 @@ export type ListingSpec<Payload, Row> = {
   empty: string;
   unavailable?: (payload: Payload) => string | null;
   paged?: true;
+  serverQuery?: true;
+  query?: (place: Placement) => URLSearchParams;
   search?: (row: Row) => string;
   chips?: Chip<Row>[];
   actions?: (row: Row, context: RowContext<Row>) => ReactNode;
@@ -103,14 +105,14 @@ export function Listing<Payload, Row>({
   const [credentials, setCredentials] = useState<CredentialRequest | null>(
     null,
   );
-  const [reloads, setReloads] = useState(0);
-  const state = usePanelRead<Payload>(spec.read + cursor(spec, place), reloads);
+  const state = usePanelRead<Payload>(spec.read + cursor(spec, place));
   const query = place.q ?? "";
   const picked = place.chip ?? null;
+  const [typed, setTyped] = useState(query);
 
-  const setQuery = (value: string) => onPlace({ q: value || undefined });
+  const setQuery = (value: string) => onPlace({ q: value || undefined, after: undefined });
   const setPicked = (value: string | null) =>
-    onPlace({ chip: value ?? undefined });
+    onPlace({ chip: value ?? undefined, after: undefined });
   const open = (row: Row) => onPlace({ open: spec.rowKey(row) });
   const close = () => onPlace({ open: undefined });
 
@@ -130,7 +132,6 @@ export function Listing<Payload, Row>({
     setNotice(outcomeNotice(outcome));
   }
 
-  const refresh = () => setReloads((count) => count + 1);
   const context: RowContext<Row> = { open, act, busy, viewer };
   const term = query.trim().toLowerCase();
   const bySearch = (row: Row) =>
@@ -152,9 +153,26 @@ export function Listing<Payload, Row>({
         title={title}
         note={spec.note}
         bar={
-          known?.length || state.phase === "failed" ? (
+          known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
             <>
-              {spec.search && known?.length ? (
+              {spec.serverQuery ? (
+                <form
+                  className="flex items-stretch"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    setQuery(typed);
+                  }}
+                >
+                  <Input
+                    type="search"
+                    aria-label="Search"
+                    placeholder="Search"
+                    className="max-w-control-row"
+                    value={typed}
+                    onChange={(event) => setTyped(event.target.value)}
+                  />
+                </form>
+              ) : spec.search && known?.length ? (
                 <Input
                   type="search"
                   aria-label="Search"
@@ -164,7 +182,7 @@ export function Listing<Payload, Row>({
                   onChange={(event) => setQuery(event.target.value)}
                 />
               ) : null}
-              {spec.chips && searched?.length ? (
+              {spec.chips && (searched?.length || spec.serverQuery) ? (
                 <Filter
                   options={spec.chips.map((chip) => ({
                     label: chip.label,
@@ -182,9 +200,6 @@ export function Listing<Payload, Row>({
                   First page
                 </Button>
               ) : null}
-              <Button variant="row" onClick={refresh}>
-                Refresh
-              </Button>
             </>
           ) : null
         }
@@ -194,20 +209,15 @@ export function Listing<Payload, Row>({
             const rows = spec.rows(payload);
             if (!rows.length)
               return (
-                <PanelBlank
-                  body={spec.empty}
-                  action={
-                    <Button variant="outline" onClick={refresh}>
-                      Refresh
-                    </Button>
-                  }
-                />
+                <PanelBlank body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty} />
               );
             const chip = spec.chips?.find((entry) => entry.label === picked);
             const unknown = picked !== null && chip === undefined;
             const matched = unknown
               ? []
-              : rows.filter((row) => (!chip || chip.has(row)) && bySearch(row));
+              : spec.serverQuery
+                ? rows
+                : rows.filter((row) => (!chip?.has || chip.has(row)) && bySearch(row));
             const note = unknown ? "That filter is not available." : "Nothing matches.";
             if (!matched.length && (spec.cards || spec.list))
               return <PanelBlank body={note} />;
@@ -361,8 +371,10 @@ function cursor<Payload, Row>(
   spec: ListingSpec<Payload, Row>,
   place: Placement,
 ): string {
-  if (!spec.paged || !place.after) return "";
-  return "?" + new URLSearchParams({ after: place.after }).toString();
+  const params = spec.query?.(place) ?? new URLSearchParams();
+  if (spec.paged && place.after) params.set("after", place.after);
+  const query = params.toString();
+  return query ? "?" + query : "";
 }
 
 function part<Row>(

@@ -6,6 +6,7 @@ export type ChatRow = {
   agent_name: string;
   title: string;
   last_at: string;
+  origin: string | null;
 };
 
 /** The rail, and — for a permalink to a conversation another surface holds, which has no chat row

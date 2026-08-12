@@ -217,7 +217,7 @@ function ObjectIndex({
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
         const owned = payload.fields.includes(OWNER_FIELD);
         const shown = payload.fields.filter(
-          (field) => field !== CONVERSATION_FIELD && field !== OWNER_FIELD,
+          (field) => field !== CONVERSATION_FIELD && field !== OWNER_FIELD && field !== "mine",
         );
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
         if (agentId === null) columns.push("Agent");
@@ -227,9 +227,12 @@ function ObjectIndex({
           columns.push({ label: heading(field, payload.spec_schema), sort: field });
         }
         if (acts || payload.fields.includes(CONVERSATION_FIELD)) columns.push("");
-        const flags = shown.filter(
+        const flags = payload.fields.filter(
           (field) =>
-            narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean"),
+            field !== CONVERSATION_FIELD &&
+            field !== OWNER_FIELD &&
+            (narrowed === field ||
+              payload.objects.some((row) => typeof row[field] === "boolean")),
         );
         return (
           <>
@@ -272,7 +275,6 @@ function ObjectIndex({
                       {"New " + noun(payload.kind)}
                     </Button>
                   ) : null}
-                  <Button onClick={() => setReloads((count) => count + 1)}>Refresh</Button>
                 </>
               }
             >
@@ -281,7 +283,13 @@ function ObjectIndex({
                 rows={payload.objects}
                 rowKey={(row) => row.agent_id + "/" + row.name}
                 empty={"No " + noun(payload.kind) + " is visible to you."}
-                note={narrowing ? "No " + noun(payload.kind) + " matches this search." : undefined}
+                note={
+                  narrowed === "mine" && !query
+                    ? "You have not created a " + noun(payload.kind) + "."
+                    : narrowing
+                      ? "No " + noun(payload.kind) + " matches this search."
+                      : undefined
+                }
                 sort={{
                   by: orderBy,
                   descending,

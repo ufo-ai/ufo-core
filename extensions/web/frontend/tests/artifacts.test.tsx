@@ -12,6 +12,7 @@ import {
   objectIndex,
   useStreamFake,
   viewCard,
+  wire,
 } from "./harness";
 
 const TEXT_URL = "/dl/notes.txt";
@@ -25,6 +26,8 @@ const artifact = (over: Record<string, unknown> = {}) => ({
   created_at: "2026-07-31T09:00:00",
   url: TEXT_URL,
   owner_email: "member@example.com",
+  origin: null,
+  conversation_id: "c1",
   ...over,
 });
 
@@ -47,6 +50,49 @@ beforeEach(() => {
   useStreamFake();
 });
 
+test("the artifact listing sends search and media filters to its read", async () => {
+  const { calls } = wire({
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  expect(await screen.findByRole("tab", { name: "Images" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Documents" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Data" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Other" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("tab", { name: "Images" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("media=image"))).toBe(true));
+
+  await userEvent.type(screen.getByRole("searchbox"), "report{Enter}");
+  await waitFor(() => expect(calls.some((url) => url.includes("q=report"))).toBe(true));
+});
+
+test("narrowing a paged listing reads from the start, not from the page it was on", async () => {
+  const { calls } = wire({
+    "/workspace/artifacts": () => json({ artifacts: [artifact()], older: "page-2" }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Older" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("after=page-2"))).toBe(true));
+
+  await userEvent.click(screen.getByRole("tab", { name: "Images" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("media=image"))).toBe(true));
+  expect(calls.filter((url) => url.includes("media=image")).some((url) => url.includes("after="))).toBe(false);
+
+  await userEvent.type(screen.getByRole("searchbox"), "report{Enter}");
+  await waitFor(() => expect(calls.some((url) => url.includes("q=report"))).toBe(true));
+  expect(calls.filter((url) => url.includes("q=report")).some((url) => url.includes("after="))).toBe(false);
+});
+
 test("a text artifact opens in the viewer, reads its body, and closes back to the listing", async () => {
   vi.stubGlobal(
     "fetch",
@@ -63,7 +109,9 @@ test("a text artifact opens in the viewer, reads its body, and closes back to th
 
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("hello from the file")).toBeTruthy();
-  expect(screen.getByText("notes · text/plain · 12 B · Jul 31 2026")).toBeTruthy();
+  expect(
+    screen.getByText("notes · member@example.com · text/plain · 12 B · Jul 31 2026"),
+  ).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByText("hello from the file")).toBeNull());

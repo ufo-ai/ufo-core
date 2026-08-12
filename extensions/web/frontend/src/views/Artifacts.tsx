@@ -4,7 +4,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import type { ListingSpec } from "@/kernel/listing";
 import { cn } from "@/lib/cn";
-import { ownerLabel } from "@/lib/audience";
+import { ownerLabel, useViewer } from "@/lib/audience";
 import { day } from "@/lib/moments";
 import { formatSize } from "@/lib/size";
 import { Sheet } from "@/components/ui/sheet";
@@ -17,12 +17,21 @@ type Artifact = {
   created_at: string;
   url: string | null;
   owner_email: string | null;
+  origin: string | null;
+  conversation_id: string;
 };
 
 type ArtifactsPayload = {
   artifacts: Artifact[];
   newer?: string | null;
   older?: string | null;
+};
+
+const MEDIA: Record<string, string> = {
+  Images: "image",
+  Documents: "document",
+  Data: "data",
+  Other: "other",
 };
 
 function isImage(entry: Artifact): boolean {
@@ -36,9 +45,17 @@ function isText(entry: Artifact): boolean {
 export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
   read: "/workspace/artifacts",
   paged: true,
+  serverQuery: true,
+  query: (place) => {
+    const params = new URLSearchParams();
+    if (place.q) params.set("q", place.q);
+    const media = MEDIA[place.chip ?? ""];
+    if (media) params.set("media", media);
+    return params;
+  },
   rows: (payload) => payload.artifacts,
   rowKey: (entry) => entry.created_at + "|" + entry.filename,
-  search: (entry) => [entry.filename, entry.subject ?? "", entry.media_type].join(" "),
+  chips: [{ label: "Images" }, { label: "Documents" }, { label: "Data" }, { label: "Other" }],
   cards: {
     mark: { shape: "band", image: (entry) => (isImage(entry) ? entry.url : null) },
     primary: { field: "filename" },
@@ -60,7 +77,15 @@ export const ARTIFACTS: ListingSpec<ArtifactsPayload, Artifact> = {
 };
 
 function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
-  const meta = [entry.subject, entry.media_type, formatSize(entry.size_bytes), day(entry.created_at)]
+  const viewer = useViewer();
+  const meta = [
+    entry.subject,
+    entry.owner_email ? ownerLabel(entry.owner_email, viewer) : null,
+    entry.origin,
+    entry.media_type,
+    formatSize(entry.size_bytes),
+    day(entry.created_at),
+  ]
     .filter((part) => part)
     .join(" · ");
 

@@ -760,7 +760,7 @@ test.each([
   expect(screen.getByText("Changes")).toBeTruthy();
 });
 
-test("changes refresh after another file result lands", async () => {
+test("changes poll after another file result lands", async () => {
   location.hash =
     "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes";
   let loads = 0;
@@ -778,15 +778,19 @@ test("changes refresh after another file result lands", async () => {
     },
     ...transcript(),
   });
-  open();
-
-  expect(await screen.findByText("No changes.")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  expect(await screen.findByText("src/late.ts")).toBeTruthy();
-  expect(loads).toBe(2);
+  vi.useFakeTimers();
+  try {
+    open();
+    expect(await vi.waitFor(() => screen.getByText("No changes."))).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await vi.waitFor(() => screen.getByText("src/late.ts"))).toBeTruthy();
+    expect(loads).toBe(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
-test("slot counts refresh when a turn settles", async () => {
+test("slot counts poll when a turn settles", async () => {
   let slotLoads = 0;
   wire({
     ...transcript(),

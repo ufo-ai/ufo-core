@@ -125,6 +125,7 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     "created_at": site.created_at.isoformat(),
                     "visibility": site.visibility,
                     "owner_email": emails.get(site.creator_member_id),
+                    "mine": site.creator_member_id == member_id,
                 }
                 | (
                     {}
@@ -212,6 +213,8 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         site = await self._find(ctx.ext, name)
         if site is None:
             raise ValueError(f"site {name!r} was unhosted while its visibility was changing")
+        if spec.visibility == "public" and site.visibility != "public":
+            raise ValueError("public sharing is not available for new sites")
         if spec.visibility == site.visibility:
             return
         await _sites(ctx.ext).set_visibility(site.conversation_id, site.name, spec.visibility)
@@ -241,18 +244,21 @@ SITE_OBJECT = ObjectKind(
         "Each listed site carries its creator (`owner_email`) and its hosted `site_url`, the link "
         "absent only on a deploy that configures "
         "no public base URL and therefore hosts no reachable link. Listings filter and order on "
-        "`conversation`, `created_at`, and `visibility` — filter on this conversation's id for the "
-        "sites it hosts, or order by `created_at` desc for the newest. "
+        "`conversation`, `created_at`, `visibility`, and `mine` — filter on this conversation's "
+        "id for the sites it hosts, or order by `created_at` desc for the newest. "
         "object_get returns its visibility, and its status carries the hosted site_url, the "
         "sandbox port serving it, and its creator; the `created_in` link names the conversation "
         "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
-        "alone), workspace (any signed-in member), or public (anyone with the link) — the same act "
-        "the member can perform in the site's own frame. Create and any other spec change are "
+        "alone), workspace (any signed-in member), or public (anyone with the link; existing "
+        "public sites only) — the same act the member can perform in the site's own frame. "
+        "Create and any other spec change are "
         "refused: a site exists by serving a port, so build it and deploy_website it. Delete "
         "unregisters the site and its link stops resolving; the sandbox keeps the port until its "
         "own lifecycle ends, so re-deploying hosts it again."
     ),
     spec_model=SiteSpec,
     store=SiteObjects(),
-    list_fields=frozenset({"conversation", "created_at", "visibility", "site_url", "owner_email"}),
+    list_fields=frozenset(
+        {"conversation", "created_at", "visibility", "mine", "site_url", "owner_email"}
+    ),
 )

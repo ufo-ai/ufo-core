@@ -42,6 +42,7 @@ function row(id: string, last_at: string): ChatRow {
     agent_name: "assistant",
     title: "chat " + id,
     last_at,
+    origin: null,
   };
 }
 
@@ -232,6 +233,48 @@ test("a row of a non-main agent names its agent in the rail", async () => {
 
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
   expect(railRow.textContent).toContain("second");
+});
+
+test("a row with an origin states it in the rail", async () => {
+  const slack = { ...CHAT_ROW, origin: "Direct message", title: "Slack question" };
+  wire({ "/api/chats": () => json({ chats: [slack] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Slack question/ });
+  expect(railRow.textContent).toContain("Direct message");
+});
+
+test("an origin rail row opens the read-only pane, never the live chat", async () => {
+  const slack = { ...CHAT_ROW, origin: "Direct message", title: "Slack question" };
+  const linked = {
+    id: CONVO_ID,
+    surface: "slack",
+    surface_label: "Direct message",
+    audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+    member_email: MEMBER.email,
+    description: "",
+    speakers: [],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T11:00:00",
+    readable: true,
+    disclosable: false,
+    agent: { id: AGENT.id, name: AGENT.name },
+  };
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [slack], conversation: linked })
+        : json({ chats: [slack] }),
+    "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /Slack question/ }));
+
+  expect(await screen.findByText("slack words")).toBeTruthy();
+  expect(screen.getByText(/read-only here/)).toBeTruthy();
+  expect(screen.queryByLabelText("Message the agent")).toBeNull();
 });
 
 test("a conversation no read of this account's answers is named unshared, not missing", async () => {

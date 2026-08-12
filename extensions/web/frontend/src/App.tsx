@@ -218,6 +218,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
         agent_name: agent.name,
         title,
         last_at: stampIso(new Date()),
+        origin: null,
       };
       setRail((current) => ({ ...current, rows: mergeChats(current.rows, [row]) }));
       const seen = routeRef.current;
@@ -238,7 +239,10 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   useEffect(() => {
     if (route.kind !== "chat" || rail.phase !== "ready") return;
     const wanted = route.conversationId;
-    if (rail.rows.some((row) => row.conversation_id === wanted) || wanted in sought) {
+    if (
+      rail.rows.some((row) => row.conversation_id === wanted && !row.origin) ||
+      wanted in sought
+    ) {
       return;
     }
     let live = true;
@@ -499,7 +503,9 @@ function Pane({
     );
   }
   if (route.kind === "chat") {
-    const row = rail.rows.find((entry) => entry.conversation_id === route.conversationId);
+    const row = rail.rows.find(
+      (entry) => entry.conversation_id === route.conversationId && !entry.origin,
+    );
     const linkedConversation = linked[route.conversationId];
     if (!row && linkedConversation) {
       const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
@@ -728,9 +734,11 @@ function RailList({
                   onClick={() => onOpen(row.conversation_id)}
                 >
                   <span className="block truncate">{row.title}</span>
-                  {mainAgent && row.agent_id !== mainAgent.id ? (
+                  {row.origin || (mainAgent && row.agent_id !== mainAgent.id) ? (
                     <span className="block truncate text-small opacity-(--muted-strong) max-narrow:hidden">
-                      {row.agent_name}
+                      {[row.origin, mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null]
+                        .filter((fact): fact is string => fact !== null)
+                        .join(" · ")}
                     </span>
                   ) : null}
                 </SidebarButton>

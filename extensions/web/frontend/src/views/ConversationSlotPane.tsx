@@ -132,13 +132,11 @@ export function ConversationSlotPane({
   onClose?: () => void;
   onOpenAgent?: (agentId: string) => void;
 }) {
-  const [reloads, setReloads] = useState(0);
   const inventory = usePanelRead<ConversationSlotsPayload>(
     summary ? null : slotsPath(agent.id, conversationId, rootConversationId),
   );
   const state = usePanelRead<SlotPayload>(
     slotPath(agent.id, conversationId, slot, rootConversationId),
-    reloads,
   );
   const resolved =
     summary ??
@@ -162,9 +160,6 @@ export function ConversationSlotPane({
           {resolved ? <SlotIcon icon={resolved.icon} /> : null}
           {label}
         </span>
-        <button type="button" className="ml-auto" onClick={() => setReloads((count) => count + 1)}>
-          Refresh
-        </button>
         {onClose ? (
           <button type="button" aria-label="Close slot" onClick={onClose}>
             Close

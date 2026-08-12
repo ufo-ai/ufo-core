@@ -25,7 +25,6 @@ import { useMainAgent } from "@/lib/mainAgent";
 const SITE_KIND = "site";
 const NOT_FOUND = 404;
 const ABSENT = "No sites extension is installed.";
-const VISIBILITY = ["private", "workspace", "public"];
 
 type SitesPayload = { objects: ObjectRow[]; next_cursor: string | null };
 
@@ -68,16 +67,15 @@ function SiteCards({
   const viewer = useViewer();
   const [typed, setTyped] = useState("");
   const [query, setQuery] = useState("");
-  const [visibility, setVisibility] = useState("");
+  const [mine, setMine] = useState("");
   const [cursor, setCursor] = useState("");
-  const [reloads, setReloads] = useState(0);
 
   const params = new URLSearchParams({ agent: agentId, order_by: "name" });
   if (query) params.set("q", query);
+  if (mine) params.set("mine", "true");
   if (cursor) params.set("cursor", cursor);
   const state = usePanelRead<SitesPayload>(
     "/objects/site?" + params.toString(),
-    reloads,
   );
 
   function submit(event: FormEvent) {
@@ -86,7 +84,10 @@ function SiteCards({
     setQuery(typed);
   }
 
-  const refresh = () => setReloads((count) => count + 1);
+  function changeMine(value: string) {
+    setCursor("");
+    setMine(value);
+  }
 
   return (
     <Section
@@ -104,14 +105,10 @@ function SiteCards({
             />
           </form>
           <Filter
-            options={VISIBILITY.map((entry) => ({
-              label: visibilityLabel(entry),
-              value: entry,
-            }))}
-            value={visibility}
-            onChange={setVisibility}
+            options={[{ label: "Mine", value: "mine" }]}
+            value={mine}
+            onChange={changeMine}
           />
-          <Button onClick={refresh}>Refresh</Button>
         </>
       }
     >
@@ -123,32 +120,16 @@ function SiteCards({
         )}
       >
         {(payload) => {
-          const shown = payload.objects.filter(
-            (row) => !visibility || row.visibility === visibility,
-          );
           if (!payload.objects.length)
             return query ? (
               <PanelEmpty>No sites match that search.</PanelEmpty>
             ) : (
-              <PanelBlank
-                body="No sites yet."
-                action={
-                  <Button variant="outline" onClick={refresh}>
-                    Refresh
-                  </Button>
-                }
-              />
-            );
-          if (!shown.length)
-            return (
-              <PanelEmpty>
-                No sites with that visibility on this page.
-              </PanelEmpty>
+              <PanelBlank body={mine ? "You have not created a site yet." : "No sites yet."} />
             );
           return (
             <>
               <CardGrid
-                rows={shown}
+                rows={payload.objects}
                 rowKey={(row) => row.name}
                 mark={{ shape: "band" }}
                 primary={(row) => row.name}

@@ -84,7 +84,6 @@ export function Memory({
     setCorrecting(null);
   }
 
-  const refresh = () => setReloads((count) => count + 1);
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
   const columns = ["Memory", "Class", "Audience", "Added"];
 
@@ -116,9 +115,6 @@ export function Memory({
                 }
               />
             ) : null}
-            <Button variant="row" onClick={refresh}>
-              Refresh
-            </Button>
           </>
         }
       >
@@ -145,14 +141,7 @@ export function Memory({
               Boolean(submitted) || (Boolean(place.kind) && !payload.matches.length);
             if (!payload.matches.length && !narrowed)
               return (
-                <PanelBlank
-                  body="No memories yet."
-                  action={
-                    <Button variant="outline" onClick={refresh}>
-                      Refresh
-                    </Button>
-                  }
-                />
+                <PanelBlank body="No memories yet." />
               );
             const corrections = payload.matches.some(correctable);
             return (

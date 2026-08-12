@@ -159,20 +159,18 @@ function matches(entry: Conversation, query: string, viewer: string | null): boo
 }
 
 /** Every screen that lists conversations draws this one section — an agent's own and a subagent's
- *  runs alike — so a row reads the same wherever the member met it: the search and `Refresh` on
- *  the bar, one row line per conversation, and the row itself as the control that opens it. The
+ *  runs alike — so a row reads the same wherever the member met it: the search on the bar, one
+ *  row line per conversation, and the row itself as the control that opens it. The
  *  rows decide the rest: one carrying an agent states that agent where one read in a single
  *  agent's namespace states the surface, and a row nobody may open says which of the two it is. */
 export function ConversationList({
   rows,
   blank,
-  onRefresh,
   onOpen,
   onDisclose,
 }: {
   rows: Conversation[];
   blank: string;
-  onRefresh: () => void;
   onOpen: (conversation: Conversation) => void;
   onDisclose?: (conversation: Conversation) => void;
 }) {
@@ -192,7 +190,6 @@ export function ConversationList({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <Button onClick={onRefresh}>Refresh</Button>
         </>
       }
     >
@@ -221,10 +218,8 @@ export function ConversationList({
 export function Conversations({ agent }: { agent: Agent }) {
   const [opened, setOpened] = useState<Conversation | null>(null);
   const [disclosing, setDisclosing] = useState<Conversation | null>(null);
-  const [reloads, setReloads] = useState(0);
   const state = usePanelRead<{ conversations: Conversation[] }>(
     "/agents/" + agent.id + "/conversations",
-    reloads,
   );
 
   if (opened) {
@@ -250,7 +245,6 @@ export function Conversations({ agent }: { agent: Agent }) {
         <ConversationList
           rows={payload.conversations}
           blank={"No conversation with " + agent.name + " yet."}
-          onRefresh={() => setReloads((count) => count + 1)}
           onOpen={setOpened}
           onDisclose={setDisclosing}
         />

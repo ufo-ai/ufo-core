@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { getJson } from "@/lib/api";
@@ -9,31 +9,52 @@ export type PanelState<T> =
   | { phase: "failed"; message: string; status: number }
   | { phase: "ready"; payload: T };
 
-/** A read whose path changes — a filter picked, a page turned, a search submitted — holds the
- *  answer it already has until the next one lands. Dropping to `loading` would unmount the very
- *  controls the member is operating: the tablist is drawn from the payload, so a class toggle
- *  would take the tabs off screen under the cursor and put them back a moment later. Only a first
- *  read, which has nothing to hold, shows the skeleton. */
+const POLL_MS = 30_000;
+
+/** A read holds its answer until the next one lands. The visible pane re-reads at a fixed interval,
+ *  while a hidden tab does not poll and a failed read waits for the member's next move. Only a
+ *  first read, which has nothing to hold, shows the skeleton. */
 export function usePanelRead<T>(path: string | null, reloads: number = 0): PanelState<T> {
   const [state, setState] = useState<PanelState<T>>({ phase: "loading" });
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  const [pollTick, setPollTick] = useState(0);
+  const reading = useRef(false);
+  const failed = useRef(false);
+  useEffect(() => {
+    const change = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", change);
+    return () => document.removeEventListener("visibilitychange", change);
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    const interval = window.setInterval(() => {
+      if (!reading.current && !failed.current) setPollTick((tick) => tick + 1);
+    }, POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [visible]);
   useEffect(() => {
     if (path === null) return;
     const superseded = new AbortController();
     let live = true;
+    reading.current = true;
     setState((held) => (held.phase === "ready" ? held : { phase: "loading" }));
     getJson<T>(path, superseded.signal).then((result) => {
       if (!live) return;
+      failed.current = !result.ok;
       setState(
         result.ok
           ? { phase: "ready", payload: result.payload }
           : { phase: "failed", message: result.message, status: result.status },
       );
+    }).finally(() => {
+      if (live) reading.current = false;
     });
     return () => {
       live = false;
+      reading.current = false;
       superseded.abort();
     };
-  }, [path, reloads]);
+  }, [path, reloads, pollTick]);
   return state;
 }
 

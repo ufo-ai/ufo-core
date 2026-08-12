@@ -1588,6 +1588,95 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     assert anonymous.status_code == 401
 
 
+async def test_artifacts_view_searches_media_and_shared_conversations(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
+    shared_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/shared",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+        surface_label="Project",
+    )
+    private_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="web/private",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+    )
+    own_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="web/own",
+        audience=str(conversation_audience(member_m)),
+        member_id=member_m,
+    )
+    records = (
+        (shared_conversation, "shared.png", "needle", "image/png"),
+        (private_conversation, "hidden.png", "hidden", "image/png"),
+        (own_conversation, "report.pdf", "needle", "application/pdf"),
+        (own_conversation, "data.csv", "table", "text/csv"),
+        (own_conversation, "archive.zip", "archive", "application/zip"),
+    )
+    for index, (conversation_id, filename, subject, media_type) in enumerate(records):
+        turn_id = await _seed_listed_turn(
+            workspace_id,
+            conversation_id,
+            agent_id,
+            seq=index + 1,
+            inbound="share",
+            speaker_member_id=member_m if conversation_id == own_conversation else member_n,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=subject,
+                    media_type=media_type,
+                    size_bytes=3,
+                    created_at=datetime(2026, 7, 1, tzinfo=UTC) + timedelta(minutes=index),
+                    updated_at=sa.func.now(),
+                )
+            )
+    headers = {"cookie": f"{SESSION_COOKIE}={token_m}"}
+    listed = (await client.get(ARTIFACTS_PATH, headers=headers)).json()["artifacts"]
+    assert {entry["filename"] for entry in listed} == {
+        "shared.png",
+        "report.pdf",
+        "data.csv",
+        "archive.zip",
+    }
+    shared = next(entry for entry in listed if entry["filename"] == "shared.png")
+    report = next(entry for entry in listed if entry["filename"] == "report.pdf")
+    assert report["owner_email"] == "m@example.com"
+    assert shared["origin"] == "Project"
+    assert shared["conversation_id"] == str(shared_conversation)
+    assert _names((await client.get(f"{ARTIFACTS_PATH}?q=report", headers=headers)).json()) == [
+        "report.pdf"
+    ]
+    needle = (await client.get(f"{ARTIFACTS_PATH}?q=needle", headers=headers)).json()["artifacts"]
+    assert {entry["filename"] for entry in needle} == {
+        "shared.png",
+        "report.pdf",
+    }
+    assert _names((await client.get(f"{ARTIFACTS_PATH}?media=image", headers=headers)).json()) == [
+        "shared.png"
+    ]
+    assert _names((await client.get(f"{ARTIFACTS_PATH}?media=other", headers=headers)).json()) == [
+        "archive.zip"
+    ]
+    assert (await client.get(f"{ARTIFACTS_PATH}?media=bad", headers=headers)).status_code == 400
+
+
 async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollup(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -1958,6 +2047,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     assert sorted(m_view["fields"]) == [
         "conversation",
         "created_at",
+        "mine",
         "owner_email",
         "site_url",
         "visibility",
@@ -2708,20 +2798,73 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     ]
 
 
-async def test_other_surface_traffic_never_displaces_the_rail(
+async def test_the_rail_lists_readable_slack_conversations_with_origin(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    slack_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="D1:1.0",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="slack",
+        surface_label="Direct message",
+    )
+    await _seed_listed_turn(
+        workspace_id, slack_id, agent_id, seq=1, inbound="Review this Slack message"
+    )
+    await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="room:C1",
+        audience="room:slack:C1",
+        member_id=None,
+        surface="slack",
+        surface_label="#general",
+    )
+    await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="prepared/member",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="web",
+    )
+
+    member_rail = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
+    )
+    assert member_rail.status_code == 200
+    rows = member_rail.json()["chats"]
+    assert [row["conversation_id"] for row in rows] == [str(slack_id)]
+    assert rows[0]["title"] == "Review this Slack message"
+    assert rows[0]["origin"] == "Direct message"
+
+    other_rail = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={other_token}"}
+    )
+    assert other_rail.json()["chats"] == []
+    admin_rail = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+    )
+    assert admin_rail.json()["chats"] == []
+
+
+async def test_the_rail_reads_every_surface_under_its_bound(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rail's surface narrowing runs under the core read's bound, so another surface's newer
-    traffic costs no slot: with the bound at two, a newer Slack thread and another member's newer
-    web conversation leave the member's own older conversation listed. The member's own
-    prepared-intent lane shares this surface and takes one slot before its missing chat row drops
-    it."""
+    """The rail reads every surface under its bound: newer Slack traffic occupies a slot and uses
+    its opening message, while a same-surface prepared-intent row without a chat record drops."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    mine_id, mine_turn = await _seed_web_turn(
+    _mine_id, mine_turn = await _seed_web_turn(
         workspace_id,
         agent_id,
         member_id,
@@ -2735,14 +2878,15 @@ async def test_other_surface_traffic_never_displaces_the_rail(
             .where(tables.turn.c.id == mine_turn)
             .values(updated_at=datetime.now(UTC) - timedelta(hours=2))
         )
-        for queue_key, surface, owner in (
-            ("C42:1723.0", "slack", None),
-            (f"intent/{agent_id}/owner@example.com", "web", member_id),
-            (f"{agent_id}/peer@example.com/{uuid4().hex}", "web", peer_id),
+        slack_id = uuid4()
+        for conversation_id, queue_key, surface, owner in (
+            (slack_id, "C42:1723.0", "slack", None),
+            (uuid4(), f"intent/{agent_id}/owner@example.com", "web", member_id),
+            (uuid4(), f"{agent_id}/peer@example.com/{uuid4().hex}", "web", peer_id),
         ):
             await connection.execute(
                 sa.insert(tables.conversation).values(
-                    id=uuid4(),
+                    id=conversation_id,
                     workspace_id=workspace_id,
                     agent_id=agent_id,
                     surface=surface,
@@ -2753,9 +2897,13 @@ async def test_other_surface_traffic_never_displaces_the_rail(
                     updated_at=sa.func.now(),
                 )
             )
+    await _seed_listed_turn(workspace_id, slack_id, agent_id, seq=1, inbound="new Slack traffic")
     monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 2)
     rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(mine_id)]
+    rows = rail.json()["chats"]
+    assert [row["conversation_id"] for row in rows] == [str(slack_id)]
+    assert rows[0]["title"] == "new Slack traffic"
+    assert rows[0]["origin"] == "slack"
 
 
 async def test_an_answer_into_a_fresh_conversation_is_refused(
@@ -6155,11 +6303,11 @@ async def _seed_agent_conversation(
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 surface=surface,
+                surface_label=surface_label,
                 queue_key=queue_key,
                 member_id=member_id,
                 audience=audience,
                 sandbox_conversation_id=sandbox_conversation_id,
-                surface_label=surface_label,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -7173,7 +7321,7 @@ async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversa
     assert next(slot for slot in inventory.json()["slots"] if slot["id"] == "sites")["count"] == 2
 
 
-async def test_automations_slot_uses_the_scheduled_task_member_gate(
+async def test_automations_slot_follows_the_conversation_audience(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
