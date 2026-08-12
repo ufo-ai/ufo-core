@@ -21,7 +21,7 @@ A single model's facts are scattered, with three incompatible keying schemes and
 
 | Fact | Home | Structure / key | Failure when wrong/missing |
 |---|---|---|---|
-| Pinned id | `extensions/research/ufo_ext_research/subagent.py:20` | `str` literal (currently `"claude-sonnet-4-6"`) | unvalidated slug — a typo silently degrades |
+| Pinned id | `extensions/research/ufo_ext_research/subagent.py:20` | `str` literal (currently `"claude-sonnet-5"`) | unvalidated slug — a typo silently degrades |
 | Routing | `models/registry.py:102-115` (`ModelProviderSpec.matches`) + `models/interface.py:132-133` | **prefix** match | terra & `gpt-5.5` indistinguishable |
 | Request shape | `models/openai.py:160,162` | imperative — `reasoning_effort` + `tools` attached together, unconditionally | **400** (this is #568) |
 | Price | `accounting.py:77` (`MODEL_TOKEN_PRICE`) | `dict[str,ModelPrice]`, exact id | warns (`accounting.py:128-130`), bills **$0** |

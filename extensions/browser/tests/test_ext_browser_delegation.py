@@ -4,7 +4,8 @@ reads an entities file, fans a bounded pool of `browser` children over it, and w
 rows to a workspace JSON file. A RecordingSpawn and a ScriptedSubagents stand in for the Subagents
 workflow (a dependency, never asserted); the tests assert the tools' own marshalling — the payloads
 spawned, the bounded wait and the cancel it fires, the entity dedupe and cap, and the workspace
-write."""
+write. The payloads carry the round budget: browser_task names none, taking the profile's default
+session ceiling, while every wide_browse child is spawned narrowed."""
 
 import asyncio
 import json
@@ -256,6 +257,7 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
     entities = [payload["task_name"] for _, payload, _, _ in spawn.spawned]
     assert entities == ["acme.com", "beta.io"]
     assert all('{"price": "number"}' in payload["task"] for _, payload, _, _ in spawn.spawned)
+    assert all(payload["extended_context"] is False for _, payload, _, _ in spawn.spawned)
     assert "wide_browse.json" in sandbox.writes
     rows = json.loads(sandbox.writes["wide_browse.json"])
     assert [row["entity"] for row in rows] == ["acme.com", "beta.io"]

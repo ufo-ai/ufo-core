@@ -3,7 +3,14 @@
 Its prompt is the ported `subagent_browser` instructions verbatim — no skill-index slot, since the
 browser subagent teaches its own workflow rather than loading skills. Its tool subset is the pack's
 browser tools plus the core file builtins it uses to save findings and screenshots into the shared
-workspace for the parent agent to read back."""
+workspace for the parent agent to read back.
+
+A browser child runs under the main agent's round ceiling, because a session spends its rounds a
+page at a time — log in, page through a table, fill a form — and one that exhausts its budget
+mid-session hands the parent a partial answer no follow-up can resume. So `extended_context`
+defaults on rather than being asked for per spawn. `wide_browse` is the one caller that sends it
+off: a fan-out is one short extraction per entity, up to 128 of them, and it keeps the ordinary
+subagent budget this profile declares."""
 
 from pathlib import Path
 
@@ -23,6 +30,7 @@ class BrowserTask(BaseModel):
     )
     url: str | None = None
     task_name: str | None = None
+    extended_context: bool = True
 
 
 class BrowserResult(BaseModel):
@@ -38,4 +46,5 @@ BROWSER_PROFILE = SubagentProfile(
     input_model=BrowserTask,
     output_model=BrowserResult,
     untrusted_output=True,
+    model="claude-sonnet-5",
 )

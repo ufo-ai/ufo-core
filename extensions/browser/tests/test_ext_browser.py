@@ -33,6 +33,7 @@ from ufo_ext_browser.subagent import (
     BROWSER_SUBAGENT_NAME,
     BROWSER_SUBAGENT_PROMPT,
     BROWSER_SUBAGENT_TOOL_NAMES,
+    BrowserTask,
 )
 from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 
@@ -41,8 +42,11 @@ from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, FileBytes, SessionGo
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
 from ufo.ext.loader import skill_registry, turn_subagents
+from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT
+from ufo.loop.engine import MAIN_ROUND_LIMIT
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
+from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -830,6 +834,30 @@ def test_browser_profile_registers_and_is_spawnable() -> None:
     available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS} | {"search_web"}
     assert set(profile.tool_names) <= available
     assert "web automation subagent" in profile.prompt
+
+
+def test_the_browser_child_runs_on_a_model_the_catalog_answers() -> None:
+    """A profile's `model` is an unvalidated slug the queue resolves at spawn, so a typo would
+    degrade every browse to the parent's model rather than failing. The pin is checked against the
+    catalog that has to answer it."""
+    assert BROWSER_PROFILE.model == "claude-sonnet-5"
+    assert BROWSER_PROFILE.model in {spec.id for spec in CORE_MODEL_SPECS}
+
+
+def test_a_browser_session_runs_at_the_main_ceiling_and_a_narrowed_spawn_does_not() -> None:
+    """The producer half of the round budget. `extended_context` rides the child's inbound payload,
+    which is where the queue reads it to lift a subagent to MAIN_ROUND_LIMIT, so it has to survive
+    the input model's own serialization: on by default, so browser_task and a bare spawn_subagent
+    both get a session that can page through a site, and off when a caller sends it off —
+    wide_browse, which then takes the profile's declared budget."""
+    assert BROWSER_PROFILE.max_rounds == SUBAGENT_ROUND_LIMIT
+    assert SUBAGENT_ROUND_LIMIT < MAIN_ROUND_LIMIT
+    default = json.loads(BrowserTask.model_validate({"task": "browse"}).model_dump_json())
+    assert default["extended_context"] is True
+    narrowed = json.loads(
+        BrowserTask.model_validate({"task": "browse", "extended_context": False}).model_dump_json()
+    )
+    assert narrowed["extended_context"] is False
 
 
 def test_browser_prompt_preserves_no_skill_index_slot() -> None:

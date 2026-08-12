@@ -27,6 +27,7 @@ from ufo_ext_research.tools import RESEARCH_TOOLS
 from ufo.ext.loader import skill_registry
 from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.subagents import subagent_system_prompt
+from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.search import (
@@ -377,7 +378,8 @@ def test_web_prompt_section_renders_into_the_shell() -> None:
 def test_registers_the_research_and_deep_research_profiles() -> None:
     assert {RESEARCH_PROFILE.name, DEEP_RESEARCH_PROFILE.name} == {"research", "deep_research"}
     assert RESEARCH_PROFILE.model == DEEP_RESEARCH_PROFILE.model == RESEARCH_MODEL
-    assert RESEARCH_MODEL == "claude-sonnet-4-6"
+    assert RESEARCH_MODEL == "claude-sonnet-5"
+    assert RESEARCH_MODEL in {spec.id for spec in CORE_MODEL_SPECS}
     assert (
         RESEARCH_PROFILE.input_model.model_validate({"objective": "x" * 10_000}).objective
         == "x" * 10_000

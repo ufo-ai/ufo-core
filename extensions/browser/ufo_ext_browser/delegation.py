@@ -13,6 +13,11 @@ A budget is bounded at both ends: below so a wedged site gets a fair run, above 
 a run holds is one leased session, and a transport that reaps its own sessions would drop the live
 connection mid-task rather than ending it through the graceful cancel path below.
 
+The round budget divides the same way. `browser_task` takes the profile's own — the main agent's
+ceiling, for a session that pages through a site — while `wide_browse` sends `extended_context`
+off, dropping each of its up-to-128 children to the ordinary subagent budget: a fan-out entity is
+one short extraction, and 128 of them at the main ceiling is a spend no single call should reach.
+
 Both tools are `side_effecting`: `browser_task` keys its one child on the call's
 `idempotency_key`, `wide_browse` spawns each child under `dedup_key =
 f"{idempotency_key}/{entity}"` — deterministic across a crash-recovery re-run, so a recovered
@@ -153,7 +158,7 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
                 task = f"{task}\n\nReturn data matching this schema:\n{output_schema}"
             result = await ctx.spawn(
                 BROWSER_PROFILE_NAME,
-                {"task": task, "task_name": entity},
+                {"task": task, "task_name": entity, "extended_context": False},
                 dedup_key=f"{ctx.idempotency_key}/{entity}",
             )
             return {

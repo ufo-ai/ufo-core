@@ -45,7 +45,7 @@ from evals.slack_silence import slack_silence_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
-VISUAL_JUDGE_MODEL = "claude-sonnet-4-6"
+VISUAL_JUDGE_MODEL = "claude-sonnet-5"
 
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
