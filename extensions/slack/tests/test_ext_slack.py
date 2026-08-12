@@ -602,7 +602,9 @@ async def _mount(
 FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
 
 
-async def _debug_footer(workspace_id: UUID, queue_key: str, turn_id: UUID) -> str:
+async def _debug_footer(
+    workspace_id: UUID, queue_key: str, turn_id: UUID, label: str | None = FOOTER_LABEL
+) -> str:
     async with workspace_tx() as connection:
         target = (
             await connection.execute(
@@ -613,7 +615,7 @@ async def _debug_footer(workspace_id: UUID, queue_key: str, turn_id: UUID) -> st
             )
         ).one()
     return (
-        f"{FOOTER_LABEL} · "
+        f"{f'{label} · ' if label is not None else ''}"
         f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={target.id}&t={turn_id}"
         f"|debug> · <{PUBLIC_BASE_URL}/surface/web?c={target.id}|view on web> · "
         f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
@@ -5762,7 +5764,11 @@ async def test_a_finished_reporter_releases_the_turn_before_its_next_run(monkeyp
         started += 1
         if started == 1:
             asyncio.get_running_loop().call_soon(
-                slack._track_progress, progress.ctx, progress.turn_id, progress.queue_key
+                slack._track_progress,
+                progress.ctx,
+                progress.turn_id,
+                progress.conversation_id,
+                progress.queue_key,
             )
             return
         await release.wait()
@@ -5770,7 +5776,7 @@ async def test_a_finished_reporter_releases_the_turn_before_its_next_run(monkeyp
     monkeypatch.setattr(slack.ThreadProgress, "run", run)
     ctx = slack.SurfaceContext.__new__(slack.SurfaceContext)
     turn_id = uuid4()
-    slack._track_progress(ctx, turn_id, "C1:100.5")
+    slack._track_progress(ctx, turn_id, uuid4(), "C1:100.5")
     first = slack._PROGRESS_TASKS[turn_id]
 
     await first
@@ -6042,6 +6048,150 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
     assert reported.startswith("applying the migration · ")
     assert reported.endswith(" in")
     assert "1,234" not in reported and "567" not in reported
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def _progress_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_id: UUID,
+    tmp_path,
+    recorder: list[httpx.Request],
+    hub: InProcessHub,
+    channels: dict[str, dict[str, object] | None] | None = None,
+) -> UUID:
+    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 0.1)
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _mock_transport(recorder, {}, frozenset(), channels=channels),
+        hub=hub,
+    )
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
+def _footers(posts: list[dict[str, object]]) -> list[str | None]:
+    """Each post's footer text, None where it carries none. A post with two context blocks is a
+    stacked footer, which no message may have, so it fails here rather than reading as the first."""
+    rendered: list[str | None] = []
+    for post in posts:
+        contexts = [block for block in post["blocks"] if block["type"] == "context"]
+        assert len(contexts) <= 1
+        rendered.append(contexts[0]["elements"][0]["text"] if contexts else None)
+    return rendered
+
+
+async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_repeats_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The first message a turn posts is where the member looks for the conversation on the web, so
+    it ends with the same footer the reply does — the accounting the tail has priced by then, the
+    debugger, the web link, the agent's configuration. Every checkpoint after it posts bare: the
+    footer belongs to the turn's first message, and a second one stacked under an update would put
+    the same links in the thread over and over."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
+    await hub.publish(
+        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
+    )
+    deadline = time.monotonic() + 10
+    while len(_progress_posts(recorder)) < 3:
+        assert time.monotonic() < deadline, "the turn never reached a third checkpoint"
+        await asyncio.sleep(0.01)
+
+    footers = _footers(_progress_posts(recorder))
+    assert footers[0] == await _debug_footer(
+        workspace_id, "C1:100.5", turn_id, "$0.001234 (567 tokens)"
+    )
+    assert all(footer is None for footer in footers[1:])
+
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_an_unpriced_first_progress_post_carries_the_footers_links_alone(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A turn can reach its first checkpoint before any model round is priced. Cost and tokens do
+    not exist yet — nor do the cache share and the model, which land with the terminal frame — so
+    the footer opens on the links it has rather than on a zero the member would read as fact."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder):
+        assert time.monotonic() < deadline, "the loading skill never reached a checkpoint"
+        await asyncio.sleep(0.01)
+
+    footer = _footers(_progress_posts(recorder))[0]
+    assert footer == await _debug_footer(workspace_id, "C1:100.5", turn_id, None)
+    assert footer is not None and "$" not in footer
+
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("member_email", "channels"),
+    [
+        (OPERATOR_OWNER_EMAIL, {"C1": {"is_ext_shared": True}}),
+        ("owner@customer.example", None),
+    ],
+    ids=["operator_shared_channel", "tenant_workspace"],
+)
+async def test_a_first_progress_posts_footer_withholds_the_operator_fields_the_reply_does(
+    db: None,
+    tmp_path,
+    monkeypatch,
+    member_email: str,
+    channels: dict[str, dict[str, object]] | None,
+) -> None:
+    """The first message's footer is gated exactly as the reply's: a guest on a Slack Connect
+    channel and a customer's own workspace see the web link and the agent configuration, never the
+    turn's spend or the session debugger."""
+    workspace_id, _ = await _seed(member_email=member_email)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    turn_id = await _progress_turn(
+        monkeypatch, workspace_id, tmp_path, recorder, hub, channels=channels
+    )
+    task = slack._PROGRESS_TASKS[turn_id]
+
+    await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
+    await hub.publish(
+        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
+    )
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder):
+        assert time.monotonic() < deadline, "the tool call never reached a checkpoint"
+        await asyncio.sleep(0.01)
+
+    assert _footers(_progress_posts(recorder))[0] == await _web_footer(workspace_id, "C1:100.5")
+
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)
 

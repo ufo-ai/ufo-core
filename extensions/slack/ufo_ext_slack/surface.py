@@ -38,6 +38,8 @@ are side-channel writes: the turn is never told, so a post neither ends it nor s
 terminal reply still lands through the poller exactly as it does for a turn that never ran long
 enough to post one. Each post carries what the tail saw — the latest completed narration, the step
 it is in, the completed work since the last — and a signalless checkpoint is skipped, never filled.
+The first one a turn delivers also carries the reply's own footer, so the conversation's web link is
+there from the turn's first message; no later one repeats it.
 
 A reply whose turn ended by asking the user (`Writeback.question`) renders the whole ask as Block
 Kit — the title, every question, and each single-choice question's options as a button row; a
@@ -95,7 +97,7 @@ from ufo.sdk.audience import (
 )
 from ufo.sdk.context import JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.hub import Parked, SkillLoad, Terminal, TextDelta, ToolCall
+from ufo.sdk.hub import CostTick, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
@@ -1417,7 +1419,7 @@ async def _admit_inbound(
     )
     if admitted.opened_run:
         _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts)
-        _track_progress(ctx, admitted.turn_id, inbound.queue_key)
+        _track_progress(ctx, admitted.turn_id, conversation_id, inbound.queue_key)
 
 
 _AMBIENT_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -2316,10 +2318,15 @@ class ThreadProgress:
     per turn: a rejected post costs that one update and the next checkpoint posts as usual, because
     a transient rate limit must not silence the rest of a long turn — the silence this exists to
     end. Bounded like the thread status: the tail ends on the durable terminal state (its own poll,
-    not the lossy hub), so the task always ends within a second of the commit."""
+    not the lossy hub), so the task always ends within a second of the commit.
+
+    The turn's first post carries the standard footer, so the member reaches the conversation on the
+    web from the first thing the turn says rather than only from its reply. Every later checkpoint
+    posts without one, so no thread carries the footer twice."""
 
     ctx: SurfaceContext
     turn_id: UUID
+    conversation_id: UUID
     queue_key: str
     cadence: ProgressCadence
 
@@ -2333,6 +2340,8 @@ class ThreadProgress:
         intervals = self.cadence.intervals()
         deadline = started + next(intervals)
         activity = TurnActivity()
+        spend: CostTick | None = None
+        first = True
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
             try:
@@ -2342,7 +2351,15 @@ class ThreadProgress:
                     if not done:
                         if await self.ctx.turn_is_terminal(self.turn_id):
                             return
-                        await self._post(client, bot_token, activity, time.monotonic() - started)
+                        posted = await self._post(
+                            client,
+                            bot_token,
+                            activity,
+                            time.monotonic() - started,
+                            spend,
+                            first,
+                        )
+                        first = first and not posted
                         deadline = time.monotonic() + next(intervals)
                         continue
                     try:
@@ -2359,6 +2376,8 @@ class ThreadProgress:
                             activity.skill(skill)
                         case TextDelta(text=text):
                             activity.stream(text)
+                        case CostTick():
+                            spend = frame
                         case _:
                             continue
             finally:
@@ -2371,11 +2390,16 @@ class ThreadProgress:
         bot_token: str,
         activity: TurnActivity,
         elapsed_seconds: float,
-    ) -> None:
+        spend: CostTick | None,
+        first: bool,
+    ) -> bool:
         """One checkpoint's post, contained: a rejection costs this update and returns, never the
         loop. The body is the member's to read in the thread and never rides the log — it carries
         the model's own narration, which is turn content, and no field name that would survive
-        `redact_payload` may hold it — so the event logs its size and the thread holds the text."""
+        `redact_payload` may hold it — so the event logs its size and the thread holds the text.
+
+        Answers whether the post landed, so the footer rides the turn's first delivered message: a
+        skipped or rejected checkpoint leaves it for the next one to carry."""
         text = activity.report(elapsed_seconds)
         if text is None:
             log(
@@ -2383,14 +2407,15 @@ class ThreadProgress:
                 turn=str(self.turn_id),
                 elapsed_seconds=int(elapsed_seconds),
             )
-            return
+            return False
         channel, separator, thread_ts = self.queue_key.partition(":")
+        metadata = await self._footer(bot_token, channel, spend) if first else None
         try:
             await _slack_ok(
                 client.post(
                     SLACK_CHAT_POST_MESSAGE_URL,
                     content=slack_reply_body(
-                        channel, thread_ts if separator else None, text, metadata=None
+                        channel, thread_ts if separator else None, text, metadata
                     ),
                     headers={
                         "Authorization": f"Bearer {bot_token}",
@@ -2405,19 +2430,46 @@ class ThreadProgress:
                 elapsed_seconds=int(elapsed_seconds),
                 error=repr(error),
             )
-            return
+            return False
         log(
             "slack.thread_progress.posted",
             turn=str(self.turn_id),
             elapsed_seconds=int(elapsed_seconds),
             characters=len(text),
+            footer=metadata is not None,
+        )
+        return True
+
+    async def _footer(self, bot_token: str, channel: str, spend: CostTick | None) -> str | None:
+        """The standard footer under the same gating the reply's carries. A running turn has no
+        terminal frame, so the cache share and the model it settled on do not exist yet and the
+        footer omits them; cost and tokens are the tail's own latest `CostTick`, absent until the
+        first model round prices one."""
+        agent_id = await self.ctx.conversation_agent(self.conversation_id)
+        if agent_id is None:
+            return None
+        accounting = (
+            None
+            if spend is None
+            else f"${spend.cost_micro_usd / 1_000_000:.6f} ({spend.tokens:,} tokens)"
+        )
+        return await _slack_footer(
+            self.ctx,
+            bot_token,
+            channel,
+            self.conversation_id,
+            agent_id,
+            self.turn_id,
+            accounting,
         )
 
 
 _PROGRESS_TASKS: dict[UUID, asyncio.Task[None]] = {}
 
 
-def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
+def _track_progress(
+    ctx: SurfaceContext, turn_id: UUID, conversation_id: UUID, queue_key: str
+) -> None:
     """Spawn one ThreadProgress task per run of a turn. Callers gate on `Admitted.opened_run`, which
     admission decides under the conversation-row lock, so exactly one delivery reaches here per run
     however many Slack sends and whichever replicas take them — the guard is the durable admission
@@ -2429,6 +2481,7 @@ def _track_progress(ctx: SurfaceContext, turn_id: UUID, queue_key: str) -> None:
     progress = ThreadProgress(
         ctx=ctx,
         turn_id=turn_id,
+        conversation_id=conversation_id,
         queue_key=queue_key,
         cadence=ProgressCadence(
             base_seconds=PROGRESS_BASE_SECONDS, cap_seconds=PROGRESS_CAP_SECONDS
@@ -2567,7 +2620,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
             )
             if admitted.opened_run:
                 _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts)
-                _track_progress(ctx, admitted.turn_id, click.queue_key)
+                _track_progress(ctx, admitted.turn_id, conversation_id, click.queue_key)
             if await ctx.admitted_body(answer_key) == body:
                 _rewrite_in_background(bot_token, click)
     return JSONResponse({"ok": True})
@@ -2803,6 +2856,44 @@ async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool:
     )
 
 
+async def _slack_footer(
+    ctx: SurfaceContext,
+    bot_token: str,
+    channel: str,
+    conversation_id: UUID,
+    agent_id: UUID,
+    turn_id: UUID,
+    accounting: str | None,
+) -> str | None:
+    """The context-block footer a turn's Slack messages carry — its first progress post and its
+    reply — so both reach the conversation on the web and the agent's configuration. The
+    conversation rides as the `?c=` query parameter, not a fragment: a fragment never reaches the
+    server, so a signed-out click would arrive at the portal with the target already dropped. The
+    operator workspace's internal messages lead with `accounting` and add a session-debugger link; a
+    Slack Connect or org-shared thread never exposes those operator fields. `accounting` is the
+    spend the caller can state — a caller with none renders the links alone, never a placeholder."""
+    web_links = None
+    if ctx.public_base_url is not None:
+        web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}"
+        web_links = (
+            f"<{web_base}?c={conversation_id}|view on web> · <{web_base}#/agents/{agent_id}|config>"
+        )
+    if not await ctx.is_operator_workspace() or await _channel_is_externally_shared(
+        bot_token, channel
+    ):
+        return web_links
+    elements = [accounting] if accounting is not None else []
+    if ctx.public_base_url is not None:
+        debug_url = (
+            f"{ctx.public_base_url.rstrip('/')}{DEBUG_SURFACE_PATH}"
+            f"?ws={ctx.workspace_id}&c={conversation_id}&t={turn_id}"
+        )
+        elements.append(f"<{debug_url}|debug>")
+    if web_links is not None:
+        elements.append(web_links)
+    return " · ".join(elements)[:SLACK_CONTEXT_TEXT_LIMIT] if elements else None
+
+
 class _SlackReplyDelivery(BaseModel):
     id: str
     ts: str
@@ -2952,19 +3043,16 @@ async def _deliver_slack_reply(
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
-    Every reply links to its web conversation and agent configuration when the deploy has a public
-    base URL. The conversation rides as the `?c=` query parameter, not a fragment: a fragment never
-    reaches the server, so a signed-out click would arrive at the portal with the target already
-    dropped. The operator workspace's internal replies add accounting and a session-debugger link;
-    a Slack Connect or org-shared thread never exposes those operator fields. An `invalid_blocks`
-    rejection is deterministic, so the reply re-posts once — as conservative section blocks when
-    it carries an ask or connect handoff (the affordance survives the markdown blocks Slack
-    rejected), as plain text otherwise — rather than the poller retrying the identical Block Kit
-    body until it ages out. Each accepted part is checkpointed in the extension store. Before an
-    uncertain request, its delivery ID is attached as Slack message metadata; a retry reads that
-    marker back before deciding whether to post, covering a response lost after Slack accepted the
-    message. The completed checkpoint survives until `attach`, after core has durably recorded the
-    first message as the delivery ref."""
+    Only the last part carries the standard footer (`_slack_footer`), with the turn's settled
+    accounting and the model it ran on, so a reply split across messages ends with exactly one. An
+    `invalid_blocks` rejection is deterministic, so the reply re-posts once — as conservative
+    section blocks when it carries an ask or connect handoff (the affordance survives the markdown
+    blocks Slack rejected), as plain text otherwise — rather than the poller retrying the identical
+    Block Kit body until it ages out. Each accepted part is checkpointed in the extension store.
+    Before an uncertain request, its delivery ID is attached as Slack message metadata; a retry
+    reads that marker back before deciding whether to post, covering a response lost after Slack
+    accepted the message. The completed checkpoint survives until `attach`, after core has durably
+    recorded the first message as the delivery ref."""
     channel, separator, thread_ts = writeback.queue_key.partition(":")
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -2972,33 +3060,19 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     actions = slack_ask_blocks(writeback.question) or slack_connect_blocks(
         writeback.connect_request, writeback.turn_id
     )
-    web_links = None
-    if ctx.public_base_url is not None:
-        web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}"
-        web_links = (
-            f"<{web_base}?c={writeback.conversation_id}|view on web> · "
-            f"<{web_base}#/agents/{writeback.agent_id}|config>"
-        )
-    metadata = web_links
-    if await ctx.is_operator_workspace() and not await _channel_is_externally_shared(
-        bot_token, channel
-    ):
-        model = writeback.model or "no-model"
-        params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
-        metadata = (
-            f"${writeback.cost_micro_usd / 1_000_000:.6f} "
-            f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
-            f"{model}{params}"
-        )
-        if ctx.public_base_url is not None:
-            debug_url = (
-                f"{ctx.public_base_url.rstrip('/')}{DEBUG_SURFACE_PATH}"
-                f"?ws={ctx.workspace_id}&c={writeback.conversation_id}&t={writeback.turn_id}"
-            )
-            metadata = f"{metadata} · <{debug_url}|debug>"
-        if web_links is not None:
-            metadata = f"{metadata} · {web_links}"
-        metadata = metadata[:SLACK_CONTEXT_TEXT_LIMIT]
+    model = writeback.model or "no-model"
+    params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
+    metadata = await _slack_footer(
+        ctx,
+        bot_token,
+        channel,
+        writeback.conversation_id,
+        writeback.agent_id,
+        writeback.turn_id,
+        f"${writeback.cost_micro_usd / 1_000_000:.6f} "
+        f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
+        f"{model}{params}",
+    )
     parts = slack_reply_parts(text)
     first_ts: str | None = None
     store = ScopedStore(SLACK_EXTENSION)
