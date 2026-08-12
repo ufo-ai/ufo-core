@@ -4,6 +4,9 @@
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.grants import (
+    ConnectionPermissionDenied as ConnectionPermissionDenied,
+)
+from ufo.grants import (
     ConnectionSummary as ConnectionSummary,
 )
 from ufo.grants import (

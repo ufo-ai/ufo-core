@@ -384,7 +384,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
     "/usage": () => new Response("no", { status: 404 }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/customize/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Only you")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
@@ -423,7 +423,7 @@ test("the agent's own tab lists what is shared with it and not what is held priv
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.queryByText("notion")).toBeNull();
+  expect(screen.queryByText("notion")).toBeTruthy();
 });
 
 test("a 404 usage read says it is not shared", async () => {
@@ -781,7 +781,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/artifacts");
 
   await userEvent.click(screen.getByRole("button", { name: "Customize" }));
-  expect(location.hash).toBe("#/customize/connectors");
+  expect(location.hash).toBe("#/customize/memory");
   expect(screen.getByRole("button", { name: "Customize" }).getAttribute("aria-current")).toBe(
     "true",
   );
@@ -849,7 +849,7 @@ test("the agent tab strip opens the tab named in the hash", async () => {
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No connector is shared with assistant yet.")).toBeTruthy();
+  expect(await screen.findByText("No account is connected to assistant yet.")).toBeTruthy();
   expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
     "true",
   );
@@ -923,7 +923,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/customize/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(
@@ -1001,7 +1001,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/customize/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   await userEvent.click(await screen.findByRole("button", { name: "Add connector" }));
   await userEvent.type(

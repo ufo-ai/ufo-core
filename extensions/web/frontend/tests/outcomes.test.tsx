@@ -115,6 +115,11 @@ test("credentials group, sort, and render slot state and literals", async () => 
 
   expect(await screen.findByText("Credential values are shared across the workspace.")).toBeTruthy();
   expect(await screen.findByText("Filled", { selector: '[data-part="status"]' })).toBeTruthy();
+  expect([...document.querySelectorAll("h2")].map((heading) => heading.textContent)).toEqual([
+    "Credentials",
+    "Model providers",
+    "Service keys",
+  ]);
   expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
   expect(await screen.findByRole("tab", { name: "Not set" })).toBeTruthy();
   const code = screen.getByText("api.datadoghq.com");
@@ -124,8 +129,8 @@ test("credentials group, sort, and render slot state and literals", async () => 
     .getAllByRole("listitem")
     .filter((card) => card.querySelector("[data-part=primary]"));
   expect(cards.map((card) => card.querySelector("[data-part=primary]")?.textContent)).toEqual([
-    "DATADOG_API_KEY",
     "OPENAI_API_KEY",
+    "DATADOG_API_KEY",
   ]);
 });
 

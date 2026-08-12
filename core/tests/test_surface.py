@@ -683,9 +683,11 @@ async def _seed_connection(
                 workspace_id=workspace_id,
                 provider=provider,
                 account_id=f"{provider}-account",
+                account_label=f"{provider} label",
                 host="api.example.test",
                 owner_member_id=owner_member_id,
                 conversation_id=conversation_id,
+                shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -697,7 +699,6 @@ async def _seed_connection(
                 agent_id=agent_id,
                 connection_id=connection_id,
                 conversation_id=conversation_id,
-                shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -729,6 +730,7 @@ async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp
     ]
     assert owner_view[0].owner_email == "owner@example.com"
     assert owner_view[0].own
+    assert owner_view[0].account_label == "github label"
     assert owner_view[1].owner_email == "peer@example.com"
     assert not owner_view[1].own
     peer_view = await context.list_agent_connections(agent_id, peer, admin=False)
@@ -741,6 +743,78 @@ async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp
         view.provider
         for view in await context.list_agent_connections(other_agent, owner, admin=True)
     ] == ["asana"]
+
+
+async def test_connection_pool_visibility_and_agent_names(db: None, tmp_path) -> None:
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    peer = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer,
+                workspace_id=workspace_id,
+                email="peer@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _seed_connection(workspace_id, agent_id, owner, "private", shared=False)
+    await _seed_connection(workspace_id, agent_id, owner, "shared", shared=True)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    peer_view = await context.list_connections(peer, admin=False)
+    assert [row.provider for row in peer_view] == ["shared"]
+    assert peer_view[0].owner_email == "owner@example.com"
+    admin_view = await context.list_connections(peer, admin=True)
+    assert [row.provider for row in admin_view] == ["private", "shared"]
+    assert admin_view[0].agents[0].name == "assistant"
+
+
+async def test_github_coverage_projects_each_credential_leg(db: None, tmp_path) -> None:
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _declared_slots=(
+            DeclaredSlot(
+                name="github_app_installation",
+                description="",
+                extension="coding",
+                member_filled=False,
+            ),
+            DeclaredSlot(name="github_git_token", description="", extension="coding"),
+        ),
+    )
+    empty = await context.github_coverage(owner, admin=False)
+    assert empty.model_dump() == {"api": False, "git_push": False, "sources": False}
+
+    await _seed_connection(workspace_id, agent_id, owner, "github", shared=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                backend="github",
+                config={},
+                subject=f"member:{owner}",
+                owner_member_id=owner,
+                next_sync_at=sa.func.now(),
+                removed_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="github_git_token",
+                ciphertext=b"secret",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    coverage = await context.github_coverage(owner, admin=False)
+    assert coverage.model_dump() == {"api": True, "git_push": True, "sources": True}
+    assert "secret" not in coverage.model_dump_json()
 
 
 async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_path) -> None:

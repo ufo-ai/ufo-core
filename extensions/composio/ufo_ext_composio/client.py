@@ -207,6 +207,11 @@ class ComposioClient:
             )
         return OAuthAccount(account_id=account_id)
 
+    async def account_label(self, account_id: str) -> str | None:
+        payload = await self._get(f"/connected_accounts/{account_id}")
+        alias = payload.get("alias")
+        return alias if isinstance(alias, str) and alias else None
+
     async def list_tools(self, toolkit: str, query: str = "") -> tuple[dict[str, object], ...]:
         """Every tool row the toolkit catalogs for `query`, following `next_cursor` to the end of
         the listing — a toolkit's tools run to the hundreds, so one page is a slice of Composio's

@@ -184,6 +184,61 @@ def test_connection_migration_collapses_one_account_into_two_agent_edges(tmp_pat
     assert restored == [("assistant", owner_id.hex, 0), ("exec", owner_id.hex, 1)]
 
 
+def test_connection_sharing_migration_backfills_connection_and_drops_edge_flag(
+    tmp_path: Path,
+) -> None:
+    owner_id = uuid4()
+    path = tmp_path / "connection-sharing.db"
+    config, workspace_id = _seed(path, (owner_id, owner_id))
+    command.upgrade(config, "0079")
+    engine = sa.create_engine(f"sqlite:///{path}")
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        columns = {column["name"] for column in inspector.get_columns("connector_grant")}
+        accounts = connection.execute(
+            sa.text(
+                "select account_id, shared from connection "
+                "where workspace_id = :workspace order by account_id"
+            ),
+            {"workspace": workspace_id.hex},
+        ).all()
+    engine.dispose()
+    assert "shared" not in columns
+    assert accounts == [("acct-1", 1)]
+
+    command.downgrade(config, "0072")
+    engine = sa.create_engine(f"sqlite:///{path}")
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        connection_columns = {column["name"] for column in inspector.get_columns("connection")}
+        restored = connection.execute(
+            sa.text(
+                "select a.name, g.shared from connector_grant g "
+                "join agent a on a.id = g.agent_id order by a.name"
+            )
+        ).all()
+    engine.dispose()
+    assert connection_columns.isdisjoint({"shared", "account_label"})
+    assert restored == [("assistant", 0), ("exec", 0)]
+
+    private_path = tmp_path / "private-connection-sharing.db"
+    private_config, private_workspace_id = _seed(private_path, (owner_id, owner_id))
+    engine = sa.create_engine(f"sqlite:///{private_path}")
+    with engine.connect() as connection:
+        connection.execute(sa.text("update grant set shared = false"))
+        connection.commit()
+    engine.dispose()
+    command.upgrade(private_config, "0079")
+    engine = sa.create_engine(f"sqlite:///{private_path}")
+    with engine.connect() as connection:
+        shared = connection.execute(
+            sa.text("select shared from connection where workspace_id = :workspace"),
+            {"workspace": private_workspace_id.hex},
+        ).scalar_one()
+    engine.dispose()
+    assert shared == 0
+
+
 def test_connection_migration_fails_before_ddl_when_ownership_conflicts(
     tmp_path: Path,
 ) -> None:

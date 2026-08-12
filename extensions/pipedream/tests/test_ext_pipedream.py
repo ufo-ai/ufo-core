@@ -276,6 +276,47 @@ async def test_connected_account_refuses_an_unhealthy_account(
         await pipedream.pipedream_client().connected_account(PIPEDREAM_ACCOUNT, "ufo_ws")
 
 
+async def test_pipedream_account_label_reads_the_name_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        return httpx.Response(
+            200,
+            json={"data": {**_account("ufo_ws", PIPEDREAM_ACCOUNT), "name": "Work Gmail"}},
+        )
+
+    _install_transport(monkeypatch, handler)
+    assert await pipedream.pipedream_client().account_label(PIPEDREAM_ACCOUNT) == "Work Gmail"
+
+
+async def test_pipedream_identity_failure_does_not_fail_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = UUID(int=1)
+    client = pipedream.pipedream_client()
+    client = pipedream.PipedreamClient(
+        client_id=client.client_id,
+        client_secret=client.client_secret,
+        project_id=client.project_id,
+        environment=client.environment,
+        transport=httpx.MockTransport(
+            _pipedream_handler(pipedream.connection_user_id(workspace_id, "state"))
+        ),
+    )
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
+
+    async def fail(_client: pipedream.PipedreamClient, _account_id: str) -> str | None:
+        raise RuntimeError("identity unavailable")
+
+    monkeypatch.setattr(pipedream.PipedreamClient, "account_label", fail)
+    account = await provider.PipedreamOAuthProvider(PROVIDER, PROVIDER_HOST, "gmail").exchange(
+        PIPEDREAM_ACCOUNT, "https://ufo.example.com/callback", workspace_id, "state"
+    )
+    assert account.account_label is None
+
+
 async def test_newest_account_picks_the_latest_of_the_workspaces_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

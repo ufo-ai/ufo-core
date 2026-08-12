@@ -63,7 +63,7 @@ class _Grants(GrantStore):
                 account_id=env.ACCOUNT_ID,
                 host=host,
                 owner_member_id=uuid4(),
-                shared=True,
+                connection_shared=True,
             )
             for provider, host in self.providers
         )

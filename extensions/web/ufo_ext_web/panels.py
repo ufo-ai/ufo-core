@@ -42,7 +42,7 @@ class ApplyIntent(BaseModel):
     a private prompt collects, so only `delete` (clear) names it here. A delete names its object
     and carries no spec."""
 
-    verb: Literal["apply", "delete", "connect"]
+    verb: Literal["apply", "delete", "connect", "attach", "detach"]
     kind: Literal[
         "agent",
         "member",
@@ -73,6 +73,10 @@ class ApplyIntent(BaseModel):
             )
         if self.verb == "delete" and self.spec is not None:
             raise ValueError("a delete intent carries no spec")
+        if self.verb in {"attach", "detach"} and self.kind != "connector_grant":
+            raise ValueError("attach and detach pair with the connector_grant kind exactly")
+        if self.verb == "detach" and self.spec is not None:
+            raise ValueError("a detach intent carries no spec")
         return self
 
 
@@ -213,7 +217,7 @@ def _tool_intent(
                     "user_description": f"Connect {submitted.name} from the portal.",
                 },
             )
-        case ApplyIntent() if submitted.verb == "delete":
+        case ApplyIntent() if submitted.verb in {"delete", "detach"}:
             return ToolIntent(
                 tool="object_delete",
                 input={

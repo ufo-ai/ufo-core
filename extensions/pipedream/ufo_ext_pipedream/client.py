@@ -167,6 +167,12 @@ class PipedreamClient:
         record = _dict(payload.get("data")) or payload
         return _owned_account(record, account_id, external_user_id)
 
+    async def account_label(self, account_id: str) -> str | None:
+        payload = await self._get(f"/connect/{self.project_id}/accounts/{account_id}")
+        record = _dict(payload.get("data")) or payload
+        name = record.get("name")
+        return name if isinstance(name, str) and name else None
+
     async def workspace_account(self, account_id: str, workspace_id: UUID) -> ConnectedAccount:
         """Read an account granted to one of this workspace's connection users."""
         payload = await self._get(f"/connect/{self.project_id}/accounts/{account_id}")

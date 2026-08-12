@@ -405,13 +405,13 @@ class ToolContext:
                 grant
                 for grant in granted
                 if grant.provider == provider
-                and not grant.shared
+                and not grant.connection_shared
                 and grant.owner_member_id == acting
             ),
             key=lambda grant: grant.account_id,
         )
         shared = sorted(
-            (grant for grant in granted if grant.provider == provider and grant.shared),
+            (grant for grant in granted if grant.provider == provider and grant.connection_shared),
             key=lambda grant: grant.account_id,
         )
         return private, shared

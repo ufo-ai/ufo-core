@@ -89,8 +89,8 @@ Customize and each section differ in nothing else, so they are one shell and one
 and a strip is drawn only where the array holds more than one view. Each destination keeps its own
 route kind, its own tab type, and its own hash builder, so a tab without a view stays a compile
 error rather than a string the router fails to match. Workspace holds what the workspace *is* — its
-people, its inputs, its output, its spend. Customize holds what the member shapes the agents *with*:
-connectors and memory.
+people, its inputs, its output, its spend, its connectors. Customize holds what the member shapes the
+agents *with*: memory.
 
 ## Settings views
 
@@ -455,12 +455,10 @@ what `Panel` holds with the skeleton, so a bar drawn within it takes the picker 
 member the moment they use it — the read the pick starts is exactly the read that erases the
 control that started it.
 
-One record set can be stated twice, to two audiences, from one read. Customize's Connectors states
-every grant the member holds on the agent they picked; the agent's own Connectors tab states the
-subset that agent can actually reach, since a grant kept private is the member's and not the
-agent's. The two differ in their rows, their picker, and the line they show when empty — never in
-their table, their acts, or the endpoint behind them, and a second read for the narrower audience
-would be a second answer to the same question.
+One connection pool is stated twice, to two audiences, from two reads. Workspace's Connectors lists
+every connection the member may attach; the agent's own Connectors tab lists the edges attached to
+that agent and attaches another pool entry. The two differ in scope and acts, and the agent's add
+path connects and attaches in one flow.
 
 The order sits on the head of the column it orders, never in a picker beside the search. A picker
 states the field names a second time, in a control wide enough to push the act off the bar, and it
@@ -716,8 +714,7 @@ Copy a known-good implementation instead of composing from rules:
   collections beneath and no section heading. A directory read that fails reports as a toast. The whole row opens the
   skill through `rowControl` into a read-only copy of the same dialog `New skill` commits with —
   which is where `Delete` stands — and a directory row's `View` leaves for the source repository.
-- `views/Connectors.tsx` — one read stated twice: the member's grants under Customize, and what
-  the agent can reach on its own tab.
+- `views/Connectors.tsx` — the workspace connection pool and the agent's attached edges.
 - `kernel/listing.tsx` — the listing renderer the declarations feed.
 - `views/Usage.tsx` — figures over headed breakdown tables, every wire value labelled.
 - `kernel/cards.tsx` — the card grid both the declared and the bespoke card sections draw.

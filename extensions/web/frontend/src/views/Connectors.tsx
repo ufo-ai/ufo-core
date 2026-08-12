@@ -9,15 +9,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label } from "@/components/ui/field";
+import { Facts } from "@/components/ui/facts";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Td } from "@/components/ui/table";
-import { AgentPicker, chosenAgent } from "@/kernel/agentpick";
-import type { Placement } from "@/kernel/pager";
 import {
   Notice,
   type NoticeState,
   OutcomeNotice,
   Panel,
-  PanelEmpty,
   QUIET,
   Section,
   outcomeNotice,
@@ -33,6 +32,7 @@ import type { Agent } from "@/lib/types";
 type Connection = {
   provider: string;
   account_id: string | null;
+  account_label: string | null;
   owner_email: string | null;
   own: boolean;
   shared: boolean;
@@ -41,41 +41,133 @@ type Connection = {
 };
 
 type ConnectionsPayload = { connections: Connection[] };
+type PoolConnection = Connection & { agents: { id: string; name: string }[] };
+type PoolPayload = { connections: PoolConnection[] };
+type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
-function matches(entry: Connection, query: string): boolean {
-  const said = [entry.provider, entry.account_id ?? "", entry.owner_email ?? ""].join(" ");
+function matches(entry: Connection | PoolConnection, query: string): boolean {
+  const said = [
+    entry.provider,
+    entry.account_label ?? "",
+    entry.account_id ?? "",
+    entry.owner_email ?? "",
+  ].join(" ");
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
 /** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own tab
  *  states the same records narrowed to what that agent can actually reach; both read the one
  *  grant list, so nothing here needs a second endpoint. */
-export function Connectors({
-  place,
-  onPlace,
-}: {
-  place: Placement;
-  onPlace: (place: Placement) => void;
-}) {
+export function WorkspaceConnectors() {
   const agents = useAgents();
-  const agent = chosenAgent(agents, place);
-  if (!agent) return <PanelEmpty>No such agent.</PanelEmpty>;
+  const [targetAgent, setTargetAgent] = useState("");
+  const [query, setQuery] = useState("");
+  const [reloads, setReloads] = useState(0);
+  const [handoff, setHandoff] = useState<NoticeState>(QUIET);
+  const viewer = useViewer();
+  const state = usePanelRead<PoolPayload>("/connections", reloads);
+  const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
   return (
-    <ConnectorList
-      key={agent.id}
-      agent={agent}
-      picker={
-        <AgentPicker agent={agent} agents={agents} onPick={(id) => onPlace({ agent: id })} />
+    <Section
+      title="Connectors"
+      bar={
+        <>
+          <Input aria-label="Search" placeholder="Search" className="max-w-control-row" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <Select value={targetAgent} onValueChange={setTargetAgent}>
+            <SelectTrigger aria-label="Agent"><SelectValue placeholder="Attach to agent" /></SelectTrigger>
+            <SelectContent>{agents.map((agent) => <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>)}</SelectContent>
+          </Select>
+        </>
       }
-      sharedOnly={false}
-    />
+    >
+      {handoff.text ? <Notice tone="quiet">{handoff.text}</Notice> : null}
+      <Panel state={state}>
+        {(payload) => (
+          <DataTable
+            columns={["Provider", "Account", "Owner", "Access", "Connected", "Agents", ""]}
+            rows={payload.connections.filter((entry) => matches(entry, query))}
+            rowKey={(entry) => entry.provider + "-" + entry.account_id}
+            empty="No connector is connected yet."
+            note={query ? "No connected account matches this search." : undefined}
+          >
+            {(entry) => (
+              <>
+                <Td>{entry.provider}</Td>
+                <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
+                <Td>{entry.owner_email ? ownerLabel(entry.owner_email, viewer) : "—"}</Td>
+                <Td>{entry.shared ? "Workspace" : "Only you"}</Td>
+                <Td>{day(entry.connected_at)}</Td>
+                <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
+                <Td>
+                  {entry.owner_email ? (
+                    <div className="flex flex-wrap gap-xs">
+                      <Button
+                        variant="row"
+                        disabled={!targetAgent}
+                        onClick={async () => {
+                          const outcome = await postIntent(targetAgent, { verb: "attach", kind: "connector_grant", name: entry.grant, spec: { provider: entry.provider, account_id: entry.account_id, shared: entry.shared } });
+                          setHandoff(outcomeNotice(outcome));
+                          setReloads((count) => count + 1);
+                        }}
+                      >Attach to agent</Button>
+                      {(entry.agents ?? [])[0] ? (
+                        <Button
+                          variant="row"
+                          onClick={async () => {
+                            const outcome = await postIntent(entry.agents[0].id, {
+                              verb: "apply",
+                              kind: "connector_grant",
+                              name: entry.grant,
+                              spec: { provider: entry.provider, account_id: entry.account_id, shared: !entry.shared },
+                            });
+                            setHandoff(outcomeNotice(outcome));
+                            setReloads((count) => count + 1);
+                          }}
+                        >
+                          {entry.shared ? "Unshare" : "Share"}
+                        </Button>
+                      ) : null}
+                      {(entry.agents ?? [])[0] ? (
+                        <ConfirmButton
+                          verb="Revoke"
+                          variant="row"
+                          onClick={async () => {
+                            let last = QUIET;
+                            for (const attached of entry.agents) {
+                              const outcome = await postIntent(attached.id, { verb: "detach", kind: "connector_grant", name: entry.grant });
+                              last = outcomeNotice(outcome);
+                              if (last.refused) break;
+                            }
+                            setHandoff(last);
+                            setReloads((count) => count + 1);
+                          }}
+                        />
+                      ) : null}
+                    </div>
+                  ) : null}
+                </Td>
+              </>
+            )}
+          </DataTable>
+        )}
+      </Panel>
+      {coverage.phase === "ready" ? (
+        <Facts
+          rows={[
+            { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
+            { label: "Git push", value: coverage.payload.git_push ? "Connected" : "Not connected" },
+            { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
+          ]}
+        />
+      ) : null}
+    </Section>
   );
 }
 
 /** What this agent can reach: a grant the member kept private is theirs, not the agent's, so the
  *  agent's own tab does not list it. */
 export function AgentConnectors({ agent }: { agent: Agent }) {
-  return <ConnectorList agent={agent} picker={null} sharedOnly />;
+  return <ConnectorList agent={agent} picker={null} sharedOnly={false} />;
 }
 
 function ConnectorList({
@@ -99,6 +191,12 @@ function ConnectorList({
   const [watching, setWatching] = useState<string | null>(null);
   const viewer = useViewer();
   const state = usePanelRead<ConnectionsPayload>("/agents/" + agent.id + "/connections", reloads);
+  const pool = usePanelRead<PoolPayload>("/connections", reloads);
+  const [attachName, setAttachName] = useState("");
+  const attachEntry =
+    pool.phase === "ready"
+      ? pool.payload.connections.find((entry) => entry.grant === attachName)
+      : undefined;
   const source = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -183,6 +281,35 @@ function ConnectorList({
         bar={
           <>
             {picker}
+            {!picker ? (
+              <>
+                <Select value={attachName} onValueChange={setAttachName}>
+                  <SelectTrigger aria-label="Connection"><SelectValue placeholder="Attach connection" /></SelectTrigger>
+                  <SelectContent>
+                    {pool.phase === "ready"
+                      ? pool.payload.connections
+                          .filter((entry) => !(entry.agents ?? []).some((attached) => attached.id === agent.id))
+                          .map((entry) => <SelectItem key={entry.grant} value={entry.grant}>{entry.account_label ?? entry.account_id}</SelectItem>)
+                      : null}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="send"
+                  disabled={!attachEntry}
+                  onClick={() =>
+                    attachEntry &&
+                    act({
+                      verb: "attach",
+                      kind: "connector_grant",
+                      name: attachEntry.grant,
+                      spec: { provider: attachEntry.provider, account_id: attachEntry.account_id, shared: attachEntry.shared },
+                    })
+                  }
+                >
+                  Attach
+                </Button>
+              </>
+            ) : null}
             <Input
               type="search"
               aria-label="Search"
@@ -215,7 +342,7 @@ function ConnectorList({
               {(entry) => (
                 <>
                   <Td>{entry.provider}</Td>
-                  <Td>{entry.account_id ?? "—"}</Td>
+                  <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
                   <Td>{ownerLabel(entry.owner_email, viewer)}</Td>
                   <Td>{entry.shared ? "Workspace" : "Only you"}</Td>
                   <Td>{day(entry.connected_at)}</Td>
@@ -244,7 +371,7 @@ function ConnectorList({
                           variant="row"
                           onClick={() =>
                             act({
-                              verb: "delete",
+                              verb: "detach",
                               kind: "connector_grant",
                               name: entry.grant,
                             })

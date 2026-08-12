@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { Fragment, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
@@ -69,6 +69,7 @@ export type ListingSpec<Payload, Row> = {
   rows: (payload: Payload) => Row[];
   rowKey: (row: Row) => string;
   empty: string;
+  group?: (row: Row) => string;
   unavailable?: (payload: Payload) => string | null;
   paged?: true;
   serverQuery?: true;
@@ -221,53 +222,67 @@ export function Listing<Payload, Row>({
             const note = unknown ? "That filter is not available." : "Nothing matches.";
             if (!matched.length && (spec.cards || spec.list))
               return <PanelBlank body={note} />;
+            const records = (rows: Row[]) =>
+              spec.cards ? (
+                <Cards
+                  face={spec.cards}
+                  spec={spec}
+                  rows={rows}
+                  context={context}
+                />
+              ) : spec.list ? (
+                <RowList
+                  line={spec.list}
+                  spec={spec}
+                  rows={rows}
+                  context={context}
+                />
+              ) : (
+                <Table>
+                  <thead>
+                    <tr>
+                      {spec.columns.map((column) => (
+                        <Th key={column.field}>{column.label}</Th>
+                      ))}
+                      {spec.actions ? <Th>{""}</Th> : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.length ? (
+                      rows.map((row) => (
+                        <tr key={spec.rowKey(row)}>
+                          {spec.columns.map((column) => (
+                            <Td key={column.field}>
+                              {part(column, row, context)}
+                            </Td>
+                          ))}
+                          {spec.actions ? (
+                            <Td>{spec.actions(row, context)}</Td>
+                          ) : null}
+                        </tr>
+                      ))
+                    ) : (
+                      <TableNote span={spec.columns.length + (spec.actions ? 1 : 0)}>
+                        {note}
+                      </TableNote>
+                    )}
+                  </tbody>
+                </Table>
+              );
+            const grouped: { title: string | null; rows: Row[] }[] =
+              spec.group && matched.length
+                ? groupRows(matched, spec.group)
+                : [{ title: null, rows: matched }];
             return (
               <>
-                {spec.cards ? (
-                  <Cards
-                    face={spec.cards}
-                    spec={spec}
-                    rows={matched}
-                    context={context}
-                  />
-                ) : spec.list ? (
-                  <RowList
-                    line={spec.list}
-                    spec={spec}
-                    rows={matched}
-                    context={context}
-                  />
-                ) : (
-                  <Table>
-                    <thead>
-                      <tr>
-                        {spec.columns.map((column) => (
-                          <Th key={column.field}>{column.label}</Th>
-                        ))}
-                        {spec.actions ? <Th>{""}</Th> : null}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {matched.length ? (
-                        matched.map((row) => (
-                          <tr key={spec.rowKey(row)}>
-                            {spec.columns.map((column) => (
-                              <Td key={column.field}>
-                                {part(column, row, context)}
-                              </Td>
-                            ))}
-                            {spec.actions ? (
-                              <Td>{spec.actions(row, context)}</Td>
-                            ) : null}
-                          </tr>
-                        ))
-                      ) : (
-                        <TableNote span={spec.columns.length + (spec.actions ? 1 : 0)}>
-                          {note}
-                        </TableNote>
-                      )}
-                    </tbody>
-                  </Table>
+                {grouped.map(({ title: groupTitle, rows }) =>
+                  groupTitle ? (
+                    <Section key={groupTitle} title={groupTitle}>
+                      {records(rows)}
+                    </Section>
+                  ) : (
+                    <Fragment key="all">{records(rows)}</Fragment>
+                  ),
                 )}
                 {spec.paged ? (
                   <Pager
@@ -306,6 +321,15 @@ export function Listing<Payload, Row>({
       </Section>
     </>
   );
+}
+
+function groupRows<Row>(rows: Row[], group: (row: Row) => string) {
+  const grouped = new Map<string, Row[]>();
+  for (const row of rows) {
+    const title = group(row);
+    grouped.set(title, [...(grouped.get(title) ?? []), row]);
+  }
+  return [...grouped].map(([title, groupedRows]) => ({ title, rows: groupedRows }));
 }
 
 function counted(slots: string[]) {

@@ -1427,6 +1427,28 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
 
+async def connection_pool(ctx: SurfaceContext, request: Request) -> Response:
+    gated = await _audience_for(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, audience = gated
+    listed = await ctx.list_connections(member_id, admin=audience.admin)
+    visible = (
+        entry.model_copy(update={"agents": tuple(a for a in entry.agents if audience.allows(a.id))})
+        for entry in listed
+    )
+    return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in visible]})
+
+
+async def github_coverage(ctx: SurfaceContext, request: Request) -> Response:
+    gated = await _audience_for(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, audience = gated
+    coverage = await ctx.github_coverage(member_id, admin=audience.admin)
+    return JSONResponse(coverage.model_dump(mode="json"))
+
+
 async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's conversations this member may see: their own plus the workspace-shared
     ones, every one of the agent's for an admin. Each says whether its content reads now and
@@ -2535,6 +2557,8 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/overview", handler=overview),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
+    SurfaceRoute(method="GET", path="connections", handler=connection_pool),
+    SurfaceRoute(method="GET", path="github/coverage", handler=github_coverage),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills", handler=skills),
     SurfaceRoute(method="GET", path="agents/{agent_id}/skills/community", handler=community_skills),
     SurfaceRoute(

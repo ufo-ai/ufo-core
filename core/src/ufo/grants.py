@@ -72,6 +72,7 @@ class OAuthAccount:
     token stays with the broker (server-side execution), so no secret crosses into the grant."""
 
     account_id: str
+    account_label: str | None = None
 
 
 class OAuthProvider(Protocol):
@@ -111,8 +112,7 @@ class OAuthProviderResolver(Protocol):
 
 @dataclass(frozen=True)
 class Grant:
-    """One agent's usable view of a connection. Identity and ownership come from the connection;
-    disclosure comes from the edge."""
+    """One agent's usable view of a connection."""
 
     id: UUID
     connection_id: UUID
@@ -120,7 +120,7 @@ class Grant:
     account_id: str
     host: str
     owner_member_id: UUID
-    shared: bool
+    connection_shared: bool
 
 
 @dataclass(frozen=True)
@@ -197,10 +197,13 @@ class GrantStore:
         grantor_member_id: UUID,
         conversation_id: UUID,
         shared: bool,
+        account_label: str | None = None,
     ) -> None:
         """Create or reuse the member's connection and grant the bound agent. A broker account has
         one owner per workspace; reconnecting it as another member fails instead of reassigning the
-        account, its sources, and every existing edge."""
+        account, its sources, and every existing edge. Reconnecting only widens sharing: a
+        `shared=False` reconnect keeps a workspace-shared connection shared, so a per-agent
+        connect never revokes other members' access — narrowing is `set_shared`'s act alone."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
             raise ValueError("account_id has a control character; refusing to record the grant")
         async with workspace_tx() as connection:
@@ -215,6 +218,8 @@ class GrantStore:
                     host=host,
                     owner_member_id=grantor_member_id,
                     conversation_id=conversation_id,
+                    shared=shared,
+                    account_label=account_label,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -246,7 +251,12 @@ class GrantStore:
                 )
             await connection.execute(
                 sa.update(tables.connection)
-                .values(host=host, updated_at=sa.func.now())
+                .values(
+                    host=host,
+                    shared=sa.or_(tables.connection.c.shared, sa.literal(shared)),
+                    account_label=account_label,
+                    updated_at=sa.func.now(),
+                )
                 .where(tables.connection.c.id == existing.id)
             )
             await connection.execute(
@@ -257,7 +267,6 @@ class GrantStore:
                     agent_id=self.agent_id,
                     connection_id=existing.id,
                     conversation_id=conversation_id,
-                    shared=shared,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -269,7 +278,6 @@ class GrantStore:
                     ],
                     set_={
                         "conversation_id": conversation_id,
-                        "shared": shared,
                         "updated_at": sa.func.now(),
                     },
                 )
@@ -287,7 +295,7 @@ class GrantStore:
                         tables.connection.c.account_id,
                         tables.connection.c.host,
                         tables.connection.c.owner_member_id,
-                        tables.connector_grant.c.shared,
+                        tables.connection.c.shared,
                     )
                     .select_from(
                         tables.connector_grant.join(
@@ -309,7 +317,7 @@ class GrantStore:
                 account_id=row.account_id,
                 host=row.host,
                 owner_member_id=row.owner_member_id,
-                shared=row.shared,
+                connection_shared=row.shared,
             )
             for row in rows
         )
@@ -328,6 +336,65 @@ class GrantStore:
             )
         return deleted.rowcount > 0
 
+    async def attach(
+        self,
+        *,
+        provider: str,
+        account_id: str,
+        conversation_id: UUID,
+        actor_member_id: UUID,
+        shared: bool,
+    ) -> bool:
+        """Attach an existing connection to this agent. The actor must own the connection or the
+        connection must be workspace-shared — an admin holds no escape, since attaching a private
+        connection widens the owner's access. Attach never changes sharing: a `shared` claim that
+        would widen the connection is refused."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.connection.c.id,
+                        tables.connection.c.owner_member_id,
+                        tables.connection.c.shared,
+                    )
+                    .where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.provider == provider,
+                        tables.connection.c.account_id == account_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                return False
+            if row.owner_member_id != actor_member_id and not row.shared:
+                raise ConnectionPermissionDenied("member cannot attach this connection")
+            if shared and not row.shared:
+                raise ValueError(
+                    "attach cannot share a connection; apply shared on the existing grant"
+                )
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.connector_grant)
+                .values(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    agent_id=self.agent_id,
+                    connection_id=row.id,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.connector_grant.c.workspace_id,
+                        tables.connector_grant.c.agent_id,
+                        tables.connector_grant.c.connection_id,
+                    ]
+                )
+            )
+        return True
+
     async def set_shared(
         self,
         grant_id: UUID,
@@ -335,7 +402,7 @@ class GrantStore:
         *,
         actor_member_id: UUID,
     ) -> bool:
-        """Flip the bound agent's edge after rechecking owner and one-way admin authority."""
+        """Flip the connection's sharing flag after rechecking owner and one-way admin authority."""
         async with workspace_tx() as connection:
             selected = await self._grant_for_actor(
                 connection,
@@ -346,11 +413,14 @@ class GrantStore:
             if selected is None:
                 return False
             updated = await connection.execute(
-                sa.update(tables.connector_grant)
+                sa.update(tables.connection)
                 .values(shared=shared, updated_at=sa.func.now())
                 .where(
-                    tables.connector_grant.c.workspace_id == self.workspace_id,
-                    tables.connector_grant.c.id == selected,
+                    tables.connection.c.workspace_id == self.workspace_id,
+                    tables.connection.c.id
+                    == sa.select(tables.connector_grant.c.connection_id)
+                    .where(tables.connector_grant.c.id == selected)
+                    .scalar_subquery(),
                 )
             )
         return updated.rowcount > 0
@@ -438,19 +508,22 @@ class GrantStore:
             return None
         if selected.owner_member_id == actor_member_id:
             return selected.id
-        is_admin = (
-            await connection.execute(
-                sa.select(tables.member.c.is_admin)
-                .where(
-                    tables.member.c.workspace_id == self.workspace_id,
-                    tables.member.c.id == actor_member_id,
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
+        is_admin = await self._is_admin(connection, actor_member_id)
         if not admin_allowed or not is_admin:
             raise ConnectionPermissionDenied("member cannot mutate this connection")
         return selected.id
+
+    async def _is_admin(self, connection: AsyncConnection, actor_member_id: UUID) -> bool:
+        return bool(
+            (
+                await connection.execute(
+                    sa.select(tables.member.c.is_admin).where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        tables.member.c.id == actor_member_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        )
 
     async def _grant_for_actor(
         self,
@@ -564,6 +637,7 @@ class ConnectFlow:
                 grantor_member_id=claims.grantor_member_id,
                 conversation_id=claims.conversation_id,
                 shared=claims.shared,
+                account_label=account.account_label,
             )
         return GrantRecorded(
             provider=descriptor.provider, account_id=account.account_id, agent_id=claims.agent_id
@@ -758,7 +832,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                     tables.connector_grant.c.conversation_id,
                     tables.connector_grant.c.created_at,
                     tables.connector_grant.c.updated_at,
-                    tables.connector_grant.c.shared,
+                    tables.connection.c.shared,
                 )
                 .select_from(
                     tables.connector_grant.join(

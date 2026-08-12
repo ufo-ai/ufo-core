@@ -92,7 +92,7 @@ class _Grants(GrantStore):
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 owner_member_id=uuid4(),
-                shared=True,
+                connection_shared=True,
             )
             for account in self.accounts
         )

@@ -26,29 +26,67 @@ type Slot = {
 
 type CredentialsPayload = { slots: Slot[] };
 
-const GROUPS: Record<string, string> = {
-  coding: "Coding",
-  exa: "Exa",
-  keyed_connectors: "Connectors",
+const MODEL_PROVIDER_SLOTS = [
+  "anthropic_api_key",
+  "openai_api_key",
+  "bedrock_api_key",
+  "openrouter_api_key",
+] as const;
+
+const SERVICE_KEY_SLOTS = [
+  "datadog_api_key",
+  "datadog_application_key",
+  "datadog_api_host",
+  "exa_api_key",
+  "turbopuffer_api_key",
+  "browserbase_api_key",
+  "browser_use_api_key",
+] as const;
+
+const MCP_SLOTS = ["mcp_servers"] as const;
+
+const SECTION_ORDER = ["Model providers", "Service keys", "MCP"];
+const EXTENSION_SECTIONS: Record<string, string> = {
+  browser_use: "Service keys",
+  browserbase: "Service keys",
+  exa: "Service keys",
+  keyed_connectors: "Service keys",
   mcp: "MCP",
-  sources: "Sources",
+  turbopuffer: "Service keys",
 };
 
-const GROUP_KEYS = Object.keys(GROUPS);
+function credentialSection(row: Slot) {
+  const slot = row.slot.toLowerCase();
+  if (MODEL_PROVIDER_SLOTS.includes(slot as (typeof MODEL_PROVIDER_SLOTS)[number]))
+    return "Model providers";
+  if (SERVICE_KEY_SLOTS.includes(slot as (typeof SERVICE_KEY_SLOTS)[number]))
+    return "Service keys";
+  if (MCP_SLOTS.includes(slot as (typeof MCP_SLOTS)[number])) return "MCP";
+  return EXTENSION_SECTIONS[row.extension] ?? extensionTitle(row.extension);
+}
+
+function extensionTitle(extension: string) {
+  return extension
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
 
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
+  group: credentialSection,
   rows: (payload) =>
     [...payload.slots].sort((left, right) => {
-      const leftRank = GROUP_KEYS.indexOf(left.extension);
-      const rightRank = GROUP_KEYS.indexOf(right.extension);
-      const normalizedLeftRank = leftRank === -1 ? GROUP_KEYS.length : leftRank;
-      const normalizedRightRank = rightRank === -1 ? GROUP_KEYS.length : rightRank;
+      const leftRank = SECTION_ORDER.indexOf(credentialSection(left));
+      const rightRank = SECTION_ORDER.indexOf(credentialSection(right));
+      const normalizedLeftRank = leftRank === -1 ? SECTION_ORDER.length : leftRank;
+      const normalizedRightRank = rightRank === -1 ? SECTION_ORDER.length : rightRank;
       if (normalizedLeftRank !== normalizedRightRank)
         return normalizedLeftRank - normalizedRightRank;
-      if (leftRank === -1 && left.extension !== right.extension)
-        return left.extension.localeCompare(right.extension);
+      const leftSection = credentialSection(left);
+      const rightSection = credentialSection(right);
+      if (leftSection !== rightSection) return leftSection.localeCompare(rightSection);
       if (left.filled !== right.filled) return left.filled ? -1 : 1;
       return left.slot.localeCompare(right.slot);
     }),

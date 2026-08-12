@@ -55,12 +55,17 @@ class PipedreamOAuthProvider:
         self, code: str, _redirect_uri: str, workspace_id: UUID, state: str
     ) -> OAuthAccount:
         external_user = pipedream.connection_user_id(workspace_id, state)
-        account = await pipedream.pipedream_client().connected_account(code, external_user)
+        client = pipedream.pipedream_client()
+        account = await client.connected_account(code, external_user)
         if account.app != self.app:
             raise pipedream.PipedreamError(
                 403, f"connected account {code!r} belongs to {account.app!r}, not {self.app!r}"
             )
-        return OAuthAccount(account_id=account.account_id)
+        try:
+            label = await client.account_label(account.account_id)
+        except Exception:
+            label = None
+        return OAuthAccount(account_id=account.account_id, account_label=label)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:

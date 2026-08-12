@@ -409,22 +409,32 @@ async def test_colliding_account_slugs_never_rename_objects(db: None) -> None:
 
 
 @pytest.mark.parametrize(
-    ("kind", "spec"),
+    ("kind", "spec", "raises", "match"),
     (
         (
             CONNECTION_KIND,
             {"provider": "gmail", "account_id": "alice"},
+            VerbNotSupported,
+            "connect_account",
         ),
         (
             CONNECTOR_GRANT_KIND,
             {"provider": "gmail", "account_id": "alice", "shared": False},
+            ValueError,
+            "not available",
         ),
     ),
 )
 async def test_connect_stays_the_only_create_path(
-    kind: str, spec: dict[str, object], db: None
+    kind: str,
+    spec: dict[str, object],
+    raises: type[Exception],
+    match: str,
+    db: None,
 ) -> None:
-    workspace_id, agent_id, *_ = await _seed()
+    """Apply never creates a connection: the connection kind refuses outright, and a grant apply
+    only attaches a connection the pool already holds — one that does not exist is refused."""
+    workspace_id, agent_id, _conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
     args = apply_tool.input_model.model_validate(
         {
@@ -441,9 +451,9 @@ async def test_connect_stays_the_only_create_path(
     with (
         ws(workspace_id),
         agent(agent_id),
-        pytest.raises(VerbNotSupported, match="connect_account"),
+        pytest.raises(raises, match=match),
     ):
-        await apply_tool.handler(_tool_context(workspace_id, agent_id), args)
+        await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), args)
 
 
 async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
@@ -470,8 +480,8 @@ async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
 
 async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None:
     """Two agents each bound to the same provider account: through agent A's turn the kind lists
-    one object, flipping `shared` flips A's row alone, and revoking deletes A's binding alone —
-    agent B's row keeps its own disclosure and survives, so no verb crosses the wall."""
+    one object, flipping `shared` shares the connection every attached agent reads, and revoking
+    deletes A's binding alone — agent B's binding survives, still reading the shared connection."""
     workspace_id, agent_a, conversation_id, _owner, grantor_id, _other = await _seed()
     agent_b = uuid4()
     async with workspace_tx() as connection:
@@ -519,9 +529,10 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                 ),
             )
         flipped = {
-            grant.agent: grant.shared for grant in await workspace_grant_summaries(workspace_id)
+            summary.agent: summary.shared
+            for summary in await workspace_grant_summaries(workspace_id)
         }
-        assert flipped == {"assistant": True, "exec": False}
+        assert flipped == {"assistant": True, "exec": True}
 
         with agent(agent_a):
             delete_tool = _object_tool("object_delete")
@@ -537,7 +548,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
             )
         survivors = await workspace_grant_summaries(workspace_id)
         assert [grant.agent for grant in survivors] == ["exec"]
-        assert survivors[0].shared is False
+        assert survivors[0].shared is True
 
 
 async def test_apply_compares_with_the_current_grant_generation(
@@ -1112,7 +1123,7 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
                 "manifest": _share_manifest("bob@example.com", False, name=GMAIL_BOB_NAME),
             }
         )
-        with pytest.raises(VerbNotSupported, match="connect_account"):
+        with pytest.raises(ValueError, match="not available"):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), create)
 
 

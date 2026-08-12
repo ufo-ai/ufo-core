@@ -1354,6 +1354,7 @@ async def _seed_connection(
                 host="api.example.test",
                 owner_member_id=owner_member_id,
                 conversation_id=conversation_id,
+                shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1365,7 +1366,6 @@ async def _seed_connection(
                 agent_id=agent_id,
                 connection_id=connection_id,
                 conversation_id=conversation_id,
-                shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1375,6 +1375,10 @@ async def _seed_connection(
 async def test_connections_panel_holds_the_member_gate_and_the_wall(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
+    """#624 acceptance, read-side: inside one agent, member M's private connector never appears in
+    member N's panel while shared ones appear to both — a shared connection naming its owner to
+    every member who can reach it; another agent's grants are absent; an out-of-audience agent is
+    not-found; a workspace admin sees every edge."""
     client, workspace_id, agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -1420,6 +1424,75 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert walled.status_code == 404
+
+
+async def test_connection_pool_names_no_agent_outside_the_web_audience(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    walled_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=walled_agent,
+                workspace_id=workspace_id,
+                name="legal-review",
+                prompt="review",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    await _seed_connection(workspace_id, walled_agent, member_m, "github", shared=True)
+    pool = await client.get(
+        "/surface/web/connections", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert [(c["provider"], c["agents"]) for c in pool.json()["connections"]] == [("github", [])]
+    admin_pool = await client.get(
+        "/surface/web/connections", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    )
+    assert [a["name"] for c in admin_pool.json()["connections"] for a in c["agents"]] == [
+        "legal-review"
+    ]
+
+
+async def test_github_coverage_route_reports_independent_legs(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    await _seed_connection(workspace_id, agent_id, member_id, "github", shared=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                backend="github",
+                config={},
+                subject=f"member:{member_id}",
+                owner_member_id=member_id,
+                next_sync_at=sa.func.now(),
+                removed_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="github_app_installation",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    response = await client.get(
+        "/surface/web/github/coverage", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert response.json() == {"api": True, "git_push": True, "sources": True}
+    assert "sealed" not in response.text
 
 
 async def test_credentials_view_reports_slots_and_never_values(
@@ -5486,7 +5559,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     assert "owner" in refused.json()["message"]
     async with workspace_tx() as connection:
         still_shared = (
-            await connection.execute(sa.select(tables.connector_grant.c.shared))
+            await connection.execute(sa.select(tables.connection.c.shared))
         ).scalar_one()
     assert still_shared is True
     flipped = await client.post(
@@ -5497,9 +5570,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     assert flipped.status_code == 200
     assert flipped.json()["applied"] is True
     async with workspace_tx() as connection:
-        shared_now = (
-            await connection.execute(sa.select(tables.connector_grant.c.shared))
-        ).scalar_one()
+        shared_now = (await connection.execute(sa.select(tables.connection.c.shared))).scalar_one()
     assert shared_now is False
     revoked = await client.post(
         f"/surface/web/agents/{agent_id}/intents",

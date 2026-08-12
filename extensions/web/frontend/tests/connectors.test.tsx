@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { customizeHash } from "@/lib/route";
+import { workspaceHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -12,8 +12,6 @@ import {
   SECOND,
   SECOND_ID,
   json,
-  opened,
-  pick,
   useStreamFake,
   wire,
 } from "./harness";
@@ -26,6 +24,7 @@ function grant(provider: string, shared: boolean, name: string) {
   return {
     provider,
     account_id: "acct",
+    account_label: null,
     owner_email: "member@example.com",
     own: true,
     shared,
@@ -42,45 +41,36 @@ function connectors() {
           ? [grant("notion", true, "g2")]
           : [grant("github", false, "g1")],
       }),
+    "/github/coverage": () =>
+      json({ api: true, git_push: false, sources: true }),
     "/transcript": () => json({ messages: [] }),
   });
 }
 
-test("the customize tab lists every grant on the agent it names", async () => {
-  location.hash = "#/customize/connectors";
+test("the workspace tab lists the connection pool", async () => {
+  location.hash = "#/workspace/connectors";
   connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.getByText("Only you")).toBeTruthy();
-  expect(screen.getByText("You")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
-    "true",
-  );
-  expect((await opened("Agent")).map((option) => option.textContent)).toEqual([
-    "assistant",
-    "second",
-  ]);
+  expect(screen.getByText("API")).toBeTruthy();
+  expect(screen.getByText("Not connected")).toBeTruthy();
+  expect(screen.getAllByText("Sources").length).toBeGreaterThan(1);
 });
 
-test("picking an agent reads that agent's grants and names it in the hash", async () => {
-  location.hash = "#/customize/connectors";
+test("the agent tab reads attached connections", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   const { calls } = connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
-
-  await pick("Agent", "second");
-
-  expect(await screen.findByText("notion")).toBeTruthy();
-  expect(screen.queryByText("github")).toBeNull();
-  expect(location.hash).toBe("#/customize/connectors?agent=" + SECOND_ID);
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/connections"))).toBe(true);
+  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/connections"))).toBe(true);
 });
 
-test("a grant change is admitted into the lane of the agent the member picked", async () => {
+test("a grant change is admitted into the lane of the agent whose tab holds it", async () => {
   const posted: string[] = [];
-  location.hash = "#/customize/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
     "/intents": (url) => {
@@ -91,36 +81,27 @@ test("a grant change is admitted into the lane of the agent the member picked", 
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await pick("Agent", "second");
   await userEvent.click(await screen.findByRole("button", { name: "Share with agent" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
+  expect(posted[0]).toContain("/agents/" + AGENT_ID + "/intents");
 });
 
-test("a reloaded pick lands on that agent, which the empty line names", async () => {
-  location.hash = customizeHash("connectors", { agent: SECOND_ID });
+test("an empty pool states that no connector is connected yet", async () => {
+  location.hash = workspaceHash("connectors");
   wire({
     "/connections": () => json({ connections: [] }),
+    "/github/coverage": () => json({ api: false, git_push: false, sources: false }),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No account is connected to second yet.")).toBeTruthy();
-});
-
-test("a hash naming an agent this member cannot reach reports it", async () => {
-  location.hash = customizeHash("connectors", { agent: "99999999-9999-4999-8999-999999999999" });
-  const { calls } = connectors();
-  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-
-  expect(await screen.findByText("No such agent.")).toBeTruthy();
-  expect(calls.some((url) => url.includes("/connections"))).toBe(false);
+  expect(await screen.findByText("No connector is connected yet.")).toBeTruthy();
 });
 
 test("the bar is drawn while the first read is still in flight", async () => {
   const pending = new Map<string, (value: Response) => void>();
-  location.hash = "#/customize/connectors";
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -134,9 +115,9 @@ test("the bar is drawn while the first read is still in flight", async () => {
   );
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("combobox", { name: "Agent" })).toBeTruthy();
+  expect(await screen.findByRole("combobox", { name: "Connection" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add connector" })).toBeTruthy();
-  expect(pending.size).toBe(1);
+  expect(pending.size).toBe(2);
 });
 
 test("the agent's own tab states what is shared with that agent", async () => {

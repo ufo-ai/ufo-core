@@ -4,7 +4,7 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { CustomizeTab, Section, WorkspaceTab } from "@/lib/route";
 import { ARTIFACTS } from "@/views/Artifacts";
-import { Connectors } from "@/views/Connectors";
+import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { Scheduled } from "@/views/Scheduled";
 import { Sites } from "@/views/Sites";
@@ -40,6 +40,11 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
   },
   sources: declared("Sources", SOURCES),
+  connectors: {
+    label: "Connectors",
+    remountOnPlace: false,
+    render: () => <WorkspaceConnectors />,
+  },
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",
@@ -55,11 +60,6 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
 };
 
 export const CUSTOMIZE_VIEWS: Record<CustomizeTab, PaneView> = {
-  connectors: {
-    label: "Connectors",
-    remountOnPlace: false,
-    render: (place, onPlace) => <Connectors place={place} onPlace={onPlace} />,
-  },
   memory: {
     label: "Memory",
     remountOnPlace: false,

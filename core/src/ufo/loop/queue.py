@@ -773,11 +773,13 @@ async def _grant_cli_env(
             grant.account_id
             for grant in granted
             if grant.provider == provider
-            and not grant.shared
+            and not grant.connection_shared
             and grant.owner_member_id == acting_member_id
         )
         shared = sorted(
-            grant.account_id for grant in granted if grant.provider == provider and grant.shared
+            grant.account_id
+            for grant in granted
+            if grant.provider == provider and grant.connection_shared
         )
         accounts = private or shared
         if len(accounts) > 1:

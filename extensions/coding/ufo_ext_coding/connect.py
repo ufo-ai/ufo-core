@@ -166,8 +166,8 @@ async def github_installed(ctx: ExtensionContext, request: Request) -> Response:
         )
     await ctx.credentials.bind_installation(GIT_INSTALLATION_SLOT, installation_id)
     return _page(
-        "GitHub is connected. The agent can now clone and push the repositories this installation "
-        "grants — you can close this tab and return to the conversation.",
+        "GitHub App installation is connected. Git push is available for the repositories this "
+        "installation grants — you can close this tab and return to the conversation.",
         200,
     )
 

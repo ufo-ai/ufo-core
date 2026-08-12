@@ -478,6 +478,7 @@ class ConnectionView(BaseModel):
 
     provider: str
     account_id: str
+    account_label: str | None
     grant: str
     owner_email: str | None
     own: bool
@@ -488,6 +489,33 @@ class ConnectionView(BaseModel):
     @classmethod
     def _aware_utc(cls, value: datetime) -> datetime:
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class AttachedAgentView(BaseModel):
+    id: UUID
+    name: str
+
+
+class ConnectionPoolView(BaseModel):
+    provider: str
+    account_id: str
+    grant: str
+    account_label: str | None
+    owner_email: str | None
+    shared: bool
+    connected_at: datetime
+    agents: tuple[AttachedAgentView, ...]
+
+    @field_validator("connected_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class GithubCoverageView(BaseModel):
+    api: bool
+    git_push: bool
+    sources: bool
 
 
 class SpendCapView(BaseModel):
@@ -1765,15 +1793,18 @@ class SurfaceContext:
     ) -> tuple[ConnectionView, ...]:
         """The connector accounts granted to one agent that this member may see — the member gate
         in the query, never the caller: an admin sees every edge, everyone else their own private
-        grants plus agent-shared ones. The wall stays the query's `agent_id`; another agent's
-        edges are simply absent."""
+        grants plus workspace-shared ones (#645's resolution rule, read-side). The wall stays the
+        query's `agent_id`; another agent's edges are simply absent. A shared connection names its
+        owner to every member who can use it — sharing is the disclosure; a private connection
+        names its owner only to the owner or an admin."""
         query = (
             sa.select(
                 tables.connection.c.provider,
                 tables.connection.c.account_id,
+                tables.connection.c.account_label,
                 tables.member.c.email,
                 tables.connection.c.owner_member_id,
-                tables.connector_grant.c.shared,
+                tables.connection.c.shared,
                 tables.connector_grant.c.created_at,
             )
             .select_from(
@@ -1791,7 +1822,7 @@ class SurfaceContext:
         if not admin:
             query = query.where(
                 sa.or_(
-                    tables.connector_grant.c.shared,
+                    tables.connection.c.shared,
                     tables.connection.c.owner_member_id == member_id,
                 )
             )
@@ -1802,12 +1833,134 @@ class SurfaceContext:
                 provider=row.provider,
                 account_id=row.account_id,
                 grant=account_object_name(row.provider, row.account_id),
+                account_label=row.account_label,
                 owner_email=row.email,
                 own=admin or row.owner_member_id == member_id,
                 shared=row.shared,
                 connected_at=row.created_at,
             )
             for row in rows
+        )
+
+    async def list_connections(
+        self, member_id: UUID, *, admin: bool
+    ) -> tuple[ConnectionPoolView, ...]:
+        query = (
+            sa.select(
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.connection.c.account_label,
+                tables.member.c.email,
+                tables.connection.c.owner_member_id,
+                tables.connection.c.shared,
+                tables.connection.c.created_at,
+                tables.agent.c.id.label("agent_id"),
+                tables.agent.c.name.label("agent_name"),
+            )
+            .select_from(
+                tables.connection.join(
+                    tables.member, tables.connection.c.owner_member_id == tables.member.c.id
+                )
+                .outerjoin(
+                    tables.connector_grant,
+                    tables.connector_grant.c.connection_id == tables.connection.c.id,
+                )
+                .outerjoin(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+            )
+            .where(tables.connection.c.workspace_id == self.workspace_id)
+            .order_by(
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.agent.c.name,
+            )
+        )
+        if not admin:
+            query = query.where(
+                sa.or_(
+                    tables.connection.c.shared,
+                    tables.connection.c.owner_member_id == member_id,
+                )
+            )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        grouped: dict[tuple[str, str], list[AttachedAgentView]] = {}
+        records: dict[tuple[str, str], ConnectionPoolView] = {}
+        for row in rows:
+            key = (row.provider, row.account_id)
+            records.setdefault(
+                key,
+                ConnectionPoolView(
+                    provider=row.provider,
+                    account_id=row.account_id,
+                    grant=account_object_name(row.provider, row.account_id),
+                    account_label=row.account_label,
+                    owner_email=(
+                        row.email
+                        if admin or row.shared or row.owner_member_id == member_id
+                        else None
+                    ),
+                    shared=row.shared,
+                    connected_at=row.created_at,
+                    agents=(),
+                ),
+            )
+            if row.agent_id is not None:
+                grouped.setdefault(key, []).append(
+                    AttachedAgentView(id=row.agent_id, name=row.agent_name)
+                )
+        return tuple(
+            records[key].model_copy(update={"agents": tuple(grouped.get(key, ()))})
+            for key in records
+        )
+
+    async def github_coverage(self, member_id: UUID, *, admin: bool) -> GithubCoverageView:
+        connection_visibility = (
+            sa.true()
+            if admin
+            else sa.or_(
+                tables.connection.c.shared,
+                tables.connection.c.owner_member_id == member_id,
+            )
+        )
+        source_visibility = (
+            sa.true()
+            if admin
+            else sa.or_(
+                tables.source.c.subject == SHARED_SUBJECT,
+                tables.source.c.owner_member_id == member_id,
+            )
+        )
+        async with workspace_tx() as connection:
+            api = await connection.scalar(
+                sa.select(
+                    sa.exists().where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.provider == "github",
+                        connection_visibility,
+                    )
+                )
+            )
+            sources = await connection.scalar(
+                sa.select(
+                    sa.exists().where(
+                        tables.source.c.workspace_id == self.workspace_id,
+                        tables.source.c.backend == "github",
+                        tables.source.c.removed_at.is_(None),
+                        source_visibility,
+                    )
+                )
+            )
+            slots = await connection.scalars(
+                sa.select(tables.credential.c.slot).where(
+                    tables.credential.c.workspace_id == self.workspace_id,
+                    tables.credential.c.slot.in_(("github_app_installation", "github_git_token")),
+                )
+            )
+        filled_slots = set(slots.all())
+        return GithubCoverageView(
+            api=bool(api),
+            git_push=bool({"github_app_installation", "github_git_token"} & filled_slots),
+            sources=bool(sources),
         )
 
     async def list_artifacts(

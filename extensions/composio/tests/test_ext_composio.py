@@ -150,6 +150,7 @@ def _composio_handler(
     executed: list[dict[str, object]] | None = None,
     toolkit: str = "github",
     tool_slug: str = GITHUB_SLUG,
+    alias: str | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     """A Composio mock: connect endpoints (reporting `owner` as the account's owning user, so the
     ownership assertion passes for a match and refuses a foreign one), the tool catalog
@@ -166,15 +167,15 @@ def _composio_handler(
         if method == "GET" and path.endswith("/auth_configs"):
             return httpx.Response(200, json={"items": [{"id": "ac_test"}]})
         if method == "GET" and "/connected_accounts/" in path:
-            return httpx.Response(
-                200,
-                json={
-                    "status": "ACTIVE",
-                    "user_id": owner,
-                    "toolkit": {"slug": toolkit},
-                    "state": {"val": {"access_token": GITHUB_TOKEN}},
-                },
-            )
+            payload = {
+                "status": "ACTIVE",
+                "user_id": owner,
+                "toolkit": {"slug": toolkit},
+                "state": {"val": {"access_token": GITHUB_TOKEN}},
+            }
+            if alias is not None:
+                payload["alias"] = alias
+            return httpx.Response(200, json=payload)
         if method == "GET" and path.endswith("/tools"):
             return httpx.Response(200, json={"items": [_tool_row(tool_slug)]})
         if method == "GET" and path.endswith(f"/tools/{tool_slug}"):
@@ -216,10 +217,13 @@ def _mock_client(
     executed: list[dict[str, object]] | None = None,
     toolkit: str = "github",
     tool_slug: str = GITHUB_SLUG,
+    alias: str | None = None,
 ) -> composio.ComposioClient:
     return composio.ComposioClient(
         api_key="test",
-        transport=httpx.MockTransport(_composio_handler(owner, executed, toolkit, tool_slug)),
+        transport=httpx.MockTransport(
+            _composio_handler(owner, executed, toolkit, tool_slug, alias)
+        ),
     )
 
 
@@ -244,6 +248,26 @@ def _registry() -> ConnectorRegistry:
 async def test_composio_client_confirms_an_active_accounts_owner() -> None:
     account = await _mock_client().connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "github")
     assert account.account_id == COMPOSIO_ACCOUNT
+
+
+async def test_composio_account_label_reads_the_alias_field() -> None:
+    assert await _mock_client(alias="Work GitHub").account_label(COMPOSIO_ACCOUNT) == "Work GitHub"
+
+
+async def test_composio_identity_failure_does_not_fail_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _mock_client(owner=f"ufo_{UUID(int=1)}")
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    async def fail(_client: composio.ComposioClient, _account_id: str) -> str | None:
+        raise RuntimeError("identity unavailable")
+
+    monkeypatch.setattr(composio.ComposioClient, "account_label", fail)
+    account = await provider.ComposioOAuthProvider("github", PROVIDER_HOST).exchange(
+        COMPOSIO_ACCOUNT, "https://ufo.example.com/callback", UUID(int=1), "state"
+    )
+    assert account.account_label is None
 
 
 async def test_connectable_toolkit_rejects_a_path_traversing_slug_without_calling() -> None:

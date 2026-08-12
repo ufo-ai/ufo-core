@@ -237,6 +237,19 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
         old: ConnectorGrantSpec | None,
         owner: GeneratedObjectOwner | None,
     ) -> None:
+        if old is None and owner is None:
+            if ctx.grants is None or ctx.speaker_member_id is None:
+                raise RuntimeError("attaching requires a speaking member and connector access")
+            attached = await ctx.grants.attach(
+                provider=spec.provider,
+                account_id=spec.account_id,
+                conversation_id=ctx.turn.conversation_id,
+                actor_member_id=ctx.speaker_member_id,
+                shared=spec.shared,
+            )
+            if not attached:
+                raise ValueError(f"connection {name!r} is not available")
+            return
         if old is None or owner is None:
             raise VerbNotSupported(CONNECT_REFUSAL)
         if ctx.grants is None:
@@ -297,17 +310,18 @@ CONNECTION_OBJECT = ObjectKind(
 CONNECTOR_GRANT_OBJECT = ObjectKind(
     name=CONNECTOR_GRANT_KIND,
     description=(
-        "One agent's access to a connected provider account. Apply flips `shared`; delete revokes "
-        "only this agent's access."
+        "One agent's access to a connected provider account. Apply attaches an existing "
+        "connection or flips `shared`; delete revokes only this agent's access."
     ),
     guidance=(
-        "Use this kind to manage the current agent's connection access. Create is refused; "
-        "connect_account creates the edge. Its connection owner may share or make it private; a "
-        "workspace admin may only make it private. Its owner or an admin may delete it, revoking "
-        "only this agent's edge while leaving the connection and other agents' edges intact. Its "
-        "`scoped_to` link names the agent holding the edge; while it is private its `access_to` "
-        "link names the connection the edge opens — object_get that for the account's owner and "
-        "every agent holding it."
+        "Use this kind to manage the current agent's connection access. Apply with a new name "
+        "attaches a connection the workspace already holds; connect_account is the only way to "
+        "create one. Its connection owner may share or make it private; a workspace admin may "
+        "only make it private. Its owner or an admin may delete it, revoking only this agent's "
+        "edge while leaving the connection and other agents' edges intact. Its `scoped_to` link "
+        "names the agent holding the edge; while it is private its `access_to` link names the "
+        "connection the edge opens — object_get that for the account's owner and every agent "
+        "holding it."
     ),
     spec_model=ConnectorGrantSpec,
     store=ConnectorGrantObjects(),

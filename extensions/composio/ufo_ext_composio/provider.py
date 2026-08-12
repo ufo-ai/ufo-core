@@ -48,9 +48,13 @@ class ComposioOAuthProvider:
         self, code: str, _redirect_uri: str, workspace_id: UUID, _state: str
     ) -> OAuthAccount:
         expected_user = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-        return await composio.composio_client().connected_account(
-            code, expected_user, self.provider
-        )
+        client = composio.composio_client()
+        account = await client.connected_account(code, expected_user, self.provider)
+        try:
+            label = await client.account_label(code)
+        except Exception:
+            label = None
+        return OAuthAccount(account_id=account.account_id, account_label=label)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:

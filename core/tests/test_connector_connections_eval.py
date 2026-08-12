@@ -68,7 +68,7 @@ async def test_foreign_mailbox_seed_binds_the_shared_grant_to_the_other_member(
                     sa.select(
                         tables.connection.c.account_id,
                         tables.member.c.email,
-                        tables.connector_grant.c.shared,
+                        tables.connection.c.shared,
                     )
                     .select_from(
                         tables.connection.join(

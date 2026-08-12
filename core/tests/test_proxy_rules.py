@@ -130,7 +130,7 @@ def _grant(account: str = "acct-1", grantor=ACTING, shared: bool = False) -> Gra
         account_id=account,
         host=CLI_HOST,
         owner_member_id=grantor,
-        shared=shared,
+        connection_shared=shared,
     )
 
 
@@ -154,7 +154,7 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
         account_id="a",
         host="",
         owner_member_id=ACTING,
-        shared=False,
+        connection_shared=False,
     )
     rules = derive_grant_rules((grant,), ConnectorTransferHosts({}, default=TRANSFER))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
@@ -171,7 +171,7 @@ def test_brokered_grant_without_any_host_derives_no_scope_rule() -> None:
         account_id="a",
         host="",
         owner_member_id=ACTING,
-        shared=False,
+        connection_shared=False,
     )
     assert derive_grant_rules((grant,)) == ()
 
