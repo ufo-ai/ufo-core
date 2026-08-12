@@ -38,6 +38,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    sbxfs_file_op,
 )
 
 CARRIER_NAME = "docker"
@@ -451,6 +452,13 @@ class DockerCarrier:
             inspected = stderr.decode(errors="replace").strip()
             return f" with no stderr — docker inspect exited {code}: {inspected}"
         return f" with no stderr — its container reports: {stdout.decode().strip()}"
+
+    async def file_op(
+        self, handle: SandboxHandle, op: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        """The image bakes `sbxfs`, so a file op is that CLI run through `exec` — which pins the
+        container for the op's duration and revives a stopped one, exactly as a bash command."""
+        return await sbxfs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP

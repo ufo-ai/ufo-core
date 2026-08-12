@@ -101,39 +101,24 @@ pdftoppm -png -r {dpi} -f 1 -l 1 -singlefile "$pdf" "$stem"
 test -f "$stem.png"
 """
 
-SHARE_PREFLIGHT_PROG = """
-import hashlib, json, sys
-from containment import ContainmentError, contained_file
-
-
-def measure(path, root):
-    with contained_file(path, root) as target:
-        if target.lstat() is None:
-            raise SystemExit(path + " not found")
-        h = hashlib.sha256()
-        size = 0
-        head = b""
-        with target.open_bytes() as f:
-            while True:
-                chunk = f.read(1048576)
-                if not chunk:
-                    break
-                if len(head) < 4096:
-                    head += chunk[: 4096 - len(head)]
-                size += len(chunk)
-                h.update(chunk)
-    return {
-        "size": size,
-        "digest": "sha256:" + h.hexdigest(),
-        "is_text": b"\\x00" not in head,
-    }
-
-
-try:
-    print(json.dumps(measure(sys.argv[1], sys.argv[2])))
-except ContainmentError as error:
-    raise SystemExit(str(error))
-"""
+SHARE_PREFLIGHT_CMD = (
+    "p={path}\n"
+    '[ -f "$p" ] && [ ! -L "$p" ] || {{ printf %s "$p is not a regular file" >&2; exit 1; }}\n'
+    'size=$(wc -c < "$p" | tr -d " ") || exit 1\n'
+    'digest=$(openssl dgst -sha256 "$p") || exit 1\n'
+    "digest=${{digest##* }}\n"
+    'kept=$(head -c 4096 "$p" | tr -d "\\000" | wc -c | tr -d " ")\n'
+    'seen=$(head -c 4096 "$p" | wc -c | tr -d " ")\n'
+    'text=true; [ "$kept" = "$seen" ] || text=false\n'
+    'printf \'{{"size":%d,"digest":"sha256:%s","is_text":%s}}\' "$size" "$digest" "$text"\n'
+)
+"""Measure a produced file's size, sha256 and text-ness with tools every carrier has — `wc`,
+`openssl`, `head`, `tr` — so the same one command runs in the container and on a member's own
+machine, where no baked `sbxfs` or usable `python3` exists. The size and digest bind the S3
+presigned PUT (§`_store_artifact`), so a file changing between the measure and the upload fails at
+S3 rather than landing as a self-consistent lie. A symlink at the target is refused, the one
+containment the share path needs: the bytes it copies out must be the file the agent named, not a
+link's target."""
 
 
 MAX_BASH_TIMEOUT_MS = 600_000
@@ -628,8 +613,9 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
             detail=(render.stderr.strip() or render.stdout.strip())[:ARTIFACT_PREVIEW_DETAIL_CHARS],
         )
         return None
-    preflight = await ctx.sandbox.python(
-        SHARE_PREFLIGHT_PROG, rendered, WORKSPACE_DIR, timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS
+    preflight = await ctx.sandbox.bash(
+        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(rendered)),
+        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     )
     if preflight.exit_code != 0:
         log("share_file.preview.unmeasured", filename=safe_name)
@@ -660,8 +646,9 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
     scoped = workspace_path(args.file_path)
-    preflight = await ctx.sandbox.python(
-        SHARE_PREFLIGHT_PROG, scoped, WORKSPACE_DIR, timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS
+    preflight = await ctx.sandbox.bash(
+        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(scoped)),
+        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     )
     if preflight.exit_code != 0:
         raise RuntimeError(preflight.stderr.strip() or "artifact preflight failed")

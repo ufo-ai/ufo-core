@@ -16,7 +16,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -40,6 +40,7 @@ from ufo.sandbox.session import (
     sandbox_handle_id,
     workspace_path,
 )
+from ufo.sandbox.terminal import CLIENT_BACKEND, TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
 from ufo.workspace import ws_current
 
@@ -78,11 +79,27 @@ class ConversationSandbox:
     image_ref: str
     proxy: ProxyEndpoint
     workspace_root: Path
+    terminals: Terminals = field(default_factory=Terminals)
+    terminals_admissible: bool = True
+    """Whether this process may bind a conversation to a connected terminal — true only when it both
+    holds the member's connection and runs their turn, which is exactly the in-process hub's
+    single-instance condition. A deploy on a shared hub (a multi-replica fleet) sets it false: the
+    rendezvous is process-local, so a `client:` binding written on one pod would strand every turn
+    the queue hands another pod. False there means the terminal is never bound and the conversation
+    falls to the deploy's own carrier — the behaviour a member had before this existed."""
 
     async def open(
         self, conversation_id: UUID, run_token: str, env: Mapping[str, str]
-    ) -> SandboxHandle:
+    ) -> SandboxSession:
         """The conversation's sandbox, created or resumed, with its handle persisted.
+
+        The session carries the carrier that serves this conversation — the deploy's own, or the
+        member's connected terminal — so which backend a conversation runs on is answered in one
+        place rather than read off the process by every caller that needs to reach a workspace. A
+        conversation binds on first open and the row records it: a fresh conversation whose member
+        has a terminal connected binds to that terminal's directory, and a bound one refuses to run
+        anywhere else — a terminal at a different directory, or none, is named to the member rather
+        than answered from a workspace they cannot see.
 
         Nothing serializes concurrent opens of one brand-new conversation — an inbound attachment
         landing off-turn can race the turn's own open — so persistence is a compare-and-swap over
@@ -93,27 +110,42 @@ class ConversationSandbox:
         none exists there, and an e2b one idles into a paused, unbilled husk."""
         stored = await self._stored(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            handle = await self._opened(conversation_id, stored, run_token, env)
-            persisted = f"{self.backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
+            backend, carrier, handle = await self._opened(conversation_id, stored, run_token, env)
+            persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
-                return handle
+                return SandboxSession(carrier=carrier, handle=handle)
             winner = await self._claim(conversation_id, stored, persisted)
             if winner == persisted:
-                return handle
+                return SandboxSession(carrier=carrier, handle=handle)
             stored = winner
         raise RuntimeError(
             f"conversation {conversation_id}'s sandbox handle kept moving across "
             f"{OPEN_CLAIM_ATTEMPTS} open attempts"
         )
 
-    async def existing(self, conversation_id: UUID) -> SandboxHandle | None:
+    async def existing(self, conversation_id: UUID) -> SandboxSession | None:
         """The conversation's sandbox when one is reachable, else None — the read path. A read
         never provisions: a conversation that never grew a sandbox, one whose stored handle another
         backend wrote, and one whose sandbox the carrier reclaimed or its provider lost all answer
-        None rather than resurrecting anything, and the row is never written."""
+        None rather than resurrecting anything, and the row is never written. A terminal-bound
+        conversation is reachable exactly while its terminal is connected at the bound directory."""
         stored = await self._stored(conversation_id)
         if stored is None:
             return None
+        bound_path = sandbox_handle_id(CLIENT_BACKEND, stored)
+        if bound_path is not None:
+            carrier = TerminalCarrier(terminals=self.terminals)
+            handle = await carrier.attach(
+                SandboxSpec(
+                    conversation_id=conversation_id,
+                    image_ref=self.image_ref,
+                    workspace_host_path=bound_path,
+                    proxy=self.proxy,
+                    run_token=UNSIGNED_RUN_TOKEN,
+                    resume_id=bound_path,
+                )
+            )
+            return None if handle is None else SandboxSession(carrier=carrier, handle=handle)
         resume_id = sandbox_handle_id(self.backend, stored)
         if resume_id is None:
             return None
@@ -124,7 +156,7 @@ class ConversationSandbox:
             if existing is None:
                 return None
             host_path = existing
-        return await self.carrier.attach(
+        handle = await self.carrier.attach(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
@@ -134,6 +166,21 @@ class ConversationSandbox:
                 resume_id=resume_id,
             )
         )
+        return None if handle is None else SandboxSession(carrier=self.carrier, handle=handle)
+
+    async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool:
+        """Bind an unbound conversation to the terminal at `cwd`, reporting whether this call made
+        the claim. Admission calls it while the member's connection is live, so a turn whose first
+        open lands after that connection's hold still selects the terminal — the row, not the
+        transient binding, is what `_opened` trusts. A conversation already bound anywhere keeps
+        its binding: the compare-and-swap only fills an empty handle."""
+        if not self.terminals_admissible:
+            return False
+        claimed = f"{CLIENT_BACKEND}{SANDBOX_HANDLE_SEP}{cwd}"
+        stored = await self._stored(conversation_id)
+        if stored is not None:
+            return False
+        return await self._claim(conversation_id, None, claimed) == claimed
 
     async def write(self, conversation_id: UUID, rel: str, content: bytes) -> str:
         """Land `content` at `rel` inside the conversation's workspace and return the `/workspace`
@@ -144,19 +191,17 @@ class ConversationSandbox:
                 f"{rel} is {len(content)} bytes, over the {WORKSPACE_WRITE_MAX_BYTES}-byte limit "
                 "for a workspace write"
             )
-        target = workspace_path(rel)
-        handle = await self.open(conversation_id, UNSIGNED_RUN_TOKEN, {})
-        await self.carrier.write(handle, target, content)
-        return target
+        session = await self.open(conversation_id, UNSIGNED_RUN_TOKEN, {})
+        await session.write_file(rel, content)
+        return workspace_path(rel)
 
     async def prune(self, conversation_id: UUID, rel_prefix: str, keep: int) -> None:
         """Keep only the newest `keep` files directly under `rel_prefix`, deleting the rest —
         the bound on an off-turn writer that appends unattended. Runs in the container, so the
         newest are the newest the agent sees."""
-        handle = await self.existing(conversation_id)
-        if handle is None:
+        session = await self.existing(conversation_id)
+        if session is None:
             return
-        session = SandboxSession(carrier=self.carrier, handle=handle)
         result = await session.python(
             PRUNE_PROG, workspace_path(rel_prefix), WORKSPACE_DIR, str(keep)
         )
@@ -170,10 +215,9 @@ class ConversationSandbox:
         Paths come back absolute in the walker's own view — `/workspace/…` from a containerised
         carrier, the host directory from the local carrier's argv rewrite — so each is made relative
         against whichever of those two roots it carries."""
-        handle = await self.existing(conversation_id)
-        if handle is None:
+        session = await self.existing(conversation_id)
+        if session is None:
             return ()
-        session = SandboxSession(carrier=self.carrier, handle=handle)
         listed = await session.run_sbxfs(
             "glob",
             {
@@ -195,7 +239,7 @@ class ConversationSandbox:
             sorted(
                 (
                     WorkspaceFile(
-                        path=self._workspace_rel(handle, str(entry["path"])),
+                        path=self._workspace_rel(session.handle, str(entry["path"])),
                         size_bytes=int(entry["size"]),
                         modified_at=datetime.fromtimestamp(float(entry["modified"]), tz=UTC),
                     )
@@ -214,10 +258,9 @@ class ConversationSandbox:
     async def read(self, conversation_id: UUID, rel: str) -> AsyncIterator[bytes] | None:
         """One workspace file's bytes in bounded chunks, or None when the conversation has no
         sandbox or the path holds no file."""
-        handle = await self.existing(conversation_id)
-        if handle is None:
+        session = await self.existing(conversation_id)
+        if session is None:
             return None
-        session = SandboxSession(carrier=self.carrier, handle=handle)
         if not await session.file_exists(rel):
             return None
         return session.read_file(rel)
@@ -228,14 +271,46 @@ class ConversationSandbox:
         stored: str | None,
         run_token: str,
         env: Mapping[str, str],
-    ) -> SandboxHandle:
+    ) -> tuple[str, Carrier, SandboxHandle]:
+        """The carrier this open runs on and the handle it opened — the one place the choice is
+        made. A stored `client:` handle stays a terminal conversation forever, connected or not; a
+        fresh conversation binds to a connected terminal when one holds it; everything else is the
+        deploy's carrier, and a stored handle from the deploy's own backend keeps it even while a
+        terminal is connected — that conversation's workspace already lives elsewhere.
+
+        A stored `client:` handle this instance cannot serve terminals for — a deploy scaled from
+        one replica to a fleet since it was bound — fails loud rather than opening a directory named
+        `client:<path>` under `workspace_root`: the conversation's workspace is a terminal no pod
+        here can reach."""
+        bound_path = None if stored is None else sandbox_handle_id(CLIENT_BACKEND, stored)
+        if bound_path is not None and not self.terminals_admissible:
+            raise TerminalGone(
+                f"this conversation's workspace is the terminal at {bound_path}, which this "
+                "instance cannot reach"
+            )
+        if bound_path is None and stored is None and self.terminals_admissible:
+            bound = self.terminals.workspace(conversation_id)
+            bound_path = None if bound is None else bound.cwd
+        if bound_path is not None:
+            carrier = TerminalCarrier(terminals=self.terminals)
+            handle = await carrier.create(
+                SandboxSpec(
+                    conversation_id=conversation_id,
+                    image_ref=self.image_ref,
+                    workspace_host_path=bound_path,
+                    proxy=self.proxy,
+                    run_token=run_token,
+                    env=env,
+                )
+            )
+            return CLIENT_BACKEND, carrier, handle
         if self.off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
         else:
             host_path = await asyncio.to_thread(self._provisioned_dir, conversation_id)
             if os.geteuid() == 0:
                 await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
-        return await self.carrier.create(
+        handle = await self.carrier.create(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
@@ -246,6 +321,7 @@ class ConversationSandbox:
                 env=env,
             )
         )
+        return self.backend, self.carrier, handle
 
     def _provisioned_dir(self, conversation_id: UUID) -> Path:
         """The conversation's own directory under `workspace_root`, made if absent and then proved:

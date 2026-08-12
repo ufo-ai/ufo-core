@@ -106,6 +106,9 @@ from ufo.ext.surface import (
     SurfaceWorkspaceUnknown as SurfaceWorkspaceUnknown,
 )
 from ufo.ext.surface import (
+    TerminalOp as TerminalOp,
+)
+from ufo.ext.surface import (
     TurnDetail as TurnDetail,
 )
 from ufo.ext.surface import (
@@ -134,6 +137,9 @@ from ufo.sandbox.conversation import (
 )
 from ufo.sandbox.conversation import (
     WorkspaceFile as WorkspaceFile,
+)
+from ufo.sandbox.terminal import (
+    TerminalGone as TerminalGone,
 )
 from ufo.schema.records import (
     MEMBER_ADMISSION as MEMBER_ADMISSION,

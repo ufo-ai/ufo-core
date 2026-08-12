@@ -39,6 +39,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    sbxfs_file_op,
 )
 
 LOCAL_CONTAINER_ID = "local"
@@ -244,6 +245,13 @@ class LocalCarrier:
                 return target.open_bytes()
         except PathNotFound as error:
             raise FileNotFoundError(str(error)) from error
+
+    async def file_op(
+        self, handle: SandboxHandle, op: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        """The scratch PATH every command runs under holds `sbxfs`, so a file op is that CLI run as
+        a host subprocess against the workspace directory."""
+        return await sbxfs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,

@@ -69,6 +69,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    sbxfs_file_op,
 )
 
 CARRIER_NAME = "e2b"
@@ -594,6 +595,13 @@ class E2BCarrier:
                 yield chunk
         finally:
             await stream.aclose()
+
+    async def file_op(
+        self, handle: SandboxHandle, op: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        """The template bakes `sbxfs`, so a file op is that CLI run through `exec` — under the same
+        lease, quoting and timeout mapping every other command gets."""
+        return await sbxfs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port

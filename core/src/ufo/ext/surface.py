@@ -105,6 +105,7 @@ from ufo.sandbox.ingress_token import (
     IngressClaims,
     mint_ingress_token,
 )
+from ufo.sandbox.terminal import TerminalOp
 from ufo.schema import tables
 from ufo.schema.records import (
     SCHEDULED_ADMISSION,
@@ -3058,6 +3059,67 @@ class SurfaceContext:
         if not await self._owned_conversation(conversation_id):
             return None
         return await self._sandboxes.read(conversation_id, rel)
+
+    @property
+    def terminals_admissible(self) -> bool:
+        """Whether this instance may serve a conversation from the member's connected terminal —
+        false on a shared-hub fleet, where the rendezvous is process-local and a binding would
+        strand every turn the queue hands another replica. A surface reads it to decide whether an
+        `x-ufo-cwd` header means anything here at all."""
+        return self._sandboxes.terminals_admissible
+
+    def terminal_connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
+        """Publish the terminal this surface's held connection stands for, so the conversation's
+        sandbox can be that terminal. Paired with `terminal_disconnect` around the connection's
+        life; the rendezvous survives the reconnects a held stream's cap makes routine."""
+        self._sandboxes.terminals.connect(conversation_id, cwd, member_id)
+
+    def terminal_disconnect(self, conversation_id: UUID) -> None:
+        self._sandboxes.terminals.disconnect(conversation_id)
+
+    async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool:
+        """Bind a fresh conversation to the connected terminal at admission, so a turn whose first
+        sandbox open lands between the client's held streams still opens on the terminal rather
+        than silently provisioning the deploy's workspace. A compare-and-swap over an empty handle:
+        a conversation already bound anywhere keeps its binding, and the claim reports whether this
+        call made it — the one moment the surface tells the member where the agent works."""
+        return await self._sandboxes.claim_terminal(conversation_id, cwd)
+
+    async def next_terminal_op(self, conversation_id: UUID) -> TerminalOp:
+        """The next op the conversation's turn asks of its terminal — what a held stream races
+        against the turn's own frames, rendering each op as one `run` directive."""
+        return await self._sandboxes.terminals.next_op(conversation_id)
+
+    def terminal_resolve(
+        self,
+        conversation_id: UUID,
+        op_id: str,
+        reply: bytes,
+        failed: str | None,
+        member_id: UUID | None,
+    ) -> bool:
+        """Answer the in-flight op with what the member's client posted back. Gated twice: the op
+        id is unguessable and single-use, and the reply must come from the member whose terminal
+        the binding named — another member's bearer on the same channel resolves nothing."""
+        bound = self._sandboxes.terminals.workspace(conversation_id)
+        if bound is None or bound.member_id != member_id:
+            return False
+        return self._sandboxes.terminals.resolve(conversation_id, op_id, reply, failed)
+
+    async def terminal_op_body(
+        self, queue_key: str, op_id: str, member_id: UUID | None
+    ) -> bytes | None:
+        """The bytes the in-flight op sends down to the terminal — the read projection a client
+        `curl`s a write's body from, gated exactly as `terminal_resolve` and never creating a
+        conversation: an op in flight implies one exists."""
+        async with workspace_tx() as connection:
+            found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
+        if found is None:
+            return None
+        bound = self._sandboxes.terminals.workspace(found.id)
+        if bound is None or bound.member_id != member_id:
+            return None
+        return self._sandboxes.terminals.staged(found.id, op_id)
 
     async def installation(self, peer_surface: str) -> str | None:
         """The workspace's installation identity on a peer surface (e.g. Slack's `team:<id>`), or

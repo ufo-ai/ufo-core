@@ -23,4 +23,5 @@ from ufo.sandbox.session import SandboxHandle as SandboxHandle
 from ufo.sandbox.session import SandboxSession as SandboxSession
 from ufo.sandbox.session import SandboxSpec as SandboxSpec
 from ufo.sandbox.session import SandboxUnreachable as SandboxUnreachable
+from ufo.sandbox.session import sbxfs_file_op as sbxfs_file_op
 from ufo.sandbox.session import workspace_path as workspace_path

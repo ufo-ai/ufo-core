@@ -58,7 +58,6 @@ from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.session import (
     RunToken,
     RunTokenCodec,
-    SandboxHandle,
     SandboxSession,
 )
 from ufo.schema import tables
@@ -355,7 +354,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         model = await runtime.registry.client_for(resolved.model)
         grants = GrantStore() if runtime.credentials is not None else None
         clis = connector_clis(runtime.manifests)
-        handle = await _open_sandbox(
+        sandbox = await _open_sandbox(
             runtime.sandboxes,
             runtime.run_tokens,
             turn,
@@ -364,7 +363,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.credentials,
             injecting_slots(runtime.manifests),
         )
-        sandbox = SandboxSession(carrier=runtime.sandboxes.carrier, handle=handle)
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
             run_tokens=runtime.run_tokens,
@@ -590,7 +588,7 @@ async def _open_sandbox(
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
     slots: tuple[CredentialSlot, ...],
-) -> SandboxHandle:
+) -> SandboxSession:
     """Open the sandbox this turn runs in, under the turn's signed run token and the env its
     credentials derive.
 

@@ -563,15 +563,17 @@ async def test_a_real_sandbox_process_reaches_a_keyed_host_with_sentinels_only(
     )
     try:
         with ws(workspace_id):
-            handle = await _open_sandbox(
-                sandboxes,
-                RUN_TOKENS,
-                turn,
-                None,
-                {},
-                store,
-                KEYED_SLOTS,
-            )
+            handle = (
+                await _open_sandbox(
+                    sandboxes,
+                    RUN_TOKENS,
+                    turn,
+                    None,
+                    {},
+                    store,
+                    KEYED_SLOTS,
+                )
+            ).handle
             assert {k: v for k, v in handle.egress_env.items() if k.startswith("DD_")} == {
                 "DD_API_KEY": "UFO_SENTINEL_KEYED_DATADOG_API_KEY",
                 "DD_APP_KEY": "UFO_SENTINEL_KEYED_DATADOG_APPLICATION_KEY",

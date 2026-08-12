@@ -8,7 +8,8 @@ set -eu
 UFO_SCRIPT_VERSION=dev
 UFO_URL="${UFO_URL:-https://flyingobject.ai}"
 WORKSPACE_URL="${WORKSPACE_URL:-}"
-UFO_CHANNEL="${UFO_CHANNEL:-ufo}"
+UFO_CHANNEL="${UFO_CHANNEL:-}"
+ONBOARDING_CHANNEL=onboard
 UFO_HOME="${UFO_HOME:-$HOME/.ufo}"
 BIN="$UFO_HOME/bin/ufo"
 CREDENTIALS="$UFO_HOME/credentials"
@@ -39,6 +40,11 @@ NAK=$(printf '\025')
 CR=$(printf '\r')
 CHOICES=''
 CHOSEN=''
+OSA=''
+UFO_CWD=''
+SEND_OP=''
+SEND_OP_ERR=''
+SEND_OP_BODY=''
 
 TTY=0
 [ -t 1 ] && TTY=1
@@ -588,12 +594,29 @@ do_install() {
   add_to_path
 }
 
+find_osascript() {
+  OSA=$(command -v osascript 2> /dev/null) || OSA=''
+}
+
 post() {
-  set -- --data-binary "$1"
+  if [ -n "$SEND_OP" ]; then
+    if [ -n "$SEND_OP_ERR" ]; then
+      set -- --data-binary '' -H "x-ufo-op: $SEND_OP" -H "x-ufo-op-err: $SEND_OP_ERR"
+    elif [ -n "$SEND_OP_BODY" ]; then
+      set -- --data-binary "@$SEND_OP_BODY" -H "x-ufo-op: $SEND_OP"
+    else
+      set -- --data-binary '' -H "x-ufo-op: $SEND_OP"
+    fi
+  else
+    set -- --data-binary "$1"
+  fi
   if [ -n "${TOKEN:-}" ]; then
     set -- "$@" -H "authorization: Bearer $TOKEN"
   fi
   set -- "$@" -H "x-ufo-session: $SID"
+  if [ -n "$OSA" ] && [ -n "$WORKSPACE_URL" ]; then
+    set -- "$@" -H "x-ufo-cwd: $UFO_CWD"
+  fi
   installed=0
   [ -x "$BIN" ] && installed=1
   if [ -n "$WORKSPACE_URL" ]; then
@@ -626,6 +649,10 @@ turn() {
   spin_start
   post "$1" > "$FIFO" &
   CURL=$!
+  # `post` runs in that subshell, so its own reset of the op reply state would never reach this
+  # shell: the fork already handed the child the values it sends, so clearing them here — after the
+  # fork — leaves the next turn a clean body instead of re-posting a spent op id over every message.
+  SEND_OP='' SEND_OP_ERR='' SEND_OP_BODY=''
 
   TAB=$(printf '\t')
   while IFS="$TAB" read -r verb rest; do
@@ -744,6 +771,21 @@ turn() {
         NEXT=poll
         SLEEP=$rest
         ;;
+      run)
+        NEXT=run
+        OP_ID=${rest%%"$TAB"*}
+        R_REST=${rest#*"$TAB"}
+        OP_KIND=${R_REST%%"$TAB"*}
+        R_REST=${R_REST#*"$TAB"}
+        OP_TIMEOUT=${R_REST%%"$TAB"*}
+        R_REST=${R_REST#*"$TAB"}
+        # `read` strips the trailing IFS tab, so a write/read op (empty payload) arrives with arg
+        # as the last field. Split on what is there, as the file arm does.
+        case $R_REST in
+          *"$TAB"*) OP_ARG=${R_REST%%"$TAB"*}; OP_PAYLOAD=${R_REST#*"$TAB"} ;;
+          *) OP_ARG=$R_REST; OP_PAYLOAD='' ;;
+        esac
+        ;;
       token)
         TOKEN=$rest
         mkdir -p "$UFO_HOME"
@@ -754,6 +796,7 @@ turn() {
         WORKSPACE_URL=$rest
         mkdir -p "$UFO_HOME"
         printf '%s\n' "$WORKSPACE_URL" > "$WORKSPACE"
+        [ "$UFO_CHANNEL" != "$ONBOARDING_CHANNEL" ] || new_conversation
         ;;
       install)
         if [ -x "$BIN" ]; then
@@ -822,10 +865,40 @@ maybe_restart() {
   [ -z "${UFO_UPDATED:-}" ] || return 0
   [ -x "$BIN" ] || return 0
   UFO_UPDATED=1
-  export UFO_UPDATED
+  export UFO_UPDATED UFO_CHANNEL
   trap - EXIT
   cleanup
   exec "$BIN" "$INPUT0"
+}
+
+new_conversation() { # UFO_CHANNEL = 16 random bytes, hex
+  UFO_CHANNEL=''
+  for _b in $(od -An -N16 -tx1 /dev/urandom 2> /dev/null); do
+    UFO_CHANNEL=$UFO_CHANNEL$_b
+  done
+  [ "${#UFO_CHANNEL}" = 32 ] || die 'Could not read 16 random bytes from /dev/urandom'
+}
+
+launch_channel() { # onboarding holds one channel so its claim survives a relaunch
+  [ -z "$UFO_CHANNEL" ] || return 0
+  if [ -n "$WORKSPACE_URL" ]; then
+    new_conversation
+  else
+    UFO_CHANNEL=$ONBOARDING_CHANNEL
+  fi
+}
+
+resume_line() { # the command that returns to this conversation
+  [ "$TTY" = 1 ] && [ -n "$WORKSPACE_URL" ] || return 0
+  say ''
+  say "${DIM}Resume this conversation: ${RESET}${BOLD}ufo --resume $UFO_CHANNEL${RESET}"
+}
+
+interrupt() {
+  printf '\n'
+  dyn_erase 2> /dev/null || true
+  resume_line
+  exit 130
 }
 
 main() {
@@ -840,14 +913,22 @@ main() {
       WORKSPACE_URL=''
       shift
       ;;
+    --resume)
+      [ -n "${2:-}" ] || die '--resume needs a conversation id.'
+      UFO_CHANNEL=$2
+      shift 2
+      ;;
   esac
   WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/ufo.XXXXXX")
   FIFO="$WORKDIR/fifo"
   mkfifo "$FIFO"
   trap cleanup EXIT
+  find_osascript
+  UFO_CWD=$(pwd -P)
   [ -s "$CREDENTIALS" ] && TOKEN=$(cat "$CREDENTIALS")
   [ -s "$SESSION" ] && SID=$(cat "$SESSION")
   [ -z "$WORKSPACE_URL" ] && [ -s "$WORKSPACE" ] && WORKSPACE_URL=$(cat "$WORKSPACE")
+  launch_channel
   if [ -z "${SID:-}" ]; then
     SID="$(uname -n 2>/dev/null || printf host).$$.$(date +%s)"
     mkdir -p "$UFO_HOME"
@@ -865,10 +946,7 @@ main() {
       ask)
         if ! ask "$PROMPT"; then
           dyn_erase
-          if [ "$TTY" = 1 ]; then
-            say ''
-            say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
-          fi
+          resume_line
           exit 0
         fi
         input=$REPLY
@@ -876,10 +954,7 @@ main() {
       choose)
         if ! choose_menu; then
           dyn_erase
-          if [ "$TTY" = 1 ]; then
-            say ''
-            say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"
-          fi
+          resume_line
           exit 0
         fi
         input=$REPLY
@@ -888,18 +963,93 @@ main() {
         sleep "$SLEEP"
         input=''
         ;;
+      run)
+        # Only exec and fileop need the runner; write, read and an unknown kind answer without it,
+        # so the missing-runner refusal guards those two arms alone, never the whole dispatch.
+        SEND_OP=$OP_ID
+        case "$OP_KIND" in
+          exec | fileop)
+            if [ -z "$OSA" ]; then
+              SEND_OP_ERR='ENOSYS: osascript is not available on this machine'
+              OP_KIND=refused
+            fi
+            ;;
+        esac
+        case "$OP_KIND" in
+            exec)
+              printf '%b' "$OP_PAYLOAD" > "$WORKDIR/op.js"
+              "$OSA" -l JavaScript "$WORKDIR/op.js" emit "$WORKDIR" > "$WORKDIR/run.sh"
+              OP_CODE=0
+              # The command leads its own process group (`set -m`), and only a timeout kills that
+              # group: a command that exits on its own leaves its group alone, so a backgrounded
+              # server survives, mirroring local.py's exec.
+              (
+                set -m
+                cd "$UFO_CWD" || exit 127
+                sh "$WORKDIR/run.sh" < /dev/null \
+                  > "$WORKDIR/run.out" 2> "$WORKDIR/run.err" &
+                _op=$!
+                ( sleep "$OP_TIMEOUT"; kill -KILL "-$_op" 2> /dev/null ) \
+                  < /dev/null > /dev/null 2>&1 &
+                _watch=$!
+                wait "$_op"
+                _code=$?
+                kill "$_watch" 2> /dev/null
+                exit "$_code"
+              ) 2> /dev/null || OP_CODE=$?
+              "$OSA" -l JavaScript "$WORKDIR/op.js" package "$WORKDIR" \
+                "$WORKDIR/run.out" "$WORKDIR/run.err" "$OP_CODE" > "$WORKDIR/reply.json"
+              SEND_OP_BODY="$WORKDIR/reply.json"
+              ;;
+            fileop)
+              printf '%b' "$OP_PAYLOAD" > "$WORKDIR/op.js"
+              if "$OSA" -l JavaScript "$WORKDIR/op.js" run "$WORKDIR" \
+                > "$WORKDIR/reply.json" 2> "$WORKDIR/op.err"; then
+                SEND_OP_BODY="$WORKDIR/reply.json"
+              else
+                SEND_OP_ERR="fileop failed: $(tail -n 1 "$WORKDIR/op.err")"
+              fi
+              ;;
+            refused) ;;
+            write)
+              OP_TARGET=$(printf '%b' "$OP_ARG")
+              if curl -fsS -H "authorization: Bearer $TOKEN" -o "$WORKDIR/staged" \
+                   "$WORKSPACE_URL/surface/ufo/$UFO_CHANNEL/op/$OP_ID" \
+                 && mkdir -p "$(dirname "$OP_TARGET")" \
+                 && mv "$WORKDIR/staged" "$OP_TARGET"; then
+                SEND_OP_BODY=''
+              else
+                SEND_OP_ERR="EIO: could not write $OP_TARGET"
+              fi
+              ;;
+            read)
+              OP_TARGET=$(printf '%b' "$OP_ARG")
+              if [ -f "$OP_TARGET" ]; then
+                SEND_OP_BODY=$OP_TARGET
+              else
+                SEND_OP_ERR="ENOENT: $OP_TARGET"
+              fi
+              ;;
+            *)
+              SEND_OP_ERR="unknown op kind: $OP_KIND"
+              ;;
+        esac
+        input=''
+        ;;
       exit)
         maybe_restart
+        resume_line
         exit "$CODE"
         ;;
       end)
         maybe_restart
+        resume_line
         exit 0
         ;;
     esac
   done
 }
 
-trap 'printf "\n"; exit 130' INT
+trap interrupt INT
 
 main "$@"

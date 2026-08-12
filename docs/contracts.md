@@ -109,6 +109,7 @@ class Carrier(Protocol):
     async def exec(self, h: SandboxHandle, argv: tuple[str, ...], *, timeout_s: int) -> ExecResult: ...
     async def write(self, h: SandboxHandle, path: str, content: bytes) -> None: ...  # copy-in
     async def read(self, h: SandboxHandle, path: str) -> AsyncIterator[bytes]: ...   # copy-out
+    async def file_op(self, h: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]: ...
     async def dial(self, h: SandboxHandle, port: int) -> DialTarget: ...  # inbound: host, tls, headers
 class SandboxSpec:  conversation_id: UUID; image_ref: str; workspace_host_path: str
                     proxy: ProxyEndpoint; run_token: str; resume_id: str | None

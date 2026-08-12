@@ -730,9 +730,10 @@ def _tracked_patches(repository: Path) -> dict[str, str]:
 
 def _diff_path(line: str) -> str | None:
     """The path a `---`/`+++` header names, without its `a/`/`b/` prefix. git quotes a name holding
-    a space, a quote or a control character and leaves every other byte alone under
-    `core.quotePath=false`, so an unquoted one is already the path."""
-    value = line[4:]
+    a quote or a control character and leaves every other byte alone under `core.quotePath=false`,
+    so an unquoted one is already the path — except that a name holding a space rides unquoted with
+    one tab appended, git's own disambiguator, which is not part of the name."""
+    value = line[4:].removesuffix("\t")
     if value == "/dev/null":
         return None
     if value.startswith('"') and value.endswith('"'):

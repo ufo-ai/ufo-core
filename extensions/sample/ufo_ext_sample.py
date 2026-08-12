@@ -105,6 +105,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    sbxfs_file_op,
 )
 from ufo.sdk.search import (
     FetchedPage,
@@ -1088,6 +1089,11 @@ class SampleCarrier:
         if path not in self.written:
             raise FileNotFoundError(path)
         yield self.written[path]
+
+    async def file_op(
+        self, handle: SandboxHandle, op: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        return await sbxfs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         return DialTarget(host=f"{CARRIER_CONTAINER}:{port}", tls=False)

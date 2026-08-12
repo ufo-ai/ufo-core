@@ -218,6 +218,7 @@ def run() -> None:
                 config, manifests, credentials, registry.pricing, run_tokens, blob
             ),
             workspace_root=config.sandbox.workspace_root,
+            terminals_admissible=config.hub.backend == IN_PROCESS_BACKEND,
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),

@@ -30,6 +30,7 @@ from ufo.sandbox.session import (
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
+    WORKSPACE_DIR,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -404,6 +405,26 @@ async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
 
     read = await session.run_sbxfs("read", {"path": "notes.txt"})
     assert "alpha" in json.dumps(read)
+
+
+async def test_file_op_is_the_carrier_seam_a_session_runs_a_file_op_through(tmp_path: Path) -> None:
+    """The op the session hands down reaches the files through the carrier alone: the local one
+    answers it with the sbxfs on its command PATH, returning the parsed object, and a handled
+    refusal — a path holding no file — arrives as the ValueError a tool reports to the model."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    await carrier.write(handle, f"{WORKSPACE_DIR}/notes.txt", b"alpha\nbeta\n")
+
+    read = await carrier.file_op(
+        handle, "read", {"path": f"{WORKSPACE_DIR}/notes.txt", "workspace": WORKSPACE_DIR}
+    )
+    assert read["content"] == "1\talpha\n2\tbeta"
+
+    with pytest.raises(ValueError, match="not found"):
+        await carrier.file_op(
+            handle, "read", {"path": f"{WORKSPACE_DIR}/absent.txt", "workspace": WORKSPACE_DIR}
+        )
 
 
 GUARD_PROBE_PROG = """

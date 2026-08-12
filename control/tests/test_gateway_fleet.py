@@ -507,7 +507,9 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
 # occurs. Presence proves each listed string, never that no unlisted one exists.
 CLIENT_MEMBER_COPY = (
     ("""say 'Signed out.'""", 1),
-    ('say "${DIM}Type ${RESET}${BOLD}ufo${RESET}${DIM} to continue.${RESET}"', 2),
+    ('say "${DIM}Resume this conversation: ${RESET}${BOLD}ufo --resume $UFO_CHANNEL${RESET}"', 1),
+    ("""die '--resume needs a conversation id.'""", 1),
+    ("die 'Could not read 16 random bytes from /dev/urandom'", 1),
     ('say "${DIM}✓ Installed ufo ($BIN)${RESET}"', 1),
     ('say "${DIM}✓ Added ufo to PATH in $profile${RESET}"', 1),
     ('say "${DIM}✓ Linked ufo into ~/.local/bin${RESET}"', 1),

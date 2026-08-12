@@ -30,7 +30,7 @@ test for the extension API — every entry must be expressible without touching 
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Shutdown stops admission, gives requests `[serve].request_shutdown_seconds`, waits `[serve].graceful_shutdown_seconds` for active workflows and proxy connections, then retires the executor heartbeat only if no workflow remains active — a workflow that outlives the drain keeps the seat, so no peer re-dispatches work this process still executes; the seat ages out with the process. The supervisor's termination budget exceeds the sequential drains. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
-| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. |
+| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — only tool arguments are workspace-guarded), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
@@ -220,6 +220,19 @@ process-wide connection ceiling bounds proxy state; a per-workspace share keeps 
 consuming it. Meter records cross a bounded, backpressured queue and write aggregated per run in
 workspace-scoped transactions, so one failed run cannot roll back another.
 
+A conversation born in a connected CLI terminal binds instead to the `client` carrier: its
+`/workspace` is the member's own `$PWD`, and its ops run as the member's own subprocesses on the
+member's machine. This is not isolation and does not claim to be — the agent acts as the member,
+guarded by nothing the member's own shell is not, so it is offered only to a terminal the member
+themselves connected, never a deploy default. The ops travel down the surface's held stream and
+their results return as the client's next request (the rendezvous, §Extension surfaces); egress
+metering is cooperative there, since a command that ignores the proxy env reaches the member's own
+network, but the model sentinel is never exported, so no key leaks. A client-bound conversation
+with no connected terminal is unreachable — its turns and its file browser fail loud rather than
+running somewhere the member cannot see. The op logic itself ships from the deploy as JavaScript
+the member's stock `osascript` runs, so the contract has one home and the client carries no version
+of it.
+
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real
 values onto the wire, so raw secrets never enter the sandbox), **grant scoping** (authenticated
@@ -237,7 +250,8 @@ its apiserver-rewrite / token-mint module through this same rewriter seam.
 
 `/workspace` is the carrier's own storage and the only copy of a conversation's files: a host
 directory an in-cluster carrier bind-mounts (local, Docker), the sandbox's own disk off-cluster
-(E2B, whose provider suspends an idle sandbox and keeps it indefinitely). A tool reaches only
+(E2B, whose provider suspends an idle sandbox and keeps it indefinitely), the member's own `$PWD`
+for the `client` carrier. A tool reaches only
 `/workspace`; transcripts, compaction records, and artifacts live in the blob store, which the
 sandbox holds no credential for — sharing a file is the sandbox PUTting it to a single-key
 presigned URL serve mints, bound to the size and sha256 an in-container preflight measured, so S3
@@ -245,8 +259,9 @@ itself refuses any other body. Everything that touches workspace files goes thro
 a turn's tools, a surface landing an inbound attachment, a job appending a change log, the
 operator's file browser — and reclaiming a container is the carrier's own business: the Docker
 carrier stops its idle containers and any later touch starts one again (the bind mount and the
-container persist), and nothing may reclaim a container whose disk is the workspace. Carrier interface: `create / attach / exec / write / read / host` — a local
-carrier is core's default; Docker and E2B implement it as extensions on the `carriers` point.
+container persist), and nothing may reclaim a container whose disk is the workspace. Carrier interface: `create / attach / exec / write / read / file_op / dial` — a local
+carrier is core's default and the `client` carrier (the connected terminal) is core's too; Docker
+and E2B implement it as extensions on the `carriers` point.
 
 ## Extension system
 
@@ -280,7 +295,7 @@ Manifest registers (each optional):
 | `credentials` → `InjectionTarget` | A slot carrying one turns the workspace's stored secret into wire access without the sandbox ever holding it: the proxy admits the target host, swaps the declared sentinel in that header for the real secret, and meters the host — resolved **per workspace from the run token**, so the one shared proxy injects for every workspace and bakes none of them into its static base. The engine exports the sentinel (never the secret) as the declared `env`, so the agent's own HTTP client authenticates the provider the way the GitHub CLI does with a grant. A provider that pins its API host per account declares a `HostChoice` instead of a hostname: the closed set of hosts it publishes (a Datadog site, an OpsGenie region), the companion non-secret slot a member selects through, the default an unchosen workspace gets, and the env the resolved host is exported as. **The stored value is a choice, never a hostname** — it resolves to one of the declared literals or to nothing — so a scoped host is always a string the declaration wrote, which is what an exact ScopeRule requires: it bypasses the proxy's private-address check (that check guards the open-internet path), and free text there would let a stored address decide where the shared proxy dials. A closed set leaves no pattern, length cap, case fold or suffix bound to get wrong. Every host is resolved through one resolver by all three consumers — proxy rules, the sandbox export, and the `credential` object's own read — so no read reports a host the wire would not use. One sandbox variable carries one value: every exported name (a slot's env, a choice's env, a connector CLI's env) is claimed in a single namespace where both roles collect their slots, and a sentinel is unique across installed extensions. **This is how a provider no broker can front becomes connectable**: brokered OAuth where a broker hosts consent, a keyed slot where only the member holds a key. Two slots on one host each inject their own header, which is a provider taking more than one key (Datadog's API + application key); auth signed over the request (SigV4) and Basic composed from two stored values are not expressible and are out of scope. A slot naming `git_basic_user` composes Basic from its one secret and that declared literal, and configures the sandbox's git to send the sentinel as its `Authorization` header for the host: git is the one client whose auth is configured rather than read from an env var, and smart-HTTP takes only Basic — a bearer is refused even for a public repository. That is what makes `git clone` and `git push` of a private repository work from the sandbox, with the sandbox holding only the sentinel. A slot may also name a `source`: a credential this deploy MINTS per workspace at rule derivation rather than the member storing one, falling back to the stored value when it has nothing to mint from. The published GitHub App is the one: an admin installs it from a link carrying a seal that names this workspace and slot, GitHub returns them to the extension's own route, and the authorization code there exchanges for that member's own token so `GET /user/installations` decides whether they actually reach the installation the redirect claims — the seal alone could not, since an admin who obtains a link could return with another organization's id. Each turn's rules then carry an installation token minted against it, expiring in an hour. What the slot stores is a **seal** over `(workspace, installation)`, not the id: an id is a small integer anyone could type into the slot, and the deploy's App key mints against any installation of it — so the durable secret is the deploy's App key, not a member token at rest, and a member's own token remains the fallback for a repository outside that organization. |
 | `onboarding` | Steps contributed to the workspace/pack onboarding flow. |
 | `models` | Model providers behind `ModelClient` (OpenRouter, local runtimes). |
-| `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's default is a local temp-dir carrier. |
+| `carriers` | Sandbox carriers — Docker, E2B, remote runners; core's defaults are a local temp-dir carrier and the `client` carrier (a connected CLI terminal's own directory). |
 | `indexes` | Index backends for memory/source retrieval (turbopuffer); the dialect-native default (SQLite FTS5 + local cosine, Postgres tsvector + pgvector) ships as the base-pinned `index_default` extension registering name `"default"`, which core resolves when `memory.index_backend` is unset. |
 | `embeds` | Embedding backends behind `EmbedClient`, selected by `memory.embed_backend`; OpenAI text-embedding-3-large ships as the base-pinned `embed_openai` extension registering name `"default"`. |
 | `hubs` | Stream hubs for multi-instance deploys (Redis). |
@@ -423,7 +438,11 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   as the surface's own answer affordance under the same idempotent admit (first answer wins,
   `admitted_body` confirming which landed), credential prompts collect privately through the
   sealed handoff gated per slot by `credential_prompt_pending`, and the turn's shared files
-  deliver as TTL `artifact_link` downloads read off `shared_artifacts`.
+  deliver as TTL `artifact_link` downloads read off `shared_artifacts`. The held stream is also
+  where a `client`-carrier turn reaches the member's machine: the same connection that tails the
+  turn's frames also carries each sandbox op down as one directive and takes its result back as the
+  client's next request — the rendezvous the carrier awaits (§Sandboxing), gated so only the member
+  the binding names may answer an op or read the bytes it stages.
 
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|

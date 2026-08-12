@@ -39,6 +39,7 @@ from ufo.loop.queue import (
     _open_sandbox,
 )
 from ufo.loop.subagents import SubagentRegistry, Subagents
+from ufo.sandbox import terminal
 from ufo.sandbox.containment import LocationEscape, NonDirectoryAncestor
 from ufo.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
@@ -57,7 +58,9 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    sbxfs_file_op,
 )
+from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
 from ufo.schema.records import Turn
 from ufo.workspace import ws
@@ -179,15 +182,17 @@ async def test_open_sandbox_persists_the_backend_prefixed_handle(db: None, tmp_p
     workspace_id, conversation_id = await _conversation()
 
     with ws(workspace_id):
-        handle = await _open_sandbox(
-            _sandboxes(LocalCarrier(), "local", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            None,
-            (),
-        )
+        handle = (
+            await _open_sandbox(
+                _sandboxes(LocalCarrier(), "local", tmp_path),
+                RUN_TOKENS,
+                _turn(workspace_id, conversation_id),
+                None,
+                {},
+                None,
+                (),
+            )
+        ).handle
 
     assert handle.container_id == "local"
     assert handle.workspace_host_path == str(
@@ -209,15 +214,17 @@ async def test_open_sandbox_follows_a_symlinked_workspace_root(db: None, tmp_pat
     (tmp_path / "workspaces").symlink_to(volume, target_is_directory=True)
 
     with ws(workspace_id):
-        handle = await _open_sandbox(
-            _sandboxes(LocalCarrier(), "local", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            None,
-            (),
-        )
+        handle = (
+            await _open_sandbox(
+                _sandboxes(LocalCarrier(), "local", tmp_path),
+                RUN_TOKENS,
+                _turn(workspace_id, conversation_id),
+                None,
+                {},
+                None,
+                (),
+            )
+        ).handle
 
     assert handle.workspace_host_path == str(volume / str(conversation_id))
     assert (volume / str(conversation_id)).is_dir()
@@ -291,9 +298,11 @@ async def test_open_sandbox_provisions_a_traversing_root_at_its_canonical_place(
     )
 
     with ws(workspace_id):
-        handle = await _open_sandbox(
-            sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), None, {}, None, ()
-        )
+        handle = (
+            await _open_sandbox(
+                sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), None, {}, None, ()
+            )
+        ).handle
 
     assert handle.workspace_host_path == str(tmp_path / "workspaces" / str(conversation_id))
     assert (tmp_path / "workspaces" / str(conversation_id)).is_dir()
@@ -1126,7 +1135,7 @@ async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
         stored = await _stored_handle(conversation_id)
 
     assert stored is not None
-    assert first.container_id == second.container_id == stored.removeprefix("e2b:")
+    assert first.handle.container_id == second.handle.container_id == stored.removeprefix("e2b:")
 
 
 async def test_a_read_never_creates_and_answers_absent_for_a_gone_sandbox(
@@ -1213,6 +1222,11 @@ class _TruncatingCarrier:
         }
         return ExecResult(stdout=json.dumps(listing), stderr="", exit_code=0)
 
+    async def file_op(
+        self, handle: SandboxHandle, op: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        return await sbxfs_file_op(cast(Carrier, self), handle, op, params)
+
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
@@ -1235,9 +1249,11 @@ async def test_a_subagent_turn_opens_the_sandbox_of_the_member_conversation(
     )
 
     with ws(workspace_id):
-        handle = await _open_sandbox(
-            _sandboxes(LocalCarrier(), "local", tmp_path), RUN_TOKENS, child, None, {}, None, ()
-        )
+        handle = (
+            await _open_sandbox(
+                _sandboxes(LocalCarrier(), "local", tmp_path), RUN_TOKENS, child, None, {}, None, ()
+            )
+        ).handle
 
     assert handle.conversation_id == member_conversation
     assert handle.workspace_host_path == str(
@@ -1293,3 +1309,136 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
                     )
                 )
             ).scalar_one()
+
+
+def _terminal_sandboxes(
+    tmp_path: Path, terminals: Terminals, admissible: bool = True
+) -> ConversationSandbox:
+    return ConversationSandbox(
+        carrier=LocalCarrier(),
+        backend="local",
+        off_cluster=False,
+        image_ref=SANDBOX_IMAGE_REF,
+        proxy=PROXY,
+        workspace_root=tmp_path / "workspaces",
+        terminals=terminals,
+        terminals_admissible=admissible,
+    )
+
+
+async def test_a_fresh_conversation_binds_to_the_connected_terminal(
+    db: None, tmp_path: Path
+) -> None:
+    """First open with a terminal connected claims `client:<directory>` on the row, the session's
+    carrier is the terminal's, and no server-side workspace directory is provisioned."""
+    workspace_id, conversation_id = await _conversation()
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        session = await sandboxes.open(conversation_id, "run-a", {})
+
+    assert isinstance(session.carrier, TerminalCarrier)
+    assert session.handle.workspace_host_path == "/Users/member/proj"
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
+    assert not (tmp_path / "workspaces" / str(conversation_id)).exists()
+
+
+async def test_a_fleet_replica_never_binds_a_terminal_and_falls_to_the_deploy_carrier(
+    db: None, tmp_path: Path
+) -> None:
+    """On a shared-hub fleet the rendezvous is process-local, so a `client:` binding would strand
+    every turn the queue hands another replica. A non-admissible instance never claims it: the
+    connected terminal is ignored, no `client:` handle is written, and the conversation opens on the
+    deploy's own carrier."""
+    workspace_id, conversation_id = await _conversation()
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals, admissible=False)
+
+    with ws(workspace_id):
+        assert await sandboxes.claim_terminal(conversation_id, "/Users/member/proj") is False
+        session = await sandboxes.open(conversation_id, "run-a", {})
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert await _stored_handle(conversation_id) == "local:local"
+
+
+async def test_a_client_bound_conversation_a_replica_cannot_serve_fails_loud(
+    db: None, tmp_path: Path
+) -> None:
+    """A conversation bound to a terminal while the deploy ran one replica, opened on a pod after it
+    scaled to a fleet, fails loud rather than opening a directory named `client:<path>` under the
+    workspace root — its workspace is a terminal no pod here can reach."""
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    sandboxes = _terminal_sandboxes(tmp_path, Terminals(), admissible=False)
+
+    with ws(workspace_id):
+        with pytest.raises(TerminalGone) as refusal:
+            await sandboxes.open(conversation_id, "run-a", {})
+
+    assert "/Users/member/proj" in str(refusal.value)
+
+
+async def test_a_bound_conversation_refuses_a_terminal_standing_elsewhere(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/other", None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        with pytest.raises(TerminalGone) as refusal:
+            await sandboxes.open(conversation_id, "run-a", {})
+
+    assert "/Users/member/proj" in str(refusal.value)
+    assert "/Users/member/other" in str(refusal.value)
+
+
+async def test_a_bound_conversation_refuses_when_no_terminal_is_connected(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    sandboxes = _terminal_sandboxes(tmp_path, Terminals())
+
+    with ws(workspace_id):
+        with pytest.raises(TerminalGone):
+            await sandboxes.open(conversation_id, "run-a", {})
+        assert await sandboxes.existing(conversation_id) is None
+
+
+async def test_a_deploy_conversation_keeps_its_carrier_beside_a_connected_terminal(
+    db: None, tmp_path: Path
+) -> None:
+    """A stored handle from the deploy's own backend means the workspace already lives there; a
+    terminal arriving later never captures it."""
+    workspace_id, conversation_id = await _conversation(handle="local:local")
+    (tmp_path / "workspaces" / str(conversation_id)).mkdir(parents=True)
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        session = await sandboxes.open(conversation_id, "run-a", {})
+
+    assert isinstance(session.carrier, LocalCarrier)
+    assert await _stored_handle(conversation_id) == "local:local"
+
+
+async def test_a_terminal_conversation_is_reachable_exactly_while_connected(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
+    terminals = Terminals()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
+
+    with ws(workspace_id):
+        session = await sandboxes.existing(conversation_id)
+        assert session is not None
+        assert isinstance(session.carrier, TerminalCarrier)
+        terminals.disconnect(conversation_id)
+        assert await sandboxes.existing(conversation_id) is None

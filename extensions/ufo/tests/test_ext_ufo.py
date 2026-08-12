@@ -3,12 +3,19 @@ import base64
 import hashlib
 import hmac
 import json
+import os
+import re
+import shutil
 import subprocess
+import tempfile
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
@@ -18,6 +25,7 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from starlette.datastructures import Headers
 from starlette.requests import Request as StarletteRequest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
@@ -25,6 +33,7 @@ from ufo_ext_ufo.surface import (
     HOLD_SECONDS,
     PROMPT,
     SharedFile,
+    _utf8_header,
     directive,
     directives_for,
     resolve_workspace,
@@ -59,6 +68,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.sandbox.terminal import TerminalOpFailed, client_payload
 from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -291,15 +301,16 @@ def _client_script() -> Path:
     raise AssertionError(f"{CLIENT_RELATIVE} not found above {__file__}")
 
 
-def _shell_file_arm() -> str:
-    """The `file)` arm lifted out of the shipped client verbatim, so this exercises the script's own
-    parsing rather than a copy of it that could drift."""
+def _shell_slice(start: str, end: str) -> str:
+    """Source lifted out of the shipped client verbatim, so a test exercises the script's own code
+    rather than a copy of it that could drift."""
     source = _client_script().read_text()
-    start = source.index("      file)\n")
-    return source[start : source.index("      exit)", start)]
+    first = source.index(start)
+    return source[first : source.index(end, first)]
 
 
 def _render_in_shell(line: bytes) -> str:
+    arm = _shell_slice("      file)\n", "      exit)")
     harness = f"""
 TAB=$(printf '\\t')
 FX=0
@@ -310,7 +321,7 @@ flush_open() {{ :; }}
 dyn_paint() {{ :; }}
 while IFS="$TAB" read -r verb rest; do
   case "$verb" in
-{_shell_file_arm()}
+{arm}
   esac
 done
 """
@@ -334,6 +345,474 @@ def test_the_shell_client_splits_a_linkless_file_without_reading_the_size_as_a_u
     """`read` strips a trailing IFS tab, so an unconfigured link arrives as two fields and a naive
     third-field split would print the byte count where the URL belongs."""
     assert _render_in_shell(directive("file", "notes.md", "17", "")) == "shared notes.md (17 bytes)"
+
+
+OSASCRIPT = shutil.which("osascript")
+requires_osascript = pytest.mark.skipif(OSASCRIPT is None, reason="osascript is not installed")
+
+
+def _exec_payload(argv: list[str], env: dict[str, str] | None = None) -> str:
+    """The exec op's payload, composed by the production `client_payload` so the suite ships the
+    byte-identical program (shared prelude, `exec.js`, the `run` entry) the carrier ships."""
+    return client_payload("exec", {"argv": argv, "env": env or {}})
+
+
+def _relay_shell(
+    setup: str, line: bytes, osa: str | None = OSASCRIPT
+) -> subprocess.CompletedProcess[bytes]:
+    """Drive both shipped `run` arms verbatim: the directive arm parses `line`, then the `run)`
+    dispatch runs the op, and the harness reports the reply the loop would post. `setup` seeds the
+    variables (`WORKDIR`, `UFO_CWD`, and, for the copy arms, the surface state and stub `curl`)."""
+    directive_arm = _shell_slice("      run)\n", "      token)")
+    dispatch_arm = _shell_slice("      run)\n        # Only exec", "      exit)")
+    harness = f"""set -eu
+TAB=$(printf '\\t')
+OSA='{osa or ""}'
+SEND_OP='' SEND_OP_ERR='' SEND_OP_BODY=''
+{setup}
+NEXT=end
+IFS="$TAB" read -r verb rest
+case "$verb" in
+{directive_arm}
+esac
+case "$NEXT" in
+{dispatch_arm}
+esac
+printf 'SEND_OP=%s\\n' "$SEND_OP"
+printf 'SEND_OP_ERR=%s\\n' "$SEND_OP_ERR"
+printf 'SEND_OP_BODY=%s\\n' "$SEND_OP_BODY"
+"""
+    return subprocess.run(["sh", "-c", harness], input=line, capture_output=True, timeout=60)
+
+
+def _op_fields(done: subprocess.CompletedProcess[bytes]) -> dict[str, str]:
+    assert done.returncode == 0, done.stderr.decode()
+    fields: dict[str, str] = {}
+    for row in done.stdout.decode().splitlines():
+        key, _, value = row.partition("=")
+        fields[key] = value
+    return fields
+
+
+@requires_osascript
+def test_an_exec_op_packages_its_stdout_as_hex(tmp_path: Path) -> None:
+    """The op runs under the real committed `exec.js`: emit shell-quotes the argv, the command
+    runs, and package hands back the captured stdout as hex — the reply the loop posts."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "hi"]))
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    assert fields["SEND_OP"] == "a" * 32
+    assert fields["SEND_OP_ERR"] == ""
+    reply = json.loads((work / "reply.json").read_text())
+    assert bytes.fromhex(reply["stdout_hex"]) == b"hi"
+    assert reply["exit_code"] == 0
+
+
+@requires_osascript
+def test_a_package_reply_is_exactly_one_json_object(tmp_path: Path) -> None:
+    """osascript echoes a `run` handler's return value to stdout when it is not undefined; the
+    shipped trailer returns main()'s value and package `print`s its JSON then returns undefined, so
+    the reply is one object with no trailing echo line — a second line would corrupt the JSON."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "hi"]))
+    _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    text = (work / "reply.json").read_text()
+    assert text.endswith("\n")
+    assert text.count("\n") == 1
+    assert set(json.loads(text)) == {"exit_code", "stdout_hex", "stderr_hex"}
+
+
+@requires_osascript
+def test_an_exec_op_recovers_an_escaped_payload(tmp_path: Path) -> None:
+    """The payload rides one directive field, so a newline and a backslash in the JS are escaped on
+    the wire; `printf '%b'` restores them byte-for-byte before osascript parses the program."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "a\nb\\c"]))
+    _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    reply = json.loads((work / "reply.json").read_text())
+    assert bytes.fromhex(reply["stdout_hex"]) == b"a\nb\\c"
+
+
+@requires_osascript
+def test_an_exec_op_that_outlives_its_timeout_is_killed(tmp_path: Path) -> None:
+    """The watchdog kills the command's process group at `timeout_s`, so the packaged exit code is
+    nonzero and the arm returns near the deadline rather than at the command's own end."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "b" * 32, "exec", "1", "", _exec_payload(["sleep", "30"]))
+    started = time.monotonic()
+    done = _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line)
+    elapsed = time.monotonic() - started
+    _op_fields(done)
+    reply = json.loads((work / "reply.json").read_text())
+    assert reply["exit_code"] != 0
+    assert elapsed < 15
+
+
+@requires_osascript
+def test_a_backgrounded_child_does_not_hold_the_exec_arm(tmp_path: Path) -> None:
+    """A command that exits on its own leaves its group alone, so a server it backgrounds survives
+    and the arm returns at the command's exit — not when the descendant finally ends."""
+    work = tmp_path / "work"
+    work.mkdir()
+    payload = _exec_payload(["sh", "-c", "sleep 10 & echo up"])
+    line = directive("run", "c" * 32, "exec", "30", "", payload)
+    started = time.monotonic()
+    done = _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line)
+    elapsed = time.monotonic() - started
+    _op_fields(done)
+    reply = json.loads((work / "reply.json").read_text())
+    assert bytes.fromhex(reply["stdout_hex"]) == b"up\n"
+    assert reply["exit_code"] == 0
+    assert elapsed < 5
+
+
+def test_a_write_op_lands_the_staged_body_atomically(tmp_path: Path) -> None:
+    """The op's body is fetched into a staged temp and `mv`d onto the target — an atomic rename into
+    a directory the arm creates — and a success answers with an empty reply body."""
+    work = tmp_path / "work"
+    work.mkdir()
+    body = b"payload\x00bytes\nno-trailing-newline"
+    fixture = tmp_path / "fixture.bin"
+    fixture.write_bytes(body)
+    target = tmp_path / "sub" / "out.bin"
+    setup = f"""WORKDIR='{work}'
+UFO_CWD='{tmp_path}'
+TOKEN=tok
+WORKSPACE_URL=https://ws.test
+UFO_CHANNEL=chan
+curl() {{
+  _out=''
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then _out=$2; shift 2; else shift; fi
+  done
+  cp '{fixture}' "$_out"
+}}"""
+    line = directive("run", "d" * 32, "write", "60", str(target), "")
+    fields = _op_fields(_relay_shell(setup, line))
+    assert fields["SEND_OP"] == "d" * 32
+    assert fields["SEND_OP_ERR"] == ""
+    assert fields["SEND_OP_BODY"] == ""
+    assert target.read_bytes() == body
+    assert not (work / "staged").exists()
+
+
+@requires_osascript
+def test_a_read_op_answers_with_the_file_as_the_reply_body(tmp_path: Path) -> None:
+    """A regular file at the path is the reply body itself — the arm hands the loop its path so
+    `post` streams it with `--data-binary`."""
+    work = tmp_path / "work"
+    work.mkdir()
+    source = tmp_path / "doc.txt"
+    source.write_bytes(b"contents")
+    line = directive("run", "e" * 32, "read", "60", str(source), "")
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    assert fields["SEND_OP"] == "e" * 32
+    assert fields["SEND_OP_ERR"] == ""
+    assert fields["SEND_OP_BODY"] == str(source)
+
+
+def test_a_read_of_a_missing_path_is_an_enoent_error_reply(tmp_path: Path) -> None:
+    """A path holding no regular file answers `ENOENT`, carried as `x-ufo-op-err` so a copy-out's
+    failure never rides the empty reply body."""
+    work = tmp_path / "work"
+    work.mkdir()
+    missing = tmp_path / "nope.txt"
+    line = directive("run", "e" * 32, "read", "60", str(missing), "")
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    assert fields["SEND_OP"] == "e" * 32
+    assert fields["SEND_OP_ERR"] == f"ENOENT: {missing}"
+    assert fields["SEND_OP_BODY"] == ""
+
+
+def test_an_unknown_op_kind_is_named_in_the_error_reply(tmp_path: Path) -> None:
+    """An old client told to do something a newer server invented answers so, rather than hanging
+    the turn on a kind it cannot run."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "f" * 32, "teleport", "60", "", "")
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    assert fields["SEND_OP"] == "f" * 32
+    assert fields["SEND_OP_ERR"] == "unknown op kind: teleport"
+
+
+def test_a_run_op_without_osascript_is_an_enosys_error_reply(tmp_path: Path) -> None:
+    """A machine that cannot run ops sends no `x-ufo-cwd`, so the server never binds it; a run
+    directive arriving anyway is refused rather than silently dropped."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "0" * 32, "exec", "10", "", _exec_payload(["printf", "hi"]))
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa=""))
+    assert fields["SEND_OP"] == "0" * 32
+    assert fields["SEND_OP_ERR"] == "ENOSYS: osascript is not available on this machine"
+
+
+def _post_args(
+    send_op: str, send_op_err: str, send_op_body: str, *, osa: str, workspace: str
+) -> tuple[list[str], str]:
+    """The arguments the shipped `post` hands `curl` for one call, plus the op state it leaves
+    behind. `curl` is stubbed to record its argv; every other variable `post` reads is seeded."""
+    post_arm = _shell_slice("post() {", "\nline_break()")
+    harness = f"""set -eu
+curl() {{ for _a in "$@"; do printf 'ARG=%s\\n' "$_a"; done; }}
+TOKEN=tok
+SID=sid
+BIN=/nonexistent
+TTY=1
+UFO_SCRIPT_VERSION=test
+UFO_URL=https://onboard.test
+WORKSPACE_URL='{workspace}'
+UFO_CHANNEL=chan
+OSA='{osa}'
+UFO_CWD=/home/me/proj
+SEND_OP='{send_op}'
+SEND_OP_ERR='{send_op_err}'
+SEND_OP_BODY='{send_op_body}'
+{post_arm}
+post 'the message'
+printf 'LEFT=%s|%s|%s\\n' "$SEND_OP" "$SEND_OP_ERR" "$SEND_OP_BODY"
+"""
+    done = subprocess.run(["sh", "-c", harness], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    rows = done.stdout.splitlines()
+    args = [row[len("ARG=") :] for row in rows if row.startswith("ARG=")]
+    left = next(row[len("LEFT=") :] for row in rows if row.startswith("LEFT="))
+    return args, left
+
+
+def test_post_sends_an_op_reply_body_under_the_op_header() -> None:
+    """A successful op's reply is the staged body, addressed by `x-ufo-op`, and the terminal's cwd
+    rides every post so the surface re-binds the slot on the reconnect the reply POST is."""
+    args, left = _post_args(
+        "d" * 32, "", "/tmp/reply.json", osa="/usr/bin/osascript", workspace=WORKSPACE_BASE
+    )
+    assert "x-ufo-op: " + "d" * 32 in args
+    assert "@/tmp/reply.json" in args
+    assert "x-ufo-cwd: /home/me/proj" in args
+    assert not any(arg.startswith("x-ufo-op-err:") for arg in args)
+    # post never clears the op state — it runs in `turn`'s background subshell, so the reset must
+    # happen in the parent after the fork (see the two-turns regression below), not here.
+    assert left == "dddddddddddddddddddddddddddddddd||/tmp/reply.json"
+
+
+def test_post_sends_an_op_failure_as_a_header_with_no_body() -> None:
+    """A failed op answers with `x-ufo-op-err` and an empty body — a read's failure never rides the
+    body, because a read's body is the file."""
+    args, left = _post_args(
+        "e" * 32, "ENOENT: /x", "", osa="/usr/bin/osascript", workspace=WORKSPACE_BASE
+    )
+    assert "x-ufo-op: " + "e" * 32 in args
+    assert "x-ufo-op-err: ENOENT: /x" in args
+    assert left == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee|ENOENT: /x|"
+
+
+def test_post_omits_the_cwd_header_when_no_osascript_is_present() -> None:
+    """A machine that cannot run ops never offers to: with no runner, `post` sends no `x-ufo-cwd`,
+    so the surface leaves the conversation on the deploy's own carrier."""
+    args, _ = _post_args("", "", "", osa="", workspace=WORKSPACE_BASE)
+    assert not any(arg.startswith("x-ufo-cwd:") for arg in args)
+    assert "the message" in args
+
+
+def test_the_op_reply_state_is_cleared_after_the_fork_so_the_next_message_is_a_turn() -> None:
+    """The regression the review found: `post` runs in `turn`'s background subshell, so its own
+    reset could never clear the parent — an op reply's `SEND_OP` would ride every later message,
+    posting a spent op id with an empty body and dropping what the member typed. The fork lines run
+    verbatim from the shipped `turn`; the parent clears after the fork, so a second message posts as
+    a turn."""
+    fork_and_clear = _shell_slice('  post "$1" > "$FIFO" &', "\n\n  TAB=")
+    harness = f"""set -eu
+FIFO=/dev/null
+spin_start() {{ :; }}
+# Stand in for the backgrounded post, recording the op state the fork handed it — the child sees
+# the values set before the fork, exactly as the real post does.
+post() {{ printf '%s\\n' "$SEND_OP" > "$SEEN"; }}
+SEND_OP=opid SEND_OP_ERR='' SEND_OP_BODY=/tmp/reply
+{fork_and_clear}
+wait
+printf 'CHILD_SAW=%s\\n' "$(cat "$SEEN")"
+printf 'PARENT_LEFT=%s\\n' "$SEND_OP"
+"""
+    with tempfile.TemporaryDirectory() as work:
+        seen = Path(work) / "seen"
+        done = subprocess.run(
+            ["sh", "-c", harness, "sh", "the message"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "SEEN": str(seen)},
+            timeout=30,
+        )
+    assert done.returncode == 0, done.stderr
+    rows = dict(row.split("=", 1) for row in done.stdout.splitlines() if "=" in row)
+    assert rows["CHILD_SAW"] == "opid"
+    assert rows["PARENT_LEFT"] == ""
+
+
+WORKSPACE_BASE = "https://acme.ufo.test"
+
+
+def _channel_shell_slices() -> str:
+    return "\n".join(
+        (
+            _shell_slice('WORKSPACE_URL="', "\nUFO_HOME="),
+            _shell_slice("die()", "\nterm_size()"),
+            _shell_slice("new_conversation()", "\nlaunch_channel()"),
+            _shell_slice("launch_channel()", "\nresume_line()"),
+        )
+    )
+
+
+def _channel_environ(environment: str | None, workspace: str) -> dict[str, str]:
+    environ = dict(os.environ)
+    environ.pop("UFO_CHANNEL", None)
+    environ["WORKSPACE_URL"] = workspace
+    if environment is not None:
+        environ["UFO_CHANNEL"] = environment
+    return environ
+
+
+def _launch_in_shell(
+    *args: str, environment: str | None = None, workspace: str = WORKSPACE_BASE
+) -> subprocess.CompletedProcess[str]:
+    """The shipped client's channel arm, run the way a launch runs it, printing the channel the
+    launch settled on. The channel is the conversation key the surface reads off the path."""
+    arm = _shell_slice("    --resume)", "  WORKDIR=")
+    harness = f"""set -eu
+{_channel_shell_slices()}
+main() {{
+  case "${{1:-}}" in
+{arm}
+  launch_channel
+  printf '%s\\n' "$UFO_CHANNEL"
+}}
+main "$@"
+"""
+    return subprocess.run(
+        ["sh", "-c", harness, "ufo", *args],
+        capture_output=True,
+        text=True,
+        env=_channel_environ(environment, workspace),
+        timeout=30,
+    )
+
+
+def test_a_launch_is_a_new_conversation() -> None:
+    """The channel is the conversation, so a launch that reused one would hand every member a
+    single thread that never ends."""
+    first = _launch_in_shell().stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{32}", first) is not None
+    assert _launch_in_shell().stdout.strip() != first
+
+
+def test_resume_continues_the_conversation_it_names() -> None:
+    launched = _launch_in_shell("--resume", "9f2cb410")
+    assert launched.returncode == 0
+    assert launched.stdout.strip() == "9f2cb410"
+
+
+def test_resume_without_a_conversation_is_refused() -> None:
+    """A missing id would otherwise open a conversation named by the next word on the line."""
+    launched = _launch_in_shell("--resume")
+    assert launched.returncode == 1
+    assert launched.stderr.strip() == "ufo: --resume needs a conversation id."
+
+
+def test_an_environment_channel_holds_the_conversation_a_caller_named() -> None:
+    """`UFO_CHANNEL` wins over the fresh conversation, so a scripted caller keeps the thread it
+    pins; `--resume` wins over `UFO_CHANNEL`, because the line the member typed is the later
+    word."""
+    assert _launch_in_shell(environment="ops").stdout.strip() == "ops"
+    assert _launch_in_shell("--resume", "9f2cb410", environment="ops").stdout.strip() == "9f2cb410"
+
+
+def test_onboarding_launches_share_one_channel() -> None:
+    """The gateway keys its live claim on (channel, session), so a member who quits mid-onboarding
+    and relaunches must land back on that claim rather than at the email prompt."""
+    assert _launch_in_shell(workspace="").stdout.strip() == "onboard"
+    assert _launch_in_shell(workspace="").stdout.strip() == "onboard"
+
+
+def _sign_in_shell(environment: str | None = None) -> str:
+    """A launch with no workspace, then the `workspace` directive the sign-in cap lands: the
+    client's own launch arm sets the channel and its own `workspace)` arm answers the directive."""
+    arm = _shell_slice("      workspace)\n", "      install)")
+    harness = f"""set -eu
+TAB=$(printf '\\t')
+UFO_HOME=$(mktemp -d "${{TMPDIR:-/tmp}}/ufo-test.XXXXXX")
+WORKSPACE="$UFO_HOME/workspace"
+{_channel_shell_slices()}
+launch_channel
+while IFS="$TAB" read -r verb rest; do
+  case "$verb" in
+{arm}
+  esac
+done
+printf '%s\\n' "$UFO_CHANNEL"
+rm -rf "$UFO_HOME"
+"""
+    done = subprocess.run(
+        ["sh", "-c", harness],
+        input=directive("workspace", WORKSPACE_BASE),
+        capture_output=True,
+        check=True,
+        env=_channel_environ(environment, ""),
+        timeout=30,
+    )
+    return done.stdout.decode().strip()
+
+
+def test_signing_in_opens_a_fresh_conversation() -> None:
+    """The onboarding channel never becomes a conversation: the `workspace` directive moves the
+    member onto a fresh one, and the answer they type next opens it."""
+    assert re.fullmatch(r"[0-9a-f]{32}", _sign_in_shell()) is not None
+
+
+def test_a_pinned_channel_survives_sign_in() -> None:
+    assert _sign_in_shell(environment="ops") == "ops"
+
+
+def _leave_in_shell(channel: str, workspace: str, call: str) -> subprocess.CompletedProcess[str]:
+    """The client's own leaving lines, run under the state a launch leaves them in."""
+    say = _shell_slice("say()", "\ndie()")
+    erase = _shell_slice("dyn_erase()", "\nflush_open()")
+    line = _shell_slice("resume_line()", "\ninterrupt()")
+    trap = _shell_slice("interrupt()", "\nmain()")
+    harness = f"""set -eu
+TTY=1
+DYN_H=0
+BOLD='' DIM='' RESET=''
+UFO_CHANNEL='{channel}'
+WORKSPACE_URL='{workspace}'
+{say}
+{erase}
+{line}
+{trap}
+{call}
+"""
+    return subprocess.run(["sh", "-c", harness], capture_output=True, text=True, timeout=30)
+
+
+def test_the_exit_line_names_the_conversation_to_resume() -> None:
+    left = _leave_in_shell("9f2cb410", "https://acme.ufo.test", "resume_line")
+    assert left.returncode == 0
+    assert left.stdout.splitlines() == ["", "Resume this conversation: ufo --resume 9f2cb410"]
+
+
+def test_no_conversation_is_named_before_a_workspace_answers() -> None:
+    """Onboarding runs on the same channel, but the member holds no conversation until the
+    `workspace` directive lands, so there is nothing to resume yet."""
+    assert _leave_in_shell("9f2cb410", "", "resume_line").stdout == ""
+
+
+def test_an_interrupt_names_the_conversation_and_still_leaves_on_130() -> None:
+    """130 is the shell's own answer to Ctrl-C, and every caller of `ufo` reads it; the line the
+    member needs on the way out rides in front of that code, never over it."""
+    left = _leave_in_shell("9f2cb410", "https://acme.ufo.test", "interrupt")
+    assert left.returncode == 130
+    assert left.stdout.splitlines() == ["", "", "Resume this conversation: ufo --resume 9f2cb410"]
 
 
 async def test_stream_privately_renders_a_connect_handoff() -> None:
@@ -1090,3 +1569,148 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
             assert garbage.status_code == 400
     finally:
         dbos_client.destroy()
+
+
+def test_a_terminal_refusal_reaches_the_member_in_its_own_words() -> None:
+    """`TerminalGone` names the directory the conversation is bound to and where the terminal
+    stands — the member's own machine, the member's own fact — so the failure passes through where
+    an internal error stays behind the generic line."""
+    gone = Terminal(
+        frame=TerminalFrame(
+            status="failed",
+            text="",
+            error_class="TerminalGone",
+            error_message="this conversation's workspace is /Users/m/proj; the connected "
+            "terminal is at /Users/m/other",
+        )
+    )
+    lines = _lines(b"".join(directives_for(gone, streamed=False)))
+    assert lines[0][0] == "say" and "/Users/m/proj" in lines[0][1]
+
+
+async def _post_terminal(
+    client: AsyncClient,
+    channel: str,
+    token: str,
+    body: bytes,
+    cwd: str,
+    op: str | None = None,
+    err: str | None = None,
+) -> list[list[str]]:
+    headers = {"authorization": f"Bearer {token}", "x-ufo-cwd": cwd}
+    if op is not None:
+        headers["x-ufo-op"] = op
+    if err is not None:
+        headers["x-ufo-op-err"] = err
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        response = await client.post(f"/surface/ufo/{channel}", content=body, headers=headers)
+    assert response.status_code == 200
+    return _lines(response.content)
+
+
+async def _linked_conversation(client: AsyncClient, workspace_id: UUID, token: str) -> UUID:
+    """The conversation the `ufo` surface keys `main` to, created and its member linked by one
+    empty-body post — the state a first contact leaves, without admitting a turn. Its op routes are
+    then exercised against a rendezvous the test binds directly."""
+    assert await _post(client, "main", token, b"") == [["ask", ">"]]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.surface == "ufo",
+                )
+            )
+        ).one()
+    return row.id
+
+
+async def test_a_write_op_serves_its_staged_bytes_only_to_the_binding_member(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+    tmp_path: Path,
+) -> None:
+    """The op read projection: the bytes a write op sends down are served by `GET …/op/<id>` to the
+    member the binding names, refused to anyone else, and the reply posted under `x-ufo-op` resolves
+    the sender — the surface half of the rendezvous, exercised through the real routes."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    terminals = runtime[3].terminals
+    cwd = str(tmp_path / "proj")
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+
+    terminals.connect(conversation_id, cwd, member_id)
+    try:
+        sending = asyncio.ensure_future(
+            terminals.send(conversation_id, "write", 30, arg=f"{cwd}/inbox.txt", body=b"payload")
+        )
+        while (op := terminals.in_flight(conversation_id)) is None:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+
+        served = await client.get(
+            f"/surface/ufo/main/op/{op.op_id}",
+            headers={"authorization": f"Bearer {token}"},
+        )
+        assert served.status_code == 200 and served.content == b"payload"
+
+        await _seed_member(workspace_id, "other@example.com")
+        foreign = _mint(SECRET, workspace_id, "other@example.com", _future())
+        refused = await client.get(
+            f"/surface/ufo/main/op/{op.op_id}",
+            headers={"authorization": f"Bearer {foreign}"},
+        )
+        assert refused.status_code == 404
+
+        await _post_terminal(client, "main", token, b"", cwd, op=op.op_id)
+        assert await sending == b""
+    finally:
+        terminals.disconnect(conversation_id)
+
+
+def test_a_non_ascii_cwd_is_recovered_as_utf8_not_mojibake() -> None:
+    """The client sends `pwd -P` as raw UTF-8 header bytes; the ASGI server decodes each byte
+    latin-1, so a non-ASCII directory would bind mojibaked and every file op would miss. The surface
+    recovers the UTF-8 the client meant. Built from the exact raw bytes the wire carries, through a
+    real Starlette `Headers`, so the latin-1 decode under test is the production one."""
+    real_cwd = "/Users/josé/proj"
+    request = cast(
+        StarletteRequest,
+        SimpleNamespace(headers=Headers(raw=[(b"x-ufo-cwd", real_cwd.encode("utf-8"))])),
+    )
+    assert _utf8_header(request, "x-ufo-cwd") == real_cwd
+    # A plain ASCII path is invariant through the round trip.
+    ascii_request = cast(
+        StarletteRequest,
+        SimpleNamespace(headers=Headers(raw=[(b"x-ufo-cwd", b"/Users/alex/proj")])),
+    )
+    assert _utf8_header(ascii_request, "x-ufo-cwd") == "/Users/alex/proj"
+
+
+async def test_an_op_error_reply_fails_the_op_with_the_terminals_words(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+    tmp_path: Path,
+) -> None:
+    """A reply posted with `x-ufo-op-err` fails the waiting op with the terminal's own words,
+    routed through the real POST handler and the member gate."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    terminals = runtime[3].terminals
+    cwd = str(tmp_path / "proj")
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    terminals.connect(conversation_id, cwd, member_id)
+    try:
+        sending = asyncio.ensure_future(
+            terminals.send(conversation_id, "read", 30, arg=f"{cwd}/absent.txt")
+        )
+        while (op := terminals.in_flight(conversation_id)) is None:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+        await _post_terminal(
+            client, "main", token, b"", cwd, op=op.op_id, err=f"ENOENT: {cwd}/absent.txt"
+        )
+        with pytest.raises(TerminalOpFailed, match="ENOENT"):
+            await sending
+    finally:
+        terminals.disconnect(conversation_id)

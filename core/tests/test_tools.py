@@ -2,6 +2,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import shlex
 import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -23,11 +24,11 @@ from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
-    WORKSPACE_DIR,
     ExecResult,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
+    workspace_path,
 )
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillRegistry
@@ -35,7 +36,7 @@ from ufo.subjects import member_subject
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
     FILE_TOOL_RESULT_MAX_CHARS,
-    SHARE_PREFLIGHT_PROG,
+    SHARE_PREFLIGHT_CMD,
     _file_tool_result,
 )
 from ufo.tools.context import Spawn, SpawnResult, SubagentStatus, ToolContext, ToolResult
@@ -438,15 +439,19 @@ async def _local_session(workspace: Path) -> SandboxSession:
     return SandboxSession(carrier=carrier, handle=await carrier.create(spec))
 
 
+async def _preflight(session: SandboxSession, scoped: str) -> ExecResult:
+    return await session.bash(SHARE_PREFLIGHT_CMD.format(path=shlex.quote(scoped)))
+
+
 async def test_the_share_preflight_measures_the_workspace_file(tmp_path: Path) -> None:
-    """What the upload is bound to comes off the guard's own fd: the size and digest of the file the
-    descent proved, streamed rather than held whole."""
+    """What the upload is bound to comes off stock tools every carrier has — `wc` and `openssl` —
+    so the same one command measures the file in the container and on a member's own machine."""
     workspace = tmp_path / "workspace"
     session = await _local_session(workspace)
     payload = b"report bytes\n"
     (workspace / "report.txt").write_bytes(payload)
 
-    preflight = await session.python(SHARE_PREFLIGHT_PROG, "/workspace/report.txt", WORKSPACE_DIR)
+    preflight = await _preflight(session, "/workspace/report.txt")
 
     assert preflight.exit_code == 0, preflight.stderr
     assert json.loads(preflight.stdout) == {
@@ -456,34 +461,37 @@ async def test_the_share_preflight_measures_the_workspace_file(tmp_path: Path) -
     }
 
 
-async def test_the_share_preflight_refuses_a_traversal_path(tmp_path: Path) -> None:
-    """The preflight runs the checks itself rather than trusting the scoping upstream of it: a share
-    is the one path a produced file leaves the sandbox on, and NanoClaw's second escape is the
-    lesson that an ingress resolving its own path needs its own guard."""
+async def test_the_share_preflight_reports_binary_content(tmp_path: Path) -> None:
+    """A NUL in the first window marks the file binary, so a picture is not previewed as text."""
     workspace = tmp_path / "workspace"
     session = await _local_session(workspace)
-    (workspace / "sub").mkdir()
-    (tmp_path / "outside.txt").write_bytes(b"host secret")
+    (workspace / "blob.bin").write_bytes(b"head\x00tail")
 
-    preflight = await session.python(
-        SHARE_PREFLIGHT_PROG, "/workspace/sub/../../outside.txt", WORKSPACE_DIR
-    )
+    preflight = await _preflight(session, "/workspace/blob.bin")
 
-    assert preflight.exit_code != 0
-    assert "escapes" in preflight.stderr
-    assert preflight.stdout == ""
+    assert preflight.exit_code == 0, preflight.stderr
+    assert json.loads(preflight.stdout)["is_text"] is False
+
+
+def test_share_traversal_is_refused_before_the_preflight() -> None:
+    """A share is the one path a produced file leaves the sandbox on. Traversal is refused where the
+    handler resolves the member's argument — `workspace_path` — so a scoped path reaches the
+    preflight already confined, and NanoClaw's second escape stays closed."""
+    with pytest.raises(ValueError, match="escapes"):
+        workspace_path("sub/../../outside.txt")
 
 
 async def test_the_share_preflight_refuses_a_planted_symlink(tmp_path: Path) -> None:
-    """A share of a link the agent planted would copy the host file's bytes into the blob store and
-    mint a member download link for them — CVE-2026-56692 with one extra hop."""
+    """A share of a link the agent planted would copy the target's bytes into the blob store and
+    mint a member download link for them — CVE-2026-56692 with one extra hop. The command refuses a
+    symlink at the target, the one containment the copy-out needs."""
     workspace = tmp_path / "workspace"
     session = await _local_session(workspace)
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"host secret")
     (workspace / "report.txt").symlink_to(outside)
 
-    preflight = await session.python(SHARE_PREFLIGHT_PROG, "/workspace/report.txt", WORKSPACE_DIR)
+    preflight = await _preflight(session, "/workspace/report.txt")
 
     assert preflight.exit_code != 0
     assert "not a regular file" in preflight.stderr

@@ -17,7 +17,7 @@ admits nothing and resumes tailing the conversation's latest turn."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from functools import partial
 from uuid import UUID
@@ -35,6 +35,8 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
+    TerminalGone,
+    TerminalOp,
     TurnContext,
 )
 
@@ -44,8 +46,12 @@ PROMPT = ">"
 POLL_SECONDS = 1
 MAX_MESSAGE_BYTES = 40_000
 MAX_SECRET_BYTES = 4_096
+MAX_OP_REPLY_BYTES = 100 * 1024 * 1024
 SECRET_HEADER = "x-ufo-secret"
 SECRET_SLOT_HEADER = "x-ufo-slot"
+CWD_HEADER = "x-ufo-cwd"
+OP_HEADER = "x-ufo-op"
+OP_ERR_HEADER = "x-ufo-op-err"
 QUEUE_KEY_SEPARATOR = ":"
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
 
@@ -165,7 +171,7 @@ def _answer(
         case "failed":
             safe_error = (
                 frame.error_message
-                if frame.error_class == CredentialValueInvalid.__name__
+                if frame.error_class in (CredentialValueInvalid.__name__, TerminalGone.__name__)
                 else None
             )
             return (
@@ -188,6 +194,7 @@ async def stream_directives(
     pending: Callable[[str, str], Awaitable[bool]] | None = None,
     connect: Callable[[], Awaitable[str]] | None = None,
     files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None = None,
+    ops: Callable[[], Awaitable[TerminalOp]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -196,56 +203,97 @@ async def stream_directives(
     reconnect while an unanswered sibling keeps asking. `files` reads what the turn shared, once the
     turn has ended and only then — the rows land during the turn, so reading earlier would report a
     partial set. The tail's scope is entered here because the route returns its response before a
-    single frame is read."""
+    single frame is read.
+
+    `ops` is the terminal rendezvous: each op the turn asks of the member's machine is raced
+    against the turn's own frames, rendered as one `run` directive, and ends the stream — the
+    client goes to execute, and its reply is its next request, which resumes this tail. No `poll`
+    follows a `run`, because the reply is already the reconnect. A frame in flight when the op
+    wins is not lost: the next connection's tail replays the turn from the start of its ring."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
     terminated = False
+    ran = False
+    frame_task: asyncio.Task[tuple[str, LiveFrame] | None] | None = None
+    op_task: asyncio.Task[TerminalOp] | None = None
     async with tail as frames:
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            try:
-                item = await asyncio.wait_for(_next(frames), remaining)
-            except TimeoutError:
-                break
-            if item is None:
-                break
-            _cursor, frame = item
-            collect: tuple[CredentialPrompt, ...] = ()
-            if (
-                isinstance(frame, Terminal)
-                and frame.frame.credential_request is not None
-                and pending is not None
-            ):
-                request = frame.frame.credential_request
-                collect = tuple(
-                    [p for p in request.prompts if await pending(request.sealed, p.slot)]
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                if frame_task is None:
+                    frame_task = asyncio.ensure_future(_next(frames))
+                if ops is not None and op_task is None:
+                    op_task = asyncio.ensure_future(ops())
+                waiting: set[asyncio.Task[object]] = {frame_task}
+                if op_task is not None:
+                    waiting.add(op_task)
+                done, _ = await asyncio.wait(
+                    waiting, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
                 )
-            connect_message: str | None = None
-            if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
-                if connect is None:
-                    connect_message = "Connection request unavailable; ask me to connect again."
-                else:
+                if not done:
+                    break
+                if op_task is not None and op_task in done:
                     try:
-                        url = await connect()
-                    except ConnectRequestInvalid:
+                        op = op_task.result()
+                    except TerminalGone:
+                        op_task = None
+                        ops = None
+                        continue
+                    op_task = None
+                    yield directive("run", op.op_id, op.kind, str(op.timeout_s), op.arg, op.payload)
+                    ran = True
+                    break
+                item = frame_task.result()
+                frame_task = None
+                if item is None:
+                    break
+                _cursor, frame = item
+                collect: tuple[CredentialPrompt, ...] = ()
+                if (
+                    isinstance(frame, Terminal)
+                    and frame.frame.credential_request is not None
+                    and pending is not None
+                ):
+                    request = frame.frame.credential_request
+                    collect = tuple(
+                        [p for p in request.prompts if await pending(request.sealed, p.slot)]
+                    )
+                connect_message: str | None = None
+                if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
+                    if connect is None:
                         connect_message = "Connection request unavailable; ask me to connect again."
                     else:
-                        connect_message = f"Complete the connection: {url}"
-            shared: tuple[SharedFile, ...] = ()
-            if isinstance(frame, Terminal) and files is not None:
-                shared = await files()
-            lines = directives_for(frame, streamed, collect, connect_message, shared)
-            if lines and isinstance(frame, TextDelta):
-                streamed = True
-            for line in lines:
-                yield line
-            if isinstance(frame, Terminal | Parked):
-                terminated = True
-                break
-    if not terminated:
+                        try:
+                            url = await connect()
+                        except ConnectRequestInvalid:
+                            connect_message = (
+                                "Connection request unavailable; ask me to connect again."
+                            )
+                        else:
+                            connect_message = f"Complete the connection: {url}"
+                shared: tuple[SharedFile, ...] = ()
+                if isinstance(frame, Terminal) and files is not None:
+                    shared = await files()
+                lines = directives_for(frame, streamed, collect, connect_message, shared)
+                if lines and isinstance(frame, TextDelta):
+                    streamed = True
+                for line in lines:
+                    yield line
+                if isinstance(frame, Terminal | Parked):
+                    terminated = True
+                    break
+        finally:
+            for task in (frame_task, op_task):
+                if task is not None:
+                    task.cancel()
+            for task in (frame_task, op_task):
+                if task is not None:
+                    with suppress(asyncio.CancelledError, TerminalGone):
+                        await task
+    if not terminated and not ran:
         yield directive("poll", str(POLL_SECONDS))
 
 
@@ -265,10 +313,26 @@ def _authenticated_email(request: Request, workspace_id: UUID) -> str | None:
     return verify_token(token.strip(), workspace_id)
 
 
+def _utf8_header(request: Request, name: str) -> str:
+    """A header the client sent as raw UTF-8 bytes, recovered. HTTP header values are ISO-8859-1 by
+    the spec, so the ASGI server decodes each byte to a codepoint; re-encoding latin-1 is total and
+    reverses that exactly, and the UTF-8 decode then yields the string the client meant — the
+    member's `pwd -P`, which is a path and may hold non-ASCII. Pure ASCII is invariant through both
+    steps, so a plain path is untouched."""
+    raw = request.headers.get(name, "").strip()
+    return raw.encode("latin-1", "replace").decode("utf-8", "replace")
+
+
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
-    tailing the conversation's latest turn (or prompts when it holds none)."""
+    tailing the conversation's latest turn (or prompts when it holds none).
+
+    A client standing in a directory names it in `x-ufo-cwd`, and that terminal is the
+    conversation's sandbox: the first admitted turn claims the binding on the row and tells the
+    member where the agent works, the held stream publishes the terminal for the claim's ops, and
+    a reply to an op arrives as the next request under `x-ufo-op` — resolved here, never admitted,
+    never in the transcript — which then resumes the same tail."""
     email = _authenticated_email(request, ctx.workspace_id)
     if email is None:
         return PlainTextResponse("unauthorized", status_code=401)
@@ -276,35 +340,71 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     sealed = request.headers.get(SECRET_HEADER)
     if sealed:
         return await _fulfill_secret(ctx, request, member_id, sealed)
+    cwd = _utf8_header(request, CWD_HEADER)
+    if cwd and not cwd.startswith("/"):
+        return PlainTextResponse("x-ufo-cwd must be an absolute path", status_code=400)
+    if cwd and not ctx.terminals_admissible:
+        # A shared-hub fleet cannot serve a terminal from this pod, so the header means nothing
+        # here: the conversation falls to the deploy's own carrier, as if the client never sent it.
+        cwd = ""
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
-    body = (await request.body()).decode("utf-8", "replace").strip()
-    if not body:
+    note: bytes | None = None
+    op_id = request.headers.get(OP_HEADER, "").strip()
+    if op_id:
+        reply = await request.body()
+        if len(reply) > MAX_OP_REPLY_BYTES:
+            ctx.terminal_resolve(
+                conversation_id, op_id, b"", "E2BIG: the reply is too large", member_id
+            )
+            return PlainTextResponse("op reply too large", status_code=413)
+        failed = _utf8_header(request, OP_ERR_HEADER) or None
+        ctx.terminal_resolve(conversation_id, op_id, bytes(reply), failed, member_id)
         turn_id = await ctx.latest_turn(conversation_id)
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
     else:
-        if len(body.encode()) > MAX_MESSAGE_BYTES:
-            return PlainTextResponse("message too large", status_code=413)
-        turn_id = (
-            await ctx.admit(
-                conversation_id,
-                body,
-                context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
-                speaker_member_id=member_id,
-            )
-        ).turn_id
+        body = (await request.body()).decode("utf-8", "replace").strip()
+        if not body:
+            turn_id = await ctx.latest_turn(conversation_id)
+            if turn_id is None:
+                return PlainTextResponse(directive("ask", PROMPT))
+        else:
+            if len(body.encode()) > MAX_MESSAGE_BYTES:
+                return PlainTextResponse("message too large", status_code=413)
+            if cwd and await ctx.claim_terminal(conversation_id, cwd):
+                note = directive("note", f"Workspace: {cwd}")
+            turn_id = (
+                await ctx.admit(
+                    conversation_id,
+                    body,
+                    context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+                    speaker_member_id=member_id,
+                )
+            ).turn_id
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
-    return StreamingResponse(
-        stream_directives(
-            ctx.tail(turn_id),
-            HOLD_SECONDS,
-            ctx.credential_prompt_pending,
-            connect,
-            partial(shared_files, ctx, turn_id),
-        ),
-        media_type="text/plain",
+    directives = stream_directives(
+        ctx.tail(turn_id),
+        HOLD_SECONDS,
+        ctx.credential_prompt_pending,
+        connect,
+        partial(shared_files, ctx, turn_id),
+        ops=partial(ctx.next_terminal_op, conversation_id) if cwd else None,
     )
+
+    async def bound() -> AsyncIterator[bytes]:
+        if cwd:
+            ctx.terminal_connect(conversation_id, cwd, member_id)
+        try:
+            if note is not None:
+                yield note
+            async for line in directives:
+                yield line
+        finally:
+            if cwd:
+                ctx.terminal_disconnect(conversation_id)
+
+    return StreamingResponse(bound(), media_type="text/plain")
 
 
 async def _fulfill_secret(
@@ -329,4 +429,22 @@ async def _fulfill_secret(
     return PlainTextResponse(directive("say", f"stored {slot}"))
 
 
-ROUTES = (SurfaceRoute(method="POST", path="{channel}", handler=channel),)
+async def op_body(ctx: SurfaceContext, request: Request) -> Response:
+    """The bytes an in-flight op sends down to the terminal — what a write's relay `curl`s into
+    its staged temp file. An authenticated read projection: the op id is unguessable and single-use,
+    the bearer must be the member the binding was made under, and nothing is created or admitted."""
+    email = _authenticated_email(request, ctx.workspace_id)
+    if email is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    member_id = await ctx.linked_member(email)
+    queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
+    body = await ctx.terminal_op_body(queue_key, request.path_params["op_id"], member_id)
+    if body is None:
+        return PlainTextResponse("no such op", status_code=404)
+    return Response(content=body, media_type="application/octet-stream")
+
+
+ROUTES = (
+    SurfaceRoute(method="POST", path="{channel}", handler=channel),
+    SurfaceRoute(method="GET", path="{channel}/op/{op_id}", handler=op_body),
+)
