@@ -35,7 +35,7 @@ from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -96,10 +96,11 @@ current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", def
 
 
 def _build_engine(url: str, pool: _Pool) -> AsyncEngine:
-    """A pool for postgres, `NullPool` for sqlite — whose single-writer semantics are the
-    `begin immediate` listener below, not a pool. `pool_pre_ping` is what survives an RDS failover
-    or an idle-killed connection, and the dial it replaces one with is bounded here: asyncpg's own
-    default is 60 seconds, longer than any caller of this module is willing to wait."""
+    """A pool for either backend — sqlite's single-writer semantics are the `begin immediate`
+    listener below, not the absence of a pool, so nothing is bought by opening a fresh file handle
+    and re-running three pragmas for every transaction. `pool_pre_ping` is what survives an RDS
+    failover or an idle-killed connection, and the dial it replaces one with is bounded here:
+    asyncpg's own default is 60 seconds, longer than any caller of this module will wait."""
     engine = create_async_engine(url, **_pool_kwargs(url, pool))
     if engine.dialect.name == "sqlite":
         sa.event.listen(engine.sync_engine, "connect", _sqlite_on_connect)
@@ -108,9 +109,18 @@ def _build_engine(url: str, pool: _Pool) -> AsyncEngine:
 
 
 def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]:
+    """sqlite keeps `pool.size` connections warm and refuses none: its overflow is unlimited, so a
+    caller that wants a connection while every pooled one is checked out still gets one — the
+    property `NullPool` gave, without paying for a dial it could have reused. A local file needs
+    neither a pre-ping (nothing between the process and the file goes stale) nor a recycle."""
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite":
-        return {"poolclass": NullPool}
+        return {
+            "poolclass": AsyncAdaptedQueuePool,
+            "pool_size": pool.size,
+            "max_overflow": -1,
+            "pool_timeout": POOL_TIMEOUT_SECONDS,
+        }
     return {
         "pool_size": pool.size,
         "max_overflow": pool.overflow,

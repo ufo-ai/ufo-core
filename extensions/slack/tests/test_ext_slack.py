@@ -1899,6 +1899,10 @@ async def test_participating_thread_admits_unmentioned_replies_on_the_transcript
                 EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
             )
             assert response.json() == {"ok": True}
+            # Nothing orders an admission the ack deferred against the foreground admission of a
+            # later event, so each decision settles before the next event is posted — the queue
+            # order below is then the order these events arrived.
+            await _settle_ambient()
         for body in ignored:
             response = await client.post(
                 EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))

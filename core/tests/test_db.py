@@ -1799,8 +1799,71 @@ async def test_an_owner_url_gets_its_own_smaller_pool(db: None, database_url: st
 
 async def test_pool_class_matches_dialect(db: None, database_url: str) -> None:
     await _touch()
-    expected = "NullPool" if database_url.startswith("sqlite") else "AsyncAdaptedQueuePool"
-    assert type(_current_engine().pool).__name__ == expected
+    pool = _current_engine().pool
+    assert type(pool).__name__ == "AsyncAdaptedQueuePool"
+    assert pool.size() == ufo.db.POOL_SIZE
+    # What the dialect decides is now the ceiling, not the class: a local file refuses nobody.
+    expected = -1 if database_url.startswith("sqlite") else ufo.db.MAX_OVERFLOW
+    assert pool._max_overflow == expected
+
+
+async def test_a_pooled_sqlite_connection_carries_nothing_into_the_next_transaction(
+    db: None, database_url: str
+) -> None:
+    """THE sqlite pooling safety invariant: the handle a transaction hands back is reused
+    physically, and the next transaction finds it the way a fresh dial would have left it — no rows
+    from a body that raised, no write lock still held, the connect-time pragmas still on. Then the
+    test's own teardown has to end the reuse: an engine that kept its connection past `dispose_db`
+    would leave a write-ahead log beside the file every copy of it then misses. Self-contained in
+    one test, because under `--dist load` two tests are not ordered."""
+    if not database_url.startswith("sqlite"):
+        pytest.skip("a reused postgres connection is the RLS-GUC invariant's subject")
+    url = ufo.db._app_url
+    assert url is not None
+    await _touch()
+    dials = 0
+
+    def count_dial(*_: object) -> None:
+        nonlocal dials
+        dials += 1
+
+    sa.event.listen(_current_engine().sync_engine, "connect", count_dial)
+    committed, discarded = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=committed, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    with pytest.raises(RuntimeError, match="rolled back"):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=discarded, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            raise RuntimeError("this body is rolled back")
+    async with workspace_tx() as connection:
+        held = set((await connection.execute(sa.select(tables.workspace.c.id))).scalars().all())
+        foreign_keys = (await connection.execute(sa.text("pragma foreign_keys"))).scalar_one()
+    assert dials == 0, "the pool dialed again instead of reusing the connection handed back to it"
+    assert held == {committed}
+    assert foreign_keys == 1
+
+    engine = _current_engine()
+    async with engine.connect(), engine.connect():
+        assert dials == 1, "a second caller was handed the connection the first one was using"
+
+    database = Path(make_url(url).database or "")
+    await dispose_db()
+    init_db(url)
+    assert not database.with_name(f"{database.name}-wal").exists()
+    assert not database.with_name(f"{database.name}-shm").exists()
+    reader = sqlite3.connect(database)
+    try:
+        assert [row[0] for row in reader.execute("select id from workspace")] == [committed.hex]
+    finally:
+        reader.close()
 
 
 def test_the_dial_is_bounded_and_the_pool_is_named() -> None:
