@@ -68,7 +68,7 @@ from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.sandbox.terminal import TerminalOpFailed, client_payload
+from ufo.sandbox.terminal import TerminalOpFailed, client_program_bundle
 from ufo.schema import tables
 from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -351,23 +351,29 @@ OSASCRIPT = shutil.which("osascript")
 requires_osascript = pytest.mark.skipif(OSASCRIPT is None, reason="osascript is not installed")
 
 
-def _exec_payload(argv: list[str], env: dict[str, str] | None = None) -> str:
-    """The exec op's payload, composed by the production `client_payload` so the suite ships the
-    byte-identical program (shared prelude, `exec.js`, the `run` entry) the carrier ships."""
-    return client_payload("exec", {"argv": argv, "env": env or {}})
+def _exec_params(argv: list[str], env: dict[str, str] | None = None) -> str:
+    """The exec op's params — the JSON the relay lands as `op.json` for the bundled `exec.js` to
+    read. The program never rides the wire; the client holds it and the directive names it."""
+    return json.dumps({"argv": argv, "env": env or {}})
 
 
 def _relay_shell(
     setup: str, line: bytes, osa: str | None = OSASCRIPT
 ) -> subprocess.CompletedProcess[bytes]:
-    """Drive both shipped `run` arms verbatim: the directive arm parses `line`, then the `run)`
-    dispatch runs the op, and the harness reports the reply the loop would post. `setup` seeds the
-    variables (`WORKDIR`, `UFO_CWD`, and, for the copy arms, the surface state and stub `curl`)."""
+    """Drive both shipped `run` arms verbatim: the client extracts its bundled programs, the
+    directive arm parses `line`, then the `run)` dispatch runs the op naming a bundled program, and
+    the harness reports the reply the loop would post. The bundle is the production
+    `client_program_bundle()` written into a scratch `UFO_HOME`, so the op runs the byte-identical
+    program a served client holds. `setup` seeds the variables (`WORKDIR`, `UFO_CWD`, and, for the
+    copy arms, the surface state and stub `curl`)."""
     directive_arm = _shell_slice("      run)\n", "      token)")
     dispatch_arm = _shell_slice("      run)\n        # Only exec", "      exit)")
+    home = tempfile.mkdtemp(prefix="ufo-home.")
     harness = f"""set -eu
 TAB=$(printf '\\t')
 OSA='{osa or ""}'
+UFO_HOME='{home}'
+{client_program_bundle()}
 SEND_OP='' SEND_OP_ERR='' SEND_OP_BODY=''
 {setup}
 NEXT=end
@@ -400,7 +406,9 @@ def test_an_exec_op_packages_its_stdout_as_hex(tmp_path: Path) -> None:
     runs, and package hands back the captured stdout as hex — the reply the loop posts."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "hi"]))
+    line = directive(
+        "run", "a" * 32, "exec", "exec", "10", "", _exec_params(["printf", "%s", "hi"])
+    )
     fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     assert fields["SEND_OP"] == "a" * 32
     assert fields["SEND_OP_ERR"] == ""
@@ -416,7 +424,9 @@ def test_a_package_reply_is_exactly_one_json_object(tmp_path: Path) -> None:
     the reply is one object with no trailing echo line — a second line would corrupt the JSON."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "hi"]))
+    line = directive(
+        "run", "a" * 32, "exec", "exec", "10", "", _exec_params(["printf", "%s", "hi"])
+    )
     _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     text = (work / "reply.json").read_text()
     assert text.endswith("\n")
@@ -426,11 +436,13 @@ def test_a_package_reply_is_exactly_one_json_object(tmp_path: Path) -> None:
 
 @requires_osascript
 def test_an_exec_op_recovers_an_escaped_payload(tmp_path: Path) -> None:
-    """The payload rides one directive field, so a newline and a backslash in the JS are escaped on
-    the wire; `printf '%b'` restores them byte-for-byte before osascript parses the program."""
+    """The params ride one directive field, so a newline and a backslash in the argv are escaped on
+    the wire; `printf '%b'` restores them byte-for-byte into `op.json` before the program reads."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "a" * 32, "exec", "10", "", _exec_payload(["printf", "%s", "a\nb\\c"]))
+    line = directive(
+        "run", "a" * 32, "exec", "exec", "10", "", _exec_params(["printf", "%s", "a\nb\\c"])
+    )
     _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     reply = json.loads((work / "reply.json").read_text())
     assert bytes.fromhex(reply["stdout_hex"]) == b"a\nb\\c"
@@ -442,7 +454,7 @@ def test_an_exec_op_that_outlives_its_timeout_is_killed(tmp_path: Path) -> None:
     nonzero and the arm returns near the deadline rather than at the command's own end."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "b" * 32, "exec", "1", "", _exec_payload(["sleep", "30"]))
+    line = directive("run", "b" * 32, "exec", "exec", "1", "", _exec_params(["sleep", "30"]))
     started = time.monotonic()
     done = _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line)
     elapsed = time.monotonic() - started
@@ -458,8 +470,8 @@ def test_a_backgrounded_child_does_not_hold_the_exec_arm(tmp_path: Path) -> None
     and the arm returns at the command's exit — not when the descendant finally ends."""
     work = tmp_path / "work"
     work.mkdir()
-    payload = _exec_payload(["sh", "-c", "sleep 10 & echo up"])
-    line = directive("run", "c" * 32, "exec", "30", "", payload)
+    params = _exec_params(["sh", "-c", "sleep 10 & echo up"])
+    line = directive("run", "c" * 32, "exec", "exec", "30", "", params)
     started = time.monotonic()
     done = _relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line)
     elapsed = time.monotonic() - started
@@ -491,7 +503,7 @@ curl() {{
   done
   cp '{fixture}' "$_out"
 }}"""
-    line = directive("run", "d" * 32, "write", "60", str(target), "")
+    line = directive("run", "d" * 32, "write", "", "60", str(target), "")
     fields = _op_fields(_relay_shell(setup, line))
     assert fields["SEND_OP"] == "d" * 32
     assert fields["SEND_OP_ERR"] == ""
@@ -508,7 +520,7 @@ def test_a_read_op_answers_with_the_file_as_the_reply_body(tmp_path: Path) -> No
     work.mkdir()
     source = tmp_path / "doc.txt"
     source.write_bytes(b"contents")
-    line = directive("run", "e" * 32, "read", "60", str(source), "")
+    line = directive("run", "e" * 32, "read", "", "60", str(source), "")
     fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     assert fields["SEND_OP"] == "e" * 32
     assert fields["SEND_OP_ERR"] == ""
@@ -521,7 +533,7 @@ def test_a_read_of_a_missing_path_is_an_enoent_error_reply(tmp_path: Path) -> No
     work = tmp_path / "work"
     work.mkdir()
     missing = tmp_path / "nope.txt"
-    line = directive("run", "e" * 32, "read", "60", str(missing), "")
+    line = directive("run", "e" * 32, "read", "", "60", str(missing), "")
     fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     assert fields["SEND_OP"] == "e" * 32
     assert fields["SEND_OP_ERR"] == f"ENOENT: {missing}"
@@ -533,7 +545,7 @@ def test_an_unknown_op_kind_is_named_in_the_error_reply(tmp_path: Path) -> None:
     the turn on a kind it cannot run."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "f" * 32, "teleport", "60", "", "")
+    line = directive("run", "f" * 32, "teleport", "", "60", "", "")
     fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
     assert fields["SEND_OP"] == "f" * 32
     assert fields["SEND_OP_ERR"] == "unknown op kind: teleport"
@@ -544,10 +556,23 @@ def test_a_run_op_without_osascript_is_an_enosys_error_reply(tmp_path: Path) -> 
     directive arriving anyway is refused rather than silently dropped."""
     work = tmp_path / "work"
     work.mkdir()
-    line = directive("run", "0" * 32, "exec", "10", "", _exec_payload(["printf", "hi"]))
+    line = directive("run", "0" * 32, "exec", "exec", "10", "", _exec_params(["printf", "hi"]))
     fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line, osa=""))
     assert fields["SEND_OP"] == "0" * 32
     assert fields["SEND_OP_ERR"] == "ENOSYS: osascript is not available on this machine"
+
+
+@requires_osascript
+def test_a_run_op_naming_an_unbundled_program_is_an_enoent_error_reply(tmp_path: Path) -> None:
+    """The directive names its program and the client runs its own bundled copy; a newer server
+    naming a program this client's bundle predates is refused rather than run, so the turn ends on a
+    clean error instead of hanging or executing the wrong file."""
+    work = tmp_path / "work"
+    work.mkdir()
+    line = directive("run", "1" * 32, "fileop", "quantum", "60", "", "{}")
+    fields = _op_fields(_relay_shell(f"WORKDIR='{work}'\nUFO_CWD='{tmp_path}'", line))
+    assert fields["SEND_OP"] == "1" * 32
+    assert fields["SEND_OP_ERR"] == "ENOENT: no bundled program for quantum"
 
 
 def _post_args(

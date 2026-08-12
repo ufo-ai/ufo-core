@@ -598,6 +598,14 @@ find_osascript() {
   OSA=$(command -v osascript 2> /dev/null) || OSA=''
 }
 
+# The gateway injects the op programs below, so a served client holds its own copy and the wire
+# never carries a program. The script's version hash covers the injected block, so a program edit
+# moves the version and the client re-fetches on its next install.
+write_programs() {
+# ufo:programs
+:
+}
+
 post() {
   if [ -n "$SEND_OP" ]; then
     if [ -n "$SEND_OP_ERR" ]; then
@@ -773,18 +781,16 @@ turn() {
         ;;
       run)
         NEXT=run
-        OP_ID=${rest%%"$TAB"*}
-        R_REST=${rest#*"$TAB"}
-        OP_KIND=${R_REST%%"$TAB"*}
-        R_REST=${R_REST#*"$TAB"}
-        OP_TIMEOUT=${R_REST%%"$TAB"*}
-        R_REST=${R_REST#*"$TAB"}
-        # `read` strips the trailing IFS tab, so a write/read op (empty payload) arrives with arg
-        # as the last field. Split on what is there, as the file arm does.
-        case $R_REST in
-          *"$TAB"*) OP_ARG=${R_REST%%"$TAB"*}; OP_PAYLOAD=${R_REST#*"$TAB"} ;;
-          *) OP_ARG=$R_REST; OP_PAYLOAD='' ;;
-        esac
+        # run <op_id> <kind> <name> <timeout> <arg> <params>. `read` strips trailing tabs, so any of
+        # the last fields may be absent (a copy op carries no params); take each field off the head
+        # and leave the rest empty once the tabs run out.
+        R_REST=$rest
+        OP_ID=${R_REST%%"$TAB"*}; case $R_REST in *"$TAB"*) R_REST=${R_REST#*"$TAB"} ;; *) R_REST='' ;; esac
+        OP_KIND=${R_REST%%"$TAB"*}; case $R_REST in *"$TAB"*) R_REST=${R_REST#*"$TAB"} ;; *) R_REST='' ;; esac
+        OP_NAME=${R_REST%%"$TAB"*}; case $R_REST in *"$TAB"*) R_REST=${R_REST#*"$TAB"} ;; *) R_REST='' ;; esac
+        OP_TIMEOUT=${R_REST%%"$TAB"*}; case $R_REST in *"$TAB"*) R_REST=${R_REST#*"$TAB"} ;; *) R_REST='' ;; esac
+        OP_ARG=${R_REST%%"$TAB"*}; case $R_REST in *"$TAB"*) R_REST=${R_REST#*"$TAB"} ;; *) R_REST='' ;; esac
+        OP_PARAMS=$R_REST
         ;;
       token)
         TOKEN=$rest
@@ -924,6 +930,7 @@ main() {
   mkfifo "$FIFO"
   trap cleanup EXIT
   find_osascript
+  write_programs
   UFO_CWD=$(pwd -P)
   [ -s "$CREDENTIALS" ] && TOKEN=$(cat "$CREDENTIALS")
   [ -s "$SESSION" ] && SID=$(cat "$SESSION")
@@ -967,18 +974,25 @@ main() {
         # Only exec and fileop need the runner; write, read and an unknown kind answer without it,
         # so the missing-runner refusal guards those two arms alone, never the whole dispatch.
         SEND_OP=$OP_ID
+        OP_PROGRAM_FILE="$UFO_HOME/programs/$OP_NAME.js"
         case "$OP_KIND" in
           exec | fileop)
             if [ -z "$OSA" ]; then
               SEND_OP_ERR='ENOSYS: osascript is not available on this machine'
               OP_KIND=refused
+            elif [ ! -f "$OP_PROGRAM_FILE" ]; then
+              SEND_OP_ERR="ENOENT: no bundled program for $OP_NAME"
+              OP_KIND=refused
+            else
+              # The program is the client's own bundled copy; only its params ride the wire, so the
+              # relay lands them beside it as op.json for the program's own `run` entry to read.
+              printf '%b' "$OP_PARAMS" > "$WORKDIR/op.json"
             fi
             ;;
         esac
         case "$OP_KIND" in
             exec)
-              printf '%b' "$OP_PAYLOAD" > "$WORKDIR/op.js"
-              "$OSA" -l JavaScript "$WORKDIR/op.js" emit "$WORKDIR" > "$WORKDIR/run.sh"
+              "$OSA" -l JavaScript "$OP_PROGRAM_FILE" emit "$WORKDIR" > "$WORKDIR/run.sh"
               OP_CODE=0
               # The command leads its own process group (`set -m`), and only a timeout kills that
               # group: a command that exits on its own leaves its group alone, so a backgrounded
@@ -997,13 +1011,12 @@ main() {
                 kill "$_watch" 2> /dev/null
                 exit "$_code"
               ) 2> /dev/null || OP_CODE=$?
-              "$OSA" -l JavaScript "$WORKDIR/op.js" package "$WORKDIR" \
+              "$OSA" -l JavaScript "$OP_PROGRAM_FILE" package "$WORKDIR" \
                 "$WORKDIR/run.out" "$WORKDIR/run.err" "$OP_CODE" > "$WORKDIR/reply.json"
               SEND_OP_BODY="$WORKDIR/reply.json"
               ;;
             fileop)
-              printf '%b' "$OP_PAYLOAD" > "$WORKDIR/op.js"
-              if "$OSA" -l JavaScript "$WORKDIR/op.js" run "$WORKDIR" \
+              if "$OSA" -l JavaScript "$OP_PROGRAM_FILE" run "$WORKDIR" \
                 > "$WORKDIR/reply.json" 2> "$WORKDIR/op.err"; then
                 SEND_OP_BODY="$WORKDIR/reply.json"
               else

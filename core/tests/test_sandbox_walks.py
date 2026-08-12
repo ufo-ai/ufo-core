@@ -2,12 +2,12 @@
 
 `sbxfs` is the oracle and runs as a subprocess, installed onto a scratch PATH exactly as the local
 carrier installs it, with `PATH` pinned to the stock directories so a walk is compared against the
-stdlib branch a machine without ripgrep takes. The subject is the shipped payload itself —
-`client_payload(op, params)`, the composition the carrier sends — run the way the relay runs it:
-`osascript -l JavaScript <payload> run <workdir>`. Both sides get the same params and the same
-tree; a mutating op (`edit`, `write`) runs each side against its own copy of the tree, and the
-whole tree state is compared after. The assertion is on the parsed JSON, since one side spells
-non-ASCII as an escape and the other as itself.
+stdlib branch a machine without ripgrep takes. The subject is the bundled program itself —
+`client_program_source(op)`, the source the client holds — run the way the relay runs it: the params
+land beside it as `op.json` and `osascript -l JavaScript <program> run <workdir>` reads them. Both
+sides get the same params and the same tree; a mutating op (`edit`, `write`) runs each side against
+its own copy of the tree, and the whole tree state is compared after. The assertion is on the parsed
+JSON, since one side spells non-ASCII as an escape and the other as itself.
 
 A program cannot list a directory, so enumeration arrives as a file in the session workdir, written
 by one command the carrier issues first. `ENUMERATION` holds that command per op, verbatim, reading
@@ -47,7 +47,7 @@ from types import ModuleType
 import pytest
 
 from ufo.sandbox.local import _provision_scratch
-from ufo.sandbox.terminal import client_payload
+from ufo.sandbox.terminal import client_program_source
 
 SANDBOX = Path(__file__).parents[1] / "src" / "ufo" / "sandbox"
 CLIENT = SANDBOX / "client"
@@ -163,10 +163,11 @@ def _walked(op: str, params: dict[str, object], workdir: Path, home: Path) -> di
 
 
 def _run(op: str, params: dict[str, object], workdir: Path) -> dict:
-    payload = workdir / f"{op}.payload.js"
-    payload.write_text(client_payload(op, params))
+    program = workdir / f"{op}.js"
+    program.write_text(client_program_source(op))
+    (workdir / "op.json").write_text(json.dumps(params))
     run = subprocess.run(
-        [RUNNER, "-l", "JavaScript", str(payload), "run", str(workdir)],
+        [RUNNER, "-l", "JavaScript", str(program), "run", str(workdir)],
         capture_output=True,
         text=True,
     )

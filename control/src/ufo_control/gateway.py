@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
+from ufo.sandbox.terminal import client_program_bundle
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
@@ -58,6 +59,7 @@ GATEWAY_POOL_MIN_SIZE = 1
 GATEWAY_POOL_MAX_SIZE = 4
 
 _CLIENT_SCRIPT = Path(__file__).parent / "client" / "ufo"
+_PROGRAM_MARKER = "# ufo:programs"
 
 
 class _RequestInputError(ValueError):
@@ -65,9 +67,10 @@ class _RequestInputError(ValueError):
 
 
 def _stamp_script(text: str) -> str:
-    version = hashlib.sha1(text.encode()).hexdigest()[:12]
+    bundled = text.replace(_PROGRAM_MARKER, client_program_bundle(), 1)
+    version = hashlib.sha1(bundled.encode()).hexdigest()[:12]
     base_url = os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
-    stamped = text.replace("UFO_SCRIPT_VERSION=dev", f"UFO_SCRIPT_VERSION={version}", 1)
+    stamped = bundled.replace("UFO_SCRIPT_VERSION=dev", f"UFO_SCRIPT_VERSION={version}", 1)
     return stamped.replace(SCRIPT_URL_DEFAULT, f'UFO_URL="${{UFO_URL:-{base_url}}}"', 1)
 
 

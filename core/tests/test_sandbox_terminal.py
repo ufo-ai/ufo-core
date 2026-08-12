@@ -4,7 +4,6 @@ every op is asked over it, the test playing the connected terminal."""
 
 import asyncio
 import json
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -48,10 +47,9 @@ async def _refuse(terminals: Terminals, conversation_id: UUID, failed: str) -> T
     return op
 
 
-def _trailer_params(op: TerminalOp) -> dict:
-    prefix, _, invocation = op.payload.rpartition("return main(")
-    assert prefix and invocation.endswith("); }")
-    return json.loads(invocation[: -len("); }")])
+def _op_params(op: TerminalOp) -> dict:
+    """The params the op carries for its bundled program to read as `op.json`."""
+    return json.loads(op.params)
 
 
 async def test_send_answers_with_the_resolved_reply() -> None:
@@ -65,7 +63,7 @@ async def test_send_answers_with_the_resolved_reply() -> None:
         assert terminals.resolve(conversation_id, op.op_id, b'{"exit_code":0}')
 
     answering = asyncio.ensure_future(answer())
-    reply = await terminals.send(conversation_id, "exec", 5, payload="main({});")
+    reply = await terminals.send(conversation_id, "exec", 5)
     await answering
     assert reply == b'{"exit_code":0}'
 
@@ -249,7 +247,7 @@ def _resuming(spec: SandboxSpec, resume_id: str) -> SandboxSpec:
     )
 
 
-async def test_exec_ships_the_program_with_rewritten_argv_and_decodes_the_reply() -> None:
+async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -262,11 +260,10 @@ async def test_exec_ships_the_program_with_rewritten_argv_and_decodes_the_reply(
     await asyncio.sleep(0)
     op = await _answer(terminals, conversation_id, reply)
     result = await running
-    assert op.kind == "exec" and op.timeout_s == 30
-    params = _trailer_params(op)
+    assert op.kind == "exec" and op.timeout_s == 30 and op.name == "exec"
+    params = _op_params(op)
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
     assert params["env"]["HTTP_PROXY"].startswith("http://run-token:@")
-    assert "function main" in op.payload
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 
@@ -280,7 +277,7 @@ async def test_write_stages_the_bytes_and_maps_a_refusal() -> None:
     await asyncio.sleep(0)
     op = await terminals.next_op(conversation_id)
     assert terminals.staged(conversation_id, op.op_id) == b"content"
-    assert op.kind == "write" and op.arg == "/p/new.txt" and op.payload == ""
+    assert op.kind == "write" and op.arg == "/p/new.txt" and op.name == "" and op.params == ""
     terminals.resolve(conversation_id, op.op_id, b"{}")
     await writing
 
@@ -334,21 +331,12 @@ async def test_read_streams_the_reply_and_maps_a_missing_file() -> None:
         await missing
 
 
-async def test_file_op_ships_the_program_and_maps_the_handled_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(terminal, "CLIENT_PROGRAM_DIR", tmp_path)
-    (tmp_path / "prelude.js").write_text("function __start__(argv) {}")
-    (tmp_path / "exec.js").write_text("function main(params) { print('{}'); }")
-    (tmp_path / "grep.js").write_text("function main(params) { print('{}'); }")
+async def test_file_op_names_its_program_and_maps_the_handled_error() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
     handle = await carrier.create(_spec(conversation_id, "/p"))
-
-    with pytest.raises(RuntimeError, match="no client program"):
-        await carrier.file_op(handle, "glob", {"pattern": "**/*"})
 
     running = asyncio.ensure_future(
         carrier.file_op(
@@ -359,19 +347,17 @@ async def test_file_op_ships_the_program_and_maps_the_handled_error(
     exec_ok = json.dumps({"exit_code": 0, "stdout_hex": "", "stderr_hex": ""}).encode()
     listing = await _answer(terminals, conversation_id, exec_ok)
     assert listing.kind == "exec"
-    enum_command = _trailer_params(listing)["argv"][2]
+    enum_command = _op_params(listing)["argv"][2]
     assert enum_command.startswith("UFO_WALK_ROOT=/p\n")
     assert "grep-enum" in enum_command
     op = await _answer(terminals, conversation_id, b'{"matches": []}')
-    assert op.kind == "fileop"
-    assert _trailer_params(op) == {
+    assert op.kind == "fileop" and op.name == "grep"
+    assert _op_params(op) == {
         "pattern": "x",
         "path": "/p",
         "workspace": "/p",
         "enum": "grep-enum",
     }
-    assert "function main(params)" in op.payload
-    assert op.payload.startswith("function __start__")
     assert await running == {"matches": []}
 
     refused = asyncio.ensure_future(
@@ -384,16 +370,10 @@ async def test_file_op_ships_the_program_and_maps_the_handled_error(
         await refused
 
 
-async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace() -> None:
     """A member launched from a directory whose path contains `/workspace` (`~/workspace/api`) must
     still walk: the enumeration's already-concrete root must not go through the `/workspace`→root
     rewrite a second time, which would mangle it into a path `find` cannot reach."""
-    monkeypatch.setattr(terminal, "CLIENT_PROGRAM_DIR", tmp_path)
-    (tmp_path / "prelude.js").write_text("function __start__(argv) {}")
-    (tmp_path / "exec.js").write_text("function main(params) { print('{}'); }")
-    (tmp_path / "grep.js").write_text("function main(params) { print('{}'); }")
     root = "/Users/alex/workspace/api"
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
@@ -409,11 +389,11 @@ async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace(
     await asyncio.sleep(0)
     exec_ok = json.dumps({"exit_code": 0, "stdout_hex": "", "stderr_hex": ""}).encode()
     listing = await _answer(terminals, conversation_id, exec_ok)
-    enum_command = _trailer_params(listing)["argv"][2]
+    enum_command = _op_params(listing)["argv"][2]
     assert f"UFO_WALK_ROOT={root}\n" in enum_command
     assert "/Users/alex/Users/alex" not in enum_command
     op = await _answer(terminals, conversation_id, b'{"matches": []}')
-    assert _trailer_params(op)["path"] == root
+    assert _op_params(op)["path"] == root
     assert await running == {"matches": []}
 
 
@@ -439,9 +419,7 @@ def test_a_sender_on_another_loop_is_woken_from_this_one() -> None:
     outcome: list[bytes] = []
 
     def worker() -> None:
-        outcome.append(
-            asyncio.run(terminals.send(conversation_id, "exec", 10, payload="main({});"))
-        )
+        outcome.append(asyncio.run(terminals.send(conversation_id, "exec", 10)))
 
     thread = _threading.Thread(target=worker)
     thread.start()
@@ -465,3 +443,21 @@ def test_exec_js_spells_the_python_constants() -> None:
     assert EGRESS_CA_CERT_ENV in source
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
         assert name in source
+
+
+def test_the_program_bundle_writes_a_self_contained_file_for_every_op() -> None:
+    """The gateway injects this block into the served client, so it must land one runnable file per
+    op the wire can name — the shared prelude, the op's own JS, and the param-free `run` entry that
+    reads `op.json`."""
+    bundle = terminal.client_program_bundle()
+    for op in ("exec", "read", "edit", "write", "grep", "glob", "changes"):
+        assert f'cat > "$UFO_HOME/programs/{op}.js"' in bundle
+        program = terminal.client_program_source(op)
+        assert "function __start__" in program
+        assert "function main" in program
+        assert 'readFile(WORKDIR + "/op.json")' in program
+
+
+def test_an_unknown_op_has_no_client_program() -> None:
+    with pytest.raises(RuntimeError, match="no client program"):
+        terminal.client_program_source("teleport")

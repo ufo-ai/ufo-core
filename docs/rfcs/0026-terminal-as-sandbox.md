@@ -52,15 +52,18 @@ is noted, not disqualifying: both are stock binaries run as the member.
 
 The shell client implements exactly the primitives the `Carrier` protocol already names, in ~15
 fixed lines each. Every op's logic — parsing, matching, windowing, result shaping — lives in
-JavaScript the server ships inside the op payload, run under `osascript -l JavaScript`. The
-shell pipes; the runner thinks; the server decides. A new op is a server release, never a client update.
+JavaScript, run under `osascript -l JavaScript`. The program is authored server-side and injected
+into the served client, so the client holds its own copy and the op directive names a program
+rather than shipping one; only the op's params ride the wire. The shell pipes; the runner thinks;
+the server decides. A new op is a server release the client picks up on its next install, never a
+hand-written client update.
 
 | Primitive | Runs | Implementation |
 |---|---|---|
 | `exec(argv, env, cwd, timeout)` | member's machine | `set -m`, a watchdog, `kill -- -$pid` — the process-group semantics `local.py:156` already documents; the argv arrives as a line the runner already shell-quoted, `eval "set -- …"` |
 | `write(path, bytes)` | member's machine | `curl` the op's body into a staged temp, `mv` onto the target |
 | `read(path)` | member's machine | the reply POST's body is the file, `curl --data-binary @-` |
-| `file_op(op, params)` | member's machine, under the runner | the payload's own JS program: byte-exact `readFile(path, "binary")`/`writeFile`, JSON result on stdout |
+| `file_op(op, params)` | member's machine, under the runner | the op's bundled JS program, its params landed as `op.json`: byte-exact `readFile(path, "binary")`/`writeFile`, JSON result on stdout |
 | `dial(port)` | — | `SandboxUnreachable`, as the local carrier already answers |
 
 `Carrier` grows one method, `file_op(handle, op, params) -> dict`. Docker, e2b and local delegate to
@@ -92,9 +95,10 @@ The evidence chain, all measured on this stock-tool set:
    6 MB file, O(n²) worst case, with the occurrence count, multi-edit sequence and snippet still
    unbuilt.
 3. **JavaScriptCore fixes both.** Byte-exact binary I/O measured on both of its stock faces,
-   real regex, native JSON — and the program it runs is data the server ships (a shared Foundation
-   prelude, the op's JS, one `run` entry), so the op contract has one home and the client has no
-   version.
+   real regex, native JSON — and the program (a shared Foundation prelude, the op's JS, one `run`
+   entry that reads `op.json`) is authored in core and injected into the served client, so the op
+   contract's one home stays server-side and the client's copy is byte-identical, covered by the
+   script's own version hash.
 
 The one divergence a byte-exact edit keeps: `sbxfs` edits text decoded `errors="replace"`, so on
 invalid UTF-8 it aliases every bad byte to U+FFFD and can count matches byte-exactness refuses.
@@ -103,8 +107,8 @@ The differential test pins the divergence as intended rather than hiding it.
 `osascript` sits at a documented path, so the relay's probe is one `command -v`; a machine
 without it binds no terminal, the conversation falls to the deploy's carrier, and the member is
 told. A Linux client, when one matters, is the same probe finding `python3` and running `sbxfs`
-itself — verbatim, the file the image already bakes — which is why the op seam is a program the
-server ships and not a contract the client implements.
+itself — verbatim, the file the image already bakes — which is why the op seam is a server-authored
+program the client merely runs, not a contract the client implements.
 
 ### Selection
 
@@ -130,13 +134,17 @@ names files at P, and a workspace that moves under a thread makes every earlier 
 
 ### Wire
 
-Server to client, down the held stream: `run <op_id> <kind> <payload>`. `kind` picks the ~15-line
-primitive arm; the payload is one escaped field **the shell never parses** — it lands in a temp file
-and is handed to the primitive whole (a `file_op`'s JS runs as `osascript -l JavaScript <payload-file> run <workdir>`; an
-`exec`'s payload is the JS that emits the shell-quoted argv line the arm `eval`s into `set --`), so
-the payload grows without the client changing. Path logic stays out of the shell the same way: the
-carrier rewrites `/workspace/…` against the bound directory before composing the payload, as the
-local carrier already rewrites against its host path.
+Server to client, down the held stream: `run <op_id> <kind> <name> <timeout> <arg> <params>`. `kind`
+picks the ~15-line primitive arm; `name` names the op's program, which the client runs from its own
+bundle (`$UFO_HOME/programs/<name>.js`); `params` is one escaped field **the shell never parses** —
+it lands as `op.json` in a temp dir and the program's `run` entry reads it (a `file_op` runs as
+`osascript -l JavaScript $UFO_HOME/programs/<name>.js run <workdir>`; an `exec` runs the same
+program's `emit` mode to produce the shell-quoted argv line the arm `eval`s into `set --`), so a new
+op grows the params without the client changing its arms. The program never rides the wire: the
+gateway injects every op program into the served client at install, and the script's own version
+hash covers the bundle, so an edited program moves the version and the client re-fetches. Path logic
+stays out of the shell the same way: the carrier rewrites `/workspace/…` against the bound directory
+before composing the params, as the local carrier already rewrites against its host path.
 
 **The reply is the next request.** `run` is a `NEXT` state in the client's existing loop, exactly as
 `sendfile` was: the client runs the op, then re-enters `post` with the result as the body and
@@ -147,7 +155,7 @@ succeeded by the reply POST. An op reply admits no turn and reaches no transcrip
 does not. Two gates decide who may answer: the op id (32 hex, unguessable, single-use) and the
 bearer, which must name the member the binding was made under.
 
-Bytes never ride the directive line. A write's payload names `GET /surface/ufo/op/<op_id>` — an
+Bytes never ride the directive line. A write's body is served at `GET /surface/ufo/op/<op_id>` — an
 authenticated read projection on the surface the client already holds a bearer for, gated the same
 two ways — and the client `curl`s it straight into the staged temp file, so a 100 MB copy-in streams
 to disk instead of entering a shell variable, and the line stays a few hundred bytes whatever the

@@ -243,7 +243,15 @@ async def stream_directives(
                         ops = None
                         continue
                     op_task = None
-                    yield directive("run", op.op_id, op.kind, str(op.timeout_s), op.arg, op.payload)
+                    yield directive(
+                        "run",
+                        op.op_id,
+                        op.kind,
+                        op.name,
+                        str(op.timeout_s),
+                        op.arg,
+                        op.params,
+                    )
                     ran = True
                     break
                 item = frame_task.result()

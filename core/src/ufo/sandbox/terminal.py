@@ -116,16 +116,18 @@ class TerminalOpFailed(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class TerminalOp:
-    """One request to a connected terminal, shaped so the relay never parses: `kind` picks the
-    fixed primitive arm, `timeout_s` and `arg` ride as their own directive fields, and `payload` is
-    ready-to-run JS the arm pipes to the runner whole — the id is what its answer comes back under.
-    """
+    """One request to a connected terminal, shaped so the relay never parses. `kind` picks the fixed
+    primitive arm; `name` is the op's program, which the client runs from its own bundle; `params`
+    is the JSON the relay writes to `op.json` for that program to read; `arg` is a copy primitive's
+    target path. The program itself never rides the wire — the client holds it bundled and the
+    server names it. The id is what the answer comes back under."""
 
     op_id: str
     kind: str
     timeout_s: int
+    name: str = ""
     arg: str = ""
-    payload: str = ""
+    params: str = ""
 
 
 _Waiter = tuple["asyncio.Future[object]", asyncio.AbstractEventLoop]
@@ -256,8 +258,9 @@ class Terminals:
         conversation_id: UUID,
         kind: str,
         timeout_s: int,
+        name: str = "",
         arg: str = "",
-        payload: str = "",
+        params: str = "",
         body: bytes | None = None,
     ) -> bytes:
         """Ask the conversation's terminal to run one op and answer its reply, raising
@@ -278,7 +281,14 @@ class Terminals:
         loop = asyncio.get_running_loop()
         await self._take_turn(conversation_id, loop, timeout_s)
         waiter: asyncio.Future[object] = loop.create_future()
-        op = TerminalOp(op_id=uuid4().hex, kind=kind, timeout_s=timeout_s, arg=arg, payload=payload)
+        op = TerminalOp(
+            op_id=uuid4().hex,
+            kind=kind,
+            timeout_s=timeout_s,
+            name=name,
+            arg=arg,
+            params=params,
+        )
         try:
             with self._lock:
                 slot = self.slots.get(conversation_id)
@@ -511,8 +521,9 @@ class TerminalCarrier:
                 handle.conversation_id,
                 OP_EXEC,
                 timeout_s,
-                payload=client_payload(
-                    OP_EXEC, {"argv": list(argv), "env": dict(handle.egress_env)}
+                name=OP_EXEC,
+                params=json.dumps(
+                    {"argv": list(argv), "env": dict(handle.egress_env)}, separators=(",", ":")
                 ),
             )
         except TerminalOpFailed as error:
@@ -561,9 +572,8 @@ class TerminalCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """One `sbxfs` op, run where the files are: the op's own JS program rides the payload and
-        runs under the client's runner, so only the result crosses. The program is data this
-        process ships — the op contract has one home here, and the client has no version. A tree
+        """One `sbxfs` op, run where the files are: the directive names the op's JS program by op
+        and the client runs its own bundled copy, so only the params and the result cross. A tree
         walk is two ops: the enumeration `find` first, through the same exec primitive, then the
         program reading its listing — the runner has no subprocess, so what a walk visits is
         decided by a command this process composed, never by the program."""
@@ -577,7 +587,6 @@ class TerminalCarrier:
         enumeration = WALK_ENUMERATION.get(op)
         if enumeration is not None:
             rewritten["enum"] = f"{op}-enum"
-        payload = client_payload(op, rewritten)
         if enumeration is not None:
             walk_root = rewritten.get("path") if op == "grep" else None
             walk_root = walk_root or rewritten.get("workspace") or root
@@ -600,7 +609,8 @@ class TerminalCarrier:
                 handle.conversation_id,
                 OP_FILE,
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
-                payload=payload,
+                name=op,
+                params=json.dumps(rewritten, separators=(",", ":")),
             )
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error
@@ -617,18 +627,42 @@ class TerminalCarrier:
         )
 
 
-def client_payload(op: str, params: dict[str, object]) -> str:
-    """One op as the ready-to-run program its directive carries: the shared prelude (the Foundation
-    shims and the `MODE`/`WORKDIR`/`ARGS` globals), the op's own JS, and the `run` entry
-    `osascript -l JavaScript` calls with the relay's argv. Composed in one place so the carrier and
-    the differential tests ship byte-identical programs."""
-    prelude = _client_program("prelude")
-    program = _client_program(op)
-    trailer = (
-        "function run(argv) { __start__(argv); "
-        f"return main({json.dumps(params, separators=(',', ':'))}); }}"
-    )
-    return f"{prelude}\n{program}\n{trailer}"
+_GENERIC_TRAILER = (
+    "function run(argv) { __start__(argv); "
+    'return main(JSON.parse(readFile(WORKDIR + "/op.json"))); }'
+)
+"""The one `run` entry every op program takes, param-free: it reads its params from `op.json` in
+the work dir rather than baking them in, so an op's directive names a program by op and carries no
+source. The relay writes `op.json` before running the program."""
+
+_OP_PROGRAMS = ("exec", "read", "edit", "write", "grep", "glob", "changes")
+"""The op programs the client runs — the copy-in and copy-out primitives are shell arms and carry
+no program. The prelude is folded into each, so a bundled client holds one self-contained file per
+op."""
+
+
+def client_program_source(op: str) -> str:
+    """One op as the ready-to-run program a bundled client holds: the shared prelude, the op's own
+    JS, and the param-free `run` entry that reads `op.json` for its params."""
+    return f"{_client_program('prelude')}\n{_client_program(op)}\n{_GENERIC_TRAILER}"
+
+
+def client_program_bundle() -> str:
+    """The shell that writes the op programs to `$UFO_HOME/programs/` — the block the gateway
+    injects into the served client so a member's own copy holds them and the wire never carries a
+    program. Each program lands through a quoted heredoc, so its JS is copied verbatim; the
+    delimiter is unique per op and cannot occur in the source. The script's version hash covers this
+    block, so any edit to a program moves it and the client's own auto-update re-fetches the
+    bundle."""
+    blocks = ['mkdir -p "$UFO_HOME/programs"']
+    for op in _OP_PROGRAMS:
+        delimiter = f"UFO_PROGRAM_EOF_{op.upper()}"
+        blocks.append(
+            f"cat > \"$UFO_HOME/programs/{op}.js\" <<'{delimiter}'\n"
+            f"{client_program_source(op)}\n"
+            f"{delimiter}"
+        )
+    return "\n".join(blocks)
 
 
 def _client_program(op: str) -> str:

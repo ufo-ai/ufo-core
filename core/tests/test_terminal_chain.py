@@ -101,6 +101,18 @@ def _client_script() -> Path:
     raise AssertionError(f"{CLIENT_RELATIVE} not found above {__file__}")
 
 
+def _served_client(tmp_path: Path) -> Path:
+    """The client a member actually runs: the shipped script with the op programs injected at the
+    marker, exactly as the gateway serves it. Run raw, the marker is inert and the op arms hold no
+    program to run."""
+    stamped = (
+        _client_script().read_text().replace("# ufo:programs", terminal.client_program_bundle(), 1)
+    )
+    served = tmp_path / "ufo"
+    served.write_text(stamped)
+    return served
+
+
 @dataclass(frozen=True)
 class ProofModel:
     """First round (the founding message is plain text): one `bash` call writing the sentinel into
@@ -361,7 +373,7 @@ def test_the_shipped_client_lands_a_bash_turn_in_its_own_directory(
     env.pop("WORKSPACE_URL", None)
 
     done = subprocess.run(
-        ["sh", str(_client_script()), "write a proof file"],
+        ["sh", str(_served_client(tmp_path)), "write a proof file"],
         cwd=bound,
         env=env,
         stdin=subprocess.DEVNULL,
