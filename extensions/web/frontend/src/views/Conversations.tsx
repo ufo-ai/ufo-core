@@ -24,10 +24,11 @@ import {
   ownerLabel,
   useViewer,
 } from "@/lib/audience";
+import type { WorkspacePlace } from "@/lib/route";
 import type { Agent, Conversation, Message } from "@/lib/types";
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
-function Back({ onBack }: { onBack: () => void }) {
+export function Back({ onBack }: { onBack: () => void }) {
   return (
     <div className="mb-lg">
       <Button variant="row" onClick={onBack}>
@@ -96,15 +97,31 @@ export function Disclose({
   );
 }
 
+/** A speaker as a row names one: the human name where the surface reported `Name (email)`, the
+ *  local part of a bare address, else the word itself. */
+function speakerName(speaker: string): string {
+  const reported = speaker.match(/^(.+) \(([^()]+@[^()]+)\)$/);
+  if (reported) return reported[1];
+  return speaker.includes("@") ? speaker.split("@", 1)[0] : speaker;
+}
+
 /** Who a conversation belongs to, as a member reads it: `You` for the viewer's own, another
- *  member's address, or — where no member's name is on it — who may read it, which is what a row
- *  with no owner is. */
+ *  member's name before their address, or — where no member's name is on it — who may read it,
+ *  which is what a row with no owner is. */
 export function who(
-  entry: { member_email: string | null; audience: string; surface_label?: string | null },
+  entry: {
+    member_email: string | null;
+    audience: string;
+    surface_label?: string | null;
+    speakers?: string[];
+  },
   viewer: string | null,
 ): string {
   if (entry.member_email === null) return audienceLabel(entry, viewer);
-  return ownerLabel(entry.member_email, viewer);
+  const owned = ownerLabel(entry.member_email, viewer);
+  if (owned === "You") return owned;
+  const sender = entry.speakers?.find(Boolean);
+  return sender ? speakerName(sender) : owned;
 }
 
 /** What a conversation is called: the words it opened with — the same cut the rail labels a chat
@@ -142,7 +159,7 @@ function metaParts(entry: Conversation, viewer: string | null): string[] {
   const parts = [
     named,
     origin(entry),
-    entry.speakers.join(", "),
+    entry.speakers.map(speakerName).join(", "),
     turns(entry.turn_count),
     reach === origin(entry) ? "" : reach,
   ];
@@ -215,27 +232,41 @@ export function ConversationList({
   );
 }
 
-export function Conversations({ agent }: { agent: Agent }) {
-  const [opened, setOpened] = useState<Conversation | null>(null);
-  const [disclosing, setDisclosing] = useState<Conversation | null>(null);
+export function Conversations({
+  agent,
+  place,
+  onPlace,
+}: {
+  agent: Agent;
+  place: WorkspacePlace;
+  onPlace: (place: WorkspacePlace) => void;
+}) {
+  const [disclosed, setDisclosed] = useState<string | null>(null);
   const state = usePanelRead<{ conversations: Conversation[] }>(
     "/agents/" + agent.id + "/conversations",
   );
 
-  if (opened) {
-    return <ConversationDetail agent={agent} conversation={opened} onBack={() => setOpened(null)} />;
+  const opened =
+    state.phase === "ready" && place.open
+      ? state.payload.conversations.find((entry) => entry.id === place.open)
+      : undefined;
+  if (opened?.readable || opened && disclosed === opened.id) {
+    return (
+      <ConversationDetail
+        agent={agent}
+        conversation={opened}
+        onBack={() => onPlace({ open: undefined })}
+      />
+    );
   }
-  if (disclosing) {
+  if (opened) {
     return (
       <Disclose
-        key={disclosing.id}
+        key={opened.id}
         agent={agent}
-        conversation={disclosing}
-        onBack={() => setDisclosing(null)}
-        onOpened={() => {
-          setOpened(disclosing);
-          setDisclosing(null);
-        }}
+        conversation={opened}
+        onBack={() => onPlace({ open: undefined })}
+        onOpened={() => setDisclosed(opened.id)}
       />
     );
   }
@@ -245,8 +276,8 @@ export function Conversations({ agent }: { agent: Agent }) {
         <ConversationList
           rows={payload.conversations}
           blank={"No conversation with " + agent.name + " yet."}
-          onOpen={setOpened}
-          onDisclose={setDisclosing}
+          onOpen={(conversation) => onPlace({ open: conversation.id })}
+          onDisclose={(conversation) => onPlace({ open: conversation.id })}
         />
       )}
     </Panel>

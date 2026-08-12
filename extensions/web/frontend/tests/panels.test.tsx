@@ -511,7 +511,7 @@ test("a conversation row names what it is about and whose it is, and the keyboar
     "can you take a look at the failing deploy",
   );
   expect(row.querySelector("[data-part='meta']")!.textContent).toBe(
-    "mel@example.com · Slack · Mel Okafor (mel@example.com), pat@example.com · 4 turns · Workspace",
+    "mel@example.com · Slack · Mel Okafor, pat · 4 turns · Workspace",
   );
   expect(row.querySelector("[data-part='when']")!.textContent).toBe("Aug 7 2026");
 

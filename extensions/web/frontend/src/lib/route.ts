@@ -44,7 +44,7 @@ export type Route =
     }
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents" }
-  | { kind: "agent"; agentId: string; tab: AgentTab }
+  | { kind: "agent"; agentId: string; tab: AgentTab; place: WorkspacePlace }
   | {
       kind: "subagent";
       name: string;
@@ -66,7 +66,7 @@ const ARTIFACT_PATH_PREFIX = "/artifacts/";
 const CONVERSATION_SLOT_HASH =
   /^#\/agents\/([0-9a-f-]{36})\/conversations\/([0-9a-f-]{36})\/slots\/([a-z][a-z0-9_-]{0,63})(?:\?root=([0-9a-f-]{36}))?$/;
 const NEW_CHAT_HASH = /^#\/new\/([0-9a-f-]{36})$/;
-const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?$/;
+const AGENT_HASH = /^#\/agents\/([0-9a-f-]{36})(?:\/(\w+))?(?:\?(.*))?$/;
 const SUBAGENT_HASH = /^#\/subagents\/(\w+)(?:\/(\w+))?$/;
 const SUBAGENT_CONVERSATION_HASH =
   /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})(?:\?root=([0-9a-f-]{36}))?$/;
@@ -155,7 +155,12 @@ export function parseHash(hash: string): Route {
   }
   const agent = hash.match(AGENT_HASH);
   if (agent) {
-    return { kind: "agent", agentId: agent[1], tab: isAgentTab(agent[2]) ? agent[2] : "overview" };
+    return {
+      kind: "agent",
+      agentId: agent[1],
+      tab: isAgentTab(agent[2]) ? agent[2] : "overview",
+      place: parsePlace(agent[3]),
+    };
   }
   const run = hash.match(SUBAGENT_CONVERSATION_HASH);
   if (run) {
@@ -198,8 +203,8 @@ export function newChatHash(agentId: string): string {
   return "#/new/" + agentId;
 }
 
-export function agentHash(agentId: string, tab: AgentTab): string {
-  return "#/agents/" + agentId + (tab === "overview" ? "" : "/" + tab);
+export function agentHash(agentId: string, tab: AgentTab, place: WorkspacePlace = {}): string {
+  return "#/agents/" + agentId + (tab === "overview" ? "" : "/" + tab) + serializePlace(place);
 }
 
 export function subagentHash(name: string, tab: SubagentTab): string {

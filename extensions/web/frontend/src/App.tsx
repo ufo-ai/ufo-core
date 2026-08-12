@@ -131,8 +131,42 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
 
   const openAgent = useCallback(
     (agentId: string, tab: AgentTab = "overview") =>
-      go(agentHash(agentId, tab), { kind: "agent", agentId, tab }),
+      go(agentHash(agentId, tab), { kind: "agent", agentId, tab, place: {} }),
     [go],
+  );
+
+  const stepPlace = useCallback(
+    (step: PlaceStep, held: boolean, next: () => { route: Route; hash: string } | null) => {
+      if (step !== "push" && !held) return;
+      if (step === "back") {
+        history.back();
+        return;
+      }
+      const target = next();
+      if (!target) return;
+      if (step === "replace") {
+        history.replaceState(null, "", target.hash);
+        setRoute(target.route);
+        return;
+      }
+      go(target.hash, target.route);
+    },
+    [go],
+  );
+
+  const placeAgent = useCallback(
+    (tab: AgentTab, place: WorkspacePlace, step: PlaceStep) => {
+      const seen = routeRef.current;
+      stepPlace(step, seen.kind === "agent" && seen.tab === tab, () =>
+        seen.kind === "agent"
+          ? {
+              route: { kind: "agent", agentId: seen.agentId, tab, place },
+              hash: agentHash(seen.agentId, tab, place),
+            }
+          : null,
+      );
+    },
+    [stepPlace],
   );
 
   const openSlot = useCallback(
@@ -154,58 +188,34 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   const placeWorkspace = useCallback(
     (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => {
       const seen = routeRef.current;
-      if (step !== "push" && (seen.kind !== "workspace" || seen.view !== view)) return;
-      if (step === "back") {
-        history.back();
-        return;
-      }
-      const next: Route = { kind: "workspace", view, place };
-      if (step === "replace") {
-        history.replaceState(null, "", workspaceHash(view, place));
-        setRoute(next);
-        return;
-      }
-      go(workspaceHash(view, place), next);
+      stepPlace(step, seen.kind === "workspace" && seen.view === view, () => ({
+        route: { kind: "workspace", view, place },
+        hash: workspaceHash(view, place),
+      }));
     },
-    [go],
+    [stepPlace],
   );
 
   const placeSection = useCallback(
     (section: Section, place: WorkspacePlace, step: PlaceStep) => {
       const seen = routeRef.current;
-      if (step !== "push" && (seen.kind !== "section" || seen.section !== section)) return;
-      if (step === "back") {
-        history.back();
-        return;
-      }
-      const next: Route = { kind: "section", section, place };
-      if (step === "replace") {
-        history.replaceState(null, "", sectionHash(section, place));
-        setRoute(next);
-        return;
-      }
-      go(sectionHash(section, place), next);
+      stepPlace(step, seen.kind === "section" && seen.section === section, () => ({
+        route: { kind: "section", section, place },
+        hash: sectionHash(section, place),
+      }));
     },
-    [go],
+    [stepPlace],
   );
 
   const placeCustomize = useCallback(
     (view: CustomizeTab, place: WorkspacePlace, step: PlaceStep) => {
       const seen = routeRef.current;
-      if (step !== "push" && (seen.kind !== "customize" || seen.view !== view)) return;
-      if (step === "back") {
-        history.back();
-        return;
-      }
-      const next: Route = { kind: "customize", view, place };
-      if (step === "replace") {
-        history.replaceState(null, "", customizeHash(view, place));
-        setRoute(next);
-        return;
-      }
-      go(customizeHash(view, place), next);
+      stepPlace(step, seen.kind === "customize" && seen.view === view, () => ({
+        route: { kind: "customize", view, place },
+        hash: customizeHash(view, place),
+      }));
     },
-    [go],
+    [stepPlace],
   );
 
   const openAdmin = useCallback(() => go("#/admin", { kind: "admin" }), [go]);
@@ -358,6 +368,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
             onPlaceWorkspace={placeWorkspace}
             onPlaceSection={placeSection}
             onPlaceCustomize={placeCustomize}
+            onPlaceAgent={placeAgent}
             sought={sought}
             linked={linked}
           />
@@ -386,6 +397,7 @@ function Pane({
   onPlaceWorkspace,
   onPlaceSection,
   onPlaceCustomize,
+  onPlaceAgent,
   sought,
   linked,
 }: {
@@ -406,6 +418,7 @@ function Pane({
   onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
   onPlaceCustomize: (view: CustomizeTab, place: WorkspacePlace, step: PlaceStep) => void;
+  onPlaceAgent: (tab: AgentTab, place: WorkspacePlace, step: PlaceStep) => void;
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
@@ -486,6 +499,8 @@ function Pane({
         tab={route.tab}
         tabs={AGENT_TABS}
         onTab={(tab) => onOpenAgent(agent.id, tab)}
+        place={route.place}
+        onPlace={(place, step) => onPlaceAgent(route.tab, place, step)}
       />
     );
   }
