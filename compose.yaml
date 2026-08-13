@@ -3,12 +3,13 @@
 #   postgres ─┐
 #   redis ────┤
 #   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap (one-shot)
-#   gateway ──┤  ufo-control gateway   :8080   onboarding/login (console email)
+#   gateway ──┤  ufo-control gateway   :8080   onboarding/login (WorkOS sign-in)
 #   serve ────┘  ufoctl serve          :8710   surfaces + DBOS workers + embedded egress proxy
 #
 # Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
-# and (via rls-bootstrap) ufo_serve roles the hosted topology uses. The gateway emails the sign-in
-# code to the console (UFO_CONTROL_EMAIL_MODE=console) — read it from `docker compose logs gateway`.
+# and (via rls-bootstrap) ufo_serve roles the hosted topology uses. WorkOS emails the sign-in
+# code to the address you type; invites log to the console (UFO_CONTROL_EMAIL_MODE=console) —
+# read those from `docker compose logs gateway`.
 
 x-dev-env: &dev-env
   UFO_CONTROL_POSTGRES_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
@@ -75,6 +76,16 @@ services:
       UFO_CONTROL_SERVE_DSN: postgresql+asyncpg://ufo:ufo@postgres:5432/ufo
       UFO_PUBLIC_BASE_URL: http://localhost:8080
       UFO_WORKSPACE_BASE_URL: http://localhost:8710
+      # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
+      # `docker compose up` needs nothing. Browser sign-in lands on a local email form instead of
+      # AuthKit, and terminal codes are logged to `docker compose logs gateway` (the dev code is
+      # 000000). To exercise the real AuthKit/Magic Auth path, set WORKOS_MODE=workos and export a
+      # staging key and its client id; the redirect is the gateway's own origin, since locally
+      # nothing routes /v1/onboard from serve's port to this container.
+      WORKOS_MODE: ${WORKOS_MODE:-console}
+      WORKOS_API_KEY: ${WORKOS_API_KEY:-}
+      WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
+      WORKOS_REDIRECT_URI: http://localhost:8080/v1/onboard/auth/callback
       # Local signup opens without an invite; the hosted gateway leaves this unset (required).
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"

@@ -20,12 +20,13 @@ browser ------>|  waitlist -> D1 + mail queue               |
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
 browser ------>|  GET /login -> sign-in page (app host)     |
+               |  GET /v1/onboard/auth/* -> WorkOS AuthKit  |
                |  POST /v1/onboard/{channel} (web = JSON)   |
                |       |                                    |
                |       v                                    |
                |  Onboarding.advance ---------------------->+--> SharedWorkspaces
                |       +--> onboard_claim rows              |
-               |       +--> email code workflow             |
+               |       +--> WorkOS email verification       |
                |       +--> domain grant burn (create only) |
                |       +--> bearer token                    |
                |  slack connect delivery (background poll)  |
@@ -63,7 +64,7 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- no claim yet ---------------------> ask for work email
   |
-  +-- email submitted ------------------> create claim, email code, ask for code
+  +-- email submitted ------------------> create claim, WorkOS emails a code, ask for it
   |
   +-- code submitted -------------------> verify claim
   |
@@ -81,6 +82,15 @@ Onboarding.advance(channel, session, body, install)
                                             emit token + workspace directives
                                             admin: choose (billing) · teammate: ask
 ```
+
+WorkOS answers one question: does this person control this address. The terminal channel applies the
+work-email denylist, then posts the address to Magic Auth, which emails the six-digit code and owns
+its expiry and attempt count — a wrong code leaves the prompt standing, and a code WorkOS will not
+redeem again ends the claim, so the member starts over. The browser channel collects neither the
+email nor the code (see "Web login"). The gateway reads `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, and
+`WORKOS_REDIRECT_URI` at startup and refuses to start without all three. Everything past the
+verified address is the gateway's own: the claim, the resolution below, the invite gate, and the
+bearer.
 
 The verified address identifies every exact membership plus the workspace its email domain names.
 One candidate opens directly; several are offered as a `choose` before a token is minted. Selecting
@@ -112,10 +122,10 @@ export METRONOME_PACKAGE_ALIAS=base-plan               # an existing Package's a
 UFO_DEV_PACK=assistant_billing docker compose up
 ```
 
-Sign in at `:8080` (the code prints to `docker compose logs gateway`); the first member of a fresh
-domain owns the workspace and gets the billing choice. The four settings are read host-side by the
-tool and the job — never in the sandbox — and the flow creates real objects in whichever account
-they name, so keep it pointed at test mode and sandbox. Without them the chain still runs to the
+Sign in at `:8080`; the first member of a fresh domain owns the workspace and gets the billing
+choice. The four settings are read host-side by the tool and the
+job — never in the sandbox — and the flow creates real objects in whichever account they name, so
+keep it pointed at test mode and sandbox. Without them the chain still runs to the
 tool and refuses there, naming each missing setting; with them it continues into the portal link and
 the activation job provisions the contract on the next tick.
 `extensions/metronome/tests/integration/test_billing_providers.py` drives the same providers from
@@ -209,23 +219,55 @@ host redirects to the surface claiming `SurfaceSpec.home` — the portal (`/surf
 serves its shell only to a resolved session and redirects an arrival without one to `/login`; a
 session that expires under an open page leaves the shell offering the same link. The portal takes
 no bearer from a member: the bearer enters through the one POST the signed-in card makes, so there
-is exactly one place a member types their email.
+is exactly one place a bearer becomes a session.
 
-A self-hosted node runs no gateway, so it has no sign-in page and no email machine — the member at
-the terminal is the owner `ufoctl init` seated, and their CLI token is the proof. `ufoctl portal`
+A self-hosted node runs no gateway, so it has no sign-in page and verifies no email — the member at
+the terminal is the owner `ufoctl init` seated, and their CLI token is the proof. The WorkOS
+settings are read at gateway boot alone, so `ufoctl serve` starts without them. `ufoctl portal`
 spends it: a loopback listener serves one page at an unguessable path, the browser posts the bearer
 from that page's form to `/surface/web`, and the listener closes behind the request that took it.
 Same route, same act, same cookie as the hosted card — the deploy differs, the door does not.
 `ufoctl serve` names the portal and that verb at startup.
 
 `GET /login` serves a self-contained sign-in page — a second renderer of the identical
-`Onboarding` machine, never a second machine. The page generates a session UUID, sends each answer
-to the same-origin `POST /v1/onboard/web` (header `x-ufo-session`, channel `web` — the claim index
-isolates it from a terminal session with the same ref), and receives the directive lines as JSON
+`Onboarding` machine, never a second machine. The page names no session at all: sign-in mints one
+and binds it as the `ufo_onboard` cookie, so the page sends each answer to the same-origin
+`POST /v1/onboard/web` (that cookie, channel `web` — the claim index isolates it from a terminal
+session with the same ref), and receives the directive lines as JSON
 (`gateway_web.parse_directives` inverts the wire escaping exactly). It renders `say`/`ask`/`exit`
 and, on `token` + `workspace`, a signed-in home card: the member's email, the workspace URL, and
 the terminal install one-liner. No `install` preamble is sent on the web channel, and the token
 never appears in a human-visible line.
+
+A web session with no claim gets one directive, `auth`, naming `GET /v1/onboard/auth/start`. The
+page navigates top-level there with its `?c=`/`?a=` carry, and `start` mints the onboarding session,
+binds it to that browser as the `ufo_onboard` cookie, and 302s to AuthKit's authorization URL with
+the session and the carry packed into the OAuth `state` under an HMAC signature — a conversation id
+that is not a uuid and a target that is not an artifact path are dropped before they ride it. The
+member authenticates on the WorkOS-hosted page. `GET /v1/onboard/auth/callback` requires the state's
+signature and requires the session it names to be the one that browser holds in the cookie,
+exchanges the returned code for the verified email, applies the work-email denylist to it, inserts
+the claim already verified, and 303s to `/login` with the carry — or with `?error=` and the sentence
+that refused, which the page states over a `Sign in again` link. The page resumes the machine under
+the same cookie, `advance` finds a verified claim, and resolution continues as the terminal's does.
+A second callback on the same session returns the claim already there, so a replayed link signs the
+same member in rather than starting over.
+
+The session id is the whole of what stands behind a verified email, so it is minted server-side and
+reaches only the browser that signed in: no query states it, the page cannot read it, only a state
+this gateway signed can name it, and the callback writes a claim for no session but the one the
+cookie names. A session another party chose therefore keys nothing — the bearer it would otherwise
+hand out is the workspace credential itself.
+Both routes sit under `/v1/onboard`, so the reserved prefixes and the nginx map already reach them,
+and `WORKOS_REDIRECT_URI` names the app-host callback the rest of the flow is already on.
+
+`WORKOS_MODE=console` runs a credential-free dev verifier, so `docker compose up` needs no WorkOS
+keys — the default for the local stack. `start` then 302s to `/v1/onboard/auth/console`, a plain
+email form the gateway serves in place of AuthKit, whose GET reaches the same callback carrying the
+typed address as the code; the cookie binding, the signed state, and every step past the identity
+proof are the deploy's own. Terminal sign-in in console mode logs its code (`000000`) rather than
+emailing it. The route is mounted only under `WORKOS_MODE=console`; the default `workos` mode
+requires the three `WORKOS_*` values at boot and serves no such door.
 
 When the claim's channel-verified email domain equals `OPERATOR_EMAIL_DOMAIN`, `_signed_in` adds
 one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
@@ -371,6 +413,13 @@ the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifes
 - The `flyingobject.ai` domain is onboarded in Cloudflare Email Sending; the edge binding permits
   only `no-reply@flyingobject.ai` as its sender.
 - The ufo surface requires `UFO_TOKEN_SECRET`; a missing secret is a configuration error, not a 401.
+- `WORKOS_API_KEY` and `WORKOS_CLIENT_ID` are the gateway's alone, in their own Secret through an
+  explicit `secretKeyRef` (`ufo-gateway-workos`, never `ufo-platform-secrets`, which serve mounts
+  whole); `WORKOS_REDIRECT_URI` rides beside them as a plain value, and a missing one of the three
+  fails startup. The redirect is whichever origin reaches the gateway: the app host's
+  `https://app.<env>/v1/onboard/auth/callback` on a deploy, `http://localhost:8080` + that path
+  under compose. One WorkOS environment answers one deploy, and the redirect it accepts is
+  registered there; the two secret values land before the gateway rolls.
 - Only a workspace admin can mint the "Add to Slack" link or derive a
   bring-your-own-app identity; the OAuth callback installs into the workspace the sealed state names.
   A teammate may call `slack_connect` to read the install status but never installs.
@@ -388,7 +437,8 @@ control/src/ufo_control/
   gateway.py              Onboarding machine and apex routes
   gateway_directives.py   the directive wire the client renders
   gateway_web.py          the /login page + JSON rendering of the same wire
-  gateway_claim.py        email -> 6-digit code -> constant-time verify
+  gateway_claim.py        the claim under its TTL: start, verify, admit verified
+  gateway_workos.py       WorkOS custody: the AuthKit hop and Magic Auth codes
   gateway_invite.py       one-time domain grants gating workspace creation
   gateway_slack_connect.py
                           the signup Slack Connect delivery: table, client, leased workflow

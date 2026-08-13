@@ -188,9 +188,9 @@ async def _completed_claim(
 ) -> UUID:
     claim_id = uuid4()
     await pool.execute(
-        "insert into ufo_control.onboard_claim (id, email, email_domain, code_hash, surface,"
+        "insert into ufo_control.onboard_claim (id, email, email_domain, surface,"
         "  surface_ref, expires_at, verified_at, resulting_workspace_id, invite_id, created_at)"
-        " values ($1, $2, $3, 'hash', 'ufo', $4, now() + interval '1 hour', now(), $5, $6,"
+        " values ($1, $2, $3, 'ufo', $4, now() + interval '1 hour', now(), $5, $6,"
         "  now() - $7::interval)",
         claim_id,
         email,

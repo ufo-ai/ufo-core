@@ -4,13 +4,14 @@ import asyncio
 import re
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import asyncpg
 import pytest
+from fake_workos import MAGIC_CODE, FakeVerifier
 from fastapi.testclient import TestClient
 from ufo.bearer import verify_token
 
@@ -22,7 +23,6 @@ from ufo_control.gateway_email import (
     AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     SES_SENDER_ENV,
     invite_email,
-    verification_email,
 )
 from ufo_control.gateway_invite import INVITE_TTL, InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
@@ -34,6 +34,12 @@ from ufo_control.gateway_slack_connect import (
     SlackConnectInviter,
 )
 from ufo_control.gateway_web import LOGIN_PAGE, parse_directives
+from ufo_control.gateway_workos import (
+    AUTH_CALLBACK_PATH,
+    WORKOS_API_KEY_ENV,
+    WORKOS_CLIENT_ID_ENV,
+    WORKOS_REDIRECT_URI_ENV,
+)
 
 TOKEN_SECRET = "test-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
@@ -42,22 +48,6 @@ UNREACHABLE_SLACK = "http://127.0.0.1:1"
 DELIVERY_POLL_SECONDS = 0.05
 DELIVERY_TIMEOUT_SECONDS = 20.0
 LEXICON_EXPIRES_AT = datetime(2026, 7, 28, 18, 45, tzinfo=UTC)
-LEXICON_CODE_TTL = timedelta(minutes=15)
-
-
-CODE_IN_BODY = re.compile(r"\d{6}")
-
-
-@dataclass
-class RecordingSender:
-    sent: dict[str, str] = field(default_factory=dict)
-
-    async def send(self, email: str, subject: str, text: str) -> None:
-        """The sender is handed a rendered message, never a code, so the code is read back out of
-        the body the way a member reads it."""
-        found = CODE_IN_BODY.search(text)
-        assert found is not None
-        self.sent[email] = found.group()
 
 
 async def _add_workspaces(dsn: str, count: int) -> None:
@@ -122,6 +112,15 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_postgres
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
     monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
+    monkeypatch.setenv(WORKOS_API_KEY_ENV, "sk_test_gateway")
+    monkeypatch.setenv(WORKOS_CLIENT_ID_ENV, "client_01GATEWAY")
+    monkeypatch.setenv(WORKOS_REDIRECT_URI_ENV, f"{WORKSPACE_URL}{AUTH_CALLBACK_PATH}")
+
+
+def _verify_through(monkeypatch: pytest.MonkeyPatch) -> FakeVerifier:
+    verifier = FakeVerifier()
+    monkeypatch.setattr(gateway, "workos_verifier_from_env", lambda: verifier)
+    return verifier
 
 
 def test_fleet_answers_the_workspace_count(
@@ -143,15 +142,14 @@ def test_a_granted_domain_is_identified_without_a_third_prompt(
     prompt, nothing retyped, and the claim still stamps its invite so the Slack Connect invitation
     keeps its trigger."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     asyncio.run(_grant(gateway_postgres, 9, "founder@inviteco.io"))
     headers = {"x-ufo-session": "invite-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
         email = "colleague@inviteco.io"
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE)
 
     assert "enter your invite" not in signed_in.text
     assert f"Signed in: {email}" in signed_in.text
@@ -164,11 +162,10 @@ def test_the_gate_ends_the_session_on_every_refusal(
     """No refusal prompts, because the member holds nothing that could change the answer: each one
     says why, names the waitlist, and exits cleanly rather than looping on a dead question."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     asyncio.run(_grant(gateway_postgres, 8, "founder@expiredco.io", timedelta(days=-1)))
     with TestClient(gateway_app()) as client:
-        ungranted = _walk(client, "no-grant", "founder@ungrantedco.io", sender)
+        ungranted = _walk(client, "no-grant", "founder@ungrantedco.io")
         assert "ungrantedco.io has no invite." in ungranted
         assert (
             "Join the waitlist: curl https://flyingobject.ai/waitlist"
@@ -177,7 +174,7 @@ def test_the_gate_ends_the_session_on_every_refusal(
         assert "exit\t0" in ungranted
         assert "\task\t" not in ungranted
 
-        expired = _walk(client, "expired-grant", "founder@expiredco.io", sender)
+        expired = _walk(client, "expired-grant", "founder@expiredco.io")
         assert re.search(
             r"The invite for expiredco\.io expired \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.", expired
         )
@@ -186,17 +183,17 @@ def test_the_gate_ends_the_session_on_every_refusal(
 
         asyncio.run(_grant(gateway_postgres, 10, "founder@burnedco.io"))
         asyncio.run(_burn_grant(gateway_postgres, "burnedco.io"))
-        burned = _walk(client, "burned-grant", "founder@burnedco.io", sender)
+        burned = _walk(client, "burned-grant", "founder@burnedco.io")
         assert "The invite for burnedco.io was already used." in burned
         assert "Contact us if you cannot sign in." in burned
         assert "exit\t0" in burned
 
 
-def _walk(client: TestClient, session: str, email: str, sender: RecordingSender) -> str:
+def _walk(client: TestClient, session: str, email: str) -> str:
     headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
     client.post("/v1/onboard/ufo", headers=headers, content="")
     client.post("/v1/onboard/ufo", headers=headers, content=email)
-    return client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email]).text
+    return client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE).text
 
 
 async def _grant(dsn: str, object_number: int, email: str, ttl: timedelta = INVITE_TTL) -> None:
@@ -275,8 +272,7 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     email = "me@httpco.io"
     workspace_id = uuid.uuid4()
     asyncio.run(_add_workspace(gateway_postgres, workspace_id, "founder@httpco.io"))
@@ -286,7 +282,7 @@ def test_http_onboarding_joins_and_returns_a_surface_verified_token(
         assert "Enter your work email" in opening.text
         asked = client.post("/v1/onboard/ufo", headers=headers, content=email)
         assert "Enter the code" in asked.text
-        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE)
     directives = dict(line.split("\t", 1) for line in signed_in.text.splitlines() if "\t" in line)
     assert verify_token(directives["token"], workspace_id) == email
     assert directives["workspace"] == WORKSPACE_URL
@@ -317,15 +313,14 @@ def test_signup_completes_and_delivery_runs_while_slack_is_unreachable(
         return replace(inviter, poll_interval=DELIVERY_POLL_SECONDS)
 
     monkeypatch.setattr(gateway, "slack_connect_from_env", promptly)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     email = "founder@slackco.io"
     asyncio.run(_grant(gateway_postgres, 11, email))
     headers = {"x-ufo-session": "slack-connect-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        signed_in = client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE)
         assert f"Signed in: {email}" in signed_in.text
         row = _await_attempted_delivery(gateway_postgres, email)
     assert row["state"] == "pending"
@@ -371,8 +366,7 @@ def test_http_onboarding_refuses_an_ambiguous_domain(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     domain = "ambiguous-httpco.io"
     asyncio.run(_add_workspace(gateway_postgres, uuid.uuid4(), f"first@{domain}"))
     asyncio.run(_add_workspace(gateway_postgres, uuid.uuid4(), f"second@{domain}"))
@@ -380,7 +374,7 @@ def test_http_onboarding_refuses_an_ambiguous_domain(
     headers = {"x-ufo-session": "ambiguous-flow", "x-ufo-installed": "1"}
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        response = client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email])
+        response = client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE)
     assert "Onboarding failed" in response.text
     assert uuid.uuid5(uuid.NAMESPACE_DNS, domain) not in asyncio.run(
         _workspace_ids(gateway_postgres)
@@ -461,8 +455,7 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
     rejected address, a wrong code, the signed-in cap, and all three invite refusals — plus the two
     emails, the sign-in page, and the served terminal client."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _verify_through(monkeypatch)
     asyncio.run(_grant(gateway_postgres, 21, "founder@lexiconco.io"))
     asyncio.run(_grant(gateway_postgres, 22, "founder@lexiconexpired.io", timedelta(days=-1)))
     asyncio.run(_grant(gateway_postgres, 23, "founder@lexiconburned.io"))
@@ -481,17 +474,16 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
             client.post("/v1/onboard/ufo", headers=headers, content="000000").text
         )
         screens += _member_copy(
-            client.post("/v1/onboard/ufo", headers=headers, content=sender.sent[email]).text
+            client.post("/v1/onboard/ufo", headers=headers, content=MAGIC_CODE).text
         )
         for session, refused in (
             ("lexicon-none", "founder@lexiconnone.io"),
             ("lexicon-expired", "founder@lexiconexpired.io"),
             ("lexicon-burned", "founder@lexiconburned.io"),
         ):
-            screens += _member_copy(_walk(client, session, refused, sender))
-    code_subject, code_body = verification_email("042042", LEXICON_EXPIRES_AT, LEXICON_CODE_TTL)
+            screens += _member_copy(_walk(client, session, refused))
     invite_subject, invite_body = invite_email(email, LEXICON_EXPIRES_AT, "flyingobject.ai")
-    screens += [code_subject, code_body, invite_subject, invite_body]
+    screens += [invite_subject, invite_body]
     assert len(screens) > 15
     for copy in screens:
         assert BANNED_METAPHOR.search(copy) is None, copy

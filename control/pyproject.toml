@@ -12,6 +12,7 @@ dependencies = [
     "opentelemetry-instrumentation-logging>=0.64b0",
     "opentelemetry-sdk>=1.43",
     "uvicorn>=0.30",
+    "workos>=10.1",
 ]
 
 [project.scripts]

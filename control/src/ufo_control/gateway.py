@@ -4,27 +4,35 @@ import asyncio
 import hashlib
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
+from urllib.parse import urlencode
 
 import asyncpg
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
 from ufo.sandbox.terminal import client_program_bundle
+from ufo.sdk.http import set_session_cookie
 
-from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
+from ufo_control.gateway_claim import ClaimError, ClaimWorkflow, Verifier
 from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
 from ufo_control.gateway_email import (
     DEFAULT_PUBLIC_BASE_URL,
     PUBLIC_BASE_URL_ENV,
     WorkEmailError,
     WorkEmailPolicy,
-    email_sender_from_env,
     public_apex_host,
 )
 from ufo_control.gateway_invite import (
@@ -37,7 +45,25 @@ from ufo_control.gateway_shared import EnsuredWorkspace, SharedWorkspaces, serve
 from ufo_control.gateway_slack_connect import slack_connect_from_env
 from ufo_control.gateway_store import OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV, mint_token
-from ufo_control.gateway_web import LOGIN_PAGE, WEB_CHANNEL, parse_directives
+from ufo_control.gateway_web import (
+    LOGIN_PAGE,
+    ONBOARD_SESSION_COOKIE,
+    WEB_CHANNEL,
+    parse_directives,
+)
+from ufo_control.gateway_workos import (
+    AUTH_CALLBACK_PATH,
+    AUTH_CONSOLE_PATH,
+    AUTH_START_PATH,
+    SIGN_IN_FAILED,
+    AuthCarry,
+    VerificationError,
+    console_signin_page,
+    pack_state,
+    unpack_state,
+    workos_console_mode,
+    workos_verifier_from_env,
+)
 from ufo_control.rls import owner_dsn
 from ufo_control.schema import require_control_schema
 
@@ -54,6 +80,7 @@ SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
 MAX_CHANNEL_BYTES = 64
 MAX_SESSION_BYTES = 128
+ONBOARD_SESSION_BYTES = 32
 MAX_BODY_BYTES = 4096
 GATEWAY_POOL_MIN_SIZE = 1
 GATEWAY_POOL_MAX_SIZE = 4
@@ -83,13 +110,19 @@ class Onboarding:
     store: OnboardStore
     workspaces: SharedWorkspaces
     invites: InviteCodes
+    verifier: Verifier
     token_secret: str
     apex_host: str
     invite_required: bool
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
+        """The browser never types its email: a page with no claim behind it is sent through
+        AuthKit, which is where the address and the proof of it come from. Every other channel
+        collects the address and confirms the code WorkOS mailed for it."""
         claim = await self.store.live_claim(channel, session)
         if claim is None:
+            if channel == WEB_CHANNEL:
+                return render(install, directive("auth", AUTH_START_PATH))
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
@@ -295,6 +328,7 @@ def gateway_app() -> FastAPI:
         nonlocal state
         owner_url = owner_dsn()
         serve_url = serve_dsn()
+        verifier = workos_verifier_from_env()
         await require_control_schema(owner_url)
         pool = await asyncpg.create_pool(
             dsn=owner_url, min_size=GATEWAY_POOL_MIN_SIZE, max_size=GATEWAY_POOL_MAX_SIZE
@@ -311,15 +345,14 @@ def gateway_app() -> FastAPI:
             pool=pool,
             onboarding=Onboarding(
                 claims=ClaimWorkflow(
-                    store=store,
-                    email_policy=WorkEmailPolicy(),
-                    email_sender=email_sender_from_env(),
+                    store=store, email_policy=WorkEmailPolicy(), verifier=verifier
                 ),
                 store=store,
                 workspaces=SharedWorkspaces(
                     workspace_url=_require_env(WORKSPACE_BASE_URL_ENV), pool=pool
                 ),
                 invites=invites,
+                verifier=verifier,
                 token_secret=_require_env(TOKEN_SECRET_ENV),
                 apex_host=public_apex_host(),
                 invite_required=invite_required,
@@ -361,15 +394,86 @@ def gateway_app() -> FastAPI:
     async def login() -> Response:
         return HTMLResponse(LOGIN_PAGE)
 
+    @app.get(AUTH_START_PATH)
+    async def auth_start(request: Request) -> Response:
+        """The page's first act. The onboarding session is minted here and bound to this browser as
+        the cookie the page cannot read, never taken from the query: the id that keys the claim the
+        callback verifies reaches nothing but the browser that signed in, so no one else can name a
+        session to have a verified email written under. Packing the carry and unpacking it again is
+        the validation: a conversation or artifact the query invented is dropped here, under the
+        same rules the callback reads it back by, so the state carries only what will be honored."""
+        assert state is not None
+        secret = state.onboarding.token_secret
+        session = secrets.token_urlsafe(ONBOARD_SESSION_BYTES)
+        carry = unpack_state(
+            pack_state(
+                AuthCarry(
+                    session=session,
+                    conversation=request.query_params.get("c"),
+                    artifact=request.query_params.get("a"),
+                ),
+                secret,
+            ),
+            secret,
+        )
+        response = RedirectResponse(
+            state.onboarding.verifier.authorization_url(pack_state(carry, secret)), status_code=302
+        )
+        set_session_cookie(response, ONBOARD_SESSION_COOKIE, session, samesite="lax")
+        return response
+
+    if workos_console_mode():
+
+        @app.get(AUTH_CONSOLE_PATH)
+        async def auth_console(request: Request) -> Response:
+            """The local stand-in for AuthKit, mounted only under `WORKOS_MODE=console`: the dev
+            enters a work email that the callback reads as the code. The cookie the start path set
+            still binds the return, so the walk past this page is the one a real return takes."""
+            return HTMLResponse(console_signin_page(request.query_params.get("state", "")))
+
+    @app.get(AUTH_CALLBACK_PATH)
+    async def auth_callback(request: Request) -> Response:
+        """AuthKit's return, honored only in the browser that left: the state has to be one this
+        gateway signed, and the session it names has to be the one the start path bound as the
+        cookie, so a state a caller wrote — or one of ours replayed anywhere else — verifies nothing
+        and writes no claim under a session someone chose. The email WorkOS verified
+        passes the same work-email policy a typed address does, and a refusal rides back to the page
+        as a sentence rather than a status: the page is where the member reads it. A callback for a
+        session that already holds a claim resolves that claim, so a repeated return signs the same
+        member in."""
+        assert state is not None
+        code = request.query_params.get("code", "")
+        try:
+            carry = unpack_state(
+                request.query_params.get("state", ""), state.onboarding.token_secret
+            )
+        except ValueError:
+            return PlainTextResponse("The sign-in link is not valid.", status_code=400)
+        query: list[tuple[str, str]] = []
+        if carry.conversation:
+            query.append(("c", carry.conversation))
+        if carry.artifact:
+            query.append(("a", carry.artifact))
+        bound = request.cookies.get(ONBOARD_SESSION_COOKIE, "").encode()
+        try:
+            if not code or not secrets.compare_digest(bound, carry.session.encode()):
+                raise VerificationError(SIGN_IN_FAILED)
+            email = await state.onboarding.verifier.exchange(code)
+            await state.onboarding.claims.admit_verified(email, WEB_CHANNEL, carry.session)
+        except (VerificationError, WorkEmailError, ClaimError) as error:
+            query.insert(0, ("error", str(error)))
+        landing = f"/login?{urlencode(query)}" if query else "/login"
+        return RedirectResponse(landing, status_code=303)
+
     @app.post("/v1/onboard/web")
     async def onboard_web(request: Request) -> Response:
+        """The page's session is the cookie sign-in bound, never a value the caller names, so the
+        claim behind a verified email advances for that browser alone. A request arriving without
+        the cookie carries no session, no claim stands behind it — one is only ever written under a
+        minted id — and the machine answers with the hop that mints one."""
         assert state is not None
-        session = request.headers.get("x-ufo-session")
-        if not session:
-            return JSONResponse({"error": "x-ufo-session header is required"}, status_code=400)
+        session = request.cookies.get(ONBOARD_SESSION_COOKIE, "")
         try:
-            if len(session.encode()) > MAX_SESSION_BYTES:
-                raise _RequestInputError("Session is too long.")
             body = await _request_body(request)
             payload = await state.onboarding.advance(WEB_CHANNEL, session, body, b"")
         except _RequestInputError as error:

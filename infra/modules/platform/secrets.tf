@@ -202,3 +202,22 @@ moved {
   from = aws_secretsmanager_secret_version.gateway_slack_connect
   to   = aws_secretsmanager_secret_version.gateway_slack_connect[0]
 }
+
+resource "aws_secretsmanager_secret" "gateway_workos" {
+  name = "${local.secret_prefix}/gateway-workos"
+  tags = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "gateway_workos" {
+  count = var.manage_runtime_secret_versions ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.gateway_workos.id
+  secret_string = jsonencode({
+    "api-key"   = ""
+    "client-id" = ""
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

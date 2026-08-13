@@ -37,11 +37,18 @@ UNBOUND_INVITE_CODE = (
     "  where table_schema = $1 and table_name = $2 and column_name = 'email_domain')"
 )
 
+RESHAPE = (
+    f"alter table {gateway_store.TABLE} drop column if exists code_hash,"
+    " drop column if exists attempts",
+)
+
 
 async def shape_control_schema(dsn: str) -> None:
     """Bring the whole schema to head in one transaction, one writer at a time. An invite ledger
     that cannot name the domain each grant opens is rebuilt and its rows are void: a grant is
-    redeemed by the domain it names, so an unbound row could never be honored."""
+    redeemed by the domain it names, so an unbound row could never be honored. A claim ledger
+    carrying the columns a verification code needed loses them, voiding nothing: WorkOS holds the
+    code, and a claim is ten minutes of state a member reruns."""
     connection = await asyncpg.connect(dsn)
     try:
         async with connection.transaction():
@@ -54,6 +61,8 @@ async def shape_control_schema(dsn: str) -> None:
             if unbound:
                 await connection.execute(f"drop table if exists {gateway_invite.TABLE}")
             for statement in DDL:
+                await connection.execute(statement)
+            for statement in RESHAPE:
                 await connection.execute(statement)
     finally:
         await connection.close()

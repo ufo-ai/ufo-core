@@ -231,6 +231,7 @@ data "kubectl_file_documents" "cluster_services" {
     secret_api_keys = module.platform.secret_names.api_keys
 
     secret_gateway_slack_connect = module.platform.secret_names.gateway_slack_connect
+    secret_gateway_workos        = module.platform.secret_names.gateway_workos
   })
 }
 

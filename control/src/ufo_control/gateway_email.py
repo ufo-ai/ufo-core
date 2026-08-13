@@ -3,8 +3,9 @@
 `WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
 organization — the denylist fails CLOSED and a malformed address is rejected up front. The sender
 delivers a rendered subject and body through SESv2, carrying no message shape of its own:
-`verification_email` and `invite_email` are the two messages the service sends. The sender
-speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU (hmac/sha256)
+`invite_email` is the one message the service sends, since WorkOS delivers the sign-in code. The
+sender speaks SESv2 `SendEmail` over `httpx` with a local SigV4 signer — signing is pure CPU
+(hmac/sha256)
 so it runs inline, and every network call is async: no boto3 network client, no sync HTTP on the
 loop. Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
 injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation), exchanged
@@ -21,7 +22,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -76,9 +77,6 @@ DISPOSABLE_EMAIL_DOMAINS = frozenset(
 
 PUBLIC_BASE_URL_ENV = "UFO_PUBLIC_BASE_URL"
 DEFAULT_PUBLIC_BASE_URL = "https://flyingobject.ai"
-
-CODE_SUBJECT = "Your flyingobject.ai verification code"
-CODE_BODY = "Your code: {code}. Expires {expires} UTC ({minutes} minutes)."
 
 INVITE_SUBJECT = "Your ufo invite"
 INVITE_BODY = """\
@@ -145,15 +143,6 @@ def public_apex_host() -> str:
             f"{PUBLIC_BASE_URL_ENV} must be a base URL like {DEFAULT_PUBLIC_BASE_URL}"
         )
     return host
-
-
-def verification_email(code: str, expires_at: datetime, ttl: timedelta) -> tuple[str, str]:
-    """Subject and body for a verification-code delivery."""
-    return CODE_SUBJECT, CODE_BODY.format(
-        code=code,
-        expires=expires_at.strftime("%H:%M"),
-        minutes=int(ttl.total_seconds() // 60),
-    )
 
 
 def invite_email(email: str, expires_at: datetime, apex_host: str) -> tuple[str, str]:

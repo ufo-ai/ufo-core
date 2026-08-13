@@ -110,6 +110,21 @@ spec:
   data:
     - {secretKey: bot-token, remoteRef: {key: ${secret_gateway_slack_connect}, property: bot-token}}
 ---
+# The WorkOS credentials the gateway verifies a member's email with. Its own Secret, read by the
+# ufo-gateway pod through an explicit secretKeyRef — serve mounts ufo-platform-secrets whole.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: ufo-gateway-workos
+  namespace: ${namespace}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: ufo-aws-sm, kind: ClusterSecretStore}
+  target: {name: ufo-gateway-workos}
+  data:
+    - {secretKey: WORKOS_API_KEY, remoteRef: {key: ${secret_gateway_workos}, property: api-key}}
+    - {secretKey: WORKOS_CLIENT_ID, remoteRef: {key: ${secret_gateway_workos}, property: client-id}}
+---
 # The shared egress proxy's stable CA certificate and key.
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret

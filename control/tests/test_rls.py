@@ -3,16 +3,16 @@
 import asyncio
 import logging
 import os
-import re
 import socket
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import asyncpg
 import pytest
 import sqlalchemy as sa
 from click.testing import CliRunner
+from fake_workos import MAGIC_CODE, FakeVerifier
 from ufo.bearer import verify_token
 from ufo.config import DatabaseConfig
 from ufo.db import (
@@ -138,24 +138,6 @@ async def _seed_workspaces(dsn: str, workspace_ids: tuple[str, ...]) -> None:
 class SharedRoleEnv:
     workspaces: tuple[str, ...]
     owner_dsn: str
-
-
-CODE_IN_BODY = re.compile(r"\d{6}")
-
-
-@dataclass
-class RecordingSender:
-    sent: dict[str, str] = field(default_factory=dict)
-
-    async def send(self, email: str, subject: str, text: str) -> None:
-        """The sender is handed a rendered message, never a code, so the code is read back out of
-        the body the way a member reads it."""
-        found = CODE_IN_BODY.search(text)
-        assert found is not None
-        self.sent[email] = found.group()
-
-    def last_code(self, email: str) -> str:
-        return self.sent[email]
 
 
 @pytest.fixture(scope="module")
@@ -632,12 +614,13 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
     async with pool.acquire() as connection:
         await connection.execute("truncate ufo_control.onboard_claim cascade")
         await connection.execute("truncate ufo_control.invite_code")
-    sender = RecordingSender()
+    verifier = FakeVerifier()
     flow = Onboarding(
-        claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender),
+        claims=ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), verifier=verifier),
         store=store,
         workspaces=SharedWorkspaces(workspace_url=SHARED_WORKSPACE_URL, pool=pool),
         invites=invites,
+        verifier=verifier,
         token_secret=SHARED_TOKEN_SECRET,
         apex_host="flyingobject.ai",
         invite_required=True,
@@ -646,10 +629,10 @@ async def test_shared_onboard_creates_then_joins_a_workspace(
         await invites.mint(1, "boss@sharedtwo.io")
         await flow.advance("ufo", "sess", "", b"")
         await flow.advance("ufo", "sess", "boss@sharedtwo.io", b"")
-        signed_in = await flow.advance("ufo", "sess", sender.last_code("boss@sharedtwo.io"), b"")
+        signed_in = await flow.advance("ufo", "sess", MAGIC_CODE, b"")
         await flow.advance("ufo", "sess2", "", b"")
         await flow.advance("ufo", "sess2", "mate@sharedtwo.io", b"")
-        joined = await flow.advance("ufo", "sess2", sender.last_code("mate@sharedtwo.io"), b"")
+        joined = await flow.advance("ufo", "sess2", MAGIC_CODE, b"")
     finally:
         await pool.close()
     workspace_id = str(uuid5(NAMESPACE_DNS, "sharedtwo.io"))
@@ -715,12 +698,11 @@ async def _redeems(dsn: str, domain: str) -> bool:
         claim_id = uuid4()
         await pool.execute(
             "insert into ufo_control.onboard_claim "
-            "(id, email, email_domain, code_hash, surface, surface_ref, expires_at) "
-            "values ($1, $2, $3, $4, $5, $6, now() + interval '15 minutes')",
+            "(id, email, email_domain, surface, surface_ref, expires_at) "
+            "values ($1, $2, $3, $4, $5, now() + interval '15 minutes')",
             claim_id,
             f"cli@{domain}",
             domain,
-            "x",
             "ufo",
             "cli-mint-proof",
         )

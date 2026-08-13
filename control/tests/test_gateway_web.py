@@ -1,20 +1,20 @@
 """The web renderer of the onboarding machine: the JSON directive wire, the sign-in page's
-self-containment, and the full email → code walk over the real `onboard_claim` table and
-`SharedWorkspaces`. Both terminal shapes are asserted, since the page can only end on one of them:
-the signed-in card and a gate refusal that ends on `exit`. The `debugger` directive is asserted at
-both poles: emitted with the exact URL for an operator-domain email, absent for everyone else.
-Workspace resolution is asserted at all three of its poles too: a domain that creates a workspace,
-an exact membership at another domain, and a verified member choosing among multiple workspaces."""
+self-containment, and the full walk from the `auth` hop through the callback to a signed-in card,
+over the real `onboard_claim` table and `SharedWorkspaces`. Both terminal shapes are asserted, since
+the page can only end on one of them: the signed-in card and a gate refusal that ends on `exit`. The
+`debugger` directive is asserted at both poles: emitted with the exact URL for an operator-domain
+email, absent for everyone else. Workspace resolution is asserted at all three of its poles too: a
+domain that creates a workspace, an exact membership at another domain, and a verified member
+choosing among multiple workspaces."""
 
 import asyncio
-import re
 import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import asyncpg
 import pytest
+from fake_workos import FakeVerifier
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 from ufo.bearer import verify_token
@@ -29,17 +29,14 @@ from ufo_control.gateway import (
     gateway_app,
 )
 from ufo_control.gateway_directives import PROMPT, directive, render
-from ufo_control.gateway_email import (
-    AWS_ROLE_ARN_ENV,
-    AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
-    SES_SENDER_ENV,
-)
 from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
-from ufo_control.gateway_web import LOGIN_PAGE, parse_directives
+from ufo_control.gateway_web import LOGIN_PAGE, ONBOARD_SESSION_COOKIE, parse_directives
+from ufo_control.gateway_workos import AUTH_CALLBACK_PATH, AUTH_START_PATH
 
 TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
+SIGNED_IN = "Signed in: "
 
 EXIT_IS_TERMINAL = """  else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');
@@ -52,33 +49,33 @@ the `arg !== '0'` branch, dropping either one, guarding the arm — changes thes
 assertion (does the arm mention `finished`?) passes on the nested form and would not have caught the
 bug it exists for."""
 
-
-CODE_IN_BODY = re.compile(r"\d{6}")
-
-
-@dataclass
-class RecordingSender:
-    sent: dict[str, str] = field(default_factory=dict)
-
-    async def send(self, email: str, subject: str, text: str) -> None:
-        """The sender is handed a rendered message, never a code, so the code is read back out of
-        the body the way a member reads it."""
-        found = CODE_IN_BODY.search(text)
-        assert found is not None
-        self.sent[email] = found.group()
+REFUSAL_REPLACES_THE_WALK = """  log.appendChild(again);
+} else {
+  advance('');
+}"""
+"""A refusal arrives as a page load, so it is the boot that must branch. Advancing the machine
+alongside the sentence takes the `auth` directive back — the page leaves for the sign-in again and
+the member never reads why they were refused, which is a bounce rather than a screen. The `else`
+is what keeps the two exclusive."""
 
 
-def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gateway_postgres: str) -> None:
-    token_file = tmp_path / "web-identity"
-    token_file.write_text("token")
+def _configure(monkeypatch: pytest.MonkeyPatch, gateway_postgres: str) -> None:
     monkeypatch.setenv(
         SERVE_DSN_ENV, gateway_postgres.replace("postgresql://", "postgresql+asyncpg://")
     )
     monkeypatch.setenv(TOKEN_SECRET_ENV, TOKEN_SECRET)
     monkeypatch.setenv(WORKSPACE_BASE_URL_ENV, WORKSPACE_URL)
-    monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
-    monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
-    monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
+
+
+def _verifies(monkeypatch: pytest.MonkeyPatch, verifier: FakeVerifier) -> FakeVerifier:
+    monkeypatch.setattr(gateway, "workos_verifier_from_env", lambda: verifier)
+    return verifier
+
+
+def _client() -> TestClient:
+    """https, so the jar carries the `Secure` onboarding cookie between requests the way a browser
+    does — the page names no session, so that cookie is the whole of what identifies it."""
+    return TestClient(gateway_app(), base_url="https://testserver")
 
 
 def test_parse_directives_round_trips_the_wire_escaping() -> None:
@@ -116,6 +113,7 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         ">Open your workspace</button>",
         "From your terminal:",
         ">Session debugger</button>",
+        "'Sign in again'",
         "'Network error — retrying…'",
         "'Error ' + res.status + ' — try again.'",
         "'Failed — reload to retry.'",
@@ -127,6 +125,41 @@ def test_login_page_asks_for_the_email_once() -> None:
     """The ask is the machine's own directive, rendered as the prompt label. The page words it no
     second time, so a member reads one instruction and answers one field."""
     assert "work email" not in LOGIN_PAGE
+
+
+def test_login_page_leaves_for_the_start_path_the_auth_directive_names() -> None:
+    """Sign-in is a hop the page never spells: the `auth` directive carries the start path, so the
+    route can move without the page changing. The page names no session on the way out or back — the
+    start path mints it and binds it as the cookie every POST carries, so neither the page nor a URL
+    can decide which session a verified email lands under. The conversation and artifact carry ride
+    the hop's query."""
+    assert "directive.verb === 'auth'" in LOGIN_PAGE
+    assert "location.assign(arg + (q.size ? '?' + q : ''))" in LOGIN_PAGE
+    assert "if (target) q.set('c', target[0]);" in LOGIN_PAGE
+    assert "if (artifact) q.set('a', artifact);" in LOGIN_PAGE
+    assert AUTH_START_PATH not in LOGIN_PAGE
+    assert "sessionStorage" not in LOGIN_PAGE
+    assert "crypto.randomUUID" not in LOGIN_PAGE
+    assert "x-ufo-session" not in LOGIN_PAGE
+    assert "params.get('session')" not in LOGIN_PAGE
+
+
+def test_login_page_states_a_refusal_and_offers_the_walk_again() -> None:
+    """The callback hands a refusal back as `/login?error=<sentence>`, so the page reads its own
+    query for it, states it, and offers the one act left — carrying the conversation and artifact
+    forward, since a refused member still came here for something."""
+    assert "params.get('error')" in LOGIN_PAGE
+    assert "line(fault, 'error')" in LOGIN_PAGE
+    assert "again.href = '/login' + (q.size ? '?' + q : '')" in LOGIN_PAGE
+    assert REFUSAL_REPLACES_THE_WALK in LOGIN_PAGE
+
+
+def test_login_page_reads_the_signed_in_email_off_the_machines_own_line() -> None:
+    """The web member types no email — WorkOS holds the address — so the card's email is the
+    machine's own `Signed in:` line, the one
+    test_web_channel_walks_the_auth_hop_to_the_signed_in_card asserts it emits."""
+    assert f"const SIGNED_IN = '{SIGNED_IN}';" in LOGIN_PAGE
+    assert "if (arg.startsWith(SIGNED_IN)) email = arg.slice(SIGNED_IN.length);" in LOGIN_PAGE
 
 
 def test_login_page_renders_a_workspace_choice() -> None:
@@ -201,8 +234,23 @@ def _workspace_exists(dsn: str, workspace_id: UUID) -> bool:
     return asyncio.run(_read())
 
 
-def _advance(client: TestClient, session: str, body: str) -> list[dict[str, object]]:
-    response = client.post("/v1/onboard/web", headers={"x-ufo-session": session}, content=body)
+def _sign_in(client: TestClient, code: str, carry: dict[str, str] | None = None) -> str:
+    """The hop the `auth` directive sends the page on, driven the way a browser drives it: the start
+    path, which mints the session and binds it to this client's jar, the state the hosted page hands
+    back, and the callback that stamps the claim verified. The returned `location` is the URL the
+    page reloads itself with."""
+    start = client.get(AUTH_START_PATH, params=carry or {}, follow_redirects=False)
+    assert start.status_code == 302
+    (packed,) = parse_qs(urlparse(start.headers["location"]).query)["state"]
+    landed = client.get(
+        AUTH_CALLBACK_PATH, params={"code": code, "state": packed}, follow_redirects=False
+    )
+    assert landed.status_code == 303
+    return landed.headers["location"]
+
+
+def _advance(client: TestClient, body: str) -> list[dict[str, object]]:
+    response = client.post("/v1/onboard/web", content=body)
     assert response.status_code == 200
     return response.json()["directives"]
 
@@ -227,26 +275,29 @@ def _directive_fields(directives: list[dict[str, object]], verb: str) -> list[st
     return [str(field) for field in fields]
 
 
-def test_web_channel_walks_email_then_code_to_the_signed_in_card(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_web_channel_walks_the_auth_hop_to_the_signed_in_card(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    """The page's whole walk: a claimless session is answered with `auth` and nothing else, the hop
+    lands the verified claim, and the reload the callback names resolves the workspace and caps the
+    card. The conversation the member was redirected here with rides out on the hop's query and
+    comes back on the return, so the card the page builds can still carry it."""
+    _configure(monkeypatch, gateway_postgres)
     email = "boss@webco.io"
+    conversation = str(uuid.uuid4())
     _grant(gateway_postgres, 71, email)
-    session = str(uuid.uuid4())
-    with TestClient(gateway_app()) as client:
-        opening = _advance(client, session, "")
-        assert "Enter your work email:" in _fields(opening, "ask")
-        assert not any(d["verb"] == "install" for d in opening)
+    _verifies(monkeypatch, FakeVerifier(exchanges={"landed": email}))
+    with _client() as client:
+        opening = _advance(client, "")
+        assert opening == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
 
-        coded = _advance(client, session, email)
-        assert "Enter the code:" in _fields(coded, "ask")
+        returned = _sign_in(client, "landed", {"c": conversation})
+        assert returned == f"/login?c={conversation}"
+        assert client.cookies[ONBOARD_SESSION_COOKIE] not in returned
 
-        signed_in = _advance(client, session, sender.sent[email])
+        signed_in = _advance(client, "")
 
-    assert _fields(signed_in, "say") == [f"Signed in: {email}"]
+    assert _fields(signed_in, "say") == [f"{SIGNED_IN}{email}"]
     (token,) = _fields(signed_in, "token")
     (workspace,) = _fields(signed_in, "workspace")
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "webco.io")))
@@ -259,36 +310,32 @@ def test_web_channel_walks_email_then_code_to_the_signed_in_card(
 
 
 def test_web_channel_lets_a_member_choose_between_an_exact_membership_and_their_domain(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
     host_founder = "boss@addedco.io"
     own_founder = "boss@bigco.io"
     alice = "alice@bigco.io"
     _grant(gateway_postgres, 74, host_founder)
     _grant(gateway_postgres, 75, own_founder)
+    _verifies(
+        monkeypatch,
+        FakeVerifier(exchanges={"host": host_founder, "own": own_founder, "alice": alice}),
+    )
     host_id = UUID(str(uuid5(NAMESPACE_DNS, "addedco.io")))
     own_id = UUID(str(uuid5(NAMESPACE_DNS, "bigco.io")))
-    with TestClient(gateway_app()) as client:
-        hosting = str(uuid.uuid4())
-        _advance(client, hosting, "")
-        _advance(client, hosting, host_founder)
-        _advance(client, hosting, sender.sent[host_founder])
+    with _client() as client:
+        _sign_in(client, "host")
+        _advance(client, "")
 
         _add_member(gateway_postgres, host_id, alice)
 
-        founding = str(uuid.uuid4())
-        _advance(client, founding, "")
-        _advance(client, founding, own_founder)
-        _advance(client, founding, sender.sent[own_founder])
+        _sign_in(client, "own")
+        _advance(client, "")
 
-        signing_in = str(uuid.uuid4())
-        _advance(client, signing_in, "")
-        _advance(client, signing_in, alice)
-        offered = _advance(client, signing_in, sender.sent[alice])
-        signed_in = _advance(client, signing_in, "bigco.io")
+        _sign_in(client, "alice")
+        offered = _advance(client, "")
+        signed_in = _advance(client, "bigco.io")
 
     assert _directive_fields(offered, "choose") == [
         gateway.WORKSPACE_PROMPT,
@@ -302,27 +349,22 @@ def test_web_channel_lets_a_member_choose_between_an_exact_membership_and_their_
 
 
 def test_web_channel_signs_in_an_exact_member_without_a_grant_for_their_domain(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
     founder = "boss@gatedco.io"
     advisor = "advisor@outsideco.dev"
     _grant(gateway_postgres, 76, founder)
+    _verifies(monkeypatch, FakeVerifier(exchanges={"founder": founder, "advisor": advisor}))
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "gatedco.io")))
-    with TestClient(gateway_app()) as client:
-        opened = str(uuid.uuid4())
-        _advance(client, opened, "")
-        _advance(client, opened, founder)
-        _advance(client, opened, sender.sent[founder])
+    with _client() as client:
+        _sign_in(client, "founder")
+        _advance(client, "")
 
         _add_member(gateway_postgres, workspace_id, advisor)
 
-        member_session = str(uuid.uuid4())
-        _advance(client, member_session, "")
-        _advance(client, member_session, advisor)
-        signed_in = _advance(client, member_session, sender.sent[advisor])
+        _sign_in(client, "advisor")
+        signed_in = _advance(client, "")
 
     (token,) = _fields(signed_in, "token")
     assert verify_token(token, workspace_id) == advisor
@@ -331,30 +373,25 @@ def test_web_channel_signs_in_an_exact_member_without_a_grant_for_their_domain(
 
 
 def test_web_channel_lets_an_added_member_use_a_grant_to_create_their_domain_workspace(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
     founder = "boss@opengateco.io"
     advisor = "advisor@openadvisor.dev"
     _grant(gateway_postgres, 77, founder)
     _grant(gateway_postgres, 78, advisor)
+    _verifies(monkeypatch, FakeVerifier(exchanges={"founder": founder, "advisor": advisor}))
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "opengateco.io")))
     own_id = UUID(str(uuid5(NAMESPACE_DNS, "openadvisor.dev")))
-    with TestClient(gateway_app()) as client:
-        opened = str(uuid.uuid4())
-        _advance(client, opened, "")
-        _advance(client, opened, founder)
-        _advance(client, opened, sender.sent[founder])
+    with _client() as client:
+        _sign_in(client, "founder")
+        _advance(client, "")
 
         _add_member(gateway_postgres, workspace_id, advisor)
 
-        joined = str(uuid.uuid4())
-        _advance(client, joined, "")
-        _advance(client, joined, advisor)
-        offered = _advance(client, joined, sender.sent[advisor])
-        signed_in = _advance(client, joined, "Create openadvisor.dev workspace")
+        _sign_in(client, "advisor")
+        offered = _advance(client, "")
+        signed_in = _advance(client, "Create openadvisor.dev workspace")
 
     assert _directive_fields(offered, "choose") == [
         gateway.WORKSPACE_PROMPT,
@@ -369,21 +406,18 @@ def test_web_channel_lets_an_added_member_use_a_grant_to_create_their_domain_wor
 
 
 def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refusal carries no prompt, so `exit` is the only thing that can end the web session. The
     renderer must treat it as terminal for both arguments: the submit handler has already hidden the
     prompt row and disabled the button, so an `exit` the page ignores leaves the reason on screen
     above a dead form that looks exactly like a hang."""
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    session = str(uuid.uuid4())
+    _configure(monkeypatch, gateway_postgres)
     email = "founder@ungrantedweb.io"
-    with TestClient(gateway_app()) as client:
-        _advance(client, session, "")
-        _advance(client, session, email)
-        refused = _advance(client, session, sender.sent[email])
+    _verifies(monkeypatch, FakeVerifier(exchanges={"ungranted": email}))
+    with _client() as client:
+        _sign_in(client, "ungranted")
+        refused = _advance(client, "")
 
     assert "ungrantedweb.io has no invite." in _fields(refused, "say")
     assert _fields(refused, "exit") == ["0"]
@@ -393,34 +427,31 @@ def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(
 
 
 def test_disabled_invite_gate_opens_a_new_workspace_without_a_grant(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
+    _configure(monkeypatch, gateway_postgres)
     monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    session = str(uuid.uuid4())
     email = "founder@nogate.io"
-    with TestClient(gateway_app()) as client:
-        _advance(client, session, "")
-        _advance(client, session, email)
-        signed_in = _advance(client, session, sender.sent[email])
+    _verifies(monkeypatch, FakeVerifier(exchanges={"opened": email}))
+    with _client() as client:
+        _sign_in(client, "opened")
+        signed_in = _advance(client, "")
     assert not any("invite" in text for text in _fields(signed_in, "say"))
     (token,) = _fields(signed_in, "token")
     assert verify_token(token, UUID(str(uuid5(NAMESPACE_DNS, "nogate.io")))) == email
 
 
 def test_web_and_terminal_sessions_never_share_a_claim(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    session = str(uuid.uuid4())
-    with TestClient(gateway_app()) as client:
-        _advance(client, session, "")
-        coded = _advance(client, session, "pilot@twochannel.io")
-        assert "Enter the code:" in _fields(coded, "ask")
+    """One id, two channels: the claim the callback stamps is keyed by the web channel, so a
+    terminal handed the same id starts its own walk at the email prompt rather than inheriting a
+    verified address."""
+    _configure(monkeypatch, gateway_postgres)
+    _verifies(monkeypatch, FakeVerifier(exchanges={"landed": "pilot@twochannel.io"}))
+    with _client() as client:
+        _sign_in(client, "landed")
+        session = client.cookies[ONBOARD_SESSION_COOKIE]
         terminal = client.post(
             "/v1/onboard/ufo",
             headers={"x-ufo-session": session, "x-ufo-installed": "1"},
@@ -430,11 +461,10 @@ def test_web_and_terminal_sessions_never_share_a_claim(
 
 
 def test_terminal_expired_code_returns_to_email_prompt(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
+    verifier = _verifies(monkeypatch, FakeVerifier())
     session = str(uuid.uuid4())
     email = "pilot@expired.io"
     headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
@@ -443,9 +473,10 @@ def test_terminal_expired_code_returns_to_email_prompt(
         client.post("/v1/onboard/ufo", headers=headers, content="")
         coded = client.post("/v1/onboard/ufo", headers=headers, content=email)
         assert "Enter the code:" in coded.text
-        code = sender.sent[email]
-        wrong = "000000" if code != "000000" else "000001"
-        incorrect = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
+        assert verifier.begun == [email]
+        code = verifier.codes[email]
+        incorrect = client.post("/v1/onboard/ufo", headers=headers, content="000000")
+        assert "The verification code is incorrect." in incorrect.text
         assert "Enter the code:" in incorrect.text
 
         async def expire() -> None:
@@ -469,80 +500,72 @@ def test_terminal_expired_code_returns_to_email_prompt(
     assert "Enter the code:" in restarted.text
 
 
-def test_terminal_exhausting_code_returns_to_email_prompt(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_terminal_workos_fault_returns_to_email_prompt(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    """A code WorkOS refuses is one to retype, since it cannot say whether the digits were wrong or
+    the code had died. A fault is different: nothing graded the digits, so the claim ends rather
+    than standing for a retype it has no answer for, and the next address starts a fresh one."""
+    _configure(monkeypatch, gateway_postgres)
+    email = "pilot@faulted.io"
+    verifier = _verifies(monkeypatch, FakeVerifier(faults={email}))
     session = str(uuid.uuid4())
-    email = "pilot@exhausting.io"
     headers = {"x-ufo-session": session, "x-ufo-installed": "1"}
 
     with TestClient(gateway_app()) as client:
         client.post("/v1/onboard/ufo", headers=headers, content="")
         client.post("/v1/onboard/ufo", headers=headers, content=email)
-        code = sender.sent[email]
-        wrong = "000000" if code != "000000" else "000001"
-        for _ in range(4):
-            retryable = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
-            assert "Enter the code:" in retryable.text
-        exhausted = client.post("/v1/onboard/ufo", headers=headers, content=wrong)
-        assert "Too many attempts. Start onboarding again." in exhausted.text
-        assert "Enter your work email:" in exhausted.text
-        assert "Enter the code:" not in exhausted.text
+        faulted = client.post("/v1/onboard/ufo", headers=headers, content=verifier.codes[email])
+        assert "Sign-in failed. Try again." in faulted.text
+        assert "Enter your work email:" in faulted.text
+        assert "Enter the code:" not in faulted.text
         restarted = client.post("/v1/onboard/ufo", headers=headers, content=email)
 
     assert "Enter the code:" in restarted.text
 
 
 def test_debugger_directive_lands_only_for_the_operator_domain(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
     email = f"alex@{OPERATOR_EMAIL_DOMAIN}"
     _grant(gateway_postgres, 72, email)
-    session = str(uuid.uuid4())
-    with TestClient(gateway_app()) as client:
-        _advance(client, session, "")
-        _advance(client, session, email)
-        signed_in = _advance(client, session, sender.sent[email])
+    _verifies(monkeypatch, FakeVerifier(exchanges={"operator": email}))
+    with _client() as client:
+        _sign_in(client, "operator")
+        signed_in = _advance(client, "")
     assert _fields(signed_in, "debugger") == [f"{WORKSPACE_URL}/surface/debug"]
 
 
 def test_debugger_directive_never_lands_outside_the_operator_domain(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
+    _configure(monkeypatch, gateway_postgres)
     email = "pilot@customerco.io"
     _grant(gateway_postgres, 73, email)
-    session = str(uuid.uuid4())
-    with TestClient(gateway_app()) as client:
-        _advance(client, session, "")
-        _advance(client, session, email)
-        signed_in = _advance(client, session, sender.sent[email])
+    _verifies(monkeypatch, FakeVerifier(exchanges={"customer": email}))
+    with _client() as client:
+        _sign_in(client, "customer")
+        signed_in = _advance(client, "")
     assert _fields(signed_in, "token")
     assert not _fields(signed_in, "debugger")
 
 
-def test_login_page_and_session_header_requirements(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_login_page_serves_itself_and_a_post_with_no_cookie_gets_the_hop(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    sender = RecordingSender()
-    monkeypatch.setattr(gateway, "email_sender_from_env", lambda: sender)
-    with TestClient(gateway_app()) as client:
+    """A page that holds no onboarding cookie holds no session, so the machine finds no claim behind
+    it and answers with the hop that mints one — the same answer a fresh page gets."""
+    _configure(monkeypatch, gateway_postgres)
+    _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
         page = client.get("/login")
         assert page.status_code == 200
         assert page.headers["content-type"].startswith("text/html")
         assert page.text == LOGIN_PAGE
-        missing = client.post("/v1/onboard/web", content="")
-        assert missing.status_code == 400
-        assert missing.json() == {"error": "x-ufo-session header is required"}
+        cookieless = client.post("/v1/onboard/web", content="")
+        assert cookieless.status_code == 200
+        assert cookieless.json()["directives"] == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
 
 
 def test_gateway_serves_every_reserved_host_prefix() -> None:

@@ -177,6 +177,7 @@ jobs:
             externalsecret/ufo-control-secrets \
             externalsecret/ufo-platform-secrets \
             externalsecret/ufo-gateway-slack-connect \
+            externalsecret/ufo-gateway-workos \
             externalsecret/ufo-egress-ca \
             externalsecret/datadog-api-key
           kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \

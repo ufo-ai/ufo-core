@@ -15,10 +15,8 @@ DDL = (
     "  id uuid primary key,"
     "  email text not null,"
     "  email_domain text not null,"
-    "  code_hash text not null,"
     "  surface text not null,"
     "  surface_ref text not null,"
-    "  attempts integer not null default 0,"
     "  expires_at timestamptz not null,"
     "  verified_at timestamptz,"
     "  resulting_workspace_id text,"
@@ -34,11 +32,9 @@ class OnboardClaim:
     claim_id: UUID
     email: str
     email_domain: str
-    code_hash: str
     surface: str
     surface_ref: str
     expires_at: datetime
-    attempts: int
     verified_at: datetime | None
     invite_id: UUID | None
 
@@ -57,16 +53,15 @@ class OnboardStore:
         async with self.pool.acquire() as connection:
             await connection.execute(
                 f"insert into {TABLE} "
-                "(id, email, email_domain, code_hash, surface, surface_ref, attempts, expires_at) "
-                "values ($1, $2, $3, $4, $5, $6, $7, $8)",
+                "(id, email, email_domain, surface, surface_ref, expires_at, verified_at) "
+                "values ($1, $2, $3, $4, $5, $6, $7)",
                 claim.claim_id,
                 claim.email,
                 claim.email_domain,
-                claim.code_hash,
                 claim.surface,
                 claim.surface_ref,
-                claim.attempts,
                 claim.expires_at,
+                claim.verified_at,
             )
 
     async def live_claim(self, surface: str, surface_ref: str) -> OnboardClaim | None:
@@ -83,32 +78,19 @@ class OnboardStore:
             claim_id=row["id"],
             email=row["email"],
             email_domain=row["email_domain"],
-            code_hash=row["code_hash"],
             surface=row["surface"],
             surface_ref=row["surface_ref"],
             expires_at=_aware(row["expires_at"]),  # type: ignore[arg-type]
-            attempts=int(row["attempts"]),
             verified_at=_aware(row["verified_at"]),
             invite_id=row["invite_id"],
         )
 
-    async def record_attempt(self, claim_id: UUID, attempts: int) -> bool:
+    async def mark_verified(self, claim_id: UUID) -> bool:
         async with self.pool.acquire() as connection:
             recorded = await connection.fetchval(
-                f"update {TABLE} set attempts = attempts + 1 "
-                "where id = $1 and attempts = $2 and verified_at is null returning true",
+                f"update {TABLE} set verified_at = now() "
+                "where id = $1 and verified_at is null returning true",
                 claim_id,
-                attempts,
-            )
-        return recorded is True
-
-    async def record_verification(self, claim_id: UUID, attempts: int) -> bool:
-        async with self.pool.acquire() as connection:
-            recorded = await connection.fetchval(
-                f"update {TABLE} set attempts = attempts + 1, verified_at = now() "
-                "where id = $1 and attempts = $2 and verified_at is null returning true",
-                claim_id,
-                attempts,
             )
         return recorded is True
 
@@ -124,12 +106,10 @@ class OnboardStore:
         async with self.pool.acquire() as connection:
             await connection.execute(f"delete from {TABLE} where id = $1", claim_id)
 
-    async def delete_unverified_claim(self, claim_id: UUID, attempts: int) -> bool:
+    async def delete_unverified_claim(self, claim_id: UUID) -> bool:
         async with self.pool.acquire() as connection:
             deleted = await connection.fetchval(
-                f"delete from {TABLE} "
-                "where id = $1 and attempts = $2 and verified_at is null returning true",
+                f"delete from {TABLE} where id = $1 and verified_at is null returning true",
                 claim_id,
-                attempts,
             )
         return deleted is True

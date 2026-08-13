@@ -8,6 +8,7 @@ against a database the verb never ran on — never re-creating what it found mis
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,8 +30,14 @@ from ufo_control.gateway_invite import (
 )
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 from ufo_control.gateway_slack_connect import DUE_INDEX
-from ufo_control.gateway_store import ACTIVE_INDEX, SCHEMA
+from ufo_control.gateway_store import ACTIVE_INDEX, SCHEMA, OnboardClaim, OnboardStore
 from ufo_control.gateway_token import TOKEN_SECRET_ENV
+from ufo_control.gateway_workos import (
+    AUTH_CALLBACK_PATH,
+    WORKOS_API_KEY_ENV,
+    WORKOS_CLIENT_ID_ENV,
+    WORKOS_REDIRECT_URI_ENV,
+)
 from ufo_control.main import main
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
 from ufo_control.schema import shape_control_schema
@@ -138,6 +145,64 @@ async def test_the_verb_rebuilds_an_unbound_invite_ledger(empty_database: str) -
         await pool.close()
 
 
+async def test_the_verb_drops_the_columns_a_verification_code_needed(empty_database: str) -> None:
+    """WorkOS holds the code now, so the claim ledger keeps no hash and counts no attempts. The
+    reshape lives with the shaping verb, and a claim written afterwards reads back through the
+    store, which names neither column."""
+    connection = await asyncpg.connect(empty_database)
+    try:
+        await connection.execute(f"create schema {SCHEMA}")
+        await connection.execute(
+            f"create table {SCHEMA}.onboard_claim ("
+            "  id uuid primary key,"
+            "  email text not null,"
+            "  email_domain text not null,"
+            "  code_hash text not null,"
+            "  surface text not null,"
+            "  surface_ref text not null,"
+            "  attempts integer not null default 0,"
+            "  expires_at timestamptz not null,"
+            "  verified_at timestamptz,"
+            "  resulting_workspace_id text,"
+            "  invite_id uuid,"
+            "  created_at timestamptz not null default now())"
+        )
+    finally:
+        await connection.close()
+
+    await shape_control_schema(empty_database)
+
+    pool = await asyncpg.create_pool(empty_database, min_size=1, max_size=2)
+    try:
+        columns = {
+            row["column_name"]
+            for row in await pool.fetch(
+                "select column_name from information_schema.columns"
+                " where table_schema = $1 and table_name = 'onboard_claim'",
+                SCHEMA,
+            )
+        }
+        assert "code_hash" not in columns
+        assert "attempts" not in columns
+        store = OnboardStore(pool=pool)
+        await store.insert_claim(
+            OnboardClaim(
+                claim_id=uuid4(),
+                email="pilot@reshaped.io",
+                email_domain="reshaped.io",
+                surface="ufo",
+                surface_ref="reshape-proof",
+                expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                verified_at=None,
+                invite_id=None,
+            )
+        )
+        claim = await store.live_claim("ufo", "reshape-proof")
+        assert claim is not None and claim.verified_at is None
+    finally:
+        await pool.close()
+
+
 def test_the_gateway_refuses_to_boot_an_unshaped_schema(
     empty_database: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -154,6 +219,9 @@ def test_the_gateway_refuses_to_boot_an_unshaped_schema(
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
     monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
+    monkeypatch.setenv(WORKOS_API_KEY_ENV, "sk_test_gateway")
+    monkeypatch.setenv(WORKOS_CLIENT_ID_ENV, "client_01GATEWAY")
+    monkeypatch.setenv(WORKOS_REDIRECT_URI_ENV, f"{WORKSPACE_URL}{AUTH_CALLBACK_PATH}")
     app = gateway_app()
 
     async def boot() -> None:

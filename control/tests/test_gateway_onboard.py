@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from fake_workos import MAGIC_CODE, FakeVerifier
 from ufo.db import dispose_db, init_db
 
 from ufo_control.gateway import (
@@ -12,7 +13,7 @@ from ufo_control.gateway import (
     _invite_required,
     _stamp_script,
 )
-from ufo_control.gateway_claim import ClaimWorkflow, hash_code
+from ufo_control.gateway_claim import ClaimWorkflow
 from ufo_control.gateway_email import WorkEmailPolicy
 from ufo_control.gateway_invite import InviteAccepted, InviteCodes
 from ufo_control.gateway_shared import SharedWorkspaces
@@ -21,11 +22,6 @@ from ufo_control.gateway_store import OnboardClaim, OnboardStore
 RAW_SCRIPT = 'UFO_SCRIPT_VERSION=dev\nUFO_URL="${UFO_URL:-https://flyingobject.ai}"\n'
 WORKSPACE_URL = "https://app.flyingobject.ai"
 TOKEN_SECRET = "test-secret"
-
-
-class UnusedSender:
-    async def send(self, email: str, subject: str, text: str) -> None:
-        raise AssertionError
 
 
 def test_stamp_substitutes_version_and_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,32 +58,31 @@ async def test_onboarding_resolves_claim_verified_by_concurrent_turn(
 ) -> None:
     email = "pilot@concurrent.io"
     domain = "concurrent.io"
-    code = "123456"
     await store.insert_claim(
         OnboardClaim(
             claim_id=uuid4(),
             email=email,
             email_domain=domain,
-            code_hash=hash_code(code),
             surface="ufo",
             surface_ref="sess",
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
-            attempts=0,
             verified_at=None,
             invite_id=None,
         )
     )
     stale = await store.live_claim("ufo", "sess")
     assert stale is not None
-    claims = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=UnusedSender())
+    verifier = FakeVerifier(codes={email: MAGIC_CODE})
+    claims = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), verifier=verifier)
     invites = InviteCodes(pool=store.pool)
     await invites.mint(1, email)
-    await claims.verify(stale, code)
+    await claims.verify(stale, MAGIC_CODE)
     flow = Onboarding(
         claims=claims,
         store=store,
         workspaces=SharedWorkspaces(workspace_url=WORKSPACE_URL, pool=store.pool),
         invites=invites,
+        verifier=verifier,
         token_secret=TOKEN_SECRET,
         apex_host="flyingobject.ai",
         invite_required=True,

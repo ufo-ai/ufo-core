@@ -1,19 +1,25 @@
 """The web presentation of the onboarding machine the terminal client drives.
 
 `GET /login` serves a self-contained sign-in page; `POST /v1/onboard/web` advances the identical
-`Onboarding` state machine (the claim row keyed by the page's generated session id) and returns the
-directive lines as JSON — a second renderer, never a second machine. The page renders `say` as
-transcript lines, `ask` as the next input, and `token`+`workspace` as the signed-in home card:
-the member's email, their workspace URL, the terminal install line — and, when the gateway's
-`debugger` directive arrived (an operator-domain email only), a form that POSTs the token to the
-operator session debugger, which exchanges it for its session cookie — the bearer never rides a
-URL.
+`Onboarding` state machine (the claim row keyed by the onboarding session) and returns the directive
+lines as JSON — a second renderer, never a second machine. Sign-in opens on the machine's `auth`
+directive: the page leaves for the start path the directive names, which mints the session, binds it
+to that browser as the `ufo_onboard` cookie, redirects through AuthKit and returns to `/login`. The
+session id is never typed, named, or read by the page, so nothing outside the browser that signed in
+can name the session the verified claim is keyed to; the page's POSTs carry the cookie same-origin.
+The page renders `/login?error=<sentence>` as the refusal above a `Sign in again`
+link. It renders `say` as transcript lines — reading the member's email off the machine's own
+`Signed in: ` line — `ask` as the next input, and `token`+`workspace` as the signed-in home card:
+that email, their workspace URL, the terminal install line — and, when the gateway's `debugger`
+directive arrived (an operator-domain email only), a form that POSTs the token to the operator
+session debugger, which exchanges it for its session cookie — the bearer never rides a URL.
 
 A conversation the portal redirected here with (`/login?c=<uuid>`) is carried onto the card's
 portal action, so the member lands on the conversation they clicked rather than a new chat. Only a
-uuid shape is carried."""
+uuid shape is carried, and it rides the hop's query out and back, so it survives the sign-in."""
 
 WEB_CHANNEL = "web"
+ONBOARD_SESSION_COOKIE = "ufo_onboard"
 
 
 def parse_directives(payload: bytes) -> list[dict[str, object]]:
@@ -119,7 +125,9 @@ LOGIN_PAGE = r"""<!doctype html>
   </section>
 </main>
 <script>
-const session = crypto.randomUUID();
+const SIGNED_IN = 'Signed in: ';
+const params = new URLSearchParams(location.search);
+const fault = params.get('error');
 const log = document.getElementById('log');
 const promptRow = document.getElementById('prompt-row');
 const promptLabel = document.getElementById('prompt-label');
@@ -134,7 +142,6 @@ let token = null;
 let workspace = null;
 let debuggerUrl = null;
 let email = null;
-let askedEmail = false;
 let choosing = false;
 let finished = false;
 let lastPrompt = null;
@@ -154,8 +161,7 @@ function prompt(text, options) {
   promptRow.style.display = 'block';
   choosing = Boolean(options && options.length);
   promptLabel.htmlFor = choosing ? 'choice' : 'answer';
-  askedEmail = text.includes('email');
-  answer.type = askedEmail ? 'email' : 'text';
+  answer.type = text.includes('email') ? 'email' : 'text';
   answer.inputMode = text.includes('code') ? 'numeric' : 'text';
   answer.style.display = choosing ? 'none' : 'block';
   choice.style.display = choosing ? 'block' : 'none';
@@ -186,12 +192,21 @@ function complete() {
 
 function handle(directive) {
   const arg = directive.fields[0] || '';
-  if (directive.verb === 'say') line(arg);
+  if (directive.verb === 'say') {
+    if (arg.startsWith(SIGNED_IN)) email = arg.slice(SIGNED_IN.length);
+    line(arg);
+  }
   else if (directive.verb === 'ask') prompt(arg);
   else if (directive.verb === 'choose') prompt(arg, directive.fields.slice(1));
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
+  else if (directive.verb === 'auth') {
+    const q = new URLSearchParams();
+    if (target) q.set('c', target[0]);
+    if (artifact) q.set('a', artifact);
+    location.assign(arg + (q.size ? '?' + q : ''));
+  }
   else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');
     finished = true;
@@ -203,8 +218,7 @@ async function advance(body) {
   go.disabled = true;
   let res;
   try {
-    res = await fetch('/v1/onboard/web',
-      { method: 'POST', headers: { 'x-ufo-session': session }, body: body || '' });
+    res = await fetch('/v1/onboard/web', { method: 'POST', body: body || '' });
   } catch (err) {
     line('Network error — retrying…', 'error');
     setTimeout(() => advance(body), 5000);
@@ -225,13 +239,25 @@ promptRow.addEventListener('submit', (event) => {
   event.preventDefault();
   const value = (choosing ? choice.value : answer.value).trim();
   if (!value) return;
-  if (askedEmail) email = value.toLowerCase();
   answer.value = '';
   promptRow.style.display = 'none';
   advance(value);
 });
 
-advance('');
+if (fault) {
+  line(fault, 'error');
+  const again = document.createElement('a');
+  again.className = 'button';
+  again.style.alignSelf = 'flex-start';
+  again.textContent = 'Sign in again';
+  const q = new URLSearchParams();
+  if (target) q.set('c', target[0]);
+  if (artifact) q.set('a', artifact);
+  again.href = '/login' + (q.size ? '?' + q : '');
+  log.appendChild(again);
+} else {
+  advance('');
+}
 </script>
 </body>
 </html>

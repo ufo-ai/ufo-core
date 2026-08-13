@@ -20,6 +20,12 @@ from ufo_control.gateway_email import (
 )
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 from ufo_control.gateway_token import TOKEN_SECRET_ENV
+from ufo_control.gateway_workos import (
+    AUTH_CALLBACK_PATH,
+    WORKOS_API_KEY_ENV,
+    WORKOS_CLIENT_ID_ENV,
+    WORKOS_REDIRECT_URI_ENV,
+)
 from ufo_control.rls import POSTGRES_OWNER_DSN_ENV
 from ufo_control.schema import shape_control_schema
 
@@ -104,6 +110,9 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv(SES_SENDER_ENV, "no-reply@flyingobject.ai")
     monkeypatch.setenv(AWS_ROLE_ARN_ENV, "arn:aws:iam::123456789012:role/gateway-ses")
     monkeypatch.setenv(AWS_WEB_IDENTITY_TOKEN_FILE_ENV, str(token_file))
+    monkeypatch.setenv(WORKOS_API_KEY_ENV, "sk_test_gateway")
+    monkeypatch.setenv(WORKOS_CLIENT_ID_ENV, "client_01GATEWAY")
+    monkeypatch.setenv(WORKOS_REDIRECT_URI_ENV, f"{WORKSPACE_URL}{AUTH_CALLBACK_PATH}")
 
 
 async def _boot(app) -> None:

@@ -1,16 +1,17 @@
 """The claim state machine against the real `onboard_claim` table (Postgres): the work-email
-denylist, hash-only storage, the TTL, the attempt cap, and the recording email sender fake that lets
-a test read the minted code back."""
+denylist, the claim's time-to-live, what each of the verifier's three answers does to the row, and
+the conditional writes that decide a race. WorkOS stands behind `FakeVerifier` — every assertion
+here is about the claim, never about the fake."""
 
-import re
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import asyncpg
 import pytest
+from fake_workos import MAGIC_CODE, FakeVerifier
 
-from ufo_control.gateway_claim import ClaimError, ClaimWorkflow, hash_code
+from ufo_control.gateway_claim import ClaimError, ClaimWorkflow
 from ufo_control.gateway_email import WorkEmailError, WorkEmailPolicy
 from ufo_control.gateway_invite import (
     InviteAccepted,
@@ -22,190 +23,169 @@ from ufo_control.gateway_invite import (
 )
 from ufo_control.gateway_store import OnboardStore
 
-CODE_IN_BODY = re.compile(r"\d{6}")
+WRONG_CODE = "000000"
 
 
-@dataclass
-class RecordingSender:
-    sent: dict[str, str] = field(default_factory=dict)
-
-    async def send(self, email: str, subject: str, text: str) -> None:
-        """The sender is handed a rendered message, never a code, so the code is read back out of
-        the body the way a member reads it."""
-        found = CODE_IN_BODY.search(text)
-        assert found is not None
-        self.sent[email] = found.group()
-
-    def last_code(self, email: str) -> str:
-        return self.sent[email]
+def _workflow(
+    store: OnboardStore, verifier: FakeVerifier, claim_ttl: timedelta | None = None
+) -> ClaimWorkflow:
+    if claim_ttl is None:
+        return ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), verifier=verifier)
+    return ClaimWorkflow(
+        store=store, email_policy=WorkEmailPolicy(), verifier=verifier, claim_ttl=claim_ttl
+    )
 
 
-class FailingSender:
-    async def send(self, email: str, subject: str, text: str) -> None:
-        raise RuntimeError("mail unavailable")
-
-
-async def test_start_persists_only_the_hash_and_emails_the_code(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
-    domain = await workflow.start("Me@Acme.com", "ufo", "sess-1")
+async def test_start_records_the_claim_and_asks_workos_for_one_code(store: OnboardStore) -> None:
+    verifier = FakeVerifier()
+    domain = await _workflow(store, verifier).start("Me@Acme.com", "ufo", "sess-1")
     assert domain == "acme.com"
-    code = sender.last_code("me@acme.com")
+    assert verifier.begun == ["me@acme.com"]
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
     assert claim.email == "me@acme.com"
-    assert claim.code_hash == hash_code(code)
-    assert code not in claim.code_hash
+    assert claim.verified_at is None
 
 
-async def test_denylist_rejects_a_free_email_before_any_write(store: OnboardStore) -> None:
-    workflow = ClaimWorkflow(
-        store=store, email_policy=WorkEmailPolicy(), email_sender=RecordingSender()
-    )
+async def test_denylist_rejects_a_free_email_before_any_write_or_send(store: OnboardStore) -> None:
+    verifier = FakeVerifier()
     with pytest.raises(WorkEmailError):
-        await workflow.start("someone@gmail.com", "ufo", "sess-1")
+        await _workflow(store, verifier).start("someone@gmail.com", "ufo", "sess-1")
+    assert await store.live_claim("ufo", "sess-1") is None
+    assert verifier.begun == []
+
+
+async def test_a_code_workos_could_not_send_leaves_no_active_claim(store: OnboardStore) -> None:
+    verifier = FakeVerifier(begin_fails=True)
+    with pytest.raises(ClaimError, match=r"Could not send the verification code\. Try again\."):
+        await _workflow(store, verifier).start("me@acme.com", "ufo", "sess-1")
     assert await store.live_claim("ufo", "sess-1") is None
 
 
 async def test_verify_accepts_the_right_code_and_marks_verified(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+    workflow = _workflow(store, FakeVerifier())
     await workflow.start("me@acme.com", "ufo", "sess-1")
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
-    await workflow.verify(claim, sender.last_code("me@acme.com"))
+    await workflow.verify(claim, MAGIC_CODE)
     verified = await store.live_claim("ufo", "sess-1")
     assert verified is not None and verified.verified_at is not None
 
 
-async def test_verify_rejects_a_wrong_code(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+async def test_verify_rejects_a_wrong_code_and_keeps_the_claim(store: OnboardStore) -> None:
+    """WorkOS caps the attempts, so a wrong code costs the member nothing but the retype: the row
+    stays exactly as it was and the same prompt comes back."""
+    workflow = _workflow(store, FakeVerifier())
     await workflow.start("me@acme.com", "ufo", "sess-1")
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
-    with pytest.raises(ClaimError, match="incorrect"):
-        await workflow.verify(claim, "000000")
+    with pytest.raises(ClaimError, match=r"The verification code is incorrect\."):
+        await workflow.verify(claim, WRONG_CODE)
+    retryable = await store.live_claim("ufo", "sess-1")
+    assert retryable is not None and retryable.verified_at is None
+    await workflow.verify(retryable, MAGIC_CODE)
+    verified = await store.live_claim("ufo", "sess-1")
+    assert verified is not None and verified.verified_at is not None
 
 
-async def test_attempt_cap_exhausts(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(
-        store=store, email_policy=WorkEmailPolicy(), email_sender=sender, max_attempts=2
-    )
-    await workflow.start("me@acme.com", "ufo", "sess-1")
-    claim = await store.live_claim("ufo", "sess-1")
-    assert claim is not None
-    code = sender.last_code("me@acme.com")
-    wrong = "000000" if code != "000000" else "000001"
-    with pytest.raises(ClaimError, match="incorrect"):
-        await workflow.verify(claim, wrong)
-    retry = await store.live_claim("ufo", "sess-1")
-    assert retry is not None
-    with pytest.raises(ClaimError, match="Too many attempts"):
-        await workflow.verify(retry, wrong)
-    assert await store.live_claim("ufo", "sess-1") is None
-
-
-async def test_stale_correct_attempt_cannot_overwrite_newer_attempt(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
-    await workflow.start("me@acme.com", "ufo", "sess-1")
-    stale = await store.live_claim("ufo", "sess-1")
-    assert stale is not None
-    code = sender.last_code("me@acme.com")
-    wrong = "000000" if code != "000000" else "000001"
-    with pytest.raises(ClaimError, match="incorrect"):
-        await workflow.verify(stale, wrong)
-    with pytest.raises(ClaimError, match="changed this session"):
-        await workflow.verify(stale, code)
-    current = await store.live_claim("ufo", "sess-1")
-    assert current is not None and current.attempts == 1 and current.verified_at is None
-
-
-async def test_stale_wrong_attempt_cannot_overwrite_newer_attempt(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
-    await workflow.start("me@acme.com", "ufo", "sess-1")
-    stale = await store.live_claim("ufo", "sess-1")
-    assert stale is not None
-    code = sender.last_code("me@acme.com")
-    wrong = "000000" if code != "000000" else "000001"
-    with pytest.raises(ClaimError, match="incorrect"):
-        await workflow.verify(stale, wrong)
-    with pytest.raises(ClaimError, match="changed this session"):
-        await workflow.verify(stale, wrong)
-    current = await store.live_claim("ufo", "sess-1")
-    assert current is not None and current.attempts == 1 and current.verified_at is None
-
-
-async def test_stale_expiry_cannot_delete_newer_attempt(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
-    await workflow.start("me@acme.com", "ufo", "sess-1")
-    claim = await store.live_claim("ufo", "sess-1")
-    assert claim is not None
-    expired = replace(claim, expires_at=datetime.now(UTC) - timedelta(seconds=1))
-    code = sender.last_code("me@acme.com")
-    wrong = "000000" if code != "000000" else "000001"
-    with pytest.raises(ClaimError, match="incorrect"):
-        await workflow.verify(claim, wrong)
-    with pytest.raises(ClaimError, match="changed this session"):
-        await workflow.verify(expired, code)
-    current = await store.live_claim("ufo", "sess-1")
-    assert current is not None and current.attempts == 1 and current.verified_at is None
-
-
-async def test_stale_exhausting_attempt_does_not_delete_verified_claim(
+async def test_a_verifier_that_could_not_grade_the_code_ends_the_claim(
     store: OnboardStore,
 ) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(
-        store=store, email_policy=WorkEmailPolicy(), email_sender=sender, max_attempts=1
-    )
-    await workflow.start("me@acme.com", "ufo", "sess-1")
-    stale = await store.live_claim("ufo", "sess-1")
-    assert stale is not None
-    code = sender.last_code("me@acme.com")
-    await workflow.verify(stale, code)
-    wrong = "000000" if code != "000000" else "000001"
-    with pytest.raises(ClaimError, match="changed this session"):
-        await workflow.verify(stale, wrong)
-    verified = await store.live_claim("ufo", "sess-1")
-    assert verified is not None and verified.verified_at is not None
-    assert not await store.record_attempt(verified.claim_id, verified.attempts)
-    assert not await store.record_verification(verified.claim_id, verified.attempts)
-    assert not await store.delete_unverified_claim(verified.claim_id, verified.attempts)
-
-
-async def test_expired_code_is_rejected(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(
-        store=store,
-        email_policy=WorkEmailPolicy(),
-        email_sender=sender,
-        code_ttl=timedelta(minutes=-1),
-    )
+    """A WorkOS fault is not a verdict on the digits, so the claim cannot be left standing for a
+    retype it has no answer for: it is deleted, and the member reads the verifier's own sentence."""
+    verifier = FakeVerifier(faults={"me@acme.com"})
+    workflow = _workflow(store, verifier)
     await workflow.start("me@acme.com", "ufo", "sess-1")
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None
-    with pytest.raises(ClaimError, match="expired"):
-        await workflow.verify(claim, sender.last_code("me@acme.com"))
+    with pytest.raises(ClaimError, match=r"Sign-in failed\. Try again\."):
+        await workflow.verify(claim, MAGIC_CODE)
     assert await store.live_claim("ufo", "sess-1") is None
 
 
-async def test_failed_email_leaves_no_active_claim(store: OnboardStore) -> None:
-    workflow = ClaimWorkflow(
-        store=store, email_policy=WorkEmailPolicy(), email_sender=FailingSender()
-    )
-    with pytest.raises(ClaimError, match="Could not send"):
-        await workflow.start("me@acme.com", "ufo", "sess-1")
+async def test_an_expired_claim_is_refused_without_asking_workos(store: OnboardStore) -> None:
+    """The verifier's own answer for this code is dropped first, so a consulted verifier would
+    grade the code wrong rather than expired — the sentence names which end refused."""
+    verifier = FakeVerifier()
+    workflow = _workflow(store, verifier, claim_ttl=timedelta(minutes=-1))
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    claim = await store.live_claim("ufo", "sess-1")
+    assert claim is not None
+    verifier.codes.clear()
+    with pytest.raises(ClaimError, match=r"expired\. Start onboarding again\."):
+        await workflow.verify(claim, MAGIC_CODE)
     assert await store.live_claim("ufo", "sess-1") is None
+
+
+async def test_a_stale_expiry_cannot_delete_a_verified_claim(store: OnboardStore) -> None:
+    """Two attempts on one session: the one holding the older row must not undo the newer state.
+    Every write is conditional on the row still being unverified, so the loser says so."""
+    workflow = _workflow(store, FakeVerifier())
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    stale = await store.live_claim("ufo", "sess-1")
+    assert stale is not None
+    await workflow.verify(stale, MAGIC_CODE)
+    expired = replace(stale, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(expired, MAGIC_CODE)
+    verified = await store.live_claim("ufo", "sess-1")
+    assert verified is not None and verified.verified_at is not None
+    assert not await store.delete_unverified_claim(verified.claim_id)
+
+
+async def test_only_the_first_of_two_verifications_stamps_the_claim(store: OnboardStore) -> None:
+    workflow = _workflow(store, FakeVerifier())
+    await workflow.start("me@acme.com", "ufo", "sess-1")
+    claim = await store.live_claim("ufo", "sess-1")
+    assert claim is not None
+    assert await store.mark_verified(claim.claim_id)
+    assert not await store.mark_verified(claim.claim_id)
+    with pytest.raises(ClaimError, match="changed this session"):
+        await workflow.verify(claim, MAGIC_CODE)
+
+
+async def test_admit_verified_writes_a_claim_that_needs_no_code(store: OnboardStore) -> None:
+    workflow = _workflow(store, FakeVerifier())
+    claim = await workflow.admit_verified("Me@Acme.com", "web", "sess-1")
+    assert claim.email == "me@acme.com"
+    assert claim.email_domain == "acme.com"
+    assert claim.verified_at is not None
+    stored = await store.live_claim("web", "sess-1")
+    assert stored is not None and stored.claim_id == claim.claim_id
+    assert stored.verified_at is not None
+
+
+async def test_admit_verified_answers_a_repeated_callback_with_the_first_claim(
+    store: OnboardStore,
+) -> None:
+    workflow = _workflow(store, FakeVerifier())
+    first = await workflow.admit_verified("me@acme.com", "web", "sess-1")
+    second = await workflow.admit_verified("someone.else@acme.com", "web", "sess-1")
+    assert second.claim_id == first.claim_id
+    assert second.email == "me@acme.com"
+
+
+async def test_admit_verified_refuses_a_denylisted_email_before_any_write(
+    store: OnboardStore,
+) -> None:
+    workflow = _workflow(store, FakeVerifier())
+    with pytest.raises(WorkEmailError):
+        await workflow.admit_verified("someone@gmail.com", "web", "sess-1")
+    assert await store.live_claim("web", "sess-1") is None
+
+
+async def test_a_web_claim_and_a_terminal_claim_never_share_a_session(store: OnboardStore) -> None:
+    workflow = _workflow(store, FakeVerifier())
+    await workflow.admit_verified("me@acme.com", "web", "shared")
+    await workflow.start("me@acme.com", "ufo", "shared")
+    web = await store.live_claim("web", "shared")
+    terminal = await store.live_claim("ufo", "shared")
+    assert web is not None and web.verified_at is not None
+    assert terminal is not None and terminal.verified_at is None
 
 
 async def test_invite_redeems_once_and_stamps_the_claim(store: OnboardStore) -> None:
-    sender = RecordingSender()
-    workflow = ClaimWorkflow(store=store, email_policy=WorkEmailPolicy(), email_sender=sender)
+    workflow = _workflow(store, FakeVerifier())
     await workflow.start("me@acme.com", "ufo", "sess-1")
     claim = await store.live_claim("ufo", "sess-1")
     assert claim is not None

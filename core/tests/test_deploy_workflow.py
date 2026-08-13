@@ -2696,6 +2696,7 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
         "externalsecret/ufo-control-secrets",
         "externalsecret/ufo-platform-secrets",
         "externalsecret/ufo-gateway-slack-connect",
+        "externalsecret/ufo-gateway-workos",
         "externalsecret/ufo-egress-ca",
         "externalsecret/datadog-api-key",
     }

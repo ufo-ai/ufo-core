@@ -112,6 +112,17 @@ spec:
             - name: UFO_CONTROL_SERVE_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_CONTROL_SERVE_DSN}
+            # WorkOS verifies the member's email — AuthKit for the browser, Magic Auth for the
+            # terminal. The gateway refuses to start without all three. The redirect URI is the app
+            # host's own callback, where the ingress routes /v1/onboard to this pod, and the same
+            # string is registered in this deploy's WorkOS environment.
+            - {name: WORKOS_REDIRECT_URI, value: "https://${shared_host}/v1/onboard/auth/callback"}
+            - name: WORKOS_API_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-gateway-workos, key: WORKOS_API_KEY}
+            - name: WORKOS_CLIENT_ID
+              valueFrom:
+                secretKeyRef: {name: ufo-gateway-workos, key: WORKOS_CLIENT_ID}
             # The signup Slack Connect inviter: UFO's own operator-workspace app, reached only from
             # this pod. Enabled, the gateway refuses to start without both the token and the team it
             # must belong to.

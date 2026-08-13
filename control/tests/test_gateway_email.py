@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -23,11 +23,9 @@ from ufo_control.gateway_email import (
     email_sender_from_env,
     invite_email,
     public_apex_host,
-    verification_email,
 )
 
 EXPIRES_AT = datetime(2026, 7, 16, 16, 10, tzinfo=UTC)
-CODE_TTL = timedelta(minutes=15)
 
 STS_RESPONSE = """\
 <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -64,14 +62,6 @@ def test_public_apex_host_rejects_a_schemeless_value(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv(PUBLIC_BASE_URL_ENV, "flyingobject.ai")
     with pytest.raises(RuntimeError, match=PUBLIC_BASE_URL_ENV):
         public_apex_host()
-
-
-def test_verification_email_states_the_exact_expiry() -> None:
-    subject, body = verification_email(
-        "042042", datetime(2026, 7, 12, 18, 45, tzinfo=UTC), timedelta(minutes=15)
-    )
-    assert subject == "Your flyingobject.ai verification code"
-    assert body == "Your code: 042042. Expires 18:45 UTC (15 minutes)."
 
 
 def test_invite_email_names_the_granted_address_and_carries_no_secret() -> None:
@@ -246,8 +236,8 @@ async def test_console_mode_logs_the_message_and_needs_no_ses(
     sender = email_sender_from_env()
     assert isinstance(sender, ConsoleEmailSender)
     with caplog.at_level(logging.INFO):
-        await sender.send("boss@webco.io", *verification_email("424242", EXPIRES_AT, CODE_TTL))
-    assert "424242" in caplog.text
+        await sender.send("boss@webco.io", *invite_email("boss@webco.io", EXPIRES_AT, "webco.io"))
+    assert "Your ufo invite" in caplog.text
     assert "boss@webco.io" in caplog.text
 
 
