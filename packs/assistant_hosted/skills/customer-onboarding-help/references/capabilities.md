@@ -70,7 +70,8 @@ reminder.
 
 ## Slack behavior worth knowing
 
-- The agent answers in channels it is in and in direct messages.
+- The agent answers a direct message always, and in a channel it is in only when @-mentioned; once
+  a mention starts a thread, every reply in that thread reaches it too, mentioned or not.
 - A turn that is already running keeps running: stopping the client does not cancel it, and it stays
   resumable. If a customer wants to interrupt work, tell them the turn will finish rather than
   claiming it was cancelled.

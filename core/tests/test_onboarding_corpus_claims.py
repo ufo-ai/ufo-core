@@ -32,6 +32,7 @@ SEATS = "core/src/ufo/seats.py"
 WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
 SCHEDULING = "core/src/ufo/scheduling.py"
+SLACK_SURFACE = "extensions/slack/ufo_ext_slack/surface.py"
 BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
@@ -309,6 +310,19 @@ CLAIMS = (
         pattern=(
             r"if validated_schedule is None or spec\.prompt is None:\n"
             r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
+        ),
+    ),
+    Claim(
+        claim="the agent answers a channel message only when addressed, never passing top-level"
+        " traffic",
+        corpus="references/capabilities.md",
+        phrase="only when @-mentioned; once\n  a mention starts a thread, every reply in that"
+        " thread reaches it too",
+        source=SLACK_SURFACE,
+        pattern=(
+            r"an un-addressed\n"
+            r"\s+channel message is admitted only as a reply in a thread the agent already"
+            r" converses in"
         ),
     ),
     Claim(
