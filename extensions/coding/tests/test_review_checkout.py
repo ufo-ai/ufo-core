@@ -339,6 +339,19 @@ def test_review_prompt_admits_only_severe_merge_blocking_defects() -> None:
     assert "P3" not in prompt
 
 
+def test_review_prompt_requires_all_qualifying_findings() -> None:
+    prompt = CODE_REVIEW_PROFILE.prompt
+
+    assert "Make an internal coverage list of every changed file and hunk." in prompt
+    assert "inspect the containing function and the supported workflow" in prompt
+    assert "Do not inspect unrelated unchanged code until you assess every changed hunk." in prompt
+    assert "Finding one severe defect is not a stopping condition." in prompt
+    assert "review the remaining changed workflows as if you found none" in prompt
+    assert "Do not return until you assess every entry in the coverage list." in prompt
+    assert "Return every qualifying finding that you establish." in prompt
+    assert "Do not lower the finding bar to increase the count." in prompt
+
+
 def test_review_prompt_writes_findings_in_simplified_technical_english() -> None:
     prompt = CODE_REVIEW_PROFILE.prompt
 

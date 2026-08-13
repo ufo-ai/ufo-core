@@ -28,6 +28,7 @@ from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
+from evals.code_review import WORKFLOW_WAIT_SECONDS as CODE_REVIEW_WORKFLOW_WAIT_SECONDS
 from evals.coding_repo.runner import (
     CODING_REPO_PACKS,
     load_coding_repo,
@@ -518,6 +519,8 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
     if tasks and all(task.name == "document_visual" for task in tasks):
         workflow_wait_seconds = DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
+    if tasks and all(task.name == "code_review" for task in tasks):
+        workflow_wait_seconds = CODE_REVIEW_WORKFLOW_WAIT_SECONDS
     reports, agent_prompt = asyncio.run(
         _run(
             config,

@@ -8,6 +8,7 @@ from evals import (
     basics,
     browser_nav,
     closing_message,
+    code_review,
     coding_subagent,
     connector_connections,
     connector_refs,
@@ -88,6 +89,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    capability_task("code_review", code_review.CASES),
     capability_task(
         "delegated_response_register",
         response_register.DELEGATED_CASES,
