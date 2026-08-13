@@ -55,6 +55,7 @@ CLI_TOKEN_TTL = timedelta(days=3650)
 UFO_CHANNEL_PREFIX = "/surface/ufo"
 SECRET_HEADER = "x-ufo-secret"
 SECRET_SLOT_HEADER = "x-ufo-slot"
+SINCE_HEADER = "x-ufo-since"
 POLL_FALLBACK_SECONDS = 1.0
 DEFAULT_CONFIG = """\
 [database]
@@ -419,9 +420,11 @@ def _run_turn(config: Config, token: str, channel: str, message: str) -> None:
 @dataclass
 class _Pending:
     """What a held stream ended on: a `poll` reconnect after its seconds, credential prompts to
-    fulfill, or neither — the turn is done."""
+    fulfill, or neither — the turn is done. `since` is where the stream got to, carried into the
+    reconnect so the tail resumes after the last frame rendered rather than replaying the turn."""
 
     poll_seconds: float | None = None
+    since: str = ""
     secrets: list[tuple[str, str, str]] = field(default_factory=list)
 
 
@@ -449,25 +452,29 @@ class _ChatStream:
 
     async def run(self, message: str) -> None:
         body = message
+        since = ""
         while True:
-            pending = await self._drain(body)
+            pending = await self._drain(body, since)
             if pending.poll_seconds is not None:
                 await asyncio.sleep(pending.poll_seconds)
                 body = ""
+                since = pending.since
                 continue
             self.display.close()
             for sealed, slot, prompt in pending.secrets:
                 await self._fulfill_secret(sealed, slot, prompt)
             return
 
-    async def _drain(self, body: str) -> _Pending:
+    async def _drain(self, body: str, since: str = "") -> _Pending:
         """Render one held stream and report how it ended. `txt`/`say`/`note`/`status`/`file`
-        render; `secret` collects a prompt to fulfill after the turn; `poll` asks for an empty-body
-        reconnect; `ask` and `exit` are the terminal directives the stream closes on; any other verb
-        fails loud."""
+        render; `secret` collects a prompt to fulfill after the turn; `since` names where this
+        stream got to, for the reconnect to resume from; `poll` asks for an empty-body reconnect;
+        `ask` and `exit` are the terminal directives the stream closes on; any other verb fails
+        loud."""
         pending = _Pending()
+        headers = {**self.headers, **({SINCE_HEADER: since} if since else {})}
         async with self.client.stream(
-            "POST", self.path, content=body.encode(), headers=self.headers
+            "POST", self.path, content=body.encode(), headers=headers
         ) as stream:
             if stream.status_code != 200:
                 detail = (await stream.aread()).decode().strip()
@@ -489,6 +496,8 @@ class _ChatStream:
                         self.display.shared_file(fields[0], fields[1], fields[2])
                     case "secret" if len(fields) == 3:
                         pending.secrets.append((fields[0], fields[1], fields[2]))
+                    case "since" if len(fields) == 2:
+                        pending.since = f"{fields[0]}:{fields[1]}"
                     case "poll":
                         try:
                             pending.poll_seconds = (

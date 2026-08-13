@@ -121,25 +121,47 @@ class InProcessHub:
 
     Publishers and subscribers may live on different event loops (DBOS runs dequeued workflows on
     its own loop thread), so a lock guards the shared per-turn state and delivery hops onto the
-    subscriber's loop. Cursors are a per-turn monotonic sequence. The ring is dropped when a turn's
-    stream ends (a Terminal or Parked) with no subscriber attached, and when the last subscriber
-    leaves, so retained memory is bounded to in-flight turns; a subscriber attaching after the ring
-    is gone replays nothing and relies on the durable poll for the terminal state.
+    subscriber's loop. The ring is dropped when a turn's stream ends (a Terminal or Parked) with no
+    subscriber attached, and when the last subscriber leaves, so retained memory is bounded to
+    in-flight turns; a subscriber attaching after the ring is gone replays nothing and relies on the
+    durable poll for the terminal state.
+
+    Cursors are a per-turn monotonic sequence, and the turn keeps it across those drops: a surface
+    that reconnects between frames — the terminal client disconnects at every op it hands the
+    member's machine — leaves no subscriber behind while it is away, and a sequence restarting at
+    one there would issue cursors the client has already passed, so the frames published in the gap
+    would be filtered out as seen and lost. The ring the reconnect finds holds only what arrived
+    while it was away, which is what a client with no cursor at all wants replayed. The mark is
+    dropped on the turn's terminal, never on its park: a parked turn resumes under the same id, and
+    its resumed run must not reissue the cursors the client already holds.
     """
 
     _turns: dict[UUID, _TurnStream] = field(default_factory=dict)
+    _marks: dict[UUID, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def _stream(self, turn_id: UUID) -> _TurnStream:
+        """This turn's ring, opened at the cursor it last reached. Call under the lock."""
+        stream = self._turns.get(turn_id)
+        if stream is None:
+            stream = _TurnStream(
+                buffer=deque(maxlen=REPLAY_BUFFER_FRAMES),
+                subscribers=[],
+                seq=self._marks.get(turn_id, 0),
+            )
+            self._turns[turn_id] = stream
+        return stream
 
     async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
         with self._lock:
-            stream = self._turns.get(turn_id)
-            if stream is None:
-                stream = _TurnStream(buffer=deque(maxlen=REPLAY_BUFFER_FRAMES), subscribers=[])
-                self._turns[turn_id] = stream
+            stream = self._stream(turn_id)
             stream.seq += 1
             cursor = str(stream.seq)
+            self._marks[turn_id] = stream.seq
             stream.buffer.append((cursor, frame))
             targets = list(stream.subscribers)
+            if isinstance(frame, Terminal):
+                del self._marks[turn_id]
             if isinstance(frame, Terminal | Parked) and not targets:
                 del self._turns[turn_id]
         for queue, loop in targets:
@@ -159,10 +181,7 @@ class InProcessHub:
         entry = (queue, asyncio.get_running_loop())
         after = int(cursor) if cursor else 0
         with self._lock:
-            stream = self._turns.get(turn_id)
-            if stream is None:
-                stream = _TurnStream(buffer=deque(maxlen=REPLAY_BUFFER_FRAMES), subscribers=[])
-                self._turns[turn_id] = stream
+            stream = self._stream(turn_id)
             stream.subscribers.append(entry)
             replay = [item for item in stream.buffer if int(item[0]) > after]
         try:
@@ -172,10 +191,10 @@ class InProcessHub:
                 yield await queue.get()
         finally:
             with self._lock:
-                stream = self._turns.get(turn_id)
-                if stream is not None and entry in stream.subscribers:
-                    stream.subscribers.remove(entry)
-                    if not stream.subscribers:
+                held = self._turns.get(turn_id)
+                if held is not None and entry in held.subscribers:
+                    held.subscribers.remove(entry)
+                    if not held.subscribers:
                         del self._turns[turn_id]
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:

@@ -442,7 +442,10 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   where a `client`-carrier turn reaches the member's machine: the same connection that tails the
   turn's frames also carries each sandbox op down as one directive and takes its result back as the
   client's next request — the rendezvous the carrier awaits (§Sandboxing), gated so only the member
-  the binding names may answer an op or read the bytes it stages.
+  the binding names may answer an op or read the bytes it stages. Each end the client reconnects
+  from names the cursor it reached, and the reconnect carries it back, so the tail resumes after the
+  last frame rendered: an op ends the stream, and a terminal that prints as it reads must not
+  reprint the notes it already showed.
 
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|

@@ -638,6 +638,9 @@ post() {
     set -- "$@" -H "authorization: Bearer $TOKEN"
   fi
   set -- "$@" -H "x-ufo-session: $SID"
+  if [ -n "${SINCE:-}" ]; then
+    set -- "$@" -H "x-ufo-since: $SINCE"
+  fi
   if { [ -n "$OSA" ] || [ -n "$NODE" ]; } && [ -n "$WORKSPACE_URL" ]; then
     set -- "$@" -H "x-ufo-cwd: $UFO_CWD"
   fi
@@ -790,6 +793,16 @@ turn() {
         ;;
       secret)
         SECRETS="${SECRETS}${rest}${NL}"
+        ;;
+      since)
+        # Where this stream got to, as `<turn>:<cursor>`. The next request carries it so the tail
+        # resumes after the last frame printed instead of replaying the turn's ring from its first
+        # — an op ends the stream, so without it every tool the turn calls reprints every note
+        # before it. The server drops a cursor naming a turn other than the one it is about to
+        # tail, so a stale one costs a replay rather than a gap.
+        S_REST=$rest
+        S_TURN=${S_REST%%"$TAB"*}; case $S_REST in *"$TAB"*) S_REST=${S_REST#*"$TAB"} ;; *) S_REST='' ;; esac
+        SINCE="$S_TURN:$S_REST"
         ;;
       poll)
         NEXT=poll

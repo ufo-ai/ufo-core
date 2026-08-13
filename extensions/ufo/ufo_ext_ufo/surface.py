@@ -60,6 +60,7 @@ SECRET_HEADER = "x-ufo-secret"
 SECRET_SLOT_HEADER = "x-ufo-slot"
 CWD_HEADER = "x-ufo-cwd"
 OP_HEADER = "x-ufo-op"
+SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
 QUEUE_KEY_SEPARATOR = ":"
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
@@ -208,6 +209,9 @@ async def stream_directives(
     connect: Callable[[], Awaitable[str]] | None = None,
     files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None = None,
     ops: Callable[[], Awaitable[TerminalOp]] | None = None,
+    *,
+    turn_id: UUID,
+    since: str = "",
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -221,13 +225,23 @@ async def stream_directives(
     `ops` is the terminal rendezvous: each op the turn asks of the member's machine is raced
     against the turn's own frames, rendered as one `run` directive, and ends the stream — the
     client goes to execute, and its reply is its next request, which resumes this tail. No `poll`
-    follows a `run`, because the reply is already the reconnect. A frame in flight when the op
-    wins is not lost: the next connection's tail replays the turn from the start of its ring."""
+    follows a `run`, because the reply is already the reconnect.
+
+    Every end the client comes back from is preceded by `since`, naming the turn and the cursor of
+    the last frame rendered; the client echoes it and the next tail opens after that frame. The
+    terminal prints as it reads, so a tail that opened at the ring's first frame would reprint every
+    note it already showed — and an op ends the stream, so a turn calling three tools would print
+    its first note three times. The cursor is the one the client was given back when this stream
+    rendered nothing, so a quiet hold never walks it backwards, and a frame taken off the
+    subscription but not rendered — one in flight when the op won the race — is replayed rather than
+    lost, because it stands after the cursor this names. A stream that ends on its own terminal
+    names none: nothing resumes it."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
     terminated = False
     ran = False
+    rendered_cursor = since
     frame_task: asyncio.Task[tuple[str, LiveFrame] | None] | None = None
     op_task: asyncio.Task[TerminalOp] | None = None
     async with tail as frames:
@@ -256,6 +270,7 @@ async def stream_directives(
                         ops = None
                         continue
                     op_task = None
+                    yield directive("since", str(turn_id), rendered_cursor)
                     yield directive(
                         "run",
                         op.op_id,
@@ -271,7 +286,7 @@ async def stream_directives(
                 frame_task = None
                 if item is None:
                     break
-                _cursor, frame = item
+                cursor, frame = item
                 collect: tuple[CredentialPrompt, ...] = ()
                 if (
                     isinstance(frame, Terminal)
@@ -303,6 +318,7 @@ async def stream_directives(
                     streamed = True
                 for line in lines:
                     yield line
+                rendered_cursor = cursor
                 if isinstance(frame, Terminal | Parked):
                     terminated = True
                     break
@@ -315,6 +331,7 @@ async def stream_directives(
                     with suppress(asyncio.CancelledError, TerminalGone):
                         await task
     if not terminated and not ran:
+        yield directive("since", str(turn_id), rendered_cursor)
         yield directive("poll", str(POLL_SECONDS))
 
 
@@ -342,6 +359,16 @@ def _utf8_header(request: Request, name: str) -> str:
     steps, so a plain path is untouched."""
     raw = request.headers.get(name, "").strip()
     return raw.encode("latin-1", "replace").decode("utf-8", "replace")
+
+
+def _resumed_from(request: Request, turn_id: UUID) -> str:
+    """Where the client's last stream got to, from the `since` directive it was given back — the
+    turn it names and the cursor within it. The turn is what makes it safe to honour: a client
+    holding a cursor for the turn before this one would otherwise start this turn's tail partway
+    through and lose the frames before it, so a cursor naming any other turn is dropped and the
+    tail opens at the ring's first frame, which is what a turn nothing has printed yet wants."""
+    named, _, cursor = request.headers.get(SINCE_HEADER, "").strip().partition(":")
+    return cursor if named == str(turn_id) else ""
 
 
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
@@ -400,13 +427,16 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
                 )
             ).turn_id
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
+    since = _resumed_from(request, turn_id)
     directives = stream_directives(
-        ctx.tail(turn_id),
+        ctx.tail(turn_id, since),
         HOLD_SECONDS,
         ctx.credential_prompt_pending,
         connect,
         partial(shared_files, ctx, turn_id),
         ops=partial(ctx.next_terminal_op, conversation_id, op_id or None) if cwd else None,
+        turn_id=turn_id,
+        since=since,
     )
 
     async def bound() -> AsyncIterator[bytes]:

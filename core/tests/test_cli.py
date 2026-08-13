@@ -191,6 +191,36 @@ async def test_drain_reports_a_poll_reconnect_and_collects_secret_prompts() -> N
     assert with_secret.secrets == [("sealed-blob", "exa_api_key", "Paste your Exa key")]
 
 
+async def test_a_held_stream_names_its_cursor_and_the_reconnect_carries_it() -> None:
+    """`since` precedes every end this client comes back from, so it has to survive the verb and
+    ride the next request. Failing loud on it stops the turn at its first reconnect — this client
+    errors on an unknown verb — and dropping it reprints everything the turn has already shown."""
+    turn = "77777777-7777-4777-8777-777777777777"
+    pages = [
+        f"txt\tworking\nsince\t{turn}\t12\npoll\t0\n".encode(),
+        b"txt\t, done\nask\t>\n",
+    ]
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=pages[min(len(seen) - 1, len(pages) - 1)])
+
+    out = io.StringIO()
+    display = _TurnDisplay(out=out, err=out, tty=False)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://fleet"
+    ) as client:
+        await _ChatStream(client=client, path="/surface/ufo/main", headers={}, display=display).run(
+            "hi"
+        )
+
+    assert len(seen) == 2
+    assert "x-ufo-since" not in seen[0].headers
+    assert seen[1].headers["x-ufo-since"] == f"{turn}:12"
+    assert screen(out.getvalue()) == ["working, done", ""]
+
+
 async def test_drain_renders_a_shared_file_with_and_without_a_link() -> None:
     """`ufoctl chat` must know `file` or every shared file becomes a hard client error — this client
     fails loud on an unknown verb where the shell client silently drops it."""

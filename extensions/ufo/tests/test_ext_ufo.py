@@ -205,9 +205,13 @@ async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
     async def token_only(sealed: str, slot: str) -> bool:
         return slot == "slack_bot_token"
 
-    gated = [line async for line in stream_directives(aclosing(frames()), 5.0, fulfilled)]
+    gated = [
+        line async for line in stream_directives(aclosing(frames()), 5.0, fulfilled, turn_id=TURN)
+    ]
     assert not any(line.startswith(b"secret\t") for line in gated)
-    partial = [line async for line in stream_directives(aclosing(frames()), 5.0, token_only)]
+    partial = [
+        line async for line in stream_directives(aclosing(frames()), 5.0, token_only, turn_id=TURN)
+    ]
     secrets = [line for line in partial if line.startswith(b"secret\t")]
     assert secrets == [b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n"]
 
@@ -281,7 +285,9 @@ async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
         yield ("c1", TextDelta(text="partial"))
         yield ("c2", Terminal(frame=TerminalFrame(status="done", text="partial")))
 
-    lines = [line async for line in stream_directives(aclosing(frames()), 5.0, files=files)]
+    lines = [
+        line async for line in stream_directives(aclosing(frames()), 5.0, files=files, turn_id=TURN)
+    ]
     assert reads == 1
     assert lines == [
         b"txt\tpartial\n",
@@ -652,7 +658,14 @@ def test_a_run_op_naming_an_unbundled_program_is_an_enoent_error_reply(tmp_path:
 
 
 def _post_args(
-    send_op: str, send_op_err: str, send_op_body: str, *, osa: str, workspace: str, node: str = ""
+    send_op: str,
+    send_op_err: str,
+    send_op_body: str,
+    *,
+    osa: str,
+    workspace: str,
+    node: str = "",
+    since: str = "",
 ) -> tuple[list[str], str]:
     """The arguments the shipped `post` hands `curl` for one call, plus the op state it leaves
     behind. `curl` is stubbed to record its argv; every other variable `post` reads is seeded."""
@@ -673,6 +686,7 @@ UFO_CWD=/home/me/proj
 SEND_OP='{send_op}'
 SEND_OP_ERR='{send_op_err}'
 SEND_OP_BODY='{send_op_body}'
+SINCE='{since}'
 {post_arm}
 post 'the message'
 printf 'LEFT=%s|%s|%s\\n' "$SEND_OP" "$SEND_OP_ERR" "$SEND_OP_BODY"
@@ -698,6 +712,52 @@ def test_post_sends_an_op_reply_body_under_the_op_header() -> None:
     # post never clears the op state — it runs in `turn`'s background subshell, so the reset must
     # happen in the parent after the fork (see the two-turns regression below), not here.
     assert left == "dddddddddddddddddddddddddddddddd||/tmp/reply.json"
+
+
+def test_post_carries_the_cursor_the_last_stream_named_and_omits_it_when_there_is_none() -> None:
+    """The reconnect an op reply is carries where the stream it is answering got to, so the tail it
+    resumes starts after the notes the terminal already printed. A client that has been given no
+    cursor sends no header at all, and the tail opens at the ring's first frame."""
+    carried, _ = _post_args(
+        "d" * 32,
+        "",
+        "",
+        osa="/usr/bin/osascript",
+        workspace=WORKSPACE_BASE,
+        since="77777777-7777-4777-8777-777777777777:12",
+    )
+    assert "x-ufo-since: 77777777-7777-4777-8777-777777777777:12" in carried
+
+    fresh, _ = _post_args("", "", "", osa="/usr/bin/osascript", workspace=WORKSPACE_BASE)
+    assert not any(arg.startswith("x-ufo-since:") for arg in fresh)
+
+
+def test_a_since_directive_leaves_the_cursor_the_next_post_carries() -> None:
+    """The client reads `since <turn> <cursor>` off the stream and joins it into the one header the
+    surface reads back. A cursor the server left empty still names its turn, which the surface
+    answers by opening the tail at the ring's first frame."""
+    turn = "77777777-7777-4777-8777-777777777777"
+    assert _since_in_shell(directive("since", turn, "12")) == f"{turn}:12"
+    assert _since_in_shell(directive("since", turn, "")) == f"{turn}:"
+
+
+def _since_in_shell(line: bytes) -> str:
+    """The `SINCE` the shipped directive loop leaves after reading one line."""
+    arm = _shell_slice("      since)", "      poll)")
+    harness = f"""set -eu
+TAB=$(printf '\\t')
+printf '%s' '{line.decode()}' | while IFS="$TAB" read -r verb rest; do
+  case "$verb" in
+{arm}
+  esac
+  printf 'SINCE=%s\\n' "$SINCE"
+done
+"""
+    done = subprocess.run(["sh", "-c", harness], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return next(
+        row[len("SINCE=") :] for row in done.stdout.splitlines() if row.startswith("SINCE=")
+    )
 
 
 def test_post_sends_an_op_failure_as_a_header_with_no_body() -> None:
@@ -940,7 +1000,10 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
     async def connect() -> str:
         return "https://oauth.example.test/authorize"
 
-    lines = [line async for line in stream_directives(aclosing(frames()), 5.0, connect=connect)]
+    lines = [
+        line
+        async for line in stream_directives(aclosing(frames()), 5.0, connect=connect, turn_id=TURN)
+    ]
     assert lines == [
         b"say\tUse the connection control.\n",
         b"say\tComplete the connection: https://oauth.example.test/authorize\n",
@@ -1034,6 +1097,9 @@ class _Never:
     async def aclose(self) -> None: ...
 
 
+TURN = UUID("77777777-7777-4777-8777-777777777777")
+
+
 async def _feed(frames: list[tuple[str, object]]) -> AsyncIterator[tuple[str, object]]:
     for item in frames:
         yield item
@@ -1042,11 +1108,67 @@ async def _feed(frames: list[tuple[str, object]]) -> AsyncIterator[tuple[str, ob
 async def test_hold_expires_and_the_stream_ends_with_poll() -> None:
     assert HOLD_SECONDS == 85.0
     out = b"".join(
-        [chunk async for chunk in stream_directives(aclosing(_Never()), hold_seconds=0.05)]
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(_Never()), hold_seconds=0.05, turn_id=TURN
+            )
+        ]
     )
     lines = _lines(out)
     assert lines[0] == ["txt", "working"]
     assert lines[-1] == ["poll", "1"]
+
+
+async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
+    """Every end that the client reconnects from carries the cursor of the last frame rendered, so
+    the tail it opens next starts after that frame instead of at the ring's first. Without it every
+    reconnect re-renders what the terminal already printed — and an op ends the stream, so a turn
+    that runs three tools prints its first note three times."""
+    frames = _feed([("7", ToolCall(tool="glob", preview="", description="Listing the folder"))])
+    out = b"".join(
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(frames), hold_seconds=0.05, turn_id=TURN, since="4"
+            )
+        ]
+    )
+    lines = _lines(out)
+    assert lines == [
+        ["note", "running glob: Listing the folder"],
+        ["since", str(TURN), "7"],
+        ["poll", "1"],
+    ]
+
+
+async def test_a_stream_resumed_from_its_cursor_states_the_cursor_it_was_given() -> None:
+    """A hold that renders nothing new still names where the client is, so a quiet reconnect does
+    not walk the cursor backwards and replay the turn from its first frame."""
+    out = b"".join(
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(_feed([])), hold_seconds=0.05, turn_id=TURN, since="9"
+            )
+        ]
+    )
+    assert _lines(out) == [["since", str(TURN), "9"], ["poll", "1"]]
+
+
+async def test_a_terminal_frame_names_no_cursor_because_nothing_resumes_it() -> None:
+    frames = _feed(
+        [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
+    )
+    out = b"".join(
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(frames), hold_seconds=HOLD_SECONDS, turn_id=TURN
+            )
+        ]
+    )
+    assert [line[0] for line in _lines(out)] == ["txt", "ask"]
 
 
 async def test_terminal_frame_closes_the_stream_without_polling() -> None:
@@ -1054,7 +1176,12 @@ async def test_terminal_frame_closes_the_stream_without_polling() -> None:
         [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
     )
     out = b"".join(
-        [chunk async for chunk in stream_directives(aclosing(frames), hold_seconds=HOLD_SECONDS)]
+        [
+            chunk
+            async for chunk in stream_directives(
+                aclosing(frames), hold_seconds=HOLD_SECONDS, turn_id=TURN
+            )
+        ]
     )
     lines = _lines(out)
     assert lines == [["txt", "echo:1"], ["ask", ">"]]
@@ -1296,6 +1423,84 @@ async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: Async
     assert denied.status_code == 401
     assert missing.status_code == 401
     assert await _turn_count(ws) == 0
+
+
+async def _seed_running_turn(workspace_id: UUID, conversation_id: UUID, member_id: UUID) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="list files in this dir",
+                admission_source="member",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showed(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The duplication the cursor closes, through the real route. An op ends the stream and the
+    reply reconnects, so a turn calling two tools printed its first note three times. A reconnect
+    carrying the cursor it was given resumes after that frame and prints nothing twice; one naming
+    another turn is dropped, and the ring is replayed whole — a turn the terminal has printed
+    nothing of wants exactly that."""
+    client, workspace_id = ufo
+    hub = runtime[1]
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+
+    async def _end_when_tailed() -> None:
+        while not (held := hub._turns.get(turn_id)) or not held.subscribers:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+        await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="Listed.")))
+
+    async def _resume(named: UUID) -> list[list[str]]:
+        """One reconnect onto a turn whose note is in the ring, carrying a cursor for `named`. The
+        ring is dropped when a stream's last subscriber leaves, so each attempt publishes its
+        own."""
+        printed = await hub.publish(
+            turn_id, ToolCall(tool="glob", preview="", description="Listing the folder")
+        )
+        ending = asyncio.ensure_future(_end_when_tailed())
+        try:
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                response = await client.post(
+                    "/surface/ufo/main",
+                    content=b"",
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "x-ufo-since": f"{named}:{printed}",
+                    },
+                )
+        finally:
+            ending.cancel()
+        assert response.status_code == 200
+        return _lines(response.content)
+
+    resumed = await _resume(turn_id)
+    stale = await _resume(uuid4())
+
+    assert [line[0] for line in resumed] == ["say", "ask"]
+    assert resumed[0] == ["say", "Listed."]
+    assert ["note", "running glob: Listing the folder"] in stale
 
 
 async def _post(client: AsyncClient, channel: str, token: str, body: bytes) -> list[list[str]]:
