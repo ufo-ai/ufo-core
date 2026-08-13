@@ -322,6 +322,7 @@ async def _seed_turn(
                 updated_at=sa.func.now(),
             )
         )
+        artifact_created_at = datetime.now(UTC)
         for artifact in artifacts:
             await connection.execute(
                 sa.insert(tables.shared_artifact).values(
@@ -332,8 +333,8 @@ async def _seed_turn(
                     subject=artifact.subject,
                     media_type=artifact.media_type,
                     size_bytes=artifact.size_bytes,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+                    created_at=artifact_created_at,
+                    updated_at=artifact_created_at,
                 )
             )
     return turn_id
