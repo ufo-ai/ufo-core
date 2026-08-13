@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import pickle
@@ -93,10 +94,13 @@ from ufo.loop.engine import (
     TurnEngine,
     TurnParked,
     _bounded,
+    _BoundToolCall,
     _claim_turn_with_handoff,
     _dispatch_segments,
     _final_act,
     _loaded_skill_closures,
+    _RejectedToolCall,
+    _RoundInput,
     _TurnMeter,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
@@ -4208,6 +4212,51 @@ async def test_the_terminal_log_carries_no_stack_when_the_frame_records_no_failu
     assert terminal["status"] == "cancelled"
     assert terminal["error_class"] == ""
     assert "stack" not in terminal
+
+
+async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
+    db: None, tmp_path: Path
+) -> None:
+    secret = "SECRET-PAYLOAD"
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        turn=turn.model_copy(update={"inbound": secret}),
+        agent=Agent(prompt=secret, model="claude-opus-4-8"),
+        system_prompt=rendered_prompt(secret),
+    )
+    round_input = _RoundInput(
+        messages=(Message(role="user", content=secret),),
+        system=secret,
+        offer_tools=True,
+        force_finish=False,
+    )
+    call = ToolUseBlock(id="toolu_1", name="write", input={"content": secret})
+    bound = _BoundToolCall(context=_dispatch_context(engine), call=call)
+    rejected = _RejectedToolCall(
+        call=call,
+        text=f"ValueError: {secret}",
+        outcome="invalid_call",
+        error_class="ValueError",
+    )
+    for step in (
+        functools.partial(TurnEngine._claim_arrivals, engine, (turn.id,)),
+        functools.partial(TurnEngine._stream_once, engine, round_input),
+        functools.partial(TurnEngine._dispatch_step, engine, bound),
+        functools.partial(TurnEngine._dispatch_step, engine, rejected),
+    ):
+        assert secret not in repr(step)
+    assert repr(engine) == (
+        f"TurnEngine(turn_id={turn.id}, agent_id={turn.agent_id}, profile=main)"
+    )
+    assert repr(round_input) == (
+        f"_RoundInput(messages=1, system_chars={len(secret)}, offer_tools=True, force_finish=False)"
+    )
+    assert repr(bound) == "_BoundToolCall(tool=write, call_id=toolu_1)"
+    assert repr(rejected) == (
+        "_RejectedToolCall(tool=write, call_id=toolu_1, outcome=invalid_call, "
+        "error_class=ValueError)"
+    )
 
 
 async def test_cancel_winning_mid_round_keeps_cancelled_terminal_bills_and_preserves_inbound(

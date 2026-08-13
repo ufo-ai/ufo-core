@@ -657,3 +657,48 @@ def test_stdlib_warnings_export_through_the_logs_pipeline():
         assert bodies == ["upload failed for report.pdf"]
     finally:
         logging.getLogger().removeHandler(handler)
+
+
+def test_an_oversized_library_warning_is_capped_before_the_exporter():
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    o11y._bridge_warning_logs(provider)
+    handler = logging.getLogger().handlers[-1]
+    try:
+        logging.getLogger("ufo_ext_slack").warning("upload failed for %s", "x" * 100_000)
+        (body,) = [item.log_record.body for item in exporter.get_finished_logs()]
+    finally:
+        logging.getLogger().removeHandler(handler)
+    dropped = len("upload failed for ") + 100_000 - o11y.LIBRARY_MESSAGE_MAX_CHARS
+    assert body == (
+        f"upload failed for {'x' * (o11y.LIBRARY_MESSAGE_MAX_CHARS - len('upload failed for '))}"
+        f"{o11y.LIBRARY_MESSAGE_ELISION.format(dropped=dropped)}"
+    )
+
+
+class _CapturingHandler(logging.Handler):
+    def __init__(self, messages: list[str]) -> None:
+        super().__init__()
+        self.messages = messages
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def test_an_oversized_dbos_warning_is_capped_on_the_logger_that_bypasses_the_root_handler():
+    warning = f"Asyncio task cancelled for workflow or step {'x' * 500_000}"
+    o11y.init_o11y(None)
+    logger = logging.getLogger(o11y.DBOS_LOGGER_NAME)
+    captured: list[str] = []
+    handler = _CapturingHandler(captured)
+    logger.addHandler(handler)
+    try:
+        logger.warning(warning)
+    finally:
+        logger.removeHandler(handler)
+    dropped = len(warning) - o11y.LIBRARY_MESSAGE_MAX_CHARS
+    assert captured == [
+        warning[: o11y.LIBRARY_MESSAGE_MAX_CHARS]
+        + o11y.LIBRARY_MESSAGE_ELISION.format(dropped=dropped)
+    ]

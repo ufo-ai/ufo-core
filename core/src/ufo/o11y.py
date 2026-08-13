@@ -43,6 +43,9 @@ OTLP_METRICS_PATH = "v1/metrics"
 OTLP_LOGS_PATH = "v1/logs"
 STACK_MAX_CHARS = 8_000
 STACK_ELISION = "\n... middle frames elided ...\n"
+DBOS_LOGGER_NAME = "dbos"
+LIBRARY_MESSAGE_MAX_CHARS = 2_000
+LIBRARY_MESSAGE_ELISION = "... {dropped} chars elided"
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
@@ -207,7 +210,10 @@ _histograms: dict[str, Histogram] = {}
 
 
 def init_o11y(otlp_endpoint: str | None) -> None:
-    """Install OTel providers exporting to the OTLP/HTTP collector; None keeps no-op defaults."""
+    """Install OTel providers exporting to the OTLP/HTTP collector; None keeps no-op defaults. The
+    `dbos` message cap installs either way — that logger writes to the pod's stdout regardless, and
+    keeps `propagate = False`, so it never reaches the root handler below."""
+    logging.getLogger(DBOS_LOGGER_NAME).addFilter(_cap_library_message)
     if otlp_endpoint is None:
         return
     traces_url, metrics_url, logs_url = _otlp_signal_urls(otlp_endpoint)
@@ -244,7 +250,18 @@ def _bridge_warning_logs(logger_provider: LoggerProvider) -> None:
             record.name != INSTRUMENTATION_NAME and not record.name.startswith("opentelemetry")
         )
     )
+    handler.addFilter(_cap_library_message)
     logging.getLogger().addHandler(handler)
+
+
+def _cap_library_message(record: logging.LogRecord) -> bool:
+    message = record.getMessage()
+    if len(message) <= LIBRARY_MESSAGE_MAX_CHARS:
+        return True
+    elision = LIBRARY_MESSAGE_ELISION.format(dropped=len(message) - LIBRARY_MESSAGE_MAX_CHARS)
+    record.msg = f"{message[:LIBRARY_MESSAGE_MAX_CHARS]}{elision}"
+    record.args = None
+    return True
 
 
 def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:

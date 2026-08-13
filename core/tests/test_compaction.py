@@ -1,3 +1,4 @@
+import functools
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from ufo.loop.compaction import (
     MAX_ANCHORS_PER_KIND,
     MAX_REFERENCE_PATHS,
     Compaction,
+    _CompactionRequest,
     harvest_anchors,
     missing_anchors,
 )
@@ -39,7 +41,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.schema.records import Usage
+from ufo.schema.records import Agent, Usage
 from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
 from ufo.transcript import Anchor, CompactionSummary, FileRef
 
@@ -993,6 +995,19 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
     assert "SECRETSIGNATURE" not in model.seen[0]
     assert "SECRETDATA" not in model.seen[0]
     assert "SECRETENCRYPTEDITEM" not in model.seen[0]
+
+
+def test_the_compact_step_renders_no_window_into_a_cancellation_log(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, agent=Agent(prompt=HEAD_FACT, model="claude-opus-4-8"))
+    request = _CompactionRequest(messages=_history(), reason="auto", active_requests=())
+    step = functools.partial(Compaction._compact, compaction, request)
+
+    assert HEAD_FACT not in repr(step)
+    assert TAIL_FACT not in repr(step)
+    assert repr(compaction) == (
+        f"Compaction(conversation_id={compaction.conversation_id}, model=claude-opus-4-8)"
+    )
+    assert repr(request) == "_CompactionRequest(messages=5, reason=auto, active_requests=0)"
 
 
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:

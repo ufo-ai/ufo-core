@@ -356,18 +356,41 @@ class ActiveMessage:
     rendered: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
+class _RoundInput:
+    messages: tuple[Message, ...]
+    system: str
+    offer_tools: bool
+    force_finish: bool
+
+    def __repr__(self) -> str:
+        return (
+            f"_RoundInput(messages={len(self.messages)}, system_chars={len(self.system)}, "
+            f"offer_tools={self.offer_tools}, force_finish={self.force_finish})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
 class _BoundToolCall:
     context: ToolContext
     call: ToolUseBlock
 
+    def __repr__(self) -> str:
+        return f"_BoundToolCall(tool={self.call.name}, call_id={self.call.id})"
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, repr=False)
 class _RejectedToolCall:
     call: ToolUseBlock
     text: str
     outcome: str
     error_class: str
+
+    def __repr__(self) -> str:
+        return (
+            f"_RejectedToolCall(tool={self.call.name}, call_id={self.call.id}, "
+            f"outcome={self.outcome}, error_class={self.error_class})"
+        )
 
 
 type _DispatchInput = _BoundToolCall | _RejectedToolCall
@@ -764,7 +787,7 @@ class _TurnMeter:
             emit_metric("turn_rounds_total", self.rounds, status=status, profile=self.profile)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class TurnEngine:
     turn: Turn
     agent: Agent
@@ -811,6 +834,12 @@ class TurnEngine:
         except KeyError:
             return
         raise ValueError(f"a subagent turn's tool set may not name a tool {FINISH_TOOL!r}")
+
+    def __repr__(self) -> str:
+        return (
+            f"TurnEngine(turn_id={self.turn.id}, agent_id={self.turn.agent_id}, "
+            f"profile={self.profile})"
+        )
 
     @property
     def profile(self) -> str:
@@ -1588,7 +1617,14 @@ class TurnEngine:
         to summarize), the overflow is unrecoverable and re-raises rather than retrying a doomed
         call; a non-overflow error re-raises unchanged."""
         try:
-            result = await self._stream_once(messages, system, offer_tools, force_finish)
+            result = await self._stream_once(
+                _RoundInput(
+                    messages=messages,
+                    system=system,
+                    offer_tools=offer_tools,
+                    force_finish=force_finish,
+                )
+            )
             usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(
@@ -1609,7 +1645,14 @@ class TurnEngine:
             self._reseed_loaded_skills(compacted)
             emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            result = await self._stream_once(compacted, system, offer_tools, force_finish)
+            result = await self._stream_once(
+                _RoundInput(
+                    messages=compacted,
+                    system=system,
+                    offer_tools=offer_tools,
+                    force_finish=force_finish,
+                )
+            )
             usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(
@@ -1662,13 +1705,7 @@ class TurnEngine:
             raise TurnParked(decision.message)
 
     @DBOS.step(preemptible=True)
-    async def _stream_once(
-        self,
-        messages: tuple[Message, ...],
-        system: str,
-        offer_tools: bool = True,
-        force_finish: bool = False,
-    ) -> StreamResult:
+    async def _stream_once(self, round_input: _RoundInput) -> StreamResult:
         """One model round, memoized as a DBOS step: it streams the deltas live to the hub and
         returns the round's text, tool calls, reasoning blocks, and usage as a StreamResult.
         Memoizing the round freezes the model-assigned `call_id`s and the round structure, so a
@@ -1692,22 +1729,22 @@ class TurnEngine:
                 input_schema=self.output_model.model_json_schema(),
             )
         )
-        if force_finish:
+        if round_input.force_finish:
             if finish is None:
                 raise RuntimeError("finish forced on a turn with no output model")
             tools: tuple[ToolSchema, ...] = (finish,)
-        elif offer_tools:
+        elif round_input.offer_tools:
             tools = self.tools.schemas() if finish is None else (*self.tools.schemas(), finish)
         else:
             tools = ()
         request = ModelRequest(
             model=self.agent.model,
-            system=system,
-            messages=messages,
+            system=round_input.system,
+            messages=round_input.messages,
             max_tokens=MAX_OUTPUT_TOKENS,
             tools=tools,
-            tool_choice=FINISH_TOOL if force_finish else None,
-            reasoning="off" if force_finish else self.agent.reasoning,
+            tool_choice=FINISH_TOOL if round_input.force_finish else None,
+            reasoning="off" if round_input.force_finish else self.agent.reasoning,
             prompt_cache_ttl=self.cache_ttl,
         )
         parts: list[str] = []

@@ -173,7 +173,20 @@ class _Candidate:
     verification: CompactionVerification
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
+class _CompactionRequest:
+    messages: tuple[Message, ...]
+    reason: Literal["auto", "force"]
+    active_requests: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return (
+            f"_CompactionRequest(messages={len(self.messages)}, reason={self.reason}, "
+            f"active_requests={len(self.active_requests)})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
 class Compaction:
     """The compaction workflow: decide on the window, run the compression pipeline over the head,
     persist before/after/summary, and hand back the window the turn should actually send to the
@@ -201,6 +214,9 @@ class Compaction:
     agent: Agent | None = None
     speaker_member_id: UUID | None = None
 
+    def __repr__(self) -> str:
+        return f"Compaction(conversation_id={self.conversation_id}, model={self.model})"
+
     async def maybe_compact(
         self,
         messages: tuple[Message, ...],
@@ -215,7 +231,13 @@ class Compaction:
             return messages, ()
         if not force and self._tokens(messages) <= self._trigger():
             return messages, ()
-        return await self._compact(messages, "force" if force else "auto", active_requests)
+        return await self._compact(
+            _CompactionRequest(
+                messages=messages,
+                reason="force" if force else "auto",
+                active_requests=active_requests,
+            )
+        )
 
     def _trigger(self) -> int:
         """The window size a compaction fires at, and the size its replacement has to come back
@@ -227,10 +249,7 @@ class Compaction:
 
     @DBOS.step()
     async def _compact(
-        self,
-        messages: tuple[Message, ...],
-        reason: Literal["auto", "force"],
-        active_requests: tuple[str, ...],
+        self, request: _CompactionRequest
     ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
         """The compaction itself, memoized as a DBOS step: the summarize model call, the blob
         writes, the index selection, and the pre/post_compact hook fires all run once and replay
@@ -248,14 +267,14 @@ class Compaction:
         leaves that verified candidate installable and records its remaining loss. The budget
         invariant is the one that fails loud — a boundary that did not shrink the window spent a
         summarize call to make the next round worse."""
-        selection = self._select(messages)
+        selection = self._select(request.messages)
         if selection is None:
-            return messages, ()
+            return request.messages, ()
         head_rounds, tail = selection
-        before_tokens = self._tokens(messages)
+        before_tokens = self._tokens(request.messages)
         await self.hooks.fire(
             "pre_compact",
-            PreCompact(reason=reason, before_tokens=before_tokens),
+            PreCompact(reason=request.reason, before_tokens=before_tokens),
             self.turn,
             self.agent,
             self.speaker_member_id,
@@ -266,13 +285,13 @@ class Compaction:
         boundary = _Boundary(
             tail=tail,
             references=self._references(head_rounds, tail),
-            active_requests=active_requests,
+            active_requests=request.active_requests,
             loaded_skills=drained,
-            pre_text=self._window_text(messages),
+            pre_text=self._window_text(request.messages),
             anchors=harvest_anchors(
                 self._window_text(tuple(chain.from_iterable(head_rounds))),
                 drained,
-                active_requests,
+                request.active_requests,
             ),
             before_tokens=before_tokens,
         )
@@ -294,8 +313,8 @@ class Compaction:
                 usages = (*usages, *retry_usages)
                 candidate = self._verify(second, boundary, retried=True)
         self._require_budget(candidate.verification, boundary)
-        await self._persist(index, messages, candidate.after, candidate.summary)
-        self._record_verification(index, reason, candidate.verification)
+        await self._persist(index, request.messages, candidate.after, candidate.summary)
+        self._record_verification(index, request.reason, candidate.verification)
         await self.hooks.fire(
             "post_compact",
             PostCompact(
