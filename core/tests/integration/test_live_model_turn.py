@@ -18,13 +18,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOSClient
 from ufo_testsupport.invoker import invoker_factory
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import Hub, InProcessHub, Terminal, TextDelta
 from ufo.loop import queue as loop_queue
@@ -63,7 +63,7 @@ async def live_runtime(
     config = dbos_launched
     hub = InProcessHub()
     blob = FilesystemBlobStore(root=config.blob.root)
-    runtime_dbos = DBOSClient(system_database_url=config.database.system_url)
+    runtime_dbos = replay_safe_client(config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(

@@ -27,7 +27,6 @@ import sqlalchemy as sa
 import uvicorn
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 from fastapi import FastAPI
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
@@ -48,6 +47,7 @@ from ufo.config import Config, DatabaseConfig, load_config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
@@ -545,7 +545,7 @@ def chat_server(
 
         hub = InProcessHub()
         blob = FilesystemBlobStore(root=config.blob.root)
-        dbos_client = DBOSClient(system_database_url=config.database.system_url)
+        dbos_client = replay_safe_client(config.database.system_url)
         sandboxes = ConversationSandbox(
             carrier=LocalCarrier(),
             backend="local",

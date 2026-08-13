@@ -15,7 +15,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_index_default import DefaultIndex
@@ -37,6 +36,7 @@ from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.loader import memory_search, skill_registry
 from ufo.hub import InProcessHub
@@ -139,7 +139,7 @@ def memory_runtime(
         proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=tmp_path_factory.mktemp("workspaces"),
     )
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     previous = loop_queue._runtime
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
@@ -182,7 +182,7 @@ async def memory_web(
 ) -> AsyncIterator[tuple[AsyncClient, UUID, UUID]]:
     config, hub, blob, sandboxes = memory_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     manifests = (web_manifest(), memory_manifest_module.manifest())
     index = DefaultIndex(transaction=workspace_tx)

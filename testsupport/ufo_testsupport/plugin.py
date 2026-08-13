@@ -32,11 +32,12 @@ from typing import Any
 
 import asyncpg
 import pytest
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 from sqlalchemy.engine import make_url
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
+from ufo.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo.workspace import init_workspace_credentials
 from ufo_testsupport.migrations import apply_cached_migrations
@@ -98,7 +99,7 @@ def integration_dependency_available(available: bool, reason: str) -> bool:
 
 
 async def _drain_dbos(database_url: str) -> None:
-    client = DBOSClient(system_database_url=DatabaseConfig(url=database_url).system_url)
+    client = replay_safe_client(DatabaseConfig(url=database_url).system_url)
     try:
         await drain_workflows(client)
     finally:
@@ -206,6 +207,7 @@ def dbos_launched(database_url: str, tmp_path_factory: pytest.TempPathFactory) -
             "system_database_url": system_url,
             "run_admin_server": False,
             "scheduler_polling_interval_sec": 1.0,
+            "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.launch()

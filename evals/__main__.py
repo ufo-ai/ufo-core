@@ -24,7 +24,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
@@ -125,6 +124,7 @@ from ufo.blob import blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.db import dispose_db, init_db
+from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, load_manifests, skill_registry
 from ufo.governance import prompt_digest
@@ -623,7 +623,7 @@ async def _run(
                 agent_reasoning,
             ) = await resolve_workspace_and_agent(agent_name, workspace_id)
             blob = blob_store_for(config.blob)
-            dbos = DBOSClient(system_database_url=config.database.system_url)
+            dbos = replay_safe_client(config.database.system_url)
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,

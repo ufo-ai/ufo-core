@@ -11,7 +11,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOSClient
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import BaseModel
@@ -31,6 +30,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
@@ -346,7 +346,7 @@ def dbos_runtime(
     config = dbos_launched
     hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     embed = embed_backend((STUB_BACKENDS,), None, None)
     index = index_backend((STUB_BACKENDS,), None, None)
     loop_queue.reset_runtime()
@@ -1416,7 +1416,7 @@ async def test_a_model_round_error_commits_a_terminal_without_leaking_an_orphane
     durable = TerminalFrame.model_validate(row.terminal)
     assert durable.error_class == "RuntimeError"
     assert durable.error_message == "boom"
-    client = DBOSClient(system_database_url=config.database.system_url)
+    client = replay_safe_client(config.database.system_url)
     try:
         handle = await client.retrieve_workflow_async(turn_id)
         async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):

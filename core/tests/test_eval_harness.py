@@ -5583,7 +5583,7 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
     )
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
-    monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
+    monkeypatch.setattr("evals.__main__.replay_safe_client", lambda _url: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         "evals.__main__.load_manifests",
@@ -5666,7 +5666,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
     monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
-    monkeypatch.setattr("evals.__main__.DBOSClient", lambda **_kwargs: object())
+    monkeypatch.setattr("evals.__main__.replay_safe_client", lambda _url: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
     monkeypatch.setattr(

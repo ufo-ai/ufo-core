@@ -4,13 +4,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOSClient
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
 from ufo.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
@@ -1089,7 +1089,7 @@ async def test_wait_reports_every_already_finished_childs_status(
     )
     first = await _finished_child(workspace_id, agent_id, parent.id, "first done")
     second = await _finished_child(workspace_id, agent_id, parent.id, "second done")
-    client = DBOSClient(system_database_url=dbos_launched.database.system_url)
+    client = replay_safe_client(dbos_launched.database.system_url)
     subagents = Subagents(
         client=client,
         registry=SubagentRegistry(()),
@@ -1322,7 +1322,7 @@ async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
     )
     child = await _finished_child(workspace_id, agent_id, parent.id, "child result")
     stranger = await _finished_child(workspace_id, agent_id, uuid4(), "private result")
-    client = DBOSClient(system_database_url=dbos_launched.database.system_url)
+    client = replay_safe_client(dbos_launched.database.system_url)
     subagents = Subagents(
         client=client,
         registry=SubagentRegistry(()),

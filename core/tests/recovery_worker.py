@@ -22,7 +22,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, EnqueueOptions
+from dbos import DBOS, EnqueueOptions
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
@@ -30,6 +30,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.connectors import ConnectorRegistry
 from ufo.db import init_db, workspace_tx
+from ufo.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
@@ -206,7 +207,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
         pricing=CORE_PRICING,
         auto_model="claude-opus-4-8",
     )
-    recovery_dbos = DBOSClient(system_database_url=env.system_url)
+    recovery_dbos = replay_safe_client(env.system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,
@@ -270,6 +271,7 @@ def _launch_dbos(env: _Env) -> None:
             "system_database_url": env.system_url,
             "executor_id": str(instance_id),
             "run_admin_server": False,
+            "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.launch()
@@ -339,7 +341,7 @@ def _enqueue_like_admission(env: _Env) -> None:
         "queue_partition_key": str(env.conversation_id),
         "app_version": DBOS_APP_VERSION,
     }
-    client = DBOSClient(system_database_url=env.system_url)
+    client = replay_safe_client(env.system_url)
     try:
         asyncio.run(client.enqueue_async(options, str(env.workspace_id), str(env.turn_id)))
     finally:

@@ -22,7 +22,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.datastructures import Headers
@@ -57,6 +56,7 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import CostTick, InProcessHub, Parked, SkillLoad, Terminal, ToolCall
@@ -1151,7 +1151,7 @@ def runtime(
         proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=config.blob.root.parent / "workspaces",
     )
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
@@ -1189,7 +1189,7 @@ async def ufo(
 ) -> AsyncIterator[tuple[AsyncClient, UUID]]:
     config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
     _mount_shared_surfaces(
@@ -1224,7 +1224,7 @@ async def shared_ufo(
     scopes itself from its bearer through `_mount_shared_surfaces`. One app, every workspace."""
     config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     app = FastAPI()
     _mount_shared_surfaces(
         app,
@@ -1386,7 +1386,7 @@ async def ufo_delivering_artifacts(
     two things `artifact_link` needs before it will mint an absolute URL."""
     config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id = await _seed_workspace()
     app = FastAPI()
     _mount_shared_surfaces(
@@ -1612,7 +1612,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     config, hub, blob, sandboxes = runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id = await _seed_workspace()
     owner = await _seed_member(workspace_id, "owner@example.com")
     await _seed_member(workspace_id, "late@example.com")

@@ -42,6 +42,7 @@ from ufo.db import (
     init_owner_db,
     verify_db_reachable,
 )
+from ufo.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.ext.context import CredentialAccess, ModelAccess
 from ufo.ext.context import context_for as extension_context_for
 from ufo.ext.conversation_slots import BoundConversationSlot
@@ -189,7 +190,7 @@ def run() -> None:
     blob = blob_store_for(config.blob)
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     carrier, carrier_spec = select_carrier(config, manifests)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
@@ -264,6 +265,7 @@ def run() -> None:
             "executor_id": str(instance_id),
             "run_admin_server": False,
             "max_executor_threads": DBOS_MAX_EXECUTOR_THREADS,
+            "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.launch()

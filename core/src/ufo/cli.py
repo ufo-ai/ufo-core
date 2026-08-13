@@ -21,7 +21,6 @@ import click
 import httpx
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 
 from ufo.accounting import SpendReport, SpendRollup
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
@@ -30,6 +29,7 @@ from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
 from ufo.credentials import CredentialStore
 from ufo.db import apply_migrations, dispose_db, init_db, init_owner_db, owner_tx, workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.grants import GrantSummary, workspace_grant_summaries
@@ -1089,7 +1089,7 @@ async def _cancel_turn(config: Config, turn_id: UUID) -> bool:
             ).scalar_one_or_none()
         if workspace_id is None:
             raise click.ClickException(f"no turn {turn_id}")
-        client = DBOSClient(system_database_url=config.database.system_url)
+        client = replay_safe_client(config.database.system_url)
         with ws(workspace_id):
             return await cancel_one_turn(client, turn_id)
     finally:

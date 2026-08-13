@@ -20,7 +20,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
-from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
@@ -60,6 +59,7 @@ from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import member_object_registry, turn_tools
@@ -172,7 +172,7 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
     """The sites surface mounted exactly as `serve` mounts a shared-fleet surface: its own
     `identify` resolves each request's workspace from the site token in the URL."""
     workspace = await _seed_workspace()
-    dbos_client = DBOSClient(system_database_url=dbos_launched.database.system_url)
+    dbos_client = replay_safe_client(dbos_launched.database.system_url)
 
     sandboxes = ConversationSandbox(
         carrier=LocalCarrier(),

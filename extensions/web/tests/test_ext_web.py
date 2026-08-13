@@ -18,7 +18,6 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_todos as todos
 from cryptography.fernet import Fernet
-from dbos import DBOSClient
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
@@ -77,6 +76,7 @@ from ufo.credentials import (
     seal_credential_request,
 )
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
 from ufo.ext.surface import (
@@ -658,7 +658,7 @@ def dbos_runtime(
         proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
         workspace_root=config.blob.root.parent / "workspaces",
     )
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     loop_queue.reset_runtime()
     loop_queue.init_runtime(
         loop_queue.Runtime(
@@ -753,7 +753,7 @@ async def web(
     monkeypatch.setattr(
         hub_tail, "turn_status_frame", release_when_running(STREAM_GATE, hub_tail.turn_status_frame)
     )
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     app = FastAPI()
     app.state.blob = blob
@@ -5356,7 +5356,7 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     assert turn.queue_key == f"intent/{agent_id}/admin@example.com"
     assert outcome["message"] == "Saved."
     assert "claude-sonnet-5" in turn.inbound
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     try:
         handle = await dbos_client.retrieve_workflow_async(outcome["turn_id"])
         async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
@@ -6437,7 +6437,7 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
     value, and the field stays optional — a create that omits it births the default."""
     config, hub, blob, sandboxes = dbos_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     app = FastAPI()
@@ -6503,7 +6503,7 @@ async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
     overview report the capability the agent setting narrows."""
     config, hub, blob, sandboxes = dbos_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
-    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     app = FastAPI()

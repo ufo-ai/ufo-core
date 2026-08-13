@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, SetWorkflowID
+from dbos import DBOS, SetWorkflowID
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
@@ -34,6 +34,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.connectors import ConnectorRegistry
 from ufo.db import workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
@@ -208,7 +209,7 @@ async def _seed_turn(model: str = "claude-opus-4-8") -> tuple[UUID, UUID, UUID]:
 
 
 def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Path) -> None:
-    recovery_dbos = DBOSClient(system_database_url=config.database.system_url)
+    recovery_dbos = replay_safe_client(config.database.system_url)
     loop_queue.init_runtime(
         loop_queue.Runtime(
             config=config,

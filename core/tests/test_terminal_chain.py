@@ -31,7 +31,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import uvicorn
-from dbos import DBOSClient
 from fastapi import FastAPI
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
@@ -51,6 +50,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, DatabaseConfig
 from ufo.connectors import ConnectorRegistry
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
@@ -227,7 +227,7 @@ async def _bootstrap_workspace() -> UUID:
 
 
 async def _drain(system_url: str) -> None:
-    client = DBOSClient(system_database_url=system_url)
+    client = replay_safe_client(system_url)
     try:
         await drain_workflows(client)
     finally:
@@ -280,7 +280,7 @@ def terminal_server(
 
         hub = InProcessHub()
         blob = FilesystemBlobStore(root=config.blob.root)
-        dbos_client = DBOSClient(system_database_url=config.database.system_url)
+        dbos_client = replay_safe_client(config.database.system_url)
         sandboxes = ConversationSandbox(
             carrier=LocalCarrier(),
             backend="local",
