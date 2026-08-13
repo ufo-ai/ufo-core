@@ -1,4 +1,5 @@
 import {
+  BAR_CONTROL,
   Select,
   SelectContent,
   SelectItem,
@@ -6,6 +7,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { Placement } from "@/kernel/pager";
+import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
 
 /** The agent a place names, else the one the workspace answers with. `undefined` where the place
@@ -31,7 +33,7 @@ export function AgentPicker({
   if (agents.length < 2) return null;
   return (
     <Select value={agent.id} onValueChange={onPick}>
-      <SelectTrigger aria-label="Agent" className="max-w-control-row">
+      <SelectTrigger aria-label="Agent" className={cn(BAR_CONTROL, "w-(--container-control-row)")}>
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

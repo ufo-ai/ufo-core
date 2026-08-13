@@ -39,7 +39,7 @@ export function Reveal({ children, bare = false }: { children: ReactNode; bare?:
         {over && !open ? (
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-x-0 bottom-0 h-6xl bg-linear-to-t from-card"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-7xl bg-linear-to-t from-card"
           />
         ) : null}
       </div>

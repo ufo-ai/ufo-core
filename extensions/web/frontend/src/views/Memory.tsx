@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { IconChevronRight } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +24,8 @@ import {
   usePanelRead,
   type NoticeState,
 } from "@/kernel/panel";
+import { rowControl } from "@/kernel/row";
+import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
 import { subjectLabel } from "@/lib/audience";
@@ -59,7 +62,6 @@ export function Memory({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const [query, setQuery] = useState(place.q ?? "");
   const submitted = place.q ?? "";
   const [reloads, setReloads] = useState(0);
   const [correcting, setCorrecting] = useState<Match | null>(null);
@@ -76,13 +78,7 @@ export function Memory({
     reloads,
   );
 
-  useEffect(() => setQuery(place.q ?? ""), [place.q]);
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    onPlace({ q: query.trim() || undefined, after: undefined });
-    setCorrecting(null);
-  }
+  useEffect(() => setCorrecting(null), [submitted]);
 
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
   const columns = ["Memory", "Class", "Audience", "Added"];
@@ -90,32 +86,14 @@ export function Memory({
   return (
     <>
       <Section
-        title="Memory"
         bar={
-          <>
-            <form onSubmit={submit} className="flex items-stretch">
-              <Input
-                type="search"
-                aria-label="Search"
-                placeholder="Search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                className="max-w-control-row"
-              />
-            </form>
-            {!submitted && kinds.length ? (
-              <Filter
-                options={kinds.map((kind) => ({
-                  label: kindLabel(kind),
-                  value: kind,
-                }))}
-                value={place.kind ?? ""}
-                onChange={(kind) =>
-                  onPlace({ kind: kind || undefined, after: undefined })
-                }
-              />
-            ) : null}
-          </>
+          !submitted && kinds.length ? (
+            <Filter
+              options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
+              value={place.kind ?? ""}
+              onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
+            />
+          ) : null
         }
       >
         <Panel
@@ -137,13 +115,8 @@ export function Memory({
           }
         >
           {(payload) => {
-            const narrowed =
-              Boolean(submitted) || (Boolean(place.kind) && !payload.matches.length);
-            if (!payload.matches.length && !narrowed)
-              return (
-                <PanelBlank body="No memories yet." />
-              );
-            const corrections = payload.matches.some(correctable);
+            const narrowed = Boolean(submitted) || (Boolean(place.kind) && !payload.matches.length);
+            if (!payload.matches.length && !narrowed) return <PanelBlank body="No memories yet." />;
             return (
               <>
                 <Table>
@@ -152,30 +125,33 @@ export function Memory({
                       {columns.map((column) => (
                         <Th key={column}>{column}</Th>
                       ))}
-                      {corrections ? <Th>{""}</Th> : null}
+                      <Th className="w-(--size-glyph)">{""}</Th>
                     </tr>
                   </thead>
                   <tbody>
                     {payload.matches.length ? (
-                      payload.matches.map((match, index) => (
-                        <tr key={index}>
-                          <Td className="w-full">{match.text}</Td>
-                          <Td className="whitespace-nowrap">{kindLabel(match.kind)}</Td>
-                          <Td className="whitespace-nowrap">{subjectLabel(match.subject)}</Td>
-                          <Td className="whitespace-nowrap opacity-(--opacity-muted)">
-                            {day(match.created_at) ?? "—"}
-                          </Td>
-                          {corrections ? (
-                            <Td>
-                              {correctable(match) ? (
-                                <Button variant="row" onClick={() => setCorrecting(match)}>
-                                  Correct
-                                </Button>
+                      payload.matches.map((match, index) => {
+                        const control = correctable(match)
+                          ? rowControl(() => setCorrecting(match), true)
+                          : null;
+                        return (
+                          <tr
+                            key={index}
+                            {...control}
+                            className={cn(control && "hover:bg-fill-hover", control?.className)}
+                          >
+                            <Td className="w-full max-w-0">{match.text}</Td>
+                            <Td>{kindLabel(match.kind)}</Td>
+                            <Td>{subjectLabel(match.subject)}</Td>
+                            <Td>{day(match.created_at) ?? "—"}</Td>
+                            <Td className="w-(--size-glyph)">
+                              {control ? (
+                                <IconChevronRight className="size-icon" aria-hidden />
                               ) : null}
                             </Td>
-                          ) : null}
-                        </tr>
-                      ))
+                          </tr>
+                        );
+                      })
                     ) : (
                       <TableNote span={columns.length}>
                         {submitted

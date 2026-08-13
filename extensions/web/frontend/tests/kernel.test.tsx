@@ -377,9 +377,10 @@ test("a section stacks heading, action bar, then records, and the bar runs from 
   const heading = screen.getByRole("heading", { name: "Members" });
   const search = screen.getByLabelText("Search members");
   const action = screen.getByRole("button", { name: "Add member" });
-  expect(search.parentElement).toBe(action.parentElement);
-  expect(search.parentElement?.className).not.toContain("justify-between");
-  expect(heading.parentElement?.parentElement?.nextElementSibling).toBe(search.parentElement);
+  const bar = search.parentElement!;
+  expect(bar).toBe(action.parentElement);
+  expect(bar.className).not.toContain("justify-between");
+  expect(bar.previousElementSibling).toBe(heading.closest("div")?.parentElement);
 });
 
 test("a section's action stands on the heading line, over the bar and the records", () => {
@@ -406,7 +407,7 @@ test("a section's note stands under its heading, not under the bar", () => {
   expect(note.parentElement).toBe(heading.parentElement?.parentElement);
 });
 
-test("a table is a bordered card, and its last row meets the card edge alone", () => {
+test("a table stands on the section's own ground, ruled only between its records", () => {
   render(
     <Table>
       <thead>
@@ -421,13 +422,29 @@ test("a table is a bordered card, and its last row meets the card edge alone", (
       </tbody>
     </Table>,
   );
-  const card = screen.getByRole("table").parentElement;
-  expect(card?.className).toContain("bg-card");
-  expect(card?.className).toContain("border-edge");
-  expect(card?.className).toContain("rounded-panel");
+  const frame = screen.getByRole("table").parentElement;
+  expect(frame?.className).not.toContain("border-edge");
+  expect(frame?.className).not.toContain("rounded-panel");
+  const head = screen.getByRole("columnheader", { name: "Member" });
+  expect(head.className).not.toContain("border");
   const cell = screen.getByRole("cell", { name: "lead@example.com" });
-  expect(cell.className).toContain("border-t");
-  expect(cell.className).not.toContain("border-b");
+  expect(cell.className).toContain("border-b");
+  expect(cell.className).not.toContain("border-t");
+});
+
+test("a row is a band: the cells sit inside the rule that states the row's extent", () => {
+  render(
+    <Table>
+      <tbody>
+        <tr>
+          <Td>lead@example.com</Td>
+        </tr>
+      </tbody>
+    </Table>,
+  );
+  const cell = screen.getByRole("cell", { name: "lead@example.com" });
+  expect(cell.className).toContain("px-2xl");
+  expect(cell.className).toContain("truncate");
 });
 
 test("a section with nothing to act on draws no action bar", () => {

@@ -5,7 +5,6 @@ Slack/CLI/web surfaces, accounting, Anthropic/OpenAI/Bedrock Mantle model access
 system for everything else (connectors, data sources, tools, subagents, onboarding).
 
 - `spec.md` — source of truth: doctrine, fixed decisions, workspace model, non-goals.
-- `DESIGN.md` — the member portal's visual and structural system.
 - `docs/contracts.md` — core contracts per unit (sections delete as code lands).
 - `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
 - `docs/handbook/` — generated stage-by-stage reference to the harness (start at `overview.md`).

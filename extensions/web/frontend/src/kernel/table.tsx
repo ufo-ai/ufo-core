@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { Table, TableNote, Th } from "@/components/ui/table";
+import { rowControl } from "@/kernel/row";
 import { PanelBlank } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 
@@ -43,7 +44,7 @@ function Head({ column, sort }: { column: Column; sort?: Sort }) {
         type="button"
         onClick={() => sort.onSort(column.sort)}
         className={cn(
-          "flex items-center gap-2xs border-0 bg-transparent p-0 text-left font-inherit text-inherit",
+          "flex items-center gap-2xs border-0 bg-transparent p-0 text-left font-sans text-inherit",
           "transition-[opacity] duration-100 ease-control hover:opacity-(--opacity-muted-faint)",
         )}
       >
@@ -64,6 +65,7 @@ export function DataTable<Row>({
   empty,
   note,
   sort,
+  open,
   children,
 }: {
   columns: Column[];
@@ -72,6 +74,9 @@ export function DataTable<Row>({
   empty: string;
   note?: string;
   sort?: Sort;
+  /** What a row opens, where the record has a page of its own — the whole row is the control that
+   *  reaches it, and a row that opens nothing is handed none. */
+  open?: (row: Row) => (() => void) | null;
   children: (row: Row) => ReactNode;
 }) {
   if (!rows.length && !note) return <PanelBlank body={empty} />;
@@ -86,7 +91,19 @@ export function DataTable<Row>({
       </thead>
       <tbody>
         {rows.length ? (
-          rows.map((row) => <tr key={rowKey(row)}>{children(row)}</tr>)
+          rows.map((row) => {
+            const press = open?.(row) ?? null;
+            const control = press ? rowControl(press, true) : null;
+            return (
+              <tr
+                key={rowKey(row)}
+                {...control}
+                className={cn(control && "hover:bg-fill-hover", control?.className)}
+              >
+                {children(row)}
+              </tr>
+            );
+          })
         ) : (
           <TableNote span={columns.length}>{note}</TableNote>
         )}

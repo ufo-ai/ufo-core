@@ -38,17 +38,19 @@ export function usePanelRead<T>(path: string | null, reloads: number = 0): Panel
     let live = true;
     reading.current = true;
     setState((held) => (held.phase === "ready" ? held : { phase: "loading" }));
-    getJson<T>(path, superseded.signal).then((result) => {
-      if (!live) return;
-      failed.current = !result.ok;
-      setState(
-        result.ok
-          ? { phase: "ready", payload: result.payload }
-          : { phase: "failed", message: result.message, status: result.status },
-      );
-    }).finally(() => {
-      if (live) reading.current = false;
-    });
+    getJson<T>(path, superseded.signal)
+      .then((result) => {
+        if (!live) return;
+        failed.current = !result.ok;
+        setState(
+          result.ok
+            ? { phase: "ready", payload: result.payload }
+            : { phase: "failed", message: result.message, status: result.status },
+        );
+      })
+      .finally(() => {
+        if (live) reading.current = false;
+      });
     return () => {
       live = false;
       reading.current = false;
@@ -65,8 +67,9 @@ const SKELETON_CARDS = 4;
 const SKELETON_FIELDS = 3;
 
 /** What is coming, drawn at its own size. A centred `Loading…` sits where no record ever will,
- *  then jumps aside as the answer lands; a skeleton holds the card, the column, and the row
- *  rhythm the payload will take, so the page settles instead of rearranging. */
+ *  then jumps aside as the answer lands; a skeleton holds the column and row rhythm the payload
+ *  will take, ruled and bounded the way that payload is, so the page settles instead of
+ *  rearranging. */
 export function PanelSkeleton({ shape }: { shape: PanelShape }) {
   if (shape === "cards")
     return (
@@ -92,11 +95,12 @@ export function PanelSkeleton({ shape }: { shape: PanelShape }) {
       </div>
     );
   return (
-    <div className="rounded-panel border border-edge bg-surface">
+    <div>
+      <Skeleton className="mx-2xl mb-lg h-(--size-notice) w-1/6" />
       {Array.from({ length: SKELETON_ROWS }, (_, index) => (
         <div
           key={index}
-          className={cn("flex items-center gap-xl px-xl py-lg", index && "border-t border-edge")}
+          className="flex items-center gap-2xl border-b border-edge-soft px-2xl py-md"
         >
           <Skeleton className="h-(--size-notice) w-full" />
           <Skeleton className="h-(--size-notice) w-1/6" />
@@ -121,8 +125,7 @@ export function Panel<T>({
   empty?: (payload: T) => ReactNode;
   children: (payload: T) => ReactNode;
 }) {
-  if (state.phase === "loading")
-    return loading ? loading() : <PanelSkeleton shape={shape} />;
+  if (state.phase === "loading") return loading ? loading() : <PanelSkeleton shape={shape} />;
   if (state.phase === "failed")
     return failed ? failed(state.message, state.status) : <PanelEmpty>{state.message}</PanelEmpty>;
   const nothing = empty?.(state.payload);
@@ -139,13 +142,14 @@ function Empty({ className, children }: { className?: string; children: ReactNod
 }
 
 export function PanelEmpty({ children }: { children: ReactNode }) {
-  return <Empty className="my-6xl mx-auto block">{children}</Empty>;
+  return <Empty className="my-7xl mx-auto block">{children}</Empty>;
 }
 
-/** A section that holds no records yet takes the card its records would have taken — same border,
- *  same left edge, same bottom rhythm as `Table` — so a blank section stacked among filled ones
- *  reads as one more row of the column rather than a note floating between them. Nothing is aligned
- *  to, so the line and its one act sit in the middle of the card. The section heading already names
+/** A section that holds no records yet takes a card on the section's own left edge. A table states
+ *  its extent in the rules between its records; a blank section has none, and a centred line in an
+ *  unbounded gap reads as an orphan of the heading rather than as the place records will stand.
+ *  Nothing is aligned to, so the line and its one act sit in the middle of the card. The section
+ *  heading already names
  *  what is absent, so the card states only what fills it. `PanelEmpty` stays the centred note for a
  *  passing condition: loading, a failed read, a search that matched nothing. */
 export function PanelBlank({ body, action }: { body: string; action?: ReactNode }) {
@@ -192,10 +196,12 @@ export function Notice({
   );
 }
 
-/** The one owner of vertical rhythm on a settings screen: `gap-lg` between the heading, the bar,
- *  and the records, `mb-6xl` to the next section. Nothing inside carries a bottom margin — a block
- *  that spaced itself would add to the gap rather than sit in it, and a screen of six sections
- *  would drift wider apart with every band it happens to hold.
+/** The one owner of vertical rhythm on a settings screen. A heading names the block directly
+ *  beneath it and its own rule is the join, so a title and the rows it heads read as one object
+ *  rather than as two blocks a gap apart. What narrows the records stands `gap-6xl` clear of both,
+ *  because a control belongs to neither the name above it nor the row below it, and `mb-5xl`
+ *  separates one section from the next. Nothing inside carries a bottom margin — a block that
+ *  spaced itself would add to the gap rather than sit in it.
  *
  *  `action` is one act on what the heading names, drawn beside it rather than under it: a fact about
  *  the whole section belongs on the heading line, where `bar` is for the controls that narrow the
@@ -214,20 +220,22 @@ export function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-6xl flex w-full max-w-section flex-col gap-lg">
+    <section className="mb-5xl flex w-full max-w-section flex-col">
       {title || note ? (
-        <div className="flex flex-col gap-xs">
+        <div className="flex flex-col gap-2xs border-b border-edge-soft pb-md">
           {title ? (
             <div className="flex items-baseline gap-md">
-              <h2 className="m-0 text-body font-strong opacity-(--opacity-muted-soft)">{title}</h2>
+              <h2 className="m-0 text-ui font-strong">{title}</h2>
               {action}
             </div>
           ) : null}
-          {note ? <p className="m-0 text-small opacity-(--opacity-muted-soft)">{note}</p> : null}
+          {note ? <p className="m-0 text-ui text-ink-soft">{note}</p> : null}
         </div>
       ) : null}
-      {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}
-      {children}
+      {bar ? (
+        <div className={cn("flex items-stretch gap-sm", (title || note) && "mt-6xl")}>{bar}</div>
+      ) : null}
+      <div className={cn(bar && "mt-6xl")}>{children}</div>
     </section>
   );
 }

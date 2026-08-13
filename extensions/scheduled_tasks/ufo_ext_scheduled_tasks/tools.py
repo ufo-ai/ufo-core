@@ -42,6 +42,7 @@ from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
+PRIVATE_PROMPT = "private member task"
 SCHEDULE_MAX = 100
 RESPONSE_EXCERPT_MAX = 400
 SCHEDULE_GATE = (
@@ -230,7 +231,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 summary=(
                     _summary(listed.task)
                     if task_content_visible(listed, member_id)
-                    else f"{listed.task.schedule} — private member task"
+                    else f"{listed.task.schedule} — {PRIVATE_PROMPT}"
                 ),
                 owner=_owner(listed),
                 fields={
@@ -240,6 +241,11 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "owner_email": emails.get(listed.task.created_by_member_id),
                     "origin": listed.surface_label or "Portal",
                     "mine": listed.task.created_by_member_id == member_id,
+                    "prompt": (
+                        (listed.task.description or listed.task.prompt)[:SUMMARY_MAX]
+                        if task_content_visible(listed, member_id)
+                        else PRIVATE_PROMPT
+                    ),
                 },
             )
             for listed in listed_rows
@@ -423,7 +429,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
     list_fields=frozenset(
-        {"conversation", "next_run_at", "paused", "owner_email", "origin", "mine"}
+        {"conversation", "next_run_at", "paused", "owner_email", "origin", "mine", "prompt"}
     ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )

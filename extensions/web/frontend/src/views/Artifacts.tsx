@@ -1,7 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
@@ -210,9 +209,6 @@ export function Artifacts({
   const viewer = useViewer();
   const query = place.q ?? "";
   const picked = place.chip ?? "";
-  const [typed, setTyped] = useState(query);
-  useEffect(() => setTyped(query), [query]);
-
   const media = MEDIA[picked];
   const siteParams = new URLSearchParams({
     agent: mainAgent?.id ?? "",
@@ -252,31 +248,15 @@ export function Artifacts({
       />
     );
 
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    onPlace({ q: typed || undefined, after: undefined });
-  }
-
   const unknown = Boolean(picked) && !FAMILIES.includes(picked);
   const absent = held.phase === "failed" && held.status === NOT_FOUND;
   const families = absent ? Object.keys(MEDIA) : FAMILIES;
 
   return (
     <Section
-      title="Artifacts"
       bar={
         state.phase === "loading" ? null : (
           <>
-            <form onSubmit={submit} className="flex items-stretch">
-              <Input
-                type="search"
-                aria-label="Search"
-                placeholder="Search"
-                className="max-w-control-row"
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-              />
-            </form>
             <Filter
               options={families.map((family) => ({ label: family, value: family }))}
               value={picked}

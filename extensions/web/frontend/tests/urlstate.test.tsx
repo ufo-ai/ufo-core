@@ -7,7 +7,6 @@ import {
   artifactTarget,
   bootRoute,
   chatHash,
-  customizeHash,
   parseHash,
   sectionHash,
   subagentConversationHash,
@@ -110,17 +109,17 @@ test("a workspace tab and a section carry the same place and parse back to it", 
   expect(parseHash("#/workspace/memory")).toEqual({ kind: "home" });
 });
 
-test("the customize hash carries its place and parses back to it", () => {
+test("the memory hash carries its place and parses back to it", () => {
   const place = { kind: "fact", q: "roadmap" };
-  expect(customizeHash("memory", place)).toBe("#/customize/memory?kind=fact&q=roadmap");
-  expect(parseHash(customizeHash("memory", place))).toEqual({
-    kind: "customize",
-    view: "memory",
+  expect(sectionHash("memory", place)).toBe("#/memory?kind=fact&q=roadmap");
+  expect(parseHash(sectionHash("memory", place))).toEqual({
+    kind: "section",
+    section: "memory",
     place,
   });
-  expect(parseHash(customizeHash("memory"))).toEqual({
-    kind: "customize",
-    view: "memory",
+  expect(parseHash(sectionHash("memory"))).toEqual({
+    kind: "section",
+    section: "memory",
     place: {},
   });
 });
@@ -422,7 +421,7 @@ test("a placement from a pane the member already left never writes its dead plac
 });
 
 test("a refused memory cursor leaves a way back to the first page", async () => {
-  location.hash = customizeHash("memory", { after: "not-a-cursor" });
+  location.hash = sectionHash("memory", { after: "not-a-cursor" });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -438,7 +437,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
 
   await userEvent.click(await screen.findByRole("button", { name: "First page" }));
 
-  await waitFor(() => expect(location.hash).toBe("#/customize/memory"));
+  await waitFor(() => expect(location.hash).toBe("#/memory"));
   expect(await screen.findByText("No memories yet.")).toBeTruthy();
 });
 
@@ -449,7 +448,7 @@ test("a hash naming a filter or a memory class that does not exist says so", asy
   expect(await screen.findByText("That filter is not available.")).toBeTruthy();
   view.unmount();
 
-  location.hash = customizeHash("memory", { kind: "nonexistent" });
+  location.hash = sectionHash("memory", { kind: "nonexistent" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("That memory class is not available.")).toBeTruthy();
@@ -502,21 +501,21 @@ test("an intent resolving after the member leaves never rewrites where they went
 });
 
 test("a memory search and kind filter ride the hash and survive reload", async () => {
-  location.hash = customizeHash("memory");
+  location.hash = sectionHash("memory");
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("tab", { name: "Fact" }));
-  expect(location.hash).toBe("#/customize/memory?kind=fact");
+  expect(location.hash).toBe("#/memory?kind=fact");
   await waitFor(() => expect(calls.some((url) => url.includes("kind=fact"))).toBe(true));
 
   await userEvent.type(screen.getByPlaceholderText("Search"), "roadmap{Enter}");
-  expect(location.hash).toBe("#/customize/memory?kind=fact&q=roadmap");
+  expect(location.hash).toBe("#/memory?kind=fact&q=roadmap");
   await waitFor(() => expect(calls.some((url) => url.includes("q=roadmap"))).toBe(true));
 });
 
 test("a reloaded kind filter lands on that kind and reads it", async () => {
-  location.hash = customizeHash("memory", { kind: "fact" });
+  location.hash = sectionHash("memory", { kind: "fact" });
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -527,7 +526,7 @@ test("a reloaded kind filter lands on that kind and reads it", async () => {
 });
 
 test("a search cleared from a kind returns to that kind rather than page one", async () => {
-  location.hash = customizeHash("memory", { kind: "fact", q: "roadmap" });
+  location.hash = sectionHash("memory", { kind: "fact", q: "roadmap" });
   serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
@@ -536,7 +535,7 @@ test("a search cleared from a kind returns to that kind rather than page one", a
   await userEvent.clear(box);
   await userEvent.type(box, "{Enter}");
 
-  await waitFor(() => expect(location.hash).toBe("#/customize/memory?kind=fact"));
+  await waitFor(() => expect(location.hash).toBe("#/memory?kind=fact"));
   expect(screen.getByRole("tab", { name: "Fact" }).getAttribute("aria-selected")).toBe("true");
 });
 
@@ -568,7 +567,7 @@ test("opening and closing the viewer issues no second listing read", async () =>
 });
 
 test("a reloaded memory search prefills the box and fetches the query", async () => {
-  location.hash = customizeHash("memory", { q: "roadmap" });
+  location.hash = sectionHash("memory", { q: "roadmap" });
   const calls = serve();
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 

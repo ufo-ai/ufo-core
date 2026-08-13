@@ -8,9 +8,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Checkbox, Field, Input, Label } from "@/components/ui/field";
+import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
 import { Facts } from "@/components/ui/facts";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  BAR_CONTROL,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Td } from "@/components/ui/table";
 import {
   Notice,
@@ -72,9 +79,15 @@ export function WorkspaceConnectors() {
       title="Connectors"
       bar={
         <>
-          <Input aria-label="Search" placeholder="Search" className="max-w-control-row" value={query} onChange={(event) => setQuery(event.target.value)} />
+          <Search
+            label="Search"
+            placeholder="Search"
+            className="w-(--container-control-row)"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
           <Select value={targetAgent} onValueChange={setTargetAgent}>
-            <SelectTrigger aria-label="Agent"><SelectValue placeholder="Attach to agent" /></SelectTrigger>
+            <SelectTrigger aria-label="Agent" className={BAR_CONTROL}><SelectValue placeholder="Attach to agent" /></SelectTrigger>
             <SelectContent>{agents.map((agent) => <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>)}</SelectContent>
           </Select>
         </>
@@ -284,7 +297,7 @@ function ConnectorList({
             {!picker ? (
               <>
                 <Select value={attachName} onValueChange={setAttachName}>
-                  <SelectTrigger aria-label="Connection"><SelectValue placeholder="Attach connection" /></SelectTrigger>
+                  <SelectTrigger aria-label="Connection" className={BAR_CONTROL}><SelectValue placeholder="Attach connection" /></SelectTrigger>
                   <SelectContent>
                     {pool.phase === "ready"
                       ? pool.payload.connections
@@ -295,6 +308,7 @@ function ConnectorList({
                 </Select>
                 <Button
                   variant="send"
+                  size="bar"
                   disabled={!attachEntry}
                   onClick={() =>
                     attachEntry &&
@@ -310,15 +324,14 @@ function ConnectorList({
                 </Button>
               </>
             ) : null}
-            <Input
-              type="search"
-              aria-label="Search"
+            <Search
+              label="Search"
               placeholder="Search"
-              className="max-w-control-row"
+              className="w-(--container-control-row)"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
-            <Button variant="send" onClick={() => setAdding(true)}>
+            <Button variant="send" size="bar" onClick={() => setAdding(true)}>
               Add connector
             </Button>
           </>

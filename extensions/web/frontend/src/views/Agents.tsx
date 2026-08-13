@@ -1,15 +1,17 @@
 import { useState } from "react";
+import { IconChevronRight, IconRefresh } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
+import { Search } from "@/components/ui/field";
+import { Filter } from "@/components/ui/filter";
+import { Table, TableNote, Td, Th } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { CardGrid } from "@/kernel/cards";
 import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
-import { COLUMN, Pane } from "@/kernel/pane";
-import { PanelBlank, PanelEmpty, Section, outcomeNotice, type NoticeState } from "@/kernel/panel";
+import { COLUMN, PageHeader } from "@/kernel/pane";
+import { PanelBlank, Section, outcomeNotice, type NoticeState } from "@/kernel/panel";
+import { rowControl } from "@/kernel/row";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { webAudienceLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
@@ -19,16 +21,31 @@ export type AgentsProps = {
   newAgent: NewAgentForm | null;
   onOpen: (agentId: string) => void;
   onOpenSubagent: (name: string) => void;
-  onNewChat: (agentId: string) => void;
   onAgents: () => void;
 };
 
 const AGENT_KIND = "agent";
 const MODEL_FIELD = "model";
-const MODEL = "font-mono text-mono opacity-(--opacity-muted-strong)";
 const MAIN = "The agent this workspace answers with by default.";
 const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
 const INHERITS = "Spawned by an agent for one task, on that agent's model.";
+const COLUMNS = ["Name", "Details"];
+const FAMILIES = [
+  { label: "Agents", value: "agent" },
+  { label: "Subagents", value: "subagent" },
+];
+
+/** One row per thing this workspace runs, whichever family it comes from: an agent a member
+ *  addresses, and a subagent an agent spawns. A row says which one it is and what it is for; the
+ *  model it runs on, who reaches it, and everything else stand on the record's own page, one press
+ *  away. A column for each would be a table read sideways to answer a question nobody asked. */
+type AgentRow = {
+  key: string;
+  family: string;
+  name: string;
+  details: string;
+  open: () => void;
+};
 
 /** The values a create form opens on: one for every field whose choices are closed — the deploy's
  *  model ids, and the enums the spec declares. A picker the member never opened would otherwise
@@ -49,20 +66,38 @@ export function Agents({
   newAgent,
   onOpen,
   onOpenSubagent,
-  onNewChat,
   onAgents,
 }: AgentsProps) {
   const mainAgent = useMainAgent();
   const [query, setQuery] = useState("");
+  const [family, setFamily] = useState("");
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<ToastState>(SILENT);
-  const [subagentsOpen, setSubagentsOpen] = useState(false);
+
+  const rows: AgentRow[] = [
+    ...agents.map((agent) => ({
+      key: "agent/" + agent.id,
+      family: "agent",
+      name: agent.name,
+      details: agent.main ? MAIN : "",
+      open: () => onOpen(agent.id),
+    })),
+    ...subagents.map((subagent) => ({
+      key: "subagent/" + subagent.name,
+      family: "subagent",
+      name: subagent.name,
+      details: subagent.model ? SPAWNED : INHERITS,
+      open: () => onOpenSubagent(subagent.name),
+    })),
+  ];
   const wanted = query.trim().toLowerCase();
-  const found = agents.filter((agent) => agent.name.toLowerCase().includes(wanted));
+  const found = rows.filter(
+    (row) => row.name.toLowerCase().includes(wanted) && (!family || row.family === family),
+  );
 
   /** The `agent` kind takes a create only from a workspace admin speaking on the main agent's
    *  lane, so that is the lane the intent rides. A create that landed is read back through the one
-   *  answer to what agents exist, which the cards, the sidebar, and the router all draw from. */
+   *  answer to what agents exist, which the table, the sidebar, and the router all draw from. */
   async function create(lane: string, envelope: SpecEnvelope): Promise<NoticeState> {
     const outcome = await postIntent(lane, envelope);
     if (outcome.applied) {
@@ -73,96 +108,82 @@ export function Agents({
   }
 
   return (
-    <Pane className={cn(COLUMN, "overflow-y-auto scrollbar-gutter-stable p-2xl")}>
-      <h1 className="m-0 mb-2xl text-title font-strong">Agents</h1>
-      <Section
-        title="Workspace agents"
-        bar={
+    <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto scrollbar-gutter-stable">
+      <PageHeader
+        aside={
           <>
-            <Input
-              type="search"
-              aria-label="Search agents"
+            <Search
+              label="Search agents"
               placeholder="Search"
-              className="max-w-control-row"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
             {newAgent && mainAgent ? (
-              <Button variant="send" onClick={() => setCreating(true)}>
+              <Button variant="send" size="bar" onClick={() => setCreating(true)}>
                 New agent
               </Button>
             ) : null}
-            <Button onClick={onAgents}>Refresh</Button>
           </>
         }
       >
-        {found.length ? (
-          <CardGrid
-            rows={found}
-            rowKey={(agent) => agent.id}
-            mark={{ shape: "square" }}
-            primary={(agent) => agent.name}
-            status={(agent) => <span className={MODEL}>{agent.model}</span>}
-            body={(agent) => {
-              const reach = agent.web_audience
-                ? webAudienceLabel(agent.main, agent.web_audience)
-                : null;
-              if (!agent.main) return reach;
-              return [MAIN, reach].filter(Boolean).join(" · ");
-            }}
-            action={(agent) => (
-              <div className="flex flex-wrap gap-xs">
-                <Button variant="send" onClick={() => onNewChat(agent.id)}>
-                  New conversation
-                </Button>
-                <Button variant="row" onClick={() => onOpen(agent.id)}>
-                  View
-                </Button>
-              </div>
-            )}
-          />
-        ) : query ? (
-          <PanelEmpty>No agent matches this search.</PanelEmpty>
-        ) : (
-          <PanelBlank body="No agent is visible to you." />
+        <h1 className="m-0 text-title font-strong">Agents</h1>
+      </PageHeader>
+      <div
+        className={cn(
+          COLUMN,
+          "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl pt-2xl",
         )}
-      </Section>
-      <Section
-        title="Subagents"
-        bar={
-          subagents.length ? (
-            <Button
-              variant="outline"
-              aria-expanded={subagentsOpen}
-              onClick={() => setSubagentsOpen((open) => !open)}
-            >
-              {subagentsOpen ? "Hide subagents" : "Show subagents"}
-            </Button>
-          ) : null
-        }
       >
-        {subagents.length ? (
-          subagentsOpen ? (
-            <CardGrid
-              rows={subagents}
-              rowKey={(subagent) => subagent.name}
-              mark={{ shape: "square" }}
-              primary={(subagent) => subagent.name}
-              status={(subagent) =>
-                subagent.model ? <span className={MODEL}>{subagent.model}</span> : null
-              }
-              body={(subagent) => (subagent.model ? SPAWNED : INHERITS)}
-              action={(subagent) => (
-                <Button variant="row" onClick={() => onOpenSubagent(subagent.name)}>
-                  View
-                </Button>
-              )}
-            />
-          ) : null
-        ) : (
-          <PanelBlank body="This deploy declares no subagents." />
-        )}
-      </Section>
+        <Section
+          bar={
+            <>
+              <Filter options={FAMILIES} value={family} onChange={setFamily} />
+              <Button size="icon" aria-label="Refresh" className="ml-auto" onClick={onAgents}>
+                <IconRefresh className="size-icon" aria-hidden />
+              </Button>
+            </>
+          }
+        >
+          {rows.length ? (
+            <Table>
+              <thead>
+                <tr>
+                  {COLUMNS.map((column) => (
+                    <Th key={column}>{column}</Th>
+                  ))}
+                  <Th>{""}</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {found.length ? (
+                  found.map((row) => {
+                    const control = rowControl(row.open, true);
+                    return (
+                      <tr
+                        key={row.key}
+                        {...control}
+                        className={cn("hover:bg-fill-hover", control.className)}
+                      >
+                        <Td>{row.name}</Td>
+                        <Td className="w-full max-w-0">{row.details}</Td>
+                        <Td className="w-(--size-glyph)">
+                          <IconChevronRight className="size-icon" aria-hidden />
+                        </Td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <TableNote span={COLUMNS.length + 1}>
+                    {query ? "No agent matches this search." : "This deploy declares no subagents."}
+                  </TableNote>
+                )}
+              </tbody>
+            </Table>
+          ) : (
+            <PanelBlank body="No agent is visible to you." />
+          )}
+        </Section>
+      </div>
       {creating && newAgent && mainAgent ? (
         <SpecDialog
           schema={newAgent.spec_schema}
@@ -176,6 +197,6 @@ export function Agents({
         />
       ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
-    </Pane>
+    </div>
   );
 }

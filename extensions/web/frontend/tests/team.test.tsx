@@ -103,7 +103,7 @@ test("a search that matches nobody says so in a row, and the table holds", async
 
   await userEvent.type(await screen.findByLabelText("Search members"), "nobody");
 
-  expect(screen.getByText("No member matches that search.")).toBeTruthy();
+  expect(screen.getByText("No member matches this search.")).toBeTruthy();
   expect(screen.getByRole("table")).toBeTruthy();
   expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
     "Member",

@@ -8,7 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, Input, Textarea } from "@/components/ui/field";
+import { Field, Input, Search, Textarea } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
   Item,
@@ -298,20 +298,20 @@ export function AgentSkills({ agent }: { agent: Agent }) {
       <OutcomeNotice state={notice} />
       <Section
         bar={
-          <div className="flex w-full flex-col gap-md pb-lg">
+          <div className="flex w-full flex-col gap-md">
             <div className="flex items-stretch gap-sm">
-              <Input
-                type="search"
-                aria-label="Search skills"
+              <Search
+                label="Search skills"
                 placeholder="Search skills"
-                className="max-w-none flex-1"
+                className="flex-1"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
+                onSubmit={() => setSubmitted(query.trim())}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") setSubmitted(query.trim());
                 }}
               />
-              <Button variant="send" onClick={() => setWriting(true)}>
+              <Button variant="send" size="bar" onClick={() => setWriting(true)}>
                 New skill
               </Button>
             </div>

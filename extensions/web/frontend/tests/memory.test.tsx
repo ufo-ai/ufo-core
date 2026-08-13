@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, PlacedCustomize, json, refusedNotice, useStreamFake, wire } from "./harness";
+import { AGENT, PlacedSection, json, refusedNotice, useStreamFake, wire } from "./harness";
 const MATCH = {
   text: "the deploy runs on EKS",
   kind: "fact",
@@ -13,10 +13,10 @@ const MATCH = {
   subject: "shared",
 };
 
-function open(view: "memory" = "memory") {
+function open() {
   return render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedCustomize view={view} />
+      <PlacedSection section="memory" />
     </MainAgentProvider>,
   );
 }
@@ -29,6 +29,22 @@ test("a deploy with no memory extension says so", async () => {
   wire({ "/workspace/memory": () => json({ available: false, kinds: [], matches: [] }) });
   open();
   expect(await screen.findByText("This deploy has no memory extension.")).toBeTruthy();
+});
+
+test("the search heads the page and the filter stands with the table", async () => {
+  wire({
+    "/workspace/memory": () =>
+      json({ available: true, kinds: ["fact"], matches: [MATCH], older: null, newer: null }),
+  });
+  open();
+
+  const header = screen.getByRole("heading", { level: 1, name: "Memory" }).parentElement!;
+  expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
+  expect(header.contains(screen.getByRole("table"))).toBe(false);
+
+  const bar = (await screen.findByRole("tab", { name: "Fact" })).closest("section")!;
+  expect(bar.contains(screen.getByRole("table"))).toBe(true);
+  expect(screen.queryAllByRole("heading", { level: 2, name: "Memory" })).toEqual([]);
 });
 
 test("the listing filters by kind, and the filter rides the read", async () => {
@@ -118,7 +134,7 @@ test("a correction posts to the main agent's lane and re-reads on success", asyn
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Correct" }));
+  await userEvent.click(await screen.findByText("the deploy runs on EKS"));
   const field = screen.getByDisplayValue("the deploy runs on EKS");
   await userEvent.clear(field);
   await userEvent.type(field, "the deploy runs on EKS in us-west-2");
@@ -134,7 +150,7 @@ test("a correction posts to the main agent's lane and re-reads on success", asyn
   await waitFor(() => expect(reads).toBe(2));
 });
 
-test("a memory carrying no memory ref offers no correction", async () => {
+test("a memory carrying no memory ref is not a row the member can open", async () => {
   wire({
     "/workspace/memory": () =>
       json({
@@ -147,8 +163,9 @@ test("a memory carrying no memory ref offers no correction", async () => {
   });
   open();
 
-  expect(await screen.findByText("the deploy runs on EKS")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Correct" })).toBeNull();
+  const row = (await screen.findByText("the deploy runs on EKS")).closest("tr")!;
+  expect(row.getAttribute("role")).toBeNull();
+  expect(row.getAttribute("tabindex")).toBeNull();
 });
 
 test("narrowing by kind keeps what the member has typed in the search box", async () => {
@@ -186,7 +203,7 @@ test("a refused correction tones its notice in place", async () => {
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Correct" }));
+  await userEvent.click(await screen.findByText("the deploy runs on EKS"));
   await userEvent.click(screen.getByRole("button", { name: "Record correction" }));
   await refusedNotice("Only the owner corrects it.");
 });

@@ -4,11 +4,9 @@ import { useState } from "react";
 import { expect, vi } from "vitest";
 
 import { TabbedPane } from "@/views/TabbedPane";
-import { CUSTOMIZE_VIEWS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 import {
-  CUSTOMIZE_TABS,
   WORKSPACE_TABS,
-  type CustomizeTab,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
@@ -26,25 +24,6 @@ export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
       group="workspace"
       tabs={WORKSPACE_TABS}
       views={WORKSPACE_VIEWS}
-      view={view}
-      place={placed.place}
-      onPlace={(next, place) => setPlaced({ view: next, place })}
-    />
-  );
-}
-
-export function PlacedCustomize({ view }: { view: CustomizeTab }) {
-  const [placed, setPlaced] = useState<{ view: CustomizeTab; place: WorkspacePlace }>({
-    view,
-    place: {},
-  });
-  if (placed.view !== view) setPlaced({ view, place: {} });
-  return (
-    <TabbedPane
-      title="Customize"
-      group="customize"
-      tabs={CUSTOMIZE_TABS}
-      views={CUSTOMIZE_VIEWS}
       view={view}
       place={placed.place}
       onPlace={(next, place) => setPlaced({ view: next, place })}
@@ -201,11 +180,11 @@ export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is 
 
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["conversation", "mine", "next_run_at", "origin", "paused", "owner_email"],
+  fields: ["conversation", "mine", "next_run_at", "origin", "paused", "owner_email", "prompt"],
   spec_schema: {
     properties: {
       schedule: { type: "string" },
-      prompt: { type: "string" },
+      prompt: { type: "string", title: "Prompt" },
       paused: { type: "boolean" },
     },
   },
@@ -253,12 +232,16 @@ export function fact(label: string): string {
   return String(said.textContent);
 }
 
-/** Open a table row's own record. The name is a link to the record's conversation, so the row's
- *  `View` is what reaches the record — scoped to the row, since every row carries one. */
+/** Open a table row's own record: the row itself is the control that reaches it. */
 export async function openRow(name: string): Promise<void> {
-  const row = (await screen.findByRole("link", { name })).closest("tr");
+  await pressRow(name);
+}
+
+/** Press a record's own row, where the row itself is the control that opens it. */
+export async function pressRow(name: string): Promise<void> {
+  const row = (await screen.findAllByText(name)).map((node) => node.closest("tr")).find(Boolean);
   if (!row) throw new Error("no row named " + name);
-  await userEvent.click(within(row).getByRole("button", { name: "View" }));
+  await userEvent.click(row);
 }
 
 export async function viewCard(name: string): Promise<HTMLElement> {

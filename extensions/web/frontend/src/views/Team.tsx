@@ -10,7 +10,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/field";
+import { Input, Search } from "@/components/ui/field";
+import { Filter } from "@/components/ui/filter";
 import {
   Select,
   SelectContent,
@@ -38,6 +39,12 @@ type Roster = { members: Member[]; can_add: boolean };
 
 type Draft = { email: string; admin: boolean };
 
+const ADMINS = "admins";
+const ROLES = [
+  { label: "Admins", value: ADMINS },
+  { label: "Members", value: "members" },
+];
+
 const BLANK: Draft = { email: "", admin: false };
 
 function counted(landed: string[]) {
@@ -54,6 +61,7 @@ export function Team({
   const mainAgent = useMainAgent();
   const [toast, setToast] = useState<ToastState>(place.notice ? { title: place.notice } : SILENT);
   const [query, setQuery] = useState("");
+  const [role, setRole] = useState("");
   const [adding, setAdding] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([BLANK]);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -116,8 +124,10 @@ export function Team({
   return (
     <Panel state={state}>
       {({ members, can_add }) => {
-        const found = members.filter((entry) =>
-          entry.email.toLowerCase().includes(query.trim().toLowerCase()),
+        const found = members.filter(
+          (entry) =>
+            entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
+            (!role || (role === ADMINS) === Boolean(entry.admin)),
         );
         return (
           <>
@@ -125,16 +135,16 @@ export function Team({
               title="Members"
               bar={
                 <>
-                  <Input
-                    type="search"
-                    aria-label="Search members"
+                  <Filter options={ROLES} value={role} onChange={setRole} />
+                  <Search
+                    label="Search members"
                     placeholder="Search"
-                    className="max-w-control-row"
+                    className="ml-auto w-(--container-control-row)"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
                   {can_add && mainAgent ? (
-                    <Button variant="send" onClick={open}>
+                    <Button variant="send" size="bar" onClick={open}>
                       Add member
                     </Button>
                   ) : null}
@@ -146,7 +156,9 @@ export function Team({
                 rows={found}
                 rowKey={(entry) => entry.email}
                 empty="This workspace has no members yet."
-                note={query ? "No member matches that search." : undefined}
+                note={
+                  query || role ? "No member matches this search." : undefined
+                }
               >
                 {(entry) => (
                   <>

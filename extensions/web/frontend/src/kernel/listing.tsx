@@ -1,7 +1,7 @@
 import { Fragment, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
+import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Table, TableNote, Td, Th } from "@/components/ui/table";
 import { CardGrid, type CardMark } from "@/kernel/cards";
@@ -157,28 +157,19 @@ export function Listing<Payload, Row>({
           known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
             <>
               {spec.serverQuery ? (
-                <form
-                  className="flex items-stretch"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    setQuery(typed);
-                  }}
-                >
-                  <Input
-                    type="search"
-                    aria-label="Search"
-                    placeholder="Search"
-                    className="max-w-control-row"
-                    value={typed}
-                    onChange={(event) => setTyped(event.target.value)}
-                  />
-                </form>
-              ) : spec.search && known?.length ? (
-                <Input
-                  type="search"
-                  aria-label="Search"
+                <Search
+                  label="Search"
                   placeholder="Search"
-                  className="max-w-control-row"
+                  className="w-(--container-control-row)"
+                  value={typed}
+                  onChange={(event) => setTyped(event.target.value)}
+                  onSubmit={() => setQuery(typed)}
+                />
+              ) : spec.search && known?.length ? (
+                <Search
+                  label="Search"
+                  placeholder="Search"
+                  className="w-(--container-control-row)"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                 />

@@ -9,17 +9,14 @@ export const AGENT_TABS = [
 
 export const WORKSPACE_TABS = ["team", "sources", "connectors", "credentials", "usage"] as const;
 
-export const CUSTOMIZE_TABS = ["memory"] as const;
-
 export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
 
-export const SECTIONS = ["scheduled", "artifacts"] as const;
+export const SECTIONS = ["scheduled", "artifacts", "memory"] as const;
 
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type SubagentTab = (typeof SUBAGENT_TABS)[number];
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
-export type CustomizeTab = (typeof CUSTOMIZE_TABS)[number];
 
 export type PlaceStep = "push" | "replace" | "back";
 
@@ -55,7 +52,6 @@ export type Route =
     }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
-  | { kind: "customize"; view: CustomizeTab; place: WorkspacePlace }
   | { kind: "admin" }
   | { kind: "bad-link" };
 
@@ -73,7 +69,6 @@ const SUBAGENT_CONVERSATION_HASH =
   /^#\/subagents\/(\w+)\/conversations\/([0-9a-f-]{36})(?:\?root=([0-9a-f-]{36}))?$/;
 const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
-const CUSTOMIZE_HASH = /^#\/customize\/([\w-]+)(?:\?(.*))?$/;
 
 const PLACE_KEYS = ["kind", "after", "q", "chip", "open", "agent", "range"] as const;
 
@@ -114,10 +109,6 @@ function isSection(name: string): name is Section {
   return SECTIONS.includes(name as Section);
 }
 
-function isCustomizeTab(name: string): name is CustomizeTab {
-  return CUSTOMIZE_TABS.includes(name as CustomizeTab);
-}
-
 export function parseHash(hash: string): Route {
   if (hash === "#/admin") return { kind: "admin" };
   if (hash === "#/agents") return { kind: "agents" };
@@ -145,10 +136,6 @@ export function parseHash(hash: string): Route {
   const workspace = hash.match(WORKSPACE_HASH);
   if (workspace && isWorkspaceTab(workspace[1])) {
     return { kind: "workspace", view: workspace[1], place: parsePlace(workspace[2]) };
-  }
-  const customize = hash.match(CUSTOMIZE_HASH);
-  if (customize && isCustomizeTab(customize[1])) {
-    return { kind: "customize", view: customize[1], place: parsePlace(customize[2]) };
   }
   const section = hash.match(SECTION_HASH);
   if (section && isSection(section[1])) {
@@ -231,6 +218,3 @@ export function sectionHash(section: Section, place: WorkspacePlace = {}): strin
   return "#/" + section + serializePlace(place);
 }
 
-export function customizeHash(view: CustomizeTab, place: WorkspacePlace = {}): string {
-  return "#/customize/" + view + serializePlace(place);
-}

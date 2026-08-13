@@ -1,11 +1,13 @@
 import { Checkbox, Field, Input, Label, Textarea } from "@/components/ui/field";
 import {
+  PLAIN_CONTROL,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/cn";
 import type { SchemaProperty } from "@/lib/types";
 
 export type SpecSchema = {
@@ -67,19 +69,36 @@ type SpecFieldProps = {
   value: SpecValue;
   options?: string[] | null;
   required: boolean;
+  layout: FormLayout;
   onChange: (value: SpecValue) => void;
 };
+
+const ROW = cn(
+  "flex min-h-(--size-control) items-center justify-between gap-2xl py-2xs",
+  "border-b border-edge-soft",
+);
 
 /** One schema field as the control its shape asks for. A required field carries the requirement so
  *  the browser's own validity applies to it — except a boolean, which holds a value either way: a
  *  checkbox reads `required` as "must be ticked", which would refuse every spec that means false. */
-function SpecField({ name, prop, value, options, required, onChange }: SpecFieldProps) {
+function SpecField({ name, prop, value, options, required, layout, onChange }: SpecFieldProps) {
   const id = "spec-" + name;
   const choices = options ?? prop.enum;
   const label = prop.title ?? name;
   const placeholder = prop.examples?.[0];
   if (!choices && specType(prop) === "boolean")
-    return (
+    return layout === "rows" ? (
+      <div className={ROW}>
+        <Label htmlFor={id} className="truncate font-normal text-ink-soft">
+          {label}
+        </Label>
+        <Checkbox
+          id={id}
+          checked={value === true}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+      </div>
+    ) : (
       <div className="flex items-center gap-sm">
         <Checkbox
           id={id}
@@ -87,6 +106,26 @@ function SpecField({ name, prop, value, options, required, onChange }: SpecField
           onChange={(event) => onChange(event.target.checked)}
         />
         <Label htmlFor={id}>{label}</Label>
+      </div>
+    );
+  if (layout === "rows" && choices)
+    return (
+      <div className={ROW}>
+        <Label htmlFor={id} className="truncate font-normal text-ink-soft">
+          {label}
+        </Label>
+        <Select required={required} value={String(value)} onValueChange={onChange}>
+          <SelectTrigger id={id} className={PLAIN_CONTROL}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {choices.map((choice) => (
+              <SelectItem key={choice} value={choice}>
+                {choice}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
     );
   return (
@@ -134,17 +173,25 @@ function SpecField({ name, prop, value, options, required, onChange }: SpecField
   );
 }
 
+/** How a schema's fields are laid out. `stacked` is the form a dialog commits — the label over a
+ *  control the member types into. `rows` is the settings panel: one ruled row a field, its name on
+ *  the left and the control against the right edge, so a screen states what it is set to before it
+ *  states how to change it, and its settings read down the same column as the facts above them. */
+export type FormLayout = "stacked" | "rows";
+
 export function FormFromSchema({
   schema,
   fields,
   values,
   options,
+  layout = "stacked",
   onChange,
 }: {
   schema: SpecSchema;
   fields?: string[];
   values: Record<string, SpecValue>;
   options?: Record<string, string[] | null>;
+  layout?: FormLayout;
   onChange: (name: string, value: SpecValue) => void;
 }) {
   const properties = schema.properties ?? {};
@@ -160,6 +207,7 @@ export function FormFromSchema({
           value={values[name] ?? ""}
           options={options?.[name] ?? null}
           required={required.includes(name)}
+          layout={layout}
           onChange={(value) => onChange(name, value)}
         />
       ))}

@@ -142,13 +142,13 @@ test("a listing with no rows states a titled blank, and lists no header or filte
   expect(screen.queryByRole("searchbox")).toBeNull();
 });
 
-test("a listing search matches the section control row width", async () => {
+test("a listing search is the bar's own filled box at the control row width", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount(spec({ search: (row: Row) => row.name }));
 
-  expect((await screen.findByRole("searchbox")).className).toContain(
-    "max-w-control-row",
-  );
+  const box = (await screen.findByRole("searchbox")).closest("form")!;
+  expect(box.className).toContain("w-(--container-control-row)");
+  expect(box.className).toContain("bg-fill-subtle");
 });
 
 test("a card listing renders each face and its row action", async () => {
@@ -1243,7 +1243,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
 
   await userEvent.type(await screen.findByRole("searchbox"), "rss");
   location.hash = "#/agents/" + AGENT.id + "/chat";
-  await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
+  await waitFor(() => expect(screen.queryByPlaceholderText("Search sources")).toBeNull());
   location.hash = "#/workspace/sources";
 
   expect(await screen.findByText("notion")).toBeTruthy();

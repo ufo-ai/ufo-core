@@ -1,9 +1,8 @@
 import type { ComponentProps } from "react";
 
+import { Segmented } from "@/components/ui/filter";
 import { cn } from "@/lib/cn";
 import { COLUMN } from "@/kernel/pane";
-
-const STEP: Record<string, number> = { ArrowRight: 1, ArrowLeft: -1 };
 
 function tabId(group: string, tab: string) {
   return group + "-" + tab + "-tab";
@@ -13,7 +12,11 @@ function panelId(group: string, tab: string) {
   return group + "-" + tab + "-panel";
 }
 
-export function TabStrip<T extends string>({
+/** A destination's tabs as the one segmented row the portal picks with — the same control a
+ *  listing narrows itself by, so a member learns one control and reads it everywhere. Selection is
+ *  the filled pill; there is no underline and no rule, because a line under a page's tabs states a
+ *  boundary between its name and its contents that the surface does not have. */
+export function TabRow<T extends string>({
   group,
   tabs,
   current,
@@ -27,35 +30,30 @@ export function TabStrip<T extends string>({
   onPick: (tab: T) => void;
 }) {
   return (
-    <div className="border-b border-edge">
-      <div role="tablist" className={cn(COLUMN, "flex flex-wrap gap-2xs px-xs pt-xs")}>
-        {tabs.map((name, index) => (
-          <button
-            key={name}
-            id={tabId(group, name)}
-            type="button"
-            role="tab"
-            aria-selected={name === current}
-            aria-controls={panelId(group, name)}
-            tabIndex={name === current ? 0 : -1}
-            onClick={() => onPick(name)}
-            onKeyDown={(event) => {
-              const step = STEP[event.key];
-              if (!step) return;
-              event.preventDefault();
-              const next = tabs[(index + step + tabs.length) % tabs.length];
-              onPick(next);
-              document.getElementById(tabId(group, next))?.focus();
-            }}
-            className={cn(
-              "border-0 border-b-(length:--marker-width) border-b-transparent bg-transparent",
-              "px-md py-xs text-inherit opacity-(--opacity-muted-soft)",
-              name === current && "border-b-ink opacity-100",
-            )}
-          >
-            {label(name)}
-          </button>
-        ))}
+    <Segmented
+      label="Tabs"
+      segments={tabs.map((name) => ({
+        value: name,
+        label: label(name),
+        id: tabId(group, name),
+        controls: panelId(group, name),
+      }))}
+      value={current}
+      onPick={(value) => onPick(value as T)}
+    />
+  );
+}
+
+/** The same row standing on a page: in the pane's column, a band clear of the title above and the
+ *  panel below, with its leading pill pulled out to the column's line so the first tab starts
+ *  where the title does. */
+export function TabStrip<T extends string>(props: Parameters<typeof TabRow<T>>[0]) {
+  return (
+    <div className="pt-2xl pb-2xl">
+      <div className={cn(COLUMN, "px-2xl")}>
+        <div className="-ml-2xl">
+          <TabRow {...props} />
+        </div>
       </div>
     </div>
   );

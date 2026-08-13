@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
-import type { CustomizeTab, Section, WorkspaceTab } from "@/lib/route";
+import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
@@ -17,12 +17,15 @@ export type PaneView = {
   render: (place: Placement, onPlace: (place: Placement) => void) => ReactNode;
   /** Remount when the placement changes, so a mutation's outcome notice reaches the new mount. */
   remountOnPlace: boolean;
+  /** The placeholder of the search the page's own header carries, for a view that narrows on `q`.
+   *  The header owns the box because it outlives the read the view redraws under it. */
+  search?: string;
+  /** A view that heads its own page — the shell draws no header over it, because the controls
+   *  reaching the whole page are the view's own and stand beside its title. */
+  ownsHeader?: boolean;
 };
 
-function declared<Payload, Row>(
-  label: string,
-  spec: ListingSpec<Payload, Row>,
-): PaneView {
+function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>): PaneView {
   return {
     label,
     remountOnPlace: true,
@@ -53,18 +56,23 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 };
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
-  scheduled: { label: "Scheduled", remountOnPlace: false, render: () => <Scheduled /> },
+  scheduled: {
+    label: "Scheduled",
+    remountOnPlace: false,
+    ownsHeader: true,
+    render: () => <Scheduled />,
+  },
+  memory: {
+    label: "Memory",
+    remountOnPlace: false,
+    search: "Search",
+    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
+  },
   artifacts: {
     label: "Artifacts",
     remountOnPlace: false,
+    search: "Search",
     render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
   },
 };
 
-export const CUSTOMIZE_VIEWS: Record<CustomizeTab, PaneView> = {
-  memory: {
-    label: "Memory",
-    remountOnPlace: false,
-    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
-  },
-};

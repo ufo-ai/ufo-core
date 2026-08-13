@@ -192,9 +192,10 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--color-attention:var(--brand-accent)");
 });
 
-test("the brand faces are bundled and carry the chrome as well as the code", () => {
+test("the bundled faces are Inter for the chrome and Roboto Mono for the code", () => {
   const css = builtStyles().replace(/\s+/g, "");
-  expect(css).toContain('--font-sans:"RobotoMono"');
+  expect(css).toContain('--font-sans:"Inter",system-ui,sans-serif');
+  expect(/@font-face\{font-family:Inter;src:url\(\/surface\/web\/static\/assets\/Inter-[^)]+\.woff2\)/.test(css)).toBe(true);
   expect(css).toContain('--font-mono:"RobotoMono"');
   expect(css).toContain('--font-display:"Canela"');
   expect(/@font-face\{font-family:RobotoMono;src:url\(\/surface\/web\/static\/assets\/RobotoMono-[^)]+\.ttf\)/.test(css)).toBe(true);

@@ -23,6 +23,7 @@ export const buttonVariants = cva(
       },
       size: {
         default: "",
+        bar: "h-(--size-control) rounded-full px-2xl py-0",
         icon: "size-(--size-control) rounded-full p-0",
       },
     },
@@ -36,6 +37,9 @@ export type ButtonProps = ComponentProps<"button"> &
 /** A button lays its content out as a centred row, so a glyph sits in the middle of the box rather
  *  than on the text baseline at its left edge, and `size="icon"` is the box a glyph alone is drawn
  *  in: one `--size-control` circle, which is the shape every icon-only act in the portal takes.
+ *  `size="bar"` is the same height drawn as a pill: the acts standing in a page's header or a
+ *  section's bar are the height and the shape of the search and the filter beside them, so a band
+ *  of controls reads as one row rather than as a tall act with chrome tucked under it.
  *
  *  `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
  *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation

@@ -27,6 +27,7 @@ import {
   pick,
   refusedNotice,
   useStreamFake,
+  pressRow,
   viewCard,
   wire,
 } from "./harness";
@@ -117,7 +118,7 @@ test("the overview states the agent's facts, renders its schema, and submits a s
   expect(await screen.findByText("Applied.")).toBeTruthy();
 });
 
-test("the agents cards state admin-visible web reach", async () => {
+test("the agents index states what a row is, and leaves the address list to its own page", async () => {
   location.hash = "#/agents";
   render(
     <App
@@ -134,10 +135,10 @@ test("the agents cards state admin-visible web reach", async () => {
   );
 
   expect(
-    await screen.findByText("The agent this workspace answers with by default. · Every member"),
+    await screen.findByText("The agent this workspace answers with by default."),
   ).toBeTruthy();
-  expect(within(screen.getByRole("main")).getByText("member@example.com")).toBeTruthy();
-  expect(screen.getByText("No member grants — admins only")).toBeTruthy();
+  expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
+  expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
 
 test("non-admin agent cards keep their existing copy", () => {
@@ -162,7 +163,7 @@ test("an overview that fails to read states the error and offers no form", async
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("the scheduled index lists declared fields and its detail pauses through the intent lane", async () => {
+test("the scheduled index leads with the next run, and its detail pauses through the intent lane", async () => {
   const posted: unknown[] = [];
   wire({
     "/objects/scheduled_task/digest": () =>
@@ -184,6 +185,7 @@ test("the scheduled index lists declared fields and its detail pauses through th
           mine: true,
           next_run_at: IN_THREE_HOURS,
           origin: "#general",
+          prompt: "summarize",
           owner_email: "member@example.com",
           paused: false,
         }),
@@ -197,15 +199,14 @@ test("the scheduled index lists declared fields and its detail pauses through th
   location.hash = "#/agents/" + AGENT_ID + "/scheduled";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const listed = (await screen.findByRole("button", { name: "digest" })).closest("tr");
+  const listed = (await screen.findByText("digest")).closest("tr");
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
   expect(said[1]).toBe("You");
-  expect(said[2]).toBe("0 9 * * * — summarize");
+  expect(said[2]).toBe("summarize");
   expect(said[3]).toContain("in ");
-  expect(said[4]).toBe("#general");
-  expect(said[5]).toBe("No");
+  expect(screen.queryByText("#general")).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "digest" }));
+  await userEvent.click(screen.getByText("digest"));
   await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
   await userEvent.click(await screen.findByLabelText("paused"));
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -276,18 +277,19 @@ test("skills name where each came from, and save posts one skill file", async ()
   });
   location.hash = "#/agents/" + AGENT_ID + "/skills";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
-  expect(screen.queryByRole("tab", { name: "All" })).toBeNull();
-  await userEvent.click(screen.getByRole("tab", { name: "Installed" }));
+  const skills = within(await screen.findByTestId("panel"));
+  expect(skills.queryByRole("tab", { name: "All" })).toBeNull();
+  await userEvent.click(skills.getByRole("tab", { name: "Installed" }));
   expect(await screen.findByText("mine")).toBeTruthy();
   expect(screen.queryByText("member skill")).toBeNull();
-  expect(screen.queryByRole("columnheader")).toBeNull();
+  expect(skills.queryByRole("columnheader")).toBeNull();
   expect(screen.getByPlaceholderText("Search skills")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Skills" })).toBeNull();
+  expect(skills.queryByRole("heading", { name: "Skills" })).toBeNull();
   expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
   expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
-  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(skills.queryByRole("button", { name: "Delete" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "New skill" }));
+  await userEvent.click(skills.getByRole("button", { name: "New skill" }));
   await userEvent.type(await screen.findByLabelText("Name"), "fresh");
   await userEvent.type(screen.getByLabelText("Description"), "Load when: asked.");
   await userEvent.type(screen.getByLabelText("Instructions"), "body");
@@ -387,7 +389,7 @@ test("a directory read the member cannot correct is stated as a toast", async ()
   const toast = await screen.findByRole("status");
   expect(toast.textContent).toContain("release-notes did not open.");
   expect(toast.textContent).toContain("60 an hour");
-  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "release-notes" })).toBeNull();
 });
 
 test("a private grant is shared with the agent from the connectors tab", async () => {
@@ -964,7 +966,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/agents");
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
-  await userEvent.click(await viewCard("second"));
+  await pressRow("second");
   expect(location.hash).toBe("#/agents/" + SECOND.id);
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
@@ -977,18 +979,18 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/artifacts");
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
-  expect(location.hash).toBe("#/customize/memory");
-  expect(screen.getByRole("button", { name: "Customize" }).getAttribute("aria-current")).toBe(
+  await userEvent.click(screen.getByRole("button", { name: "Memory" }));
+  expect(location.hash).toBe("#/memory");
+  expect(screen.getByRole("button", { name: "Memory" }).getAttribute("aria-current")).toBe(
     "true",
   );
-  expect(await screen.findByRole("heading", { level: 1, name: "Customize" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Memory" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");
 });
 
-test("the agents view lists the deploy's subagents below the agents, opening nothing", async () => {
+test("the agents view lists the deploy's subagents under the agents in one table", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
     <App
@@ -1004,29 +1006,23 @@ test("the agents view lists the deploy's subagents below the agents, opening not
   );
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  await userEvent.click(screen.getByRole("button", { name: "Show subagents" }));
-  const index = within(screen.getByRole("main"));
-  const cards = index.getAllByRole("listitem");
-  expect(cards.map((card) => within(card).getByText(/^(assistant|deep_research|general_purpose)$/).textContent)).toEqual([
+  const rows = [
+    ...screen.getByRole("table").querySelectorAll<HTMLTableRowElement>("tbody tr"),
+  ];
+  expect(rows.map((row) => row.cells[0].textContent)).toEqual([
     "assistant",
     "deep_research",
     "general_purpose",
   ]);
-  expect(within(cards[0]).getAllByRole("button").map((button) => button.textContent)).toEqual([
-    "New conversation",
-    "View",
-  ]);
-  expect(within(cards[0]).getByText("The agent this workspace answers with by default.")).toBeTruthy();
-  expect(within(cards[1]).getAllByRole("button").map((button) => button.textContent)).toEqual([
-    "View",
-  ]);
-  expect(within(cards[1]).getByText("claude-opus-4-8")).toBeTruthy();
-  expect(
-    within(cards[2]).getByText("Spawned by an agent for one task, on that agent's model."),
-  ).toBeTruthy();
-  expect(within(cards[2]).getAllByRole("button").map((button) => button.textContent)).toEqual([
-    "View",
-  ]);
+  expect(rows[0].cells[1].textContent).toBe("The agent this workspace answers with by default.");
+  expect(rows[1].cells[1].textContent).toBe(
+    "Spawned by an agent for one task. A member does not address it.",
+  );
+  expect(rows[2].cells[1].textContent).toBe(
+    "Spawned by an agent for one task, on that agent's model.",
+  );
+  expect(screen.queryByText("claude-opus-4-8")).toBeNull();
+  expect(rows.every((row) => row.getAttribute("tabindex") === "0")).toBe(true);
 });
 
 test("a member who is not an admin is offered no administration control", () => {

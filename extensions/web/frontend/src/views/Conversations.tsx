@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
+import { Search } from "@/components/ui/field";
 import { day } from "@/lib/moments";
 import { MessageLog } from "@/kernel/messages";
 import {
@@ -250,11 +250,10 @@ export function ConversationList({
       title="Conversations"
       bar={
         <>
-          <Input
-            type="search"
-            aria-label="Search"
+          <Search
+            label="Search"
             placeholder="Search"
-            className="max-w-control-row"
+            className="w-(--container-control-row)"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />

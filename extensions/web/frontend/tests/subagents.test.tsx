@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, MEMBER, fact, json, useStreamFake, viewCard, wire } from "./harness";
+import { AGENT, MEMBER, fact, json, pressRow, useStreamFake, wire } from "./harness";
 
 const RESEARCH = { name: "deep_research", model: "claude-opus-4-8" };
 const GENERAL = { name: "general_purpose", model: null };
@@ -31,38 +31,28 @@ function portal(routes: Record<string, () => Response>) {
   return routes;
 }
 
-async function openSubagents() {
-  await userEvent.click(screen.getByRole("button", { name: "Show subagents" }));
-}
-
-test("subagents start collapsed and open on demand", async () => {
+test("a subagent stands in the one table, and the family filter narrows to it", async () => {
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
 
-  expect(screen.getByRole("heading", { name: "Subagents" })).toBeTruthy();
-  expect(screen.queryByText("deep_research")).toBeNull();
-  expect(screen.queryByText("This deploy declares no subagents.")).toBeNull();
-  expect(screen.getByRole("button", { name: "Show subagents" }).getAttribute("aria-expanded")).toBe(
-    "false",
-  );
+  expect(screen.getByText("deep_research")).toBeTruthy();
+  expect(screen.getByText("assistant")).toBeTruthy();
 
-  await openSubagents();
+  await userEvent.click(screen.getByRole("tab", { name: "Subagents" }));
 
   expect(screen.getByText("deep_research")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Hide subagents" }).getAttribute("aria-expanded")).toBe(
-    "true",
-  );
+  expect(within(screen.getByRole("table")).queryByText("assistant")).toBeNull();
 });
 
-test("an empty subagent section has no fold control", async () => {
+test("a deploy declaring no subagent says so under the family that has none", async () => {
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Subagents" }));
 
-  expect(screen.getByRole("heading", { name: "Subagents" })).toBeTruthy();
   expect(screen.getByText("This deploy declares no subagents.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /subagents/i })).toBeNull();
+  expect(screen.getByRole("table")).toBeTruthy();
 });
 
 test("a subagent row opens its page, naming the model, round limit, and untrusted wall", async () => {
@@ -70,8 +60,7 @@ test("a subagent row opens its page, naming the model, round limit, and untruste
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  await openSubagents();
-  await userEvent.click(await viewCard("deep_research"));
+  await pressRow("deep_research");
 
   expect(location.hash).toBe("#/subagents/deep_research");
   const panel = within(await screen.findByTestId("panel"));
@@ -97,8 +86,7 @@ test("a subagent inheriting its parent's model says so rather than naming one", 
   portal({});
 
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
-  await openSubagents();
-  await userEvent.click(await viewCard("general_purpose"));
+  await pressRow("general_purpose");
 
   await screen.findByTestId("panel");
   expect(fact("Model")).toBe("Inherits the agent that spawns it");

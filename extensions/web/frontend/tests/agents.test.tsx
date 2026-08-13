@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -12,6 +12,7 @@ import {
   SECOND_ID,
   json,
   opened,
+  pressRow,
   useStreamFake,
   wire,
 } from "./harness";
@@ -109,15 +110,11 @@ test("an admin creates an agent from the bar, and the workspace answers with it"
   await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
   expect(await screen.findByText("Created research.")).toBeTruthy();
 
-  const card = (await screen.findAllByText("research"))
-    .map((node) => node.closest("li"))
-    .find((entry) => entry);
-  if (!card) throw new Error("the created agent is on no card");
-  await userEvent.click(within(card).getByRole("button", { name: "New conversation" }));
+  await pressRow("research");
 
-  expect(location.hash).toBe("#/new/" + SECOND_ID);
+  expect(location.hash).toBe("#/agents/" + SECOND_ID);
   expect(screen.queryByText("No such agent.")).toBeNull();
-  expect(await screen.findByRole("button", { name: "research" })).toBeTruthy();
+  expect(await screen.findByRole("complementary", { name: "research" })).toBeTruthy();
 });
 
 test("a refused create keeps the dialog standing with what the member typed", async () => {
@@ -196,7 +193,7 @@ test("a member the kind admits no create from is offered no act", async () => {
   expect(screen.queryByRole("button", { name: "New agent" })).toBeNull();
 });
 
-test("the search narrows the cards, and says so when it matches none of them", async () => {
+test("the search narrows the rows, and says so when it matches none of them", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
     <App

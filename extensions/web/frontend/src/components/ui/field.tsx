@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 /** The one field surface. `Select` draws its trigger with this too, so a button that stands in for
  *  a field is the same object to the eye as the fields beside it. */
 export const CONTROL = cn(
-  "rounded-panel border border-edge-control bg-field text-field-ink px-lg py-md font-inherit",
+  "rounded-panel border border-edge-control bg-field text-field-ink px-lg py-md font-sans",
   "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
   "transition-[border-color] duration-100 ease-control hover:border-edge-control-strong",
   "user-invalid:border-ink user-invalid:border-dashed",
@@ -63,7 +63,63 @@ export function FieldGroup({
 }
 
 export function Input({ className, type = "text", ...props }: ComponentProps<"input">) {
-  return <input data-slot="input" type={type} className={cn(CONTROL, "w-full max-w-control", className)} {...props} />;
+  return (
+    <input
+      data-slot="input"
+      type={type}
+      className={cn(CONTROL, "w-full max-w-control", className)}
+      {...props}
+    />
+  );
+}
+
+/** The one search box, in the bar that narrows a listing. It is a filled pill and not the bordered
+ *  field surface: the bar's controls sit against the records they act on, and a filled box beside
+ *  the filter's filled tab reads as one band belonging to the table, where a bordered field the
+ *  height of a form control reads as the page asking a question. The glyph is drawn here on
+ *  `currentColor`, as the chevron and the tick are. Enter submits where the read is the server's —
+ *  the box is the control, and a button beside it would say the word again; a listing that narrows
+ *  what it already holds passes no `onSubmit` and narrows on every keystroke. */
+export function Search({
+  label,
+  onSubmit,
+  className,
+  ...props
+}: Omit<ComponentProps<"input">, "type"> & {
+  label: string;
+  onSubmit?: () => void;
+}) {
+  return (
+    <form
+      className={cn(
+        "flex h-(--size-control) items-center gap-sm rounded-full bg-fill-subtle px-2xl",
+        "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink",
+        className,
+      )}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit?.();
+      }}
+    >
+      <svg
+        viewBox="0 0 16 16"
+        aria-hidden
+        className="size-(--size-glyph) shrink-0 opacity-(--opacity-muted)"
+      >
+        <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+      <input
+        type="search"
+        aria-label={label}
+        className={cn(
+          "min-w-0 flex-1 border-0 bg-transparent p-0 font-sans text-ui",
+          "placeholder:opacity-(--opacity-muted) focus-visible:outline-none",
+        )}
+        {...props}
+      />
+    </form>
+  );
 }
 
 export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
@@ -86,7 +142,7 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
  *  border and fill inside the first states a box within a box. The mirror takes the same string, so
  *  the row it sizes is the row the member is typing into. */
 const BARE = cn(
-  "border-0 bg-transparent p-0 text-field-ink font-inherit",
+  "border-0 bg-transparent p-0 text-field-ink font-sans",
   "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
 );
 

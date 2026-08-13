@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { IconChevronRight, IconRefresh } from "@tabler/icons-react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
@@ -9,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, Input } from "@/components/ui/field";
+import { Field, Input, Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
   Select,
@@ -31,10 +32,10 @@ import {
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { day, isMoment, relativeMoment } from "@/lib/moments";
-import { agentHash, chatHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
@@ -42,6 +43,17 @@ const AGENT_FIELD = "object-agent";
  *  value is a uuid, which is the wire's word for a thread and nobody's answer to "which one". The
  *  name carries the press, and the row's own `View` still opens the record itself. */
 const CONVERSATION_FIELD = "conversation";
+
+/** How many of the kind's own declared fields the index carries beside the name and the summary.
+ *  The kind states its fields in the order it leads with, so the first is the one a member came to
+ *  read — a scheduled task's next run — and the rest stand on the record's own page. A column for
+ *  every declared field is a table read sideways to answer a question nobody asked. */
+const LEADING_FIELDS = 1;
+
+/** The prose a row is read by. A kind that states what its record asks for carries it as its own
+ *  field, and that is what the index reads down; every other kind falls to the one-line summary
+ *  the projection composes. */
+const PROSE_FIELD = "prompt";
 
 export type ObjectValue = string | number | boolean | null;
 
@@ -115,12 +127,7 @@ function Chip({ children }: { children: ReactNode }) {
  *  member is waiting on and reads as the wait; a moment already past is the calendar day it fell
  *  on, which is how every other date in the portal reads. Only the comparison goes through `Date`;
  *  the day is still read off the ISO string, so no reader's zone moves it. */
-function cell(
-  field: string,
-  value: ObjectValue,
-  schema: SpecSchema | null,
-  now: Date,
-): ReactNode {
+function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now: Date): ReactNode {
   if (value === null || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
@@ -154,11 +161,13 @@ type At = ObjectAddress & { agentId: string };
 export function ObjectPane({
   agentId,
   kind,
-  label,
+  title,
 }: {
   agentId: string | null;
   kind: string;
-  label: string;
+  /** The page's own name, where this pane is the page. A tab inside another page passes none —
+   *  the pane it stands in is already headed. */
+  title?: string;
 }) {
   const [at, setAt] = useState<At | null>(null);
   if (at !== null && at.name !== null) {
@@ -173,18 +182,18 @@ export function ObjectPane({
       />
     );
   }
-  return <ObjectIndex agentId={agentId} kind={kind} label={label} onOpen={setAt} />;
+  return <ObjectIndex agentId={agentId} kind={kind} title={title} onOpen={setAt} />;
 }
 
 function ObjectIndex({
   agentId,
   kind,
-  label,
+  title,
   onOpen,
 }: {
   agentId: string | null;
   kind: string;
-  label: string;
+  title?: string;
   onOpen: (at: At) => void;
 }) {
   const agents = useAgents();
@@ -198,7 +207,6 @@ function ObjectIndex({
   const [narrowed, setNarrowed] = useState("");
   const [cursor, setCursor] = useState("");
   const [creating, setCreating] = useState(false);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
   const params = new URLSearchParams({ order_by: orderBy });
   if (agentId) params.set("agent", agentId);
   if (query) params.set("q", query);
@@ -221,47 +229,57 @@ function ObjectIndex({
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
         const owned = payload.fields.includes(OWNER_FIELD);
+        const prose = payload.fields.includes(PROSE_FIELD) ? PROSE_FIELD : "summary";
         const shown = payload.fields.filter(
-          (field) => field !== CONVERSATION_FIELD && field !== OWNER_FIELD && field !== "mine",
+          (field) =>
+            field !== CONVERSATION_FIELD &&
+            field !== OWNER_FIELD &&
+            field !== PROSE_FIELD &&
+            field !== "mine",
         );
+        const led = shown.slice(0, LEADING_FIELDS);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
         if (agentId === null) columns.push("Agent");
         if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD });
-        columns.push({ label: heading("summary", payload.spec_schema), sort: "summary" });
-        for (const field of shown) {
+        columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
+        for (const field of led) {
           columns.push({ label: heading(field, payload.spec_schema), sort: field });
         }
-        if (acts || payload.fields.includes(CONVERSATION_FIELD)) columns.push("");
+        columns.push("");
         const flags = payload.fields.filter(
           (field) =>
             field !== CONVERSATION_FIELD &&
             field !== OWNER_FIELD &&
-            (narrowed === field ||
-              payload.objects.some((row) => typeof row[field] === "boolean")),
+            (narrowed === field || payload.objects.some((row) => typeof row[field] === "boolean")),
         );
         return (
           <>
-            <OutcomeNotice state={notice} />
-            <Section
-              title={label}
-              bar={
-                <>
-                  <form
-                    onSubmit={(event) => {
-                      event.preventDefault();
+            <div className={cn("pb-6xl", title && "pt-8xl")}>
+              <div className="flex h-(--size-control) items-center gap-md">
+                {title ? <h1 className="m-0 text-title font-strong">{title}</h1> : null}
+                <div className="ml-auto flex items-center gap-sm">
+                  <Search
+                    label={"Search " + noun(payload.kind)}
+                    placeholder="Search"
+                    className="w-(--container-control-row)"
+                    value={typed}
+                    onChange={(event) => setTyped(event.target.value)}
+                    onSubmit={() => {
                       setCursor("");
                       setQuery(typed);
                     }}
-                  >
-                    <Input
-                      type="search"
-                      aria-label={"Search " + noun(payload.kind)}
-                      placeholder="Search"
-                      className="max-w-control-row"
-                      value={typed}
-                      onChange={(event) => setTyped(event.target.value)}
-                    />
-                  </form>
+                  />
+                  {acts ? (
+                    <Button variant="send" size="bar" onClick={() => setCreating(true)}>
+                      {"New " + noun(payload.kind)}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <Section
+              bar={
+                <>
                   {flags.length ? (
                     <Filter
                       options={flags.map((field) => ({
@@ -275,11 +293,14 @@ function ObjectIndex({
                       }}
                     />
                   ) : null}
-                  {acts ? (
-                    <Button variant="send" onClick={() => setCreating(true)}>
-                      {"New " + noun(payload.kind)}
-                    </Button>
-                  ) : null}
+                  <Button
+                    size="icon"
+                    aria-label="Refresh"
+                    className="ml-auto"
+                    onClick={() => setReloads((count) => count + 1)}
+                  >
+                    <IconRefresh className="size-icon" aria-hidden />
+                  </Button>
                 </>
               }
             >
@@ -287,6 +308,9 @@ function ObjectIndex({
                 columns={columns}
                 rows={payload.objects}
                 rowKey={(row) => row.agent_id + "/" + row.name}
+                open={(row) => () =>
+                  onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
+                }
                 empty={"No " + noun(payload.kind) + " is visible to you."}
                 note={
                   narrowed === "mine" && !query
@@ -308,85 +332,27 @@ function ObjectIndex({
                 {(row) => (
                   <>
                     <Td>
-                      {typeof row[CONVERSATION_FIELD] === "string" ? (
-                        <a
-                          data-part="primary"
-                          href={chatHash(row[CONVERSATION_FIELD])}
-                          className="block max-w-full truncate font-strong text-inherit underline"
-                        >
-                          {row.name}
-                        </a>
-                      ) : (
-                        <button
-                          type="button"
-                          data-part="primary"
-                          onClick={() =>
-                            onOpen({ agentId: row.agent_id, kind: payload.kind, name: row.name })
-                          }
-                          className="block max-w-full truncate border-0 bg-transparent p-0 text-left font-strong text-inherit"
-                        >
-                          {row.name}
-                        </button>
-                      )}
-                    </Td>
-                    {agentId === null ? (
-                      <Td>
-                        <a
-                          href={agentHash(row.agent_id, "overview")}
-                          className="text-inherit underline"
-                        >
-                          {row.agent_name}
-                        </a>
-                      </Td>
-                    ) : null}
-                    {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
-                    <Td>
-                      <span className="block max-w-(--size-cell) truncate">
-                        {row.summary || "—"}
+                      <span data-part="primary" className="block max-w-full truncate">
+                        {row.name}
                       </span>
                     </Td>
-                    {shown.map((field) => (
+                    {agentId === null ? <Td>{row.agent_name}</Td> : null}
+                    {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
+                    <Td className="w-full max-w-0">
+                      <span className="block truncate">
+                        {(prose === "summary" ? row.summary : row[prose]) || "—"}
+                      </span>
+                    </Td>
+                    {led.map((field) => (
                       <Td key={field}>
                         <span className="block max-w-(--size-cell) truncate">
                           {cell(field, row[field] ?? null, payload.spec_schema, now)}
                         </span>
                       </Td>
                     ))}
-                    {acts || payload.fields.includes(CONVERSATION_FIELD) ? (
-                      <Td>
-                        <div className="flex justify-end gap-xs">
-                          {payload.fields.includes(CONVERSATION_FIELD) ? (
-                            <Button
-                              variant="row"
-                              onClick={() =>
-                                onOpen({
-                                  agentId: row.agent_id,
-                                  kind: payload.kind,
-                                  name: row.name,
-                                })
-                              }
-                            >
-                              View
-                            </Button>
-                          ) : null}
-                          {acts ? (
-                            <ConfirmButton
-                              verb="Delete"
-                              variant="row"
-                              onClick={async () =>
-                                setNotice(
-                                  await submit(row.agent_id, {
-                                    verb: "delete",
-                                    kind: payload.kind,
-                                    name: row.name,
-                                  }),
-                                )
-                              }
-                            />
-                          ) : null}
-                        </div>
-                      </Td>
-                    ) : null}
+                    <Td className="w-(--size-glyph)">
+                      <IconChevronRight className="size-icon" aria-hidden />
+                    </Td>
                   </>
                 )}
               </DataTable>

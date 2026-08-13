@@ -47,6 +47,18 @@ export function SelectValue({ className, ...props }: ComponentProps<typeof Selec
   return <SelectPrimitive.Value data-slot="select-value" className={cn("min-w-0 truncate", className)} {...props} />;
 }
 
+/** The trigger a picker takes when it stands in a page header or a section bar: the height and the
+ *  pill of the search and the acts beside it, rather than the taller box a form's field is. */
+export const BAR_CONTROL = "h-(--size-control) rounded-full py-0";
+
+/** The trigger a picker takes in a settings row: the value and its chevron, with the field's
+ *  surface and box dropped. The row's own rule is the edge, so a bordered box inside it draws a
+ *  second one; what states the control is that the value is pressable and carries a chevron. */
+export const PLAIN_CONTROL = cn(
+  "size-auto justify-end gap-xs px-0 py-0",
+  "border-0 bg-transparent text-ui hover:border-transparent",
+);
+
 export function SelectTrigger({
   className,
   children,

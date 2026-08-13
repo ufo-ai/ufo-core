@@ -24,6 +24,7 @@ import {
   TASK_KIND,
   json,
   objectIndex,
+  pressRow,
   useStreamFake,
   wire,
 } from "./harness";
@@ -518,7 +519,7 @@ test("the new-conversation control targets the main agent, or picks among severa
   expect(await screen.findByText("Message second to start.")).toBeTruthy();
 });
 
-test("the agents index opens a conversation; the agent's own page states settings only", async () => {
+test("the agents index opens the agent's page, and the sidebar starts the conversation", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
   wire({ "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
@@ -529,9 +530,10 @@ test("the agents index opens a conversation; the agent's own page states setting
 
   location.hash = "#/agents";
   await screen.findByText("The agent this workspace answers with by default.");
-  await userEvent.click(
-    within(screen.getByRole("main")).getByRole("button", { name: "New conversation" }),
-  );
+  await pressRow("assistant");
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+
+  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
 });
@@ -622,7 +624,7 @@ test("the sidebar marks the section the member is in and leaves the others off",
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
-    ["Agents", "Scheduled", "Artifacts", "Customize", "Workspace"].filter(
+    ["Agents", "Scheduled", "Artifacts", "Memory", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
@@ -641,10 +643,9 @@ test("the sidebar marks the section the member is in and leaves the others off",
   await userEvent.click(screen.getByRole("button", { name: "Agents" }));
   expect(marked()).toEqual(["Agents"]);
   const index = within(await screen.findByRole("main"));
-  expect(index.getAllByText("opus").length).toBe(2);
   expect(index.getByText("assistant")).toBeTruthy();
   expect(index.getByText("second")).toBeTruthy();
-  expect(index.getAllByRole("button", { name: "View" }).length).toBe(2);
+  expect(index.getByRole("table").querySelectorAll("tbody tr").length).toBe(2);
 });
 
 test("a failed rail read states it and retries on demand", async () => {

@@ -2,17 +2,15 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
-import { FieldGroup, Hint } from "@/components/ui/field";
+import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { webAudienceLabel } from "@/lib/audience";
-import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
-const MONO = "font-mono text-mono";
 
 type OverviewPayload = {
   agent: {
@@ -86,9 +84,7 @@ export function Overview({ agent }: { agent: Agent }) {
                   { label: "Updated", value: day(ready.agent.updated_at) },
                   {
                     label: "Prompt digest",
-                    value: (
-                      <span className={cn("wrap-anywhere", MONO)}>{ready.agent.prompt_digest}</span>
-                    ),
+                    value: ready.agent.prompt_digest,
                   },
                   ...(ready.audience
                     ? [
@@ -103,16 +99,10 @@ export function Overview({ agent }: { agent: Agent }) {
             </Section>
 
             <Section title="Settings">
-              <FieldGroup
-                onSubmit={save}
-                submit={
-                  <Button type="submit" variant="send" busy={busy}>
-                    Save
-                  </Button>
-                }
-              >
+              <form onSubmit={save}>
                 <FormFromSchema
                   schema={ready.spec_schema}
+                  layout="rows"
                   values={Object.fromEntries(
                     Object.keys(properties).map((key) => [
                       key,
@@ -123,20 +113,22 @@ export function Overview({ agent }: { agent: Agent }) {
                   onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
                 />
                 {ready.deploy.sandbox_internet ? null : (
-                  <Hint className="m-0">
+                  <Hint className="m-0 mt-md">
                     This deploy grants no sandbox public internet — the agent setting narrows a
                     capability that is currently off.
                   </Hint>
                 )}
-              </FieldGroup>
+                <div className="mt-lg flex justify-end">
+                  <Button type="submit" variant="send" size="bar" busy={busy}>
+                    Save
+                  </Button>
+                </div>
+              </form>
             </Section>
 
-            <Section title="Prompt">
-              <Hint className="m-0">
-                Prompt changes go through the governed proposal path in chat.
-              </Hint>
-              <Reveal>
-                <pre className={cn("m-0 whitespace-pre-wrap wrap-anywhere", MONO)}>
+            <Section title="Prompt" note="Prompt changes go through the governed proposal path in chat.">
+              <Reveal bare>
+                <pre className="m-0 font-sans text-ink-soft whitespace-pre-wrap wrap-anywhere">
                   {ready.agent.prompt}
                 </pre>
               </Reveal>

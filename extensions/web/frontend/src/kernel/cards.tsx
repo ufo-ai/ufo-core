@@ -67,7 +67,7 @@ export function CardGrid<Row>({
                   <div
                     data-part="mark"
                     aria-hidden
-                    className="size-6xl rounded-panel bg-fill-subtle"
+                    className="size-7xl rounded-panel bg-fill-subtle"
                   />
                   {state}
                 </div>

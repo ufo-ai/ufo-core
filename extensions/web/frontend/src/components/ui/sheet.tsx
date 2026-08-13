@@ -1,4 +1,5 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { IconX } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -23,15 +24,17 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
           className={cn(
             "fixed inset-y-0 right-0 left-auto z-10 w-drawer overflow-y-auto",
             "bg-popover text-popover-foreground border-l border-edge-strong p-2xl [box-shadow:var(--shadow-raised)]",
-            "flex flex-col gap-md",
+            "flex flex-col gap-2xl",
           )}
         >
-          <header data-slot="sheet-header" className="flex items-baseline justify-between gap-md">
-            <DialogPrimitive.Title className="m-0 text-body [overflow-wrap:anywhere]">
+          <header data-slot="sheet-header" className="flex h-(--size-control) items-center justify-between gap-md">
+            <DialogPrimitive.Title className="m-0 text-title font-strong [overflow-wrap:anywhere]">
               {title}
             </DialogPrimitive.Title>
             <DialogPrimitive.Close asChild>
-              <Button>Close</Button>
+              <Button size="icon" aria-label="Close">
+                <IconX className="size-icon" aria-hidden />
+              </Button>
             </DialogPrimitive.Close>
           </header>
           {children}

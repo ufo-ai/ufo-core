@@ -2,12 +2,12 @@ import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
+import { RecordPanel } from "@/kernel/pane";
 import { Table, Td, Th } from "@/components/ui/table";
-import { COLUMN, Pane } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
-import { TabPanel, TabStrip } from "@/kernel/tabs";
+import { TabPanel, TabRow } from "@/kernel/tabs";
 import {
   ConversationList,
   ConversationTranscript,
@@ -37,38 +37,32 @@ export type SubagentPaneProps = {
   tab: SubagentTab;
   tabs: readonly SubagentTab[];
   onTab: (tab: SubagentTab) => void;
+  onClose: () => void;
   conversationId?: string;
   rootConversationId?: string;
 };
 
+/** A subagent is read beside the list it was opened from, in the drawer an agent takes. */
 export function SubagentPane({
   subagent,
   tab,
   tabs,
   onTab,
+  onClose,
   conversationId,
   rootConversationId,
 }: SubagentPaneProps) {
   const base = "/subagents/" + subagent.name;
   return (
-    <Pane>
-      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
-        <h1 className="m-0 text-title font-strong">{subagent.name}</h1>
-        <span className="opacity-(--opacity-muted-strong)">subagent</span>
-      </div>
-      <TabStrip
+    <RecordPanel onClose={onClose} title={subagent.name}>
+      <TabRow
         group="subagent"
         tabs={tabs}
         current={tab}
         label={(name) => TAB_LABELS[name]}
         onPick={onTab}
       />
-      <TabPanel
-        group="subagent"
-        current={tab}
-        className={cn(COLUMN, "flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl")}
-        data-testid="panel"
-      >
+      <TabPanel group="subagent" current={tab} className="flex flex-col" data-testid="panel">
         {tab === "overview" ? <SubagentOverview base={base} /> : null}
         {tab === "conversations" ? (
           <SubagentConversations
@@ -80,7 +74,7 @@ export function SubagentPane({
         ) : null}
         {tab === "skills" ? <SubagentSkills base={base} /> : null}
       </TabPanel>
-    </Pane>
+    </RecordPanel>
   );
 }
 
@@ -128,9 +122,10 @@ function SubagentOverview({ base }: { base: string }) {
 }
 
 function SubagentSkills({ base }: { base: string }) {
-  const state = usePanelRead<{ loads_skills: boolean; skills: { name: string; description: string }[] }>(
-    base + "/skills",
-  );
+  const state = usePanelRead<{
+    loads_skills: boolean;
+    skills: { name: string; description: string }[];
+  }>(base + "/skills");
   return (
     <Panel state={state}>
       {(payload) => (

@@ -3,6 +3,22 @@
 
 
 @font-face {
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-VariableFont_wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Italic-VariableFont_wght.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "Roboto Mono";
   src: url("./assets/fonts/RobotoMono-VariableFont_wght.ttf") format("truetype-variations");
   font-weight: 100 700;
@@ -249,6 +265,7 @@
 @theme {
   --color-surface: var(--background);
   --color-ink: color-mix(in srgb, var(--foreground) 90%, var(--background));
+  --color-ink-soft: color-mix(in srgb, var(--foreground) 55%, var(--background));
   --color-field: var(--card);
   --color-field-ink: var(--card-foreground);
 
@@ -311,7 +328,9 @@
   --spacing-3xl: 18px;
   --spacing-4xl: 20px;
   --spacing-5xl: 22px;
-  --spacing-6xl: 40px;
+  --spacing-6xl: 32px;
+  --spacing-7xl: 40px;
+  --spacing-8xl: 64px;
 
   --radius-sm: var(--radius);
   --radius-control: var(--radius);
@@ -320,7 +339,7 @@
   --radius-menu: var(--radius);
   --radius-card: var(--radius);
 
-  --font-sans: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-display: "Canela", Georgia, "Times New Roman", serif;
 
@@ -330,7 +349,7 @@
   --text-ui: 14px;
   --text-body: 15px;
   --text-subtitle: 16px;
-  --text-title: 18px;
+  --text-title: 24px;
 
   --leading-chrome: 1.5;
   --leading-reading: 1.65;
@@ -345,7 +364,7 @@
   --container-card: min(440px, calc(100vw - 32px));
   --container-dialog: min(560px, calc(100vw - 32px));
   --container-bubble: 70ch;
-  --container-section: 76ch;
+  --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
   --container-hint: 64ch;
   --container-form: 52ch;
@@ -563,7 +582,7 @@
     }
 
     &:where(ul, ol) {
-      padding-inline-start: var(--spacing-6xl);
+      padding-inline-start: var(--spacing-7xl);
     }
 
     &:where(li) {

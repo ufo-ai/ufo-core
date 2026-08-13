@@ -166,6 +166,7 @@ ASSET_MEDIA_TYPES = {
     ".otf": "font/otf",
     ".svg": "image/svg+xml",
     ".ttf": "font/ttf",
+    ".woff2": "font/woff2",
 }
 
 

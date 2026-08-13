@@ -1,14 +1,13 @@
 import { ObjectPane } from "@/kernel/objects";
-import { COLUMN, Pane } from "@/kernel/pane";
+import { RecordPanel } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
-import { TabPanel, TabStrip } from "@/kernel/tabs";
+import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
 import { Overview } from "@/views/Overview";
 import { AgentUsage } from "@/views/Usage";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
-import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
 
 const SCHEDULED_TASK_KIND = "scheduled_task";
@@ -27,11 +26,15 @@ export type AgentPaneProps = {
   tab: AgentTab;
   tabs: readonly AgentTab[];
   onTab: (tab: AgentTab) => void;
+  onClose: () => void;
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
 };
 
-export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPaneProps) {
+/** An agent is read beside the list it was opened from, not instead of it: the drawer states the
+ *  one agent while the index behind it still states which agents there are, so closing it is a
+ *  press rather than a way back. */
+export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: AgentPaneProps) {
   const { key, merged, record } = usePlaceRecorder({
     view: tab,
     place,
@@ -39,32 +42,18 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
     onPlace,
   });
   return (
-    <Pane>
-      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
-        <h1 className="m-0 text-title font-strong">{agent.name}</h1>
-        <span className="font-mono text-mono opacity-(--opacity-muted-strong)">{agent.model}</span>
-      </div>
-      <TabStrip
+    <RecordPanel onClose={onClose} title={agent.name}>
+      <TabRow
         group="agent"
         tabs={tabs}
         current={tab}
         label={(name) => TAB_LABELS[name]}
         onPick={onTab}
       />
-      <TabPanel
-        group="agent"
-        current={tab}
-        className={cn(COLUMN, "flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl")}
-        data-testid="panel"
-      >
+      <TabPanel group="agent" current={tab} className="flex flex-col" data-testid="panel">
         {tab === "overview" ? <Overview agent={agent} /> : null}
         {tab === "scheduled" ? (
-          <ObjectPane
-            key={agent.id}
-            agentId={agent.id}
-            kind={SCHEDULED_TASK_KIND}
-            label={TAB_LABELS.scheduled}
-          />
+          <ObjectPane key={agent.id} agentId={agent.id} kind={SCHEDULED_TASK_KIND} />
         ) : null}
         {tab === "conversations" ? (
           <Conversations key={key} agent={agent} place={merged} onPlace={record} />
@@ -73,6 +62,6 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
         {tab === "skills" ? <AgentSkills agent={agent} /> : null}
         {tab === "usage" ? <AgentUsage agent={agent} /> : null}
       </TabPanel>
-    </Pane>
+    </RecordPanel>
   );
 }
