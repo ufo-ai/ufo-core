@@ -23,7 +23,7 @@ services: SQLite + filesystem blobs + in-process hub.
   `loop/` (DBOS queue partitioned by conversation, TurnEngine minus compaction/tools, transcript
   `messages.json.lz4`), `accounting.py` (ledger writes + prices only), `surfaces/cli.py`, `cli.py`, `serve.py`.
 - First-run bootstrap: create workspace + first owner + default agent (`ufoctl init`).
-- **Proof**: `ufoctl chat` streams a real Anthropic turn; transcript in blob store; ledger rows
+- **Proof**: a terminal client streams a real Anthropic turn; transcript in blob store; ledger rows
   priced; second message continues the conversation; mid-turn cancel commits a terminal frame;
   kill -9 during a turn → DBOS recovery still ends the client's wait.
 

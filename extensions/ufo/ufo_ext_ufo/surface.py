@@ -128,23 +128,23 @@ def history_directives(conversation: Conversation) -> tuple[bytes, ...]:
     """The conversation so far, rendered for a fresh resume: the member's messages as `you`, the
     agent's replies as `say`. Trailing replies are left off — the tail replays the latest turn's
     frames, and a reply said here too would print twice. The newest messages win the budget."""
-    said: list[tuple[str, str]] = []
+    said: list[tuple[bool, str]] = []
     for message in conversation.messages:
         text = _history_text(message)
         if not text.strip():
             continue
-        said.append(("you" if message.role == "user" else "say", text))
-    while said and said[-1][0] == "say":
+        said.append((message.role == "user", text))
+    while said and not said[-1][0]:
         said.pop()
-    kept: list[tuple[str, str]] = []
+    kept: list[tuple[bool, str]] = []
     budget = HISTORY_CHAR_BUDGET
-    for verb, text in reversed(said):
+    for member, text in reversed(said):
         budget -= len(text)
         if budget < 0 and kept:
             break
-        kept.append((verb, text))
+        kept.append((member, text))
     kept.reverse()
-    return tuple(directive(verb, text) for verb, text in kept)
+    return tuple(directive("you" if member else "say", text) for member, text in kept)
 
 
 def _history_text(message) -> str:

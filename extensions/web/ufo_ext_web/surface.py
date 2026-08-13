@@ -58,6 +58,7 @@ from ufo.sdk.hub import (
     Parked,
     SkillLoad,
     Terminal,
+    TextDelta,
     ToolCall,
     tool_activity,
 )
@@ -2616,8 +2617,10 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case Absorbed():
             return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case _:
+        case TextDelta():
             return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
+        case _:
+            raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
 async def intents(ctx: SurfaceContext, request: Request) -> Response:

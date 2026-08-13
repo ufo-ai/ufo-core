@@ -29,10 +29,6 @@ pub enum Directive {
     Note(String),
     Txt(String),
     Status(String),
-    Ufo {
-        width: usize,
-        frame: String,
-    },
     Ask(String),
     Choose {
         prompt: String,
@@ -49,7 +45,6 @@ pub enum Directive {
     Token(String),
     Workspace(String),
     Install,
-    Logout,
     File {
         name: String,
         size: String,
@@ -97,17 +92,6 @@ pub fn parse_line(line: &str) -> Directive {
         "note" => Directive::Note(field(&fields, 0)),
         "txt" => Directive::Txt(field(&fields, 0)),
         "status" => Directive::Status(field(&fields, 0)),
-        "ufo" => {
-            let packed = field(&fields, 0);
-            let (width, frame) = packed.split_once(' ').unwrap_or((packed.as_str(), ""));
-            match width.parse() {
-                Ok(width) => Directive::Ufo {
-                    width,
-                    frame: frame.to_string(),
-                },
-                Err(_) => Directive::Unknown,
-            }
-        }
         "ask" => Directive::Ask(field(&fields, 0)),
         "choose" if !fields.is_empty() => Directive::Choose {
             prompt: fields[0].clone(),
@@ -137,7 +121,6 @@ pub fn parse_line(line: &str) -> Directive {
         "token" => Directive::Token(field(&fields, 0)),
         "workspace" => Directive::Workspace(field(&fields, 0)),
         "install" => Directive::Install,
-        "logout" => Directive::Logout,
         "file" if fields.len() >= 2 => Directive::File {
             name: fields[0].clone(),
             size: fields[1].clone(),
@@ -507,7 +490,6 @@ mod tests {
             Directive::Workspace("https://w".into())
         );
         assert_eq!(parse_line("install"), Directive::Install);
-        assert_eq!(parse_line("logout"), Directive::Logout);
         assert_eq!(parse_line("exit\t2"), Directive::Exit(2));
         assert_eq!(parse_line("exit"), Directive::Exit(0));
     }
@@ -533,20 +515,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_craft() {
-        assert_eq!(
-            parse_line("ufo\t15 line1\\nline2"),
-            Directive::Ufo {
-                width: 15,
-                frame: "line1\nline2".into()
-            }
-        );
-    }
-
-    #[test]
     fn drops_unknown_verbs() {
         assert_eq!(parse_line("debugger\thttps://d"), Directive::Unknown);
         assert_eq!(parse_line("auth\t/auth/start"), Directive::Unknown);
+        assert_eq!(parse_line("ufo\t15 line1\\nline2"), Directive::Unknown);
+        assert_eq!(parse_line("logout"), Directive::Unknown);
         assert_eq!(parse_line("mystery"), Directive::Unknown);
     }
 

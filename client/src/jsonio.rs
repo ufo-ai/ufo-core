@@ -135,8 +135,8 @@ impl Driver {
         Event::TurnStart
     }
 
-    /// Map one directive to the events it publishes. Session plumbing — the craft frame, the poll
-    /// interval, the since cursor, the ops, and the credential verbs — publishes none.
+    /// Map one directive to the events it publishes. Session plumbing — the poll interval, the
+    /// since cursor, the ops, and the credential verbs — publishes none.
     pub fn on_directive(&mut self, directive: &Directive) -> Vec<Event> {
         match directive {
             Directive::Txt(text) => vec![Event::TextDelta { text: text.clone() }],
@@ -159,14 +159,12 @@ impl Driver {
                 prompt,
             } => vec![self.raise_secret(sealed, slot, prompt)],
             Directive::Exit(code) => vec![Event::Exit { code: *code }],
-            Directive::Ufo { .. }
-            | Directive::Poll(_)
+            Directive::Poll(_)
             | Directive::Since(_)
             | Directive::Run(_)
             | Directive::Token(_)
             | Directive::Workspace(_)
             | Directive::Install
-            | Directive::Logout
             | Directive::Unknown => Vec::new(),
         }
     }
@@ -340,17 +338,12 @@ mod tests {
     fn session_plumbing_publishes_nothing() {
         let mut driver = Driver::new();
         for directive in [
-            Directive::Ufo {
-                width: 15,
-                frame: "craft".into(),
-            },
             Directive::Poll(1.0),
             Directive::Since("turn-1:cursor-9".into()),
             Directive::Run(op()),
             Directive::Token("tok".into()),
             Directive::Workspace("https://w".into()),
             Directive::Install,
-            Directive::Logout,
             Directive::Unknown,
         ] {
             assert_eq!(driver.on_directive(&directive), Vec::new());

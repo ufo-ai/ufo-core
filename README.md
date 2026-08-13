@@ -22,10 +22,9 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 export ANTHROPIC_API_KEY=...
 make install                          # uv sync, both npm trees, git hooks
 make init EMAIL=you@example.com       # writes ufo.toml; SQLite — zero services
-make build                            # only if you want the web portal; chat needs no build
+make build                            # the web portal is the local client
 make serve                            # one process: surfaces + workers
-make chat                             # second terminal; sessions persist across runs
-make portal                           # third: opens the portal in your browser, signed in
+make portal                           # second terminal: opens the portal in your browser, signed in
 ```
 
 A node with no sign-in page in front of it has one browser door: `ufoctl portal` hands this

@@ -1,6 +1,6 @@
 //! The terminal app: a scrollback transcript over a repainted dock — activity row, rule, queued
-//! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer —
-//! with the craft at the right. Every member-visible string renders through the theme's roles.
+//! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer.
+//! Every member-visible string renders through the theme's roles.
 
 mod editor;
 pub mod history;
@@ -40,9 +40,6 @@ use crate::ui::toolrender::OpView;
 use crate::wire::OpRequest;
 
 pub const PROMPT_IDLE: &str = "›";
-const CRAFT_ROWS: usize = 4;
-const CRAFT_WIDTH_DEFAULT: usize = 15;
-const MIN_COLS: u16 = 48;
 const QUEUE_SHOWN: usize = 3;
 const ENTRY_ROWS_MAX: usize = 8;
 const PICKER_ROWS: usize = 8;
@@ -173,8 +170,6 @@ pub struct App {
     ask: AskState,
     prompt: String,
     history: History,
-    craft: Vec<String>,
-    craft_w: usize,
     queued: VecDeque<String>,
     focus: Focus,
     chooser: Option<Chooser>,
@@ -219,8 +214,6 @@ impl App {
             ask: AskState::new(),
             prompt: PROMPT_IDLE.to_string(),
             history: History::load(home_root),
-            craft: Vec::new(),
-            craft_w: CRAFT_WIDTH_DEFAULT,
             queued: VecDeque::new(),
             focus: Focus::Compose,
             chooser: None,
@@ -315,15 +308,6 @@ impl App {
         self.extend_pending(vec![Line::styled(line, self.theme.muted)]);
     }
 
-    pub fn set_craft(&mut self, width: usize, frame: &str) {
-        self.craft_w = width.max(1);
-        self.craft = frame
-            .split('\n')
-            .take(CRAFT_ROWS)
-            .map(str::to_string)
-            .collect();
-    }
-
     /// The op's header throbs in the activity row while it runs; it joins the dock's op log
     /// when it answers, and the log clears the moment the reply starts streaming — tool activity
     /// is read while it happens and never crowds the transcript.
@@ -343,7 +327,7 @@ impl App {
             Ok(bytes) => Ok(bytes.as_slice()),
             Err(failure) => Err(failure.as_str()),
         };
-        let width = (self.cols as usize).saturating_sub(self.craft_cols()) as u16;
+        let width = self.cols;
         self.op_log
             .push(view.header(description.as_deref(), &self.theme, width));
         self.op_log.extend(view.body(reply, &self.theme, width));
@@ -803,41 +787,30 @@ impl App {
         self.cols
     }
 
-    fn craft_cols(&self) -> usize {
-        if self.craft.is_empty() || self.cols < MIN_COLS {
-            0
-        } else {
-            self.craft_w + 1
-        }
-    }
-
     fn entry_width(&self) -> usize {
         (self.cols as usize)
-            .saturating_sub(self.craft_cols() + 3 + wrap::width(&self.prompt))
+            .saturating_sub(3 + wrap::width(&self.prompt))
             .max(8)
     }
 
     pub fn paint(&mut self) {
         let cols = self.cols as usize;
-        let body = cols.saturating_sub(self.craft_cols());
         let mut dock: Vec<Line> = Vec::new();
-        dock.push(self.activity_line(body));
+        dock.push(self.activity_line(cols));
         dock.extend(self.op_log.iter().cloned());
-        let rule_at = dock.len();
-        let rule = || Line::styled("─".repeat(body.saturating_sub(1)), self.theme.prompt);
+        let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
         dock.push(rule());
-        self.queued_rows(&mut dock, body);
-        let (entry, cursor_in_entry) = self.entry_rows(body);
+        self.queued_rows(&mut dock, cols);
+        let (entry, cursor_in_entry) = self.entry_rows(cols);
         let entry_at = dock.len();
         dock.extend(entry);
         dock.push(rule());
         dock.push(status::footer(
             &self.theme,
-            body as u16,
+            self.cols,
             &self.host,
             &self.channel,
         ));
-        self.with_craft(&mut dock, rule_at);
 
         let avail = (self.rows as usize).saturating_sub(dock.len()).max(1);
         self.view_rows = avail;
@@ -1030,28 +1003,6 @@ impl App {
             ]));
         }
         rows
-    }
-
-    fn with_craft(&self, dock: &mut [Line<'static>], first_row: usize) {
-        let craft_cols = self.craft_cols();
-        if craft_cols == 0 {
-            return;
-        }
-        let body = (self.cols as usize).saturating_sub(craft_cols);
-        for (offset, art) in self.craft.iter().enumerate() {
-            let Some(line) = dock.get_mut(first_row + offset) else {
-                break;
-            };
-            let text: String = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            let used = wrap::width(&text);
-            let pad = " ".repeat(body.saturating_sub(used) + 1);
-            line.spans.push(Span::raw(pad));
-            line.spans.push(Span::styled(art.clone(), self.theme.craft));
-        }
     }
 
     /// Anything the stream still holds commits now: a transcript element that is not part of the

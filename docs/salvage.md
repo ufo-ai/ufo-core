@@ -25,7 +25,7 @@ Working against the old repo:
 | `metalcraft_store/{json,env}.py` | `config.py` + shared prims | U1 | fold |
 | `metalcraft_o11y/{emit,logging,metrics,sdk,tracing}.py` | `o11y.py` | U1 | collapse to one module; OTel APIs only |
 | `metalcraft_store/price.py` | `accounting.py` prices | U1 | refresh model list; fix lossy per-token ints (micro-USD/MTok); PRICE_DIGEST returns with U7 audit columns |
-| `metalcraft_cli/gateway_client.py`, `scripts/ufo`, `gateway/channels/ufo*.py` | `surfaces/cli.py` + `cli.py` (`ufoctl chat`) | U1 | one CLI; sessions stay; drop signin bridge (member token instead) |
+| `metalcraft_cli/gateway_client.py`, `scripts/ufo`, `gateway/channels/ufo*.py` | `extensions/ufo` surface + `client/` terminal | U1 | one terminal client; sessions stay; drop signin bridge (member token instead) |
 | `metalcraft_agent/tools/base.py` | `tools/registry.py`, `tools/context.py` | U2 | ToolContext replaces env-threading |
 | `metalcraft_agent/tools/sandbox.py` | `tools/builtins/` (`bash read write edit`) + `extensions/sites` (the serve tools) | U2 | drop `glob`, `grep`, `echo` (bash + ripgrep subsume); keep read-before-write + image/PDF read; `website` and the 3 serve tools move to the sites extension |
 | `metalcraft_servers/sandbox_proxy/{proxy,server}.py` (minus kubectl mint), `metalcraft_servers/egress_proxy/server.py`, `metalcraft_store/egress.py` | `sandbox/proxy/` | U2 | MERGE into one proxy: sentinel swap, host/account scoping, wire metering; rules derived, no register API |

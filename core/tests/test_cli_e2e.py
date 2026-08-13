@@ -2,11 +2,11 @@
 
 Every verb runs through `CliRunner` against `ufo.cli`, a real SQLite database, and the real
 filesystem — no mocks of the CLI, the loader, the database, or the ledger. The paid dependency, the
-model, is the only double: the chat turn runs against a StandIn model client (mirroring
+model, is the only double: the wire turn runs against a StandIn model client (mirroring
 `test_turn_lifecycle`'s registry) served by a real in-process uvicorn server, so a `ping` streams a
 real terminal frame and bills a real ledger row without an API key. The DB-owning verbs
 (`spend-cap`, `spend`, `grants`, `bundle`, `ext`) each manage their own connection, so they run
-in an isolated filesystem with no persistent engine; the chat flow holds a persistent engine and the
+in an isolated filesystem with no persistent engine; the wire turn holds a persistent engine and the
 session's DBOS worker, so its ledger read disposes that engine first and lets the `spend` verb open
 its own — the same lifecycle boundary the real process has between `serve` and a one-shot verb."""
 
@@ -16,12 +16,14 @@ import shutil
 import socket
 import threading
 import time
+import tomllib
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import uvicorn
@@ -71,6 +73,8 @@ SERVER_STOP_TIMEOUT_SECONDS = 20.0
 STOP_FLOOR_SECONDS = 3.0
 STOP_DEADLINE_SECONDS = 8.0
 REGISTERED_TIMEOUT_SECONDS = 5.0
+WIRE_TURN_TIMEOUT_SECONDS = 90.0
+WIRE_RECONNECT_LIMIT = 30
 CATALOG = """\
 [[extensions]]
 name = "memory"
@@ -512,12 +516,12 @@ async def _bootstrap_workspace() -> UUID:
 
 
 @pytest.fixture
-def chat_server(
+def wire_server(
     dbos_launched_cli: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[tuple[CliRunner, str]]:
-    """A live in-process server the real `chat` verb talks to: the shared `ufo` surface over the
-    session DBOS worker and a StandIn-model runtime, on an ephemeral port the written config names.
-    The verb reaches it exactly as it reaches the hosted fleet — a signed member bearer to
+    """A live in-process server speaking the terminal directive wire: the shared `ufo` surface over
+    the session DBOS worker and a StandIn-model runtime, on an ephemeral port the written config
+    names. A client reaches it exactly as it reaches the hosted fleet — a signed member bearer to
     `/surface/ufo/{channel}` — so this exercises the real client wire, not a dedicated shortcut.
     Yields the runner and the config path so verbs run against this same SQLite database. The
     app database is this fixture's own copy of the session template (writing the template would
@@ -628,17 +632,35 @@ def chat_server(
         )
 
 
-def test_chat_streams_the_answer_then_spend_reports_the_burn(
-    chat_server: tuple[CliRunner, str],
+def test_the_wire_streams_the_answer_then_spend_reports_the_burn(
+    wire_server: tuple[CliRunner, str],
 ) -> None:
-    """The headline keyless end-to-end: the real `chat` verb signs into the live shared `ufo`
-    surface, admits a turn that runs the full DBOS queue on the StandIn model, and renders the
-    streamed `txt` answer from the held directive stream. Disposing the server's engine then lets
-    the real `spend` verb open its own connection and read the nonzero burn the turn billed."""
-    runner, _config_path = chat_server
-    chatted = runner.invoke(cli.main, ["chat", "ping"])
-    assert chatted.exit_code == 0, chatted.output
-    assert "echo:1" in chatted.output
+    """The headline keyless end-to-end: a member bearer posts `ping` to the live shared `ufo`
+    surface — the same POST every terminal client makes — admits a turn that runs the full DBOS
+    queue on the StandIn model, and reads the streamed `txt` answer off the held directive stream,
+    reconnecting on `poll` until the stream caps on `ask`/`exit`. Disposing the server's engine
+    then lets the real `spend` verb open its own connection and read the nonzero burn the turn
+    billed."""
+    runner, config_path = wire_server
+    serve = tomllib.loads(Path(config_path).read_text())["serve"]
+    token = (Path(os.environ["UFOCTL_DIR"]) / "token").read_text().strip()
+    endpoint = f"http://{serve['host']}:{serve['port']}/surface/ufo/{uuid4().hex}"
+    headers = {"authorization": f"Bearer {token}", "content-type": "text/plain"}
+    lines: list[str] = []
+    body = "ping"
+    with httpx.Client(timeout=WIRE_TURN_TIMEOUT_SECONDS) as client:
+        for _reconnect in range(WIRE_RECONNECT_LIMIT):
+            response = client.post(endpoint, content=body.encode(), headers=headers)
+            assert response.status_code == 200, response.text
+            lines.extend(response.text.splitlines())
+            verbs = {line.split("\t", 1)[0] for line in lines}
+            if verbs & {"ask", "exit"}:
+                break
+            body = ""
+        else:
+            pytest.fail(f"stream never capped: {lines}")
+    answer = "".join(line.split("\t", 1)[1] for line in lines if line.startswith("txt\t"))
+    assert "echo:1" in answer
 
     asyncio.run(dispose_db())
     spent = runner.invoke(cli.main, ["spend"])

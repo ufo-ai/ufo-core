@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, get_args
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
@@ -92,7 +92,16 @@ from ufo.grants import (
     account_object_name,
     install_connect_flow,
 )
-from ufo.hub import InProcessHub, LiveFrame, SkillLoad, Terminal, ToolCall
+from ufo.hub import (
+    Absorbed,
+    CostTick,
+    InProcessHub,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    Terminal,
+    ToolCall,
+)
 from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import FINISH_PROMPT
@@ -211,6 +220,43 @@ def test_sse_tags_tool_and_skill_activity_frames() -> None:
     skill = _sse("", SkillLoad(skill="demo"))
     assert skill.startswith(b"event: skill\ndata: ")
     assert json.loads(skill.split(b"data: ", 1)[1]) == {"skill": "demo"}
+
+
+def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
+    """The browser subscribes by event name, and an unnamed event lands in `onmessage` as reply
+    text — so a frame kind this projection does not name must raise here, never reach a member's
+    transcript as `undefined`."""
+    frames: dict[type, LiveFrame] = {
+        TextDelta: TextDelta(text="t"),
+        Terminal: Terminal(frame=TerminalFrame(status="done", text="t")),
+        Parked: Parked(message="m"),
+        CostTick: CostTick(cost_micro_usd=1, tokens=2),
+        ToolCall: ToolCall(tool="bash", preview="ls"),
+        SkillLoad: SkillLoad(skill="s"),
+        Absorbed: Absorbed(arrivals=()),
+    }
+    assert set(frames) == set(get_args(LiveFrame))
+    named = {
+        Terminal: b"event: terminal\n",
+        Parked: b"event: parked\n",
+        CostTick: b"event: cost\n",
+        ToolCall: b"event: tool\n",
+        SkillLoad: b"event: skill\n",
+        Absorbed: b"event: absorbed\n",
+    }
+    for kind, frame in frames.items():
+        event = _sse("7", frame)
+        assert event.startswith(b"id: 7\n")
+        if kind is TextDelta:
+            assert b"event:" not in event
+        else:
+            assert named[kind] in event
+
+    class Unmapped(BaseModel):
+        pass
+
+    with pytest.raises(ValueError, match="unmapped live frame Unmapped"):
+        _sse("", cast(LiveFrame, Unmapped()))
 
 
 def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:

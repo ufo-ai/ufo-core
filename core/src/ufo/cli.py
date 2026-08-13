@@ -1,4 +1,4 @@
-"""The ufoctl CLI: init, serve, portal, chat, ext, bundle."""
+"""The ufoctl CLI: init, serve, portal, ext, bundle."""
 
 import asyncio
 import os
@@ -8,12 +8,11 @@ import sys
 import threading
 import tomllib
 import webbrowser
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import TextIO
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -45,18 +44,11 @@ from ufo.serve import run as serve_run
 from ufo.workspace import ws
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
-TURN_REQUEST_TIMEOUT_SECONDS = 90.0
 PORTAL_REACH_TIMEOUT_SECONDS = 5.0
 HANDOFF_PATH_BYTES = 24
 LOOPBACK = "127.0.0.1"
-ERASE_LINE = "\r\x1b[K"
 MICRO_USD_PER_USD = 1_000_000
 CLI_TOKEN_TTL = timedelta(days=3650)
-UFO_CHANNEL_PREFIX = "/surface/ufo"
-SECRET_HEADER = "x-ufo-secret"
-SECRET_SLOT_HEADER = "x-ufo-slot"
-SINCE_HEADER = "x-ufo-since"
-POLL_FALLBACK_SECONDS = 1.0
 DEFAULT_CONFIG = """\
 [database]
 url = "sqlite+aiosqlite:///ufo.db"
@@ -365,259 +357,6 @@ def proxy() -> None:
 def ingress() -> None:
     """Run the sandbox ingress: a token-gated reverse proxy to conversations' sandbox ports."""
     ingress_run()
-
-
-@main.command()
-@click.argument("message", required=False)
-@click.option("--new", is_flag=True, help="Start a fresh conversation session.")
-def chat(message: str | None, new: bool) -> None:
-    """Talk to the agent; the session continues across invocations."""
-    config = load_config()
-    token_path = _ufoctl_dir() / "token"
-    if not token_path.exists():
-        raise click.ClickException("no CLI token — run `ufoctl init` first")
-    token = token_path.read_text().strip()
-    channel = _session(new)
-    if message is not None:
-        _run_turn(config, token, channel, message)
-        return
-    while True:
-        try:
-            line = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            click.echo()
-            return
-        if line.strip():
-            _run_turn(config, token, channel, line)
-
-
-def _session(new: bool) -> str:
-    ufoctl_dir = _ufoctl_dir()
-    path = ufoctl_dir / "session"
-    if new or not path.exists():
-        ufoctl_dir.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(uuid4().hex)
-    return path.read_text().strip()
-
-
-def _run_turn(config: Config, token: str, channel: str, message: str) -> None:
-    """One turn against the shared `ufo` surface. The surface has no cancel, so a Ctrl-C or a
-    dropped connection ends the client cleanly while the turn finishes on the fleet — the next
-    message (an empty body first) resumes tailing the conversation's latest turn to catch up."""
-    base = f"http://{config.serve.host}:{config.serve.port}"
-    try:
-        asyncio.run(_stream_turn(base, token, channel, message))
-    except KeyboardInterrupt:
-        click.echo(
-            "\n(stopped — the turn finishes in the background; send another message to catch up)"
-        )
-    except httpx.HTTPError as error:
-        raise click.ClickException(
-            f"lost connection to serve ({error}) — retry to catch up"
-        ) from error
-
-
-@dataclass
-class _Pending:
-    """What a held stream ended on: a `poll` reconnect after its seconds, credential prompts to
-    fulfill, or neither — the turn is done. `since` is where the stream got to, carried into the
-    reconnect so the tail resumes after the last frame rendered rather than replaying the turn."""
-
-    poll_seconds: float | None = None
-    since: str = ""
-    secrets: list[tuple[str, str, str]] = field(default_factory=list)
-
-
-async def _stream_turn(base: str, token: str, channel: str, message: str) -> None:
-    """Open the client and drive one turn on the shared `ufo` surface through `_ChatStream`."""
-    display = _TurnDisplay(
-        out=sys.stdout, err=sys.stderr, tty=sys.stdout.isatty() and sys.stderr.isatty()
-    )
-    headers = {"authorization": f"Bearer {token}", "content-type": "text/plain"}
-    path = f"{UFO_CHANNEL_PREFIX}/{channel}"
-    async with httpx.AsyncClient(base_url=base, timeout=TURN_REQUEST_TIMEOUT_SECONDS) as client:
-        await _ChatStream(client=client, path=path, headers=headers, display=display).run(message)
-
-
-@dataclass(frozen=True)
-class _ChatStream:
-    """One turn on the shared `ufo` surface: POST the message to the member's channel and render the
-    held directive stream, reconnecting with an empty body on `poll` until the turn caps
-    (`ask`/`exit`), then fulfilling any credential prompts it asked for."""
-
-    client: httpx.AsyncClient
-    path: str
-    headers: dict[str, str]
-    display: "_TurnDisplay"
-
-    async def run(self, message: str) -> None:
-        body = message
-        since = ""
-        while True:
-            pending = await self._drain(body, since)
-            if pending.poll_seconds is not None:
-                await asyncio.sleep(pending.poll_seconds)
-                body = ""
-                since = pending.since
-                continue
-            self.display.close()
-            for sealed, slot, prompt in pending.secrets:
-                await self._fulfill_secret(sealed, slot, prompt)
-            return
-
-    async def _drain(self, body: str, since: str = "") -> _Pending:
-        """Render one held stream and report how it ended. `txt`/`say`/`note`/`status`/`file`
-        render; `secret` collects a prompt to fulfill after the turn; `since` names where this
-        stream got to, for the reconnect to resume from; `poll` asks for an empty-body reconnect;
-        `ask` and `exit` are the terminal directives the stream closes on; any other verb fails
-        loud."""
-        pending = _Pending()
-        headers = {**self.headers, **({SINCE_HEADER: since} if since else {})}
-        async with self.client.stream(
-            "POST", self.path, content=body.encode(), headers=headers
-        ) as stream:
-            if stream.status_code != 200:
-                detail = (await stream.aread()).decode().strip()
-                raise click.ClickException(f"chat failed ({stream.status_code}): {detail}")
-            async for raw in stream.aiter_lines():
-                if not raw:
-                    continue
-                verb, *fields = (_unescape(part) for part in raw.split("\t"))
-                match verb:
-                    case "txt":
-                        self.display.text(fields[0] if fields else "")
-                    case "say":
-                        self.display.line(fields[0] if fields else "")
-                    case "you":
-                        self.display.line(f"\u203a {fields[0] if fields else ''}")
-                    case "note":
-                        self.display.activity(fields[0] if fields else "")
-                    case "status":
-                        self.display.meter(fields[0] if fields else "")
-                    case "file" if len(fields) == 3:
-                        self.display.shared_file(fields[0], fields[1], fields[2])
-                    case "secret" if len(fields) == 3:
-                        pending.secrets.append((fields[0], fields[1], fields[2]))
-                    case "since" if len(fields) == 2:
-                        pending.since = f"{fields[0]}:{fields[1]}"
-                    case "poll":
-                        try:
-                            pending.poll_seconds = (
-                                float(fields[0]) if fields else POLL_FALLBACK_SECONDS
-                            )
-                        except ValueError:
-                            raise click.ClickException(
-                                f"unexpected directive from serve: {raw!r}"
-                            ) from None
-                    case "ask" | "exit":
-                        pass
-                    case _:
-                        raise click.ClickException(f"unexpected directive from serve: {raw!r}")
-        return pending
-
-    async def _fulfill_secret(self, sealed: str, slot: str, prompt: str) -> None:
-        """Enter one credential value privately and hand it to the surface out of band — never a
-        message, so nothing reaches the transcript. The surface answers with a `say`
-        acknowledgement."""
-        value = click.prompt(prompt, hide_input=True)
-        response = await self.client.post(
-            self.path,
-            content=value.encode(),
-            headers={**self.headers, SECRET_HEADER: sealed, SECRET_SLOT_HEADER: slot},
-        )
-        if response.status_code != 200:
-            raise click.ClickException(
-                f"could not store {slot} ({response.status_code}): {response.text.strip()}"
-            )
-        for raw in response.text.splitlines():
-            verb, *fields = (_unescape(part) for part in raw.split("\t"))
-            if verb == "say" and fields:
-                self.display.line(fields[0])
-
-
-_DIRECTIVE_ESCAPES = {"\\": "\\", "t": "\t", "n": "\n"}
-
-
-def _unescape(text: str) -> str:
-    r"""Reverse the `ufo` surface's directive escaping: `\t`→tab, `\n`→newline, `\\`→backslash."""
-    out: list[str] = []
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "\\" and index + 1 < len(text):
-            out.append(_DIRECTIVE_ESCAPES.get(text[index + 1], text[index + 1]))
-            index += 2
-        else:
-            out.append(char)
-            index += 1
-    return "".join(out)
-
-
-@dataclass
-class _TurnDisplay:
-    """One turn's terminal rendering, driven by `ufo` surface directives: `txt` deltas stream to
-    stdout, `say` and `note` land finished lines, and the `status` meter is a transient stderr line
-    that only ever occupies a line of its own and is erased before anything else prints, so it can
-    never overwrite streamed text. Its line bookkeeping assumes both streams land on one terminal,
-    so tty is true only when stdout and stderr are both ttys."""
-
-    out: TextIO
-    err: TextIO
-    tty: bool
-    line_open: bool = False
-    meter_shown: bool = False
-
-    def text(self, delta: str) -> None:
-        self._erase_meter()
-        click.echo(delta, nl=False, file=self.out)
-        if delta:
-            self.line_open = not delta.endswith("\n")
-
-    def line(self, text: str) -> None:
-        """A finished line the surface `say`s — the answer when it did not stream, a failure, a
-        connect link, or a stored-credential acknowledgement."""
-        self._close_line()
-        click.echo(text, file=self.out)
-
-    def activity(self, note: str) -> None:
-        """A mid-turn `note` (a tool call, a skill load) on its own dim line — the meter is erased
-        first so streamed text is never corrupted, and the stream continues after it."""
-        self._close_line()
-        click.echo(click.style(note, dim=True), file=self.out)
-
-    def shared_file(self, name: str, size_bytes: str, url: str) -> None:
-        """A file the turn shared. The name and size are dim context; the link stays undimmed
-        because it is the one part the member acts on. A deploy that mints no link names the file
-        alone, so the member learns it exists rather than nothing at all."""
-        self._close_line()
-        label = click.style(f"shared {name} ({size_bytes} bytes)", dim=True)
-        click.echo(f"{label} {url}" if url else label, file=self.out)
-
-    def meter(self, text: str) -> None:
-        if not self.tty:
-            return
-        if self.line_open:
-            click.echo(file=self.err)
-            self.line_open = False
-        click.echo(
-            f"{ERASE_LINE}{click.style(text, dim=True)}", nl=False, file=self.err, color=True
-        )
-        self.meter_shown = True
-
-    def close(self) -> None:
-        self._close_line()
-
-    def _erase_meter(self) -> None:
-        if not self.meter_shown:
-            return
-        click.echo(ERASE_LINE, nl=False, file=self.err, color=True)
-        self.meter_shown = False
-
-    def _close_line(self) -> None:
-        self._erase_meter()
-        if self.line_open:
-            click.echo(file=self.out)
-            self.line_open = False
 
 
 @main.group(name="spend-cap")

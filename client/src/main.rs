@@ -494,12 +494,6 @@ impl Wire {
                 self.install = true;
                 false
             }
-            Directive::Logout => {
-                self.home.clear_signin();
-                self.session.token = None;
-                self.session.workspace_url = None;
-                false
-            }
             Directive::Unknown => false,
             other => {
                 let _ = self.evt.send(WireEvent::Dir(other));
@@ -907,7 +901,6 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
         Directive::Txt(chunk) => app.txt(&chunk),
         Directive::Status(text) => app.status_text(&text),
         Directive::File { name, size, url } => app.file(&name, &size, &url),
-        Directive::Ufo { width, frame } => app.set_craft(width, &frame),
         Directive::Ask(prompt) => {
             gate.asked = true;
             gate.prompt = prompt;
@@ -980,7 +973,6 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 Directive::Txt(chunk) => out.txt(&chunk),
                 Directive::Status(text) => out.status(&text),
                 Directive::File { name, size, url } => out.file(&name, &size, &url),
-                Directive::Ufo { .. } => {}
                 Directive::Ask(prompt) => {
                     gate.asked = true;
                     gate.prompt = prompt;

@@ -53,7 +53,6 @@ pub struct Theme {
     pub diff_context: Style,
     pub selected: Style,
     pub queued: Style,
-    pub craft: Style,
 }
 
 type Rgb = (u8, u8, u8);
@@ -73,7 +72,6 @@ struct Palette {
     diff_added: Rgb,
     diff_removed: Rgb,
     diff_context: Rgb,
-    craft: Rgb,
 }
 
 const DARK: Palette = Palette {
@@ -90,7 +88,6 @@ const DARK: Palette = Palette {
     diff_added: (0x7e, 0xe7, 0x87),
     diff_removed: (0xff, 0x7b, 0x72),
     diff_context: (0x6f, 0x6f, 0x7d),
-    craft: (0x7d, 0xcf, 0xff),
 };
 
 const LIGHT: Palette = Palette {
@@ -107,7 +104,6 @@ const LIGHT: Palette = Palette {
     diff_added: (0x11, 0x63, 0x29),
     diff_removed: (0xa4, 0x0e, 0x26),
     diff_context: (0x71, 0x71, 0x7a),
-    craft: (0x15, 0x5e, 0x75),
 };
 
 impl Theme {
@@ -184,7 +180,6 @@ impl Theme {
                 _ => hue(palette.prompt).add_modifier(Modifier::BOLD),
             },
             queued: dim.add_modifier(Modifier::ITALIC),
-            craft: hue(palette.craft),
         }
     }
 }
@@ -428,7 +423,7 @@ pub fn scheme_from_colorfgbg(value: &str) -> Option<Scheme> {
 mod tests {
     use super::*;
 
-    const TEXT_ROLES: [fn(&Palette) -> Rgb; 13] = [
+    const TEXT_ROLES: [fn(&Palette) -> Rgb; 12] = [
         |p| p.muted,
         |p| p.accent,
         |p| p.prompt,
@@ -441,7 +436,6 @@ mod tests {
         |p| p.diff_added,
         |p| p.diff_removed,
         |p| p.diff_context,
-        |p| p.craft,
     ];
 
     #[test]
@@ -486,7 +480,6 @@ mod tests {
         assert_ne!(dark.prompt.fg, light.prompt.fg);
         assert_ne!(dark.error.fg, light.error.fg);
         assert_ne!(dark.muted.fg, light.muted.fg);
-        assert_ne!(dark.craft.fg, light.craft.fg);
         for role in TEXT_ROLES {
             assert_ne!(role(&DARK), role(&LIGHT));
         }
@@ -537,7 +530,6 @@ mod tests {
                 theme.diff_context,
                 theme.selected,
                 theme.queued,
-                theme.craft,
             ] {
                 assert_eq!(style.fg, None);
                 assert_eq!(style.bg, None);

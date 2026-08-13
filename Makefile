@@ -25,7 +25,7 @@ STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST)
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 
-.PHONY: help install reinstall build init serve chat portal stack stack-down stack-logs db \
+.PHONY: help install reinstall build init serve portal stack stack-down stack-logs db \
 	check fmt test test-one test-control test-web test-integration
 
 help: ## List targets
@@ -57,9 +57,6 @@ init: ## Write ufo.toml, apply the schema, onboard the workspace (EMAIL=you@exam
 
 serve: ## Run surfaces, workers, and the embedded egress proxy (needs ANTHROPIC_API_KEY)
 	uv run ufoctl serve
-
-chat: ## Talk to the agent; sessions persist across runs
-	uv run ufoctl chat
 
 portal: ## Open the portal in a browser, signed in with this machine's CLI token
 	uv run ufoctl portal

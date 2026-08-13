@@ -45,6 +45,43 @@ PORTAL_CLASS_REFUSALS = (
 RAW_CSS_VALUE = re.compile(
     r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
 )
+WORKSPACE_WIRE = frozenset(
+    {
+        "txt",
+        "note",
+        "status",
+        "say",
+        "you",
+        "ask",
+        "exit",
+        "file",
+        "secret",
+        "since",
+        "poll",
+        "run",
+        "install",
+    }
+)
+ONBOARD_WIRE = frozenset(
+    {"say", "ask", "choose", "exit", "token", "workspace", "debugger", "install"}
+)
+UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
+GATEWAY_DIRECTIVES_MODULE = Path("control/src/ufo_control/gateway_directives.py")
+GATEWAY_MODULES = (Path("control/src/ufo_control/gateway.py"), GATEWAY_DIRECTIVES_MODULE)
+RUST_WIRE_MODULE = Path("client/src/wire.rs")
+ONBOARD_WEB_MODULE = Path("control/src/ufo_control/gateway_web.py")
+TERMINAL_DROPPED_VERBS = frozenset({"debugger"})
+ONBOARD_WEB_DROPPED_VERBS = frozenset({"install"})
+WEB_SURFACE_MODULE = Path("extensions/web/ufo_ext_web/surface.py")
+DEBUGGER_SURFACE_MODULE = Path("extensions/debugger/ufo_ext_debugger/surface.py")
+SLACK_SURFACE_MODULE = Path("extensions/slack/ufo_ext_slack/surface.py")
+REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
+TURNSTREAM_MODULE = Path("extensions/web/frontend/src/lib/turnStream.ts")
+DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
+FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
+    "slack ThreadStatus._follow": frozenset({"CostTick"}),
+    "slack ThreadProgress._follow": frozenset({"Absorbed"}),
+}
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
@@ -565,7 +602,7 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
-def _live_frame_failures(trees: dict[Path, ast.Module]) -> list[str]:
+def _live_frame_kinds(trees: dict[Path, ast.Module]) -> list[str]:
     hub = trees.get(CORE_SRC / "hub.py")
     if hub is None:
         return []
@@ -574,13 +611,290 @@ def _live_frame_failures(trees: dict[Path, ast.Module]) -> list[str]:
         match node:
             case ast.Assign(targets=[ast.Name(id="LiveFrame")], value=value):
                 members = [n.id for n in ast.walk(value) if isinstance(n, ast.Name)]
+    return members
+
+
+def _live_frame_failures(trees: dict[Path, ast.Module]) -> list[str]:
     calls = {
         name
         for rel, tree in trees.items()
         if str(rel).startswith(str(CORE_SRC)) and rel != CORE_SRC / "hub.py"
         for name in _call_names(tree)
     }
-    return [f"hub: LiveFrame kind {m!r} has no emitter" for m in members if m not in calls]
+    return [
+        f"hub: LiveFrame kind {m!r} has no emitter"
+        for m in _live_frame_kinds(trees)
+        if m not in calls
+    ]
+
+
+def _match_class_names(scope: ast.AST) -> set[str]:
+    return {
+        node.cls.id
+        for node in ast.walk(scope)
+        if isinstance(node, ast.MatchClass) and isinstance(node.cls, ast.Name)
+    }
+
+
+def _function_scope(tree: ast.Module, function: str, owner: str | None = None) -> ast.AST | None:
+    haystack: ast.AST = tree
+    if owner is not None:
+        classes = [
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner
+        ]
+        if not classes:
+            return None
+        haystack = classes[0]
+    for node in ast.walk(haystack):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == function:
+            return node
+    return None
+
+
+def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Every LiveFrame kind has a handler in every consumer of the hub stream — the mirror of
+    `_live_frame_failures`' emitter check. A consumer that deliberately ignores a kind names it in
+    FRAME_EXEMPTIONS, so absence is always a decision; an exemption for a kind the consumer handles
+    is stale and fails too. The SSE event names each projection emits must equal the names its one
+    frontend listens for, so a kind cannot reach a browser as an event nothing subscribes to."""
+    failures: list[str] = []
+    kinds = set(_live_frame_kinds(trees))
+    if not kinds:
+        return ["hub: LiveFrame union not found in core/src/ufo/hub.py"]
+
+    web = trees.get(WEB_SURFACE_MODULE)
+    debugger = trees.get(DEBUGGER_SURFACE_MODULE)
+    ufo_surface = trees.get(UFO_SURFACE_MODULE)
+    redis = trees.get(REDIS_HUB_MODULE)
+    slack = trees.get(SLACK_SURFACE_MODULE)
+    consumers: list[tuple[str, ast.AST | None]] = [
+        ("web _sse", _function_scope(web, "_sse") if web else None),
+        ("debugger _sse", _function_scope(debugger, "_sse") if debugger else None),
+        (
+            "ufo directives_for",
+            _function_scope(ufo_surface, "directives_for") if ufo_surface else None,
+        ),
+        (
+            "slack ThreadStatus._follow",
+            _function_scope(slack, "_follow", "ThreadStatus") if slack else None,
+        ),
+        (
+            "slack ThreadProgress._follow",
+            _function_scope(slack, "_follow", "ThreadProgress") if slack else None,
+        ),
+    ]
+    for label, scope in consumers:
+        if scope is None:
+            failures.append(f"hub: consumer {label} not found")
+            continue
+        handled = _match_class_names(scope) & (kinds | {"MatchClass"})
+        exempt = FRAME_EXEMPTIONS.get(label, frozenset())
+        failures.extend(
+            f"hub: {label} does not handle live frame kind {kind!r}"
+            for kind in sorted(kinds - handled - exempt)
+        )
+        failures.extend(
+            f"hub: {label} exemption for {kind!r} is stale — it is handled"
+            for kind in sorted(exempt & handled)
+        )
+
+    if redis is None:
+        failures.append(f"hub: consumer {REDIS_HUB_MODULE} not found")
+    else:
+        codec: set[str] = set()
+        for node in ast.walk(redis):
+            target = None
+            match node:
+                case ast.Assign(targets=[ast.Name(id="_FRAME_KINDS")], value=value):
+                    target = value
+                case ast.AnnAssign(target=ast.Name(id="_FRAME_KINDS"), value=value):
+                    target = value
+            if target is not None:
+                codec = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} & kinds
+        failures.extend(
+            f"hub: redis _FRAME_KINDS does not carry live frame kind {kind!r}"
+            for kind in sorted(kinds - codec)
+        )
+
+    if web is not None and debugger is not None:
+        failures.extend(_sse_listener_failures(web, debugger))
+    return failures
+
+
+def _bytes_event_names(scope: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+            names.update(
+                match.group(1).decode() for match in re.finditer(rb"event: (\w+)", node.value)
+            )
+    return names
+
+
+def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
+    failures: list[str] = []
+    web_sse = _function_scope(web, "_sse")
+    web_events = _bytes_event_names(web_sse) if web_sse else set()
+    web_events |= {
+        node.args[0].value
+        for node in ast.walk(web)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_event"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+    stream_source = _required_text(TURNSTREAM_MODULE, failures)
+    if stream_source is not None:
+        listeners = set(re.findall(r'addEventListener\("(\w+)"', stream_source)) - {"open"}
+        if ".onmessage" in stream_source:
+            listeners.add("message")
+        expected = web_events | {"message"}
+        failures.extend(
+            f"sse: turnStream.ts does not listen for event {name!r}"
+            for name in sorted(expected - listeners)
+        )
+        failures.extend(
+            f"sse: turnStream.ts listens for event {name!r} that the web surface never sends"
+            for name in sorted(listeners - expected)
+        )
+
+    debugger_sse = _function_scope(debugger, "_sse")
+    debugger_kinds: set[str] = set()
+    if debugger_sse is not None:
+        debugger_kinds = {
+            node.value.decode()
+            for node in ast.walk(debugger_sse)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, bytes)
+            and re.fullmatch(rb"[a-z_]+", node.value)
+        }
+    tail_source = _required_text(DEBUGGER_TAIL_MODULE, failures)
+    if tail_source is not None:
+        array = re.search(r"EVENT_KINDS = \[(.*?)\]", tail_source, re.S)
+        tail_kinds = set(re.findall(r'"(\w+)"', array.group(1))) if array else set()
+        failures.extend(
+            f"sse: debugger Tail.tsx does not listen for event {name!r}"
+            for name in sorted(debugger_kinds - tail_kinds)
+        )
+        failures.extend(
+            f"sse: debugger Tail.tsx listens for event {name!r} that its surface never sends"
+            for name in sorted(tail_kinds - debugger_kinds)
+        )
+    return failures
+
+
+def _required_text(rel: Path, failures: list[str]) -> str | None:
+    path = ROOT / rel
+    if not path.exists():
+        failures.append(f"wire: {rel} not found")
+        return None
+    return path.read_text()
+
+
+def _directive_calls(scope: ast.AST) -> set[str]:
+    verbs: set[str] = set()
+    for node in ast.walk(scope):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "directive"
+            and node.args
+        ):
+            continue
+        head = node.args[0]
+        parts = (head.body, head.orelse) if isinstance(head, ast.IfExp) else (head,)
+        verbs |= {
+            part.value
+            for part in parts
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        }
+    return verbs
+
+
+def _stripped_dump(tree: ast.Module, function: str) -> str | None:
+    scope = _function_scope(tree, function)
+    if scope is None or not isinstance(scope, ast.FunctionDef):
+        return None
+    body = scope.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    return ast.dump(ast.Module(body=body, type_ignores=[]))
+
+
+def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The two directive wires stay closed vocabularies with both ends held: every verb a producer
+    emits is in its wire's table, every table verb is emitted, and every client of a wire handles
+    its whole vocabulary minus the drops it declares. The two `directive()` codecs — the ufo
+    surface's and the gateway's, one per package — must stay byte-for-byte the same shape, since a
+    field escaped by one and not the other splits the line framing every client parses."""
+    failures: list[str] = []
+    surface = trees.get(UFO_SURFACE_MODULE)
+    if surface is None:
+        return [f"wire: {UFO_SURFACE_MODULE} not found"]
+    emitted = _directive_calls(surface)
+    failures.extend(
+        f"wire: verb {verb!r} emitted by the ufo surface but not in WORKSPACE_WIRE"
+        for verb in sorted(emitted - WORKSPACE_WIRE)
+    )
+    failures.extend(
+        f"wire: WORKSPACE_WIRE verb {verb!r} is emitted nowhere in the ufo surface"
+        for verb in sorted(WORKSPACE_WIRE - emitted)
+    )
+
+    gateway_emitted: set[str] = set()
+    gateway_trees: dict[Path, ast.Module] = {}
+    for rel in GATEWAY_MODULES:
+        text = _required_text(rel, failures)
+        if text is not None:
+            gateway_trees[rel] = ast.parse(text, filename=str(rel))
+            gateway_emitted |= _directive_calls(gateway_trees[rel])
+    if gateway_trees:
+        failures.extend(
+            f"wire: verb {verb!r} emitted by the gateway but not in ONBOARD_WIRE"
+            for verb in sorted(gateway_emitted - ONBOARD_WIRE)
+        )
+        failures.extend(
+            f"wire: ONBOARD_WIRE verb {verb!r} is emitted nowhere in the gateway"
+            for verb in sorted(ONBOARD_WIRE - gateway_emitted)
+        )
+
+    codec = trees.get(UFO_SURFACE_MODULE)
+    gateway_codec = gateway_trees.get(GATEWAY_DIRECTIVES_MODULE)
+    if codec is not None and gateway_codec is not None:
+        if _stripped_dump(codec, "directive") != _stripped_dump(gateway_codec, "directive"):
+            failures.append(
+                f"wire: directive() diverged between {UFO_SURFACE_MODULE} and "
+                f"{GATEWAY_DIRECTIVES_MODULE}"
+            )
+
+    terminal_verbs = (WORKSPACE_WIRE | ONBOARD_WIRE) - TERMINAL_DROPPED_VERBS
+    rust_source = _required_text(RUST_WIRE_MODULE, failures)
+    if rust_source is not None:
+        rust_verbs = set(re.findall(r'"([a-z]+)"(?:\s+if .*?)?\s*=>', rust_source))
+        failures.extend(
+            f"wire: client/src/wire.rs does not parse verb {verb!r}"
+            for verb in sorted(terminal_verbs - rust_verbs)
+        )
+        failures.extend(
+            f"wire: client/src/wire.rs parses verb {verb!r} that nothing emits"
+            for verb in sorted(rust_verbs - terminal_verbs)
+        )
+
+    web_source = _required_text(ONBOARD_WEB_MODULE, failures)
+    if web_source is not None:
+        js_verbs = set(re.findall(r"directive\.verb === '([a-z]+)'", web_source))
+        expected = ONBOARD_WIRE - ONBOARD_WEB_DROPPED_VERBS
+        failures.extend(
+            f"wire: the onboarding page does not handle verb {verb!r}"
+            for verb in sorted(expected - js_verbs)
+        )
+        failures.extend(
+            f"wire: the onboarding page handles verb {verb!r} that the gateway never emits"
+            for verb in sorted(js_verbs - expected)
+        )
+    return failures
 
 
 def _init_code_failures(trees: dict[Path, ast.Module]) -> list[str]:
@@ -1178,6 +1492,8 @@ def main() -> int:
     failures.extend(_schedule_authority_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
+    failures.extend(_live_frame_consumer_failures(trees))
+    failures.extend(_directive_wire_failures(trees))
     failures.extend(_to_thread_failures(trees))
     ingress_trees = {
         **trees,

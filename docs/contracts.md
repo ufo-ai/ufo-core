@@ -56,10 +56,11 @@ lives in its sandbox. Key layout: `artifacts/<uuid>/<name>` (U5),
 `conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5). On S3 a shared file lands by a
 presigned PUT the sandbox performs, bound to the preflighted size and sha256.
 
-## hub.py (later-unit remainder)
+## hub.py
 
-`LiveFrame` grows `ToolNote` (U2) and `CostTick` (U7); lossy by contract — the durable terminal
-frame in Postgres stays authoritative.
+`LiveFrame` is the closed kind set `gates.py` holds both ends of (every kind an emitter in core
+and a handler in every consumer); lossy by contract — the durable terminal frame in Postgres stays
+authoritative.
 
 ## models/ (U2 remainder)
 
