@@ -16,6 +16,13 @@ export type Bubble = Message & {
   meta?: string;
   files?: ChatFile[];
   connectUrl?: string;
+  /** A send whose POST has not answered yet, carrying the send's own token. The queue row is
+   *  committed before the response returns, so a drain can name it while no bubble holds the
+   *  `arrival_id` — the marker is the fold's target in that window, and the drain that folds the
+   *  row consumes it. The token is how the response settles its own bubble however the log has
+   *  shifted around it: an index recorded at send time stops naming the bubble the moment a drain
+   *  inserts a reply ahead of it. */
+  sending?: string;
 };
 
 export type LiveTurn = {

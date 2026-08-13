@@ -10,7 +10,6 @@ import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
 import type { ChatFile, SubagentRun } from "@/lib/types";
 
 const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
-const WAITING = "Waiting for the agent to pick this up";
 
 /** One conversation's messages, drawn the one way this portal draws them — the member's words in
  *  a bubble, the agent's as markdown, and under each reply what it did: the subagents it spawned,
@@ -19,8 +18,10 @@ const WAITING = "Waiting for the agent to pick this up";
  *  back — an agent's conversations, a subagent's runs — hands it none and shows what landed. A
  *  conversation the member cannot reply to still reads exactly like the one they can.
  *
- *  A member message a running turn has not taken up yet states that under itself: a turn absorbs
- *  what arrived at its round boundaries, so the wait lasts as long as the call it is inside.
+ *  A member message a running turn has not taken up yet states that in its own words — italic and
+ *  muted, no line added beneath them: a turn absorbs what arrived at its round boundaries, so the
+ *  wait lasts as long as the call it is inside, and the words take their weight back when the
+ *  turn says it took them up.
  *
  *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
  *  under it: a run is opened through the conversation that spawned it, which is the route by which
@@ -41,8 +42,13 @@ export function MessageLog({
           <Meta key={index}>{message.text}</Meta>
         ) : (
           <Speech key={index} mine={message.role === "user"}>
-            {message.role === "user" ? message.text : <Markdown text={message.text} />}
-            {message.arrival_id ? <Working>{WAITING}</Working> : null}
+            {message.role !== "user" ? (
+              <Markdown text={message.text} />
+            ) : message.arrival_id ? (
+              <span className="italic opacity-(--muted)">{message.text}</span>
+            ) : (
+              message.text
+            )}
             {message.role === "user" ? null : (
               <Activity
                 events={message.events ?? []}

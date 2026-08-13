@@ -42,6 +42,8 @@ export function tokens(count: number): string {
 
 const RESYNC_EPOCH = new Map<string, number>();
 
+let SENDS = 0;
+
 function bumpEpoch(chatKey: string): void {
   RESYNC_EPOCH.set(chatKey, (RESYNC_EPOCH.get(chatKey) ?? 0) + 1);
 }
@@ -203,17 +205,65 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     }));
   });
 
+  /** A drain is a round boundary: the text streamed before it is a finished reply the engine keeps
+   *  in the window ahead of the messages it folded — not narration for the closing answer to
+   *  replace — so it settles here, ahead of the bubble whose id the frame names, which is where the
+   *  durable transcript will state it. A drain that beats the send's response names a row no bubble
+   *  is stamped with yet, so a bubble still `sending` anchors the cut the same way — the queue row
+   *  it committed is the fold's target whether or not the response is back — and the drain consumes
+   *  one marker per such row, in order, since rows fold in the order the sends appended them: a
+   *  marker left behind would anchor the next drain's reply above a message already answered. The
+   *  live bubble then starts the next round empty. A frame whose ids were all seen is a replay of a
+   *  round already recorded: it still ends the round, and recording it again would state the reply
+   *  twice. */
   source.addEventListener("absorbed", (event) => {
     const arrivals = JSON.parse((event as MessageEvent).data).arrivals as string[];
-    updateChat(chatKey, (state) => ({
-      ...state,
-      absorbed: state.absorbed.concat(arrivals.filter((id) => !state.absorbed.includes(id))),
-      messages: (state.messages ?? []).map((message) =>
-        message.arrival_id !== undefined && arrivals.includes(message.arrival_id)
-          ? { ...message, arrival_id: undefined }
-          : message,
-      ),
-    }));
+    updateChat(chatKey, (state) => {
+      const fresh = arrivals.filter((id) => !state.absorbed.includes(id));
+      const live = state.live;
+      const reply: Bubble[] =
+        fresh.length && live && (live.text || live.subagents.length)
+          ? [
+              {
+                role: "assistant",
+                text: live.text,
+                ...(live.files ? { files: live.files } : {}),
+                ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
+                ...(live.events.length ? { events: live.events } : {}),
+                ...(live.subagents.length ? { subagents: live.subagents } : {}),
+              },
+            ]
+          : [];
+      const messages = state.messages ?? [];
+      const cut = messages.findIndex(
+        (message) =>
+          (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) ||
+          message.sending !== undefined,
+      );
+      const at = cut === -1 ? messages.length : cut;
+      let inFlight = fresh.filter(
+        (id) => !messages.some((message) => message.arrival_id === id),
+      ).length;
+      const folded = (message: Bubble): Bubble => {
+        if (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) {
+          return { ...message, arrival_id: undefined };
+        }
+        if (message.sending !== undefined && inFlight > 0) {
+          inFlight -= 1;
+          return { ...message, sending: undefined };
+        }
+        return message;
+      };
+      return {
+        ...state,
+        absorbed: state.absorbed.concat(fresh),
+        messages: [...messages.slice(0, at), ...reply, ...messages.slice(at).map(folded)],
+        live:
+          live === null
+            ? null
+            : { ...liveTurn(), meter: live.meter, reconnecting: live.reconnecting },
+      };
+    });
   });
 
   source.addEventListener("tool", (event) => {
@@ -433,13 +483,28 @@ export async function sendMessage(
   // and the two halves are answered apart. The founding send holds the chat busy until it lands.
   if (target.conversationId === null && chatState(chatKey).busy) return;
   bumpEpoch(chatKey);
-  const sent = (chatState(chatKey).messages ?? []).length;
+  const token = String(++SENDS);
   updateChat(chatKey, (state) => ({
     ...state,
     busy: true,
     live: state.live ?? liveTurn(),
-    messages: (state.messages ?? []).concat({ role: "user", text: shown }),
+    messages: (state.messages ?? []).concat({ role: "user", text: shown, sending: token }),
   }));
+  const settled = (key: string, arrivalId: string | null) =>
+    updateChat(key, (state) => ({
+      ...state,
+      messages: (state.messages ?? []).map((message) =>
+        message.sending === token
+          ? {
+              ...message,
+              sending: undefined,
+              ...(arrivalId !== null && !state.absorbed.includes(arrivalId)
+                ? { arrival_id: arrivalId }
+                : {}),
+            }
+          : message,
+      ),
+    }));
   let res: Response;
   try {
     res = await fetch(chatUrl(target), {
@@ -448,10 +513,12 @@ export async function sendMessage(
       credentials: "same-origin",
     });
   } catch {
+    settled(chatKey, null);
     failTurn(chatKey, "Network error — try again.");
     return;
   }
   if (!res.ok) {
+    settled(chatKey, null);
     failTurn(chatKey, "Error " + res.status + " — try again.");
     return;
   }
@@ -465,10 +532,12 @@ export async function sendMessage(
   try {
     accepted = await res.json();
   } catch {
+    settled(chatKey, null);
     failTurn(chatKey, "Network error — try again.");
     return;
   }
   if (typeof accepted.turn_id !== "string") {
+    settled(chatKey, null);
     failTurn(chatKey, MALFORMED_REPLY);
     return;
   }
@@ -477,6 +546,7 @@ export async function sendMessage(
     target.onAccepted?.(target.conversationId);
   } else {
     if (typeof accepted.conversation_id !== "string" || typeof accepted.title !== "string") {
+      settled(chatKey, null);
       failTurn(chatKey, MALFORMED_REPLY);
       return;
     }
@@ -485,16 +555,7 @@ export async function sendMessage(
     target.onCreated?.(accepted.conversation_id, accepted.title);
   }
   const arrivalId = typeof accepted.arrival_id === "string" ? accepted.arrival_id : null;
-  if (arrivalId !== null) {
-    updateChat(streamKey, (state) => ({
-      ...state,
-      messages: (state.messages ?? []).map((message, index) =>
-        index === sent && !state.absorbed.includes(arrivalId)
-          ? { ...message, arrival_id: arrivalId }
-          : message,
-      ),
-    }));
-  }
+  settled(streamKey, arrivalId);
   const joined = arrivalId !== null && accepted.opened_run === false;
   if (joined && tailed(streamKey, accepted.turn_id)) return;
   streamTurn(streamKey, accepted.turn_id, false);

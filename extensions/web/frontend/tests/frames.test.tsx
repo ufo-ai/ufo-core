@@ -178,14 +178,15 @@ test("an arrival the reload found undrained waits until an absorbed frame names 
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("Waiting for the agent to pick this up")).toBeTruthy();
+  await waitFor(() =>
+    expect(screen.getByText("and the tests").classList.contains("italic")).toBe(true),
+  );
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   await waitFor(() =>
-    expect(screen.queryByText("Waiting for the agent to pick this up")).toBeNull(),
+    expect(screen.getByText("and the tests").classList.contains("italic")).toBe(false),
   );
-  expect(screen.getByText("and the tests")).toBeTruthy();
 });
 
 test("a terminal that is not done states the status and error class it carries", async () => {

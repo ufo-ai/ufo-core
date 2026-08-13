@@ -294,16 +294,20 @@ conversation that spawned it: the one being read for a run under a reply, that r
 runs it spawned in turn — which is the conversation the read behind the link authorizes against.
 
 The composer stays live while a turn runs, because a message sent then joins that running turn
-rather than queueing behind it. The member's bubble states the wait under itself — the working pulse
-a reply's running activity already carries, over `Waiting for the agent to pick this up` — and the
-line clears on the turn saying it took that message up, never on the next frame to arrive. A turn
+rather than queueing behind it. The member's bubble states the wait in its own words — the message
+text set italic and muted (`opacity-(--muted)`), no copy added beneath it — and the words take their
+weight back on the turn saying it took that message up, never on the next frame to arrive. A turn
 absorbs what arrived at its round boundaries, so the wait lasts as long as the call the turn is
 inside: the copy promises nothing sooner and nothing counts down against it. It also lasts no longer
 than the stream: a wait names a turn that is working on it, so the stream ending ends the wait too,
 and a row that turn never took up is drawn as waiting again by the next read — the queue knows
-whether it is, and a pulse under a bubble with nothing running only claims it. A row the turn did
+whether it is, and a bubble stating a wait with nothing running only claims it. A row the turn did
 take up stays on the page without the wait until the turn writes it: taken up is not yet written,
-and a message must not vanish between the two. That queue is
+and a message must not vanish between the two. A drain is also a round boundary: the reply streamed
+before it is finished — the engine keeps it in the window ahead of what it folded, never as
+narration for the closing answer to replace — so the page settles it ahead of the folded message,
+where the durable transcript will state it, and the next round streams into a fresh bubble. That
+queue is
 not only the member's: an extension invoking prose into a live turn folds a row the same way, and a
 run's conversation carries what its children deliver. So whose message a row is is the row's
 admission source, and a wait is stated only over a member's own and only against a turn that can
@@ -311,7 +315,8 @@ take it up — an agent's prompt draws its bubble, because the reply answers it,
 the member's; a run's turn takes up only what its children deliver, so an external row on its page
 is stated with no wait at all. The same fact decides what the turn publishes: the frame a drain
 pushes names the member rows it folded, so a surface answering “did it land?” off that frame — the
-portal's pulse, Slack's thread status — never says it of a message no member sent. The composer is
+portal's wait styling, Slack's thread status — never says it of a message no member sent. The
+composer is
 dead only where there is nothing to send into — a conversation that has not loaded, and the moment a
 first message is opening one. The `new` sentinel opens a conversation per request, so a second send
 before the first answers founds a second conversation instead of joining the first and the two halves
