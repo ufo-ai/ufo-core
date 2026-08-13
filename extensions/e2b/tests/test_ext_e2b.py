@@ -39,15 +39,15 @@ from ufo_ext_e2b import (
     CA_STAGING_PATH,
     CARRIER_NAME,
     CONVERSATION_METADATA_KEY,
-    DEFAULT_IDLE_SECONDS,
+    DIAL_LEASE_SECONDS,
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
     E2B_NETWORK,
     E2B_TEMPLATES_ENV,
     ENSURE_WORKSPACE_COMMAND,
-    EXEC_LEASE_MARGIN_SECONDS,
     EXEC_TIMEOUT_CODE,
     INSTALL_CA_COMMAND,
+    LEASE_MARGIN_SECONDS,
     NODE_GLOBAL_MODULES,
     PLAYWRIGHT_BROWSERS_DIR,
     PREPARE_ATTEMPTS,
@@ -1094,40 +1094,53 @@ def _events(caplog: pytest.LogCaptureFixture, name: str) -> list[dict[str, objec
     return [record.ufo for record in caplog.records if record.getMessage() == name]
 
 
-async def test_a_standing_lease_covers_a_command_without_a_round_trip() -> None:
-    """The lease `create` opens already outlives anything the bash tool can ask for, so the common
-    case reaches the provider once, for the command itself. Renewing per call would put a
-    control-plane round trip in front of every tool call a turn makes."""
+def test_the_autosuspend_span_is_five_minutes() -> None:
+    """The lease IS the autosuspend: a sandbox untouched for this span pauses and releases its
+    concurrency slot. Five minutes is the deliberate trade after the 2026-08-13 slot exhaustion —
+    finished work frees its slot three times sooner, and a turn that thinks past the span pays a
+    sub-second auto-resume on its next call rather than holding a slot through the silence."""
+    assert SANDBOX_LEASE_SECONDS == 300
+
+
+async def test_a_standing_lease_covers_short_commands_without_a_round_trip() -> None:
+    """A command asks the lease only for its own timeout plus the answer margin, so the common case
+    reaches the provider once, for the command itself. Renewing per call would put a control-plane
+    round trip in front of every tool call a turn makes."""
     sdk, carrier = _leased(_Clock())
     handle = await carrier.create(_spec(uuid4()))
 
     for _ in range(5):
-        await carrier.exec(handle, ("bash", "-lc", "sleep 590"), 600)
+        await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
 
     assert sdk.created[0]["timeout"] == SANDBOX_LEASE_SECONDS
     assert sdk.connected == []
 
 
 async def test_a_command_longer_than_the_standing_lease_leases_past_it() -> None:
-    """The lease is sized to outlast the tool's own ceiling, but the carrier does not assume that
-    ceiling: a command asking for more than the standing lease gets one sized to the command, so
-    raising the tool's cap can never silently reintroduce a container that pauses mid-command."""
+    """A command asking for more than the standing lease gets one sized to the command, so no
+    timeout a tool can raise reintroduces a container that pauses mid-command."""
     sdk, carrier = _leased(_Clock())
     handle = await carrier.create(_spec(uuid4()))
 
     await carrier.exec(handle, ("bash", "-lc", "sleep 3500"), 3_600)
 
-    assert sdk.connect_leases == [3_600 + EXEC_LEASE_MARGIN_SECONDS]
+    assert sdk.connect_leases == [3_600 + LEASE_MARGIN_SECONDS]
 
 
-def test_the_standing_lease_covers_the_longest_command_the_tool_can_ask_for() -> None:
-    """Skipping the renewal is only safe while no need the tool surface can raise reaches the
-    standing lease. `bash`'s ceiling is the largest of them, so lifting it past the lease is the one
-    edit that would quietly turn that skip into a container paused mid-command — pinned here rather
-    than argued in a docstring."""
-    longest_need = MAX_BASH_TIMEOUT_MS // 1000 + EXEC_LEASE_MARGIN_SECONDS
+async def test_a_bash_command_at_the_tools_ceiling_never_pauses_mid_run() -> None:
+    """The bash tool's ceiling outruns the five-minute autosuspend, so the renewal is what keeps a
+    long build or test run alive: the exec buys a lease covering its whole timeout before running,
+    and the container cannot pause under it."""
+    sdk, carrier = _leased(_Clock())
+    handle = await carrier.create(_spec(uuid4()))
+    ceiling = MAX_BASH_TIMEOUT_MS // 1000
 
-    assert longest_need <= SANDBOX_LEASE_SECONDS
+    result = await carrier.exec(handle, ("bash", "-lc", "make test"), ceiling)
+
+    assert result.exit_code == 0
+    assert ceiling > SANDBOX_LEASE_SECONDS
+    assert sdk.connect_leases == [ceiling + LEASE_MARGIN_SECONDS]
+    assert not sdk.sandboxes["sbx-1"].provider.paused
 
 
 async def test_a_turn_still_working_when_the_lease_runs_low_renews_it(
@@ -1140,12 +1153,12 @@ async def test_a_turn_still_working_when_the_lease_runs_low_renews_it(
     sdk, carrier = _leased(clock)
     handle = await carrier.create(_spec(uuid4()))
 
-    await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+    await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
     assert sdk.connected == []
 
     clock.advance(SANDBOX_LEASE_SECONDS - 100)
     with caplog.at_level(logging.INFO, logger="ufo"):
-        await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+        await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
 
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
     assert not sdk.sandboxes["sbx-1"].provider.paused
@@ -1168,11 +1181,11 @@ async def test_a_renewed_lease_carries_the_calls_after_it() -> None:
     sdk, carrier = _leased(clock)
     handle = await carrier.create(_spec(uuid4()))
     clock.advance(SANDBOX_LEASE_SECONDS - 100)
-    await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+    await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
 
     for _ in range(3):
-        await carrier.exec(handle, ("bash", "-lc", "sleep 240"), 300)
+        await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
 
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
 
@@ -1186,23 +1199,23 @@ async def test_the_lease_deadline_is_taken_before_the_call_that_sets_it() -> Non
     clock = _Clock()
     sdk, carrier = _leased(clock)
     sdk.on_call = lambda: clock.advance(100)
+    needed = 2 + LEASE_MARGIN_SECONDS
     opened = clock.now
     handle = await carrier.create(_spec(uuid4()))
 
-    clock.now = opened + SANDBOX_LEASE_SECONDS - DEFAULT_IDLE_SECONDS + 1
+    clock.now = opened + SANDBOX_LEASE_SECONDS - needed + 1
     renewed_at = clock.now
     await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
 
-    clock.now = renewed_at + SANDBOX_LEASE_SECONDS - DEFAULT_IDLE_SECONDS + 1
+    clock.now = renewed_at + SANDBOX_LEASE_SECONDS - needed + 1
     await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
 
     assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS, SANDBOX_LEASE_SECONDS]
 
 
-async def test_a_write_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
-    """A write is the same kind of work and renews the same lease. The span it asks for is the idle
-    one, not its own duration: what has to survive is the model's thinking after the write, so a
-    turn offloading a run of results must not lose the container between two of them."""
+async def test_a_write_under_a_covering_lease_buys_no_round_trip() -> None:
+    """A write asks the lease only for the answer margin, so a standing lease carries a run of
+    offloaded results without a control-plane call per file."""
     clock = _Clock()
     sdk, carrier = _leased(clock)
     handle = await carrier.create(_spec(uuid4()))
@@ -1210,21 +1223,69 @@ async def test_a_write_renews_a_lease_that_no_longer_covers_the_idle_span() -> N
 
     await carrier.write(handle, "/workspace/out.txt", b"payload")
 
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+    assert sdk.connect_leases == []
 
 
-async def test_a_dial_renews_a_lease_that_no_longer_covers_the_idle_span() -> None:
-    """A caller dialling a port is about to reach the service behind it, so the dial renews the
-    same lease — an address is worthless if the container pauses before the exchange."""
+async def test_a_write_renews_a_lease_that_no_longer_covers_it() -> None:
+    """A write near the lease's end renews the same lease the commands do, back to the full
+    autosuspend span — the provider must not pause the container mid-upload."""
     clock = _Clock()
     sdk, carrier = _leased(clock)
     handle = await carrier.create(_spec(uuid4()))
-    clock.advance(SANDBOX_LEASE_SECONDS - 100)
+    clock.advance(SANDBOX_LEASE_SECONDS - 30)
+
+    await carrier.write(handle, "/workspace/out.txt", b"payload")
+
+    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_a_read_holds_the_full_autosuspend_span_before_streaming() -> None:
+    """A read's stream is an open connection that cannot renew mid-flight, and a pause severs it
+    with no self-heal — so unlike a write's bounded body, the stream starts only with the whole
+    span ahead of it, the same floor the transfer had before the span shrank."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    sdk.sandboxes["sbx-1"].files.chunks = (b"pay", b"load")
+    clock.advance(100)
+
+    whole = [chunk async for chunk in carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")]
+
+    assert b"".join(whole) == b"payload"
+    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+
+
+async def test_a_dial_leases_the_long_span_for_the_exchange_it_cannot_see() -> None:
+    """The address a dial hands out is consumed off-carrier — a turn's CDP session, a site
+    request's stream — so nothing renews while the exchange runs and a pause severs it with no
+    reconnect. The dial therefore guarantees the autosuspend span ahead and renews to the long
+    dial span, the same contract browsing had before the autosuspend shrank."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    clock.advance(SANDBOX_LEASE_SECONDS - 30)
 
     target = await carrier.dial(handle, 9223)
 
     assert target.host == "9223-sbx-1.e2b.test"
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
+    assert DIAL_LEASE_SECONDS > SANDBOX_LEASE_SECONDS
+
+
+async def test_a_dial_under_a_long_lease_buys_no_round_trip() -> None:
+    """The ingress dials per request, so a site under traffic must ride the standing dial lease
+    rather than pay a control-plane call per page load."""
+    clock = _Clock()
+    sdk, carrier = _leased(clock)
+    handle = await carrier.create(_spec(uuid4()))
+    clock.advance(30)
+    await carrier.dial(handle, 9223)
+    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
+    clock.advance(100)
+
+    await carrier.dial(handle, 9223)
+
+    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
 
 
 async def test_an_expired_lease_is_dropped_and_the_next_dial_reconnects() -> None:
@@ -1261,7 +1322,7 @@ async def test_a_process_that_reconnects_carries_the_lease_on_connect() -> None:
 
     await restarted.exec(handle, ("bash", "-lc", "sleep 500"), 540)
 
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
+    assert sdk.connect_leases == [540 + LEASE_MARGIN_SECONDS]
 
 
 async def test_a_turn_whose_lease_lapsed_resumes_the_paused_container(
@@ -1305,7 +1366,7 @@ async def test_a_provider_fault_leaves_no_lease_for_the_next_call_to_trust(
     sdk.sandboxes["sbx-1"].commands.raises = severed
 
     with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(httpcore.RemoteProtocolError):
-        await carrier.exec(handle, ("bash", "-lc", "make"), 600)
+        await carrier.exec(handle, ("bash", "-lc", "make"), 120)
     assert _events(caplog, "sandbox.e2b.lease_dropped") == [
         {"conversation_id": str(handle.conversation_id), "during": "exec"}
     ]

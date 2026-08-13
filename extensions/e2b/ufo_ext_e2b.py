@@ -83,9 +83,21 @@ SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
 }
-DEFAULT_IDLE_SECONDS = 300
-SANDBOX_LEASE_SECONDS = 900
-EXEC_LEASE_MARGIN_SECONDS = 60
+SANDBOX_LEASE_SECONDS = 300
+"""The autosuspend span: every create, resume, and renewal leases at least this much, so a sandbox
+pauses — and releases its concurrency slot — within five minutes of its last leased call. Work that
+outruns it never pauses mid-run, because each call leases past its own need; a turn that thinks past
+it pays a sub-second auto-resume on its next call rather than holding a slot through the silence."""
+LEASE_MARGIN_SECONDS = 60
+"""Room past a call's own span for the provider to answer — what `exec` adds to a command's timeout
+and the whole span a bounded upload asks of the lease. A `read` is the exception: its stream cannot
+renew mid-flight, so it asks for the full autosuspend span instead."""
+DIAL_LEASE_SECONDS = 900
+"""What a dial's renewal leases. The address a dial hands out is consumed off-carrier — a turn's
+CDP session, a site request's stream — so no carrier call renews while the exchange runs, and a
+pause severs it with nothing upstream that reconnects. The dial guarantees the autosuspend span
+ahead and renews to this, so a conversation that dialed holds its slot up to fifteen minutes;
+everything else frees at the autosuspend span."""
 EXEC_TIMEOUT_CODE = 124
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
@@ -242,9 +254,6 @@ class E2BCarrier:
     templates: Mapping[str, str]
     """One published template per sandbox size — the build allocates cpu and memory per tier, so
     which template a fresh sandbox is created from is what `SandboxSpec.size` decides."""
-    idle_seconds: int = DEFAULT_IDLE_SECONDS
-    """The span every piece of work needs the container to survive regardless of its own length: it
-    is the model's thinking between two tool calls, not the calls, that a lease has to outlast."""
     sdk: E2BSdk = E2B_SDK
     clock: Callable[[], float] = time.monotonic
     resume_prepare_seconds: float = RESUME_PREPARE_TIMEOUT_SECONDS
@@ -540,17 +549,16 @@ class E2BCarrier:
         session reads exactly as the shell's own exit code would. It runs under the turn's egress
         env, so its every network call routes through the proxy with the turn's run token — the raw
         model key never enters the sandbox and every request is metered. What it asks of the lease
-        is its own timeout with room for the provider to answer, so the container cannot pause
-        mid-command, and never less than the idle span, which is what carries the container across
-        the model's thinking between one command and the next.
+        is its own timeout with room for the provider to answer, so however long the command, the
+        container cannot pause mid-run; the model's thinking between commands rides whatever the
+        standing lease still holds, and a gap that outruns it costs a sub-second resume, never a
+        lost turn.
 
         A stream severed while the command runs arrives as neither of those SDK exceptions, and as
         no class this can name. The command itself keeps running inside the sandbox and completes,
         so this is never retried — it is reported, and the lease is
         dropped so the next call reattaches rather than trust a deadline the provider abandoned."""
-        sandbox = await self._sandbox(
-            handle, max(self.idle_seconds, timeout_s + EXEC_LEASE_MARGIN_SECONDS)
-        )
+        sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
         command = shlex.join(argv)
         try:
             result = await sandbox.commands.run(
@@ -575,7 +583,7 @@ class E2BCarrier:
         line, since `commands.run` takes a shell string with no stdin. A failed upload drops the
         lease for the same reason a severed command does: the provider answered for a container the
         deadline here still vouches for."""
-        sandbox = await self._sandbox(handle, self.idle_seconds)
+        sandbox = await self._sandbox(handle, LEASE_MARGIN_SECONDS)
         try:
             await sandbox.files.write(path, content)
         except Exception:
@@ -587,8 +595,10 @@ class E2BCarrier:
         as its own chunked response — so an arbitrarily large produced file crosses in bounded
         pieces and never sits whole in this process. The reader holds an open connection with no
         finalizer that can release it, so it is closed on every exit path, including a consumer
-        that stops mid-file."""
-        sandbox = await self._sandbox(handle, self.idle_seconds)
+        that stops mid-file. The stream cannot renew mid-flight and a pause severs it with no
+        self-heal, so it asks the lease for the whole autosuspend span up front — a margin would
+        pause the container under a transfer the margin underestimates."""
+        sandbox = await self._sandbox(handle, SANDBOX_LEASE_SECONDS)
         try:
             stream = await sandbox.files.read(path, format="stream")
         except FileNotFoundException as error:
@@ -615,11 +625,14 @@ class E2BCarrier:
         token. The generic inbound path for any service the turn started inside the container (a
         browser's CDP endpoint, a site's dev-server preview). `get_host` is pure address formatting,
         no round trip — the lease is what the caller is really asking for, since an address is
-        worthless if the container pauses before the dial. A sandbox the provider no longer has
+        worthless if the container pauses before the exchange, and the exchange itself runs where
+        no carrier call can renew it. A sandbox the provider no longer has
         raises `SandboxNotFoundException` on reconnect — not this carrier's contract to leak — so it
         maps to `SandboxUnreachable`, the one error every carrier's `dial` raises."""
         try:
-            sandbox = await self._sandbox(handle, self.idle_seconds)
+            sandbox = await self._sandbox(
+                handle, SANDBOX_LEASE_SECONDS, span_floor=DIAL_LEASE_SECONDS
+            )
         except SandboxNotFoundException as error:
             raise SandboxUnreachable(f"e2b sandbox {handle.container_id!r} is gone") from error
         token = sandbox.traffic_access_token
@@ -629,11 +642,16 @@ class E2BCarrier:
             headers={TRAFFIC_ACCESS_HEADER: token} if token else {},
         )
 
-    async def _sandbox(self, handle: SandboxHandle, needed_seconds: int) -> E2BSandbox:
+    async def _sandbox(
+        self,
+        handle: SandboxHandle,
+        needed_seconds: int,
+        span_floor: int = SANDBOX_LEASE_SECONDS,
+    ) -> E2BSandbox:
         """The conversation's sandbox, leased past the work about to run on it. Every caller states
         the span it needs and a standing lease that already covers it is used as it stands: renewing
         per call would put a control-plane round trip in front of every tool call, and the lease is
-        sized so a working turn buys one about every ten minutes instead of one per command.
+        sized so a working turn buys one every few minutes instead of one per command.
 
         The deadline held here is a belief about a clock the provider owns, so what makes it safe to
         trust is that the only operation it gates is `connect`, which is correct whether or not the
@@ -656,7 +674,7 @@ class E2BCarrier:
         ):
             return lease.sandbox
         self._live.pop(handle.conversation_id, None)
-        span = max(SANDBOX_LEASE_SECONDS, needed_seconds)
+        span = max(span_floor, needed_seconds)
         sandbox = await self._connected(handle.conversation_id, handle.container_id, span)
         self._live[handle.conversation_id] = _Lease(sandbox, renewed + span)
         log(
