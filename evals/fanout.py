@@ -33,6 +33,9 @@ OUTPUTS = {
     "out/gamma.txt": "NONCE-GAMMA-1f90",
 }
 DISPATCH_TOOL = "run_independent_steps"
+SPAWN_TOOL = "spawn_subagent"
+CONCURRENT_WITHIN_SECONDS = 20.0
+MIN_WORKERS = 3
 PLAN_TOOL = "plan_objective"
 MIN_INDEPENDENT = 2
 MIN_SECONDS = 150.0
@@ -92,28 +95,98 @@ async def _grade(observation: ArcObservation) -> ArcVerdict:
     )
 
 
-CASES = (
-    ArcCase(
-        name="independent_steps_fan_out",
-        message=(
-            "Three jobs, and none of them needs anything from the others. Read "
-            "inputs/alpha.txt and copy the code in it to out/alpha.txt. Read inputs/beta.txt and "
-            "copy its code to out/beta.txt. Read inputs/gamma.txt and copy its code to "
-            "out/gamma.txt. Do not read the input files yourself — delegate each job to a worker. "
-            "Record an objective first so the work survives this turn, then end your turn without "
-            "waiting for the workers."
-        ),
-        grader=_grade,
-        grading=(
-            "The opening turn records an objective whose steps are marked independent, dispatches "
-            "them together rather than one at a time or by hand, ends, and the turns woken by the "
-            "workers' results leave every nonce at its named output path."
-        ),
-        min_seconds=MIN_SECONDS,
-        deadline_seconds=600.0,
-        workspace_files=tuple(
-            WorkspaceFile(path=path, content=f"code: {nonce}\n".encode())
-            for path, nonce in SOURCES.items()
-        ),
+_FAN_OUT = ArcCase(
+    name="independent_steps_fan_out",
+    message=(
+        "Three jobs, and none of them needs anything from the others. Read "
+        "inputs/alpha.txt and copy the code in it to out/alpha.txt. Read inputs/beta.txt and "
+        "copy its code to out/beta.txt. Read inputs/gamma.txt and copy its code to "
+        "out/gamma.txt. Do not read the input files yourself — delegate each job to a worker. "
+        "Record an objective first so the work survives this turn, then end your turn without "
+        "waiting for the workers."
+    ),
+    grader=_grade,
+    grading=(
+        "The opening turn records an objective whose steps are marked independent, dispatches "
+        "them together rather than one at a time or by hand, ends, and the turns woken by the "
+        "workers' results leave every nonce at its named output path."
+    ),
+    min_seconds=MIN_SECONDS,
+    deadline_seconds=600.0,
+    workspace_files=tuple(
+        WorkspaceFile(path=path, content=f"code: {nonce}\n".encode())
+        for path, nonce in SOURCES.items()
     ),
 )
+
+
+async def _grade_plain_delegation(observation: ArcObservation) -> ArcVerdict:
+    """Whether ordinary delegation already overlaps, with no objective in play.
+
+    This is the control for `independent_steps_fan_out`. If three plain spawns in one turn already
+    run at the same time, concurrency was never the missing capability and `run_independent_steps`
+    buys only a shape that is declared and durable — worth having for a turn that wakes with no
+    memory, worth nothing for work that finishes in one. If they instead run one after another, the
+    fan-out is reachable today only through an objective, which agents correctly decline to record
+    for short work, and that is the gap to close.
+
+    Overlap is read from when each child started. Sharing one parent turn is not enough on its own:
+    an agent can spawn three children in three successive rounds of the same turn, which is serial
+    work wearing the shape of a batch.
+    """
+    children = observation.children
+    if len(children) < MIN_WORKERS:
+        return ArcVerdict(
+            False,
+            f"only {len(children)} worker(s) were spawned for three independent jobs; the turn "
+            f"called {sorted(set(observation.opening_calls))}",
+        )
+    parents = {child.parent_turn_id for child in children}
+    if len(parents) != 1:
+        return ArcVerdict(
+            False,
+            f"{len(children)} workers were spread across {len(parents)} parent turns, so the work "
+            "was delegated a turn at a time rather than together",
+        )
+    starts = sorted(child.started_at for child in children if child.started_at is not None)
+    if len(starts) < MIN_WORKERS:
+        return ArcVerdict(False, "the observation carried no start time for every worker")
+    spread = (starts[-1] - starts[0]).total_seconds()
+    if spread > CONCURRENT_WITHIN_SECONDS:
+        return ArcVerdict(
+            False,
+            f"{len(children)} workers under one turn but their starts spanned {spread:.0f}s, so "
+            "they ran one after another rather than at once",
+        )
+    return ArcVerdict(
+        True,
+        f"{len(children)} workers started within {spread:.0f}s under one turn, so ordinary "
+        "delegation already overlaps without an objective",
+    )
+
+
+_PLAIN = ArcCase(
+    name="plain_delegation_overlaps",
+    message=(
+        "Three jobs, and none of them needs anything from the others. Read "
+        "inputs/alpha.txt and copy the code in it to out/alpha.txt. Read inputs/beta.txt and "
+        "copy its code to out/beta.txt. Read inputs/gamma.txt and copy its code to "
+        "out/gamma.txt. Hand each job to its own worker rather than reading the files "
+        "yourself."
+    ),
+    grader=_grade_plain_delegation,
+    grading=(
+        "Three workers are spawned from one turn and start within seconds of each other, which "
+        "says ordinary delegation already runs them at once. Starts spread over a longer window "
+        "say the turn delegated serially and only an objective can widen the fan-out."
+    ),
+    min_seconds=MIN_SECONDS,
+    deadline_seconds=600.0,
+    workspace_files=tuple(
+        WorkspaceFile(path=path, content=f"code: {nonce}\n".encode())
+        for path, nonce in SOURCES.items()
+    ),
+)
+
+
+CASES = (_FAN_OUT, _PLAIN)

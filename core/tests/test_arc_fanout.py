@@ -6,12 +6,20 @@ dispatched together all end with the same bytes on disk. So each way the shape c
 own case — a smoke that collapses them into one failure cannot say which happened.
 """
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from evals.fanout import CASES, DISPATCH_TOOL, OUTPUTS, PLAN_TOOL, _grade
+from evals.fanout import (
+    CASES,
+    DISPATCH_TOOL,
+    OUTPUTS,
+    PLAN_TOOL,
+    _grade,
+    _grade_plain_delegation,
+)
 from evals.harness.arc import ArcCase, ArcObservation, ArcTurn
 
 
@@ -97,19 +105,19 @@ async def test_outputs_alone_do_not_pass_the_case(tmp_path: Path) -> None:
 def test_the_case_seeds_every_source_it_asks_the_agent_to_read() -> None:
     """A case whose inputs are missing measures the agent failing to read a file that was never
     there."""
-    (case,) = CASES
-    seeded = {file.path for file in case.workspace_files}
-    assert seeded
-    for path in seeded:
-        assert path.startswith("inputs/")
+    for case in CASES:
+        seeded = {file.path for file in case.workspace_files}
+        assert seeded, case.name
+        for path in seeded:
+            assert path.startswith("inputs/"), case.name
 
 
 def test_the_case_never_names_the_dispatch_tool_in_its_prompt() -> None:
     """Naming the tool measures instruction-following. The question is whether the agent reaches for
     the fan-out when the work is independent and nothing told it to."""
-    (case,) = CASES
-    assert DISPATCH_TOOL not in case.message
-    assert "independent" not in case.message
+    for case in CASES:
+        assert DISPATCH_TOOL not in case.message, case.name
+        assert "independent" not in case.message, case.name
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
@@ -118,3 +126,50 @@ def test_the_case_waits_past_a_dispatch_before_it_reads(case: ArcCase) -> None:
     the wake it exists to observe."""
     assert case.min_seconds > 0
     assert case.deadline_seconds > case.min_seconds
+
+
+async def test_serial_workers_under_one_turn_are_not_concurrency(tmp_path: Path) -> None:
+    """Sharing a parent turn is not overlap. An agent can spawn three workers in three successive
+    rounds of the same turn, which is serial work wearing the shape of a batch — so the control case
+    reads when each child started, not merely whose child it is."""
+    parent = uuid4()
+    base = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+    serial = tuple(
+        ArcTurn(
+            turn_id=uuid4(),
+            seq=1,
+            admission_source="internal",
+            status="done",
+            inbound="",
+            reply="",
+            parent_turn_id=parent,
+            subagent_profile="general_purpose",
+            started_at=base + timedelta(minutes=index * 2),
+        )
+        for index in range(3)
+    )
+    verdict = await _grade_plain_delegation(observation(tmp_path, (turn(1),), children=serial))
+    assert not verdict.passed
+    assert "one after another" in verdict.reason
+
+
+async def test_overlapping_workers_under_one_turn_are_concurrency(tmp_path: Path) -> None:
+    parent = uuid4()
+    base = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+    together = tuple(
+        ArcTurn(
+            turn_id=uuid4(),
+            seq=1,
+            admission_source="internal",
+            status="done",
+            inbound="",
+            reply="",
+            parent_turn_id=parent,
+            subagent_profile="general_purpose",
+            started_at=base + timedelta(seconds=index),
+        )
+        for index in range(3)
+    )
+    verdict = await _grade_plain_delegation(observation(tmp_path, (turn(1),), children=together))
+    assert verdict.passed
+    assert "already overlaps" in verdict.reason

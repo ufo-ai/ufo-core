@@ -47,6 +47,7 @@ class ArcTurn:
     reply: str
     parent_turn_id: UUID | None
     subagent_profile: str | None
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +295,7 @@ class ArcRun:
                         tables.turn.c.terminal,
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.subagent_profile,
+                        tables.turn.c.created_at,
                     )
                     .where(
                         sa.or_(
@@ -351,4 +353,5 @@ def _arc_turn(row: sa.Row[tuple[object, ...]]) -> ArcTurn:
         reply=terminal.text if terminal is not None else "",
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
+        started_at=row.created_at,
     )
