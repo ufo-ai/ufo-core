@@ -18,6 +18,8 @@ const RECONNECT_ATTEMPTS: u32 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 
 fn main() {
+    #[cfg(unix)]
+    adopt_tty_stdin();
     let args: Vec<String> = env::args().skip(1).collect();
     let home = config::Home::resolve();
     let mut rest: &[String] = &args;
@@ -105,6 +107,42 @@ fn main() {
 fn die(message: &str) -> ! {
     eprintln!("ufo: {message}");
     process::exit(1);
+}
+
+/// A `curl | sh` install leaves the exec'd binary with the exhausted pipe as stdin. The member is
+/// still at a terminal, so input comes from the terminal itself — the shell client read every
+/// prompt from `/dev/tty`. The terminal is adopted by its real device name (`ttyname` of stdout
+/// or stderr) because macOS refuses to register the `/dev/tty` alias with kqueue, which is what
+/// the event reader polls; the alias remains the fallback for the fully redirected case, whose
+/// plain-mode reads are blocking and never poll. A process with no terminal keeps its pipe.
+#[cfg(unix)]
+fn adopt_tty_stdin() {
+    use std::io::IsTerminal;
+    use std::os::fd::AsRawFd;
+    if std::io::stdin().is_terminal() {
+        return;
+    }
+    let named = [libc::STDOUT_FILENO, libc::STDERR_FILENO]
+        .into_iter()
+        .find(|&fd| unsafe { libc::isatty(fd) } == 1)
+        .and_then(|fd| {
+            let name = unsafe { libc::ttyname(fd) };
+            if name.is_null() {
+                return None;
+            }
+            Some(
+                unsafe { std::ffi::CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        });
+    let path = named.unwrap_or_else(|| "/dev/tty".to_string());
+    let Ok(tty) = std::fs::File::open(&path) else {
+        return;
+    };
+    unsafe {
+        libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO);
+    }
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
