@@ -3291,6 +3291,7 @@ async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bub
         body="also check the tests",
         admission_source="member",
         speaker_member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)"),
     )
     invoked = await _seed_pending_arrival(
         workspace_id,
@@ -3309,6 +3310,7 @@ async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bub
         admission_source="member",
         speaker_member_id=member_id,
         consumed_turn_id=running,
+        context=TurnContext(sender="Mel Okafor (m@example.com)"),
     )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path / "blobs"))
 
@@ -3325,6 +3327,13 @@ async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bub
         (folded, False),
     ]
 
+    spoken = await context.arrival_speakers(conversation_id)
+
+    assert {(row.id, row.sender, row.speaker_member_id) for row in spoken} == {
+        (spoke, "Mel Okafor (m@example.com)", member_id),
+        (folded, "Mel Okafor (m@example.com)", member_id),
+    }
+
 
 async def _seed_pending_arrival(
     workspace_id: UUID,
@@ -3336,6 +3345,7 @@ async def _seed_pending_arrival(
     admission_source: str,
     speaker_member_id: UUID | None = None,
     consumed_turn_id: UUID | None = None,
+    context: TurnContext | None = None,
 ) -> UUID:
     arrival_id = uuid4()
     async with workspace_tx() as connection:
@@ -3350,6 +3360,7 @@ async def _seed_pending_arrival(
                 speaker_member_id=speaker_member_id,
                 admitted_turn_id=turn_id,
                 consumed_turn_id=consumed_turn_id,
+                context=None if context is None else context.model_dump(mode="json"),
                 created_at=sa.func.now(),
             )
         )

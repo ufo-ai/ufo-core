@@ -131,6 +131,25 @@ test("a reloaded conversation states its latest activity and opens onto the rest
   expect(screen.queryByText("Running the focused tests")).toBeNull();
 });
 
+test("a bubble another member spoke names them, and the viewer's own carries no name", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "draft the tweets", speaker: "Sam Frost (peer@example.com)" },
+        { role: "assistant", text: "Drafted." },
+        { role: "user", text: "thanks" },
+      ],
+    }),
+  );
+  open();
+
+  const named = (await screen.findByText("draft the tweets")).closest("[data-role=me]");
+  expect(named && within(named as HTMLElement).getByText("Sam Frost")).toBeTruthy();
+  expect(screen.queryByText(/peer@example\.com/)).toBeNull();
+  const own = screen.getByText("thanks").closest("[data-role=me]");
+  expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
+});
+
 test("a conversation reloaded while its turn runs shows the prompt, says so, and tails the turn", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();

@@ -24,7 +24,7 @@ privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
@@ -913,12 +913,19 @@ def _rendered_messages(
     subagents: SubagentRuns | None = None,
     turn_ids: frozenset[str] = frozenset(),
     agent_origin: frozenset[str] = frozenset(),
+    speakers: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
     delivered subagent result carries the wire's element around the child's output, and both would
     otherwise read as words the member typed. The reply that answers it still renders — the member
-    reads the agent coming back to them, which is what happened."""
+    reads the agent coming back to them, which is what happened.
+
+    A bubble states the member's own words, never the prompt the turn ran on: a channel surface
+    fences those words between the ambient digest and their attachments, and
+    `member_message_text` is what takes them back out. `speakers` names who spoke each turn — the
+    bubble carries the label so a conversation more members than the viewer are in reads as who
+    said what."""
     subagents = subagents or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
@@ -974,13 +981,17 @@ def _rendered_messages(
             flush_reply(False)
         if turn_id in agent_origin:
             continue
-        rendered.append({"role": "user", "text": text})
+        bubble: dict[str, object] = {"role": "user", "text": member_message_text(text)}
+        label = None if speakers is None or turn_id is None else speakers.get(turn_id)
+        if label is not None:
+            bubble["speaker"] = label
+        rendered.append(bubble)
     flush_reply(True)
     return rendered
 
 
 async def _conversation_messages(
-    ctx: SurfaceContext, conversation_id: UUID
+    ctx: SurfaceContext, conversation_id: UUID, viewer: UUID
 ) -> tuple[list[dict[str, object]], Turn | None]:
     """One conversation as every portal surface renders it — the live chat, the read-only
     transcript an agent's conversations open, and a subagent run's own page: the engine's
@@ -1012,11 +1023,23 @@ async def _conversation_messages(
     A run answers its parent by calling finish, and the payload that call carried is what the
     transcript closes with — so a conversation whose turns ran a profile states its replies as the
     answer it wrote, whole. Only such a conversation: the same words from a main agent are a reply
-    it composed, and reading them as a payload would drop every field it meant to show."""
-    recorded, agent_origin = await asyncio.gather(
+    it composed, and reading them as a payload would drop every field it meant to show.
+
+    A bubble names its speaker as the display line the admitting surface reported — except the
+    `viewer`'s own: their bubbles are the unlabelled default, so the label marks exactly the words
+    somebody else said. The transcript refers to a message by the turn it founded or, for one
+    folded into a running turn, by its queue row, so the speakers map is keyed by both — a folded
+    message keeps its speaker after the turn writes it."""
+    recorded, agent_origin, spoken = await asyncio.gather(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
+        ctx.arrival_speakers(conversation_id),
     )
+    speakers = {
+        str(arrival.id): arrival.sender
+        for arrival in spoken
+        if arrival.sender is not None and arrival.speaker_member_id != viewer
+    }
     if recorded is None:
         rendered: list[dict[str, object]] = []
     else:
@@ -1029,6 +1052,14 @@ async def _conversation_messages(
             await _subagent_nodes(ctx, spawned),
             frozenset(str(turn.id) for turn in turns),
             agent_origin,
+            speakers
+            | {
+                str(turn.id): turn.context.sender
+                for turn in turns
+                if turn.context is not None
+                and turn.context.sender is not None
+                and turn.speaker_member_id != viewer
+            },
         )
         if any(turn.subagent_profile is not None for turn in turns):
             for reply in rendered:
@@ -1039,7 +1070,17 @@ async def _conversation_messages(
     if detail is None:
         return rendered, None
     if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
-        rendered.append({"role": "user", "text": member_message_text(detail.turn.inbound)})
+        prompt: dict[str, object] = {
+            "role": "user",
+            "text": member_message_text(detail.turn.inbound),
+        }
+        if (
+            detail.turn.context is not None
+            and detail.turn.context.sender is not None
+            and detail.turn.speaker_member_id != viewer
+        ):
+            prompt["speaker"] = detail.turn.context.sender
+        rendered.append(prompt)
     draining = detail.turn.id if detail.turn.terminal is None else None
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
         if str(arrival.id) in agent_origin:
@@ -1048,6 +1089,9 @@ async def _conversation_messages(
             "role": "user",
             "text": member_message_text(arrival.inbound),
         }
+        label = speakers.get(str(arrival.id))
+        if label is not None:
+            bubble["speaker"] = label
         if (
             arrival.waiting
             and arrival.admission_source == MEMBER_ADMISSION
@@ -1068,7 +1112,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    _member_id, email, audience = resolved
+    member_id, email, audience = resolved
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
@@ -1081,7 +1125,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         return Response("no such conversation", status_code=404)
     if await _own_chat(web_extension().store, agent_id, email, conversation_id) is None:
         return Response("no such conversation", status_code=404)
-    rendered, turn = await _conversation_messages(ctx, conversation_id)
+    rendered, turn = await _conversation_messages(ctx, conversation_id, member_id)
     if turn is None:
         return JSONResponse({"messages": rendered})
     if turn.terminal is None:
@@ -1594,8 +1638,8 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
-    _agent_id, conversation_id, _viewer = authorized
-    rendered, _turn = await _conversation_messages(ctx, conversation_id)
+    _agent_id, conversation_id, viewer = authorized
+    rendered, _turn = await _conversation_messages(ctx, conversation_id, viewer.member_id)
     return JSONResponse({"messages": rendered})
 
 
@@ -2029,7 +2073,7 @@ async def subagent_conversation(ctx: SurfaceContext, request: Request) -> Respon
     )
     if run is None:
         return Response("no such conversation", status_code=404)
-    rendered, _turn = await _conversation_messages(ctx, conversation_id)
+    rendered, _turn = await _conversation_messages(ctx, conversation_id, member_id)
     return JSONResponse({"run": _subagent_run_row(run), "messages": rendered})
 
 

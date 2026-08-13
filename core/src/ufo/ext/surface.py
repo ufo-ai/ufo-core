@@ -108,6 +108,7 @@ from ufo.sandbox.ingress_token import (
 from ufo.sandbox.terminal import TerminalOp
 from ufo.schema import tables
 from ufo.schema.records import (
+    MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
     SUBAGENT_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
@@ -862,6 +863,18 @@ class QueuedArrival(BaseModel):
     inbound: str
     waiting: bool
     admission_source: TurnAdmissionSource
+
+
+class SpokenArrival(BaseModel):
+    """One member-admitted queue row's attribution: the display line the admitting surface
+    reported and the member the words are attributed to — exactly what the turn it joined carries
+    for its own founding message. Drained rows included: the engine names a folded message by its
+    queue-row id in the transcript's `<context>` tag, so a projection labelling who spoke reads
+    these beside the turn rows, which only name the messages that founded turns."""
+
+    id: UUID
+    sender: str | None
+    speaker_member_id: UUID | None
 
 
 def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
@@ -3109,6 +3122,36 @@ class SurfaceContext:
                 inbound=row.body,
                 waiting=row.consumed_turn_id is None,
                 admission_source=row.admission_source,
+            )
+            for row in rows
+        )
+
+    async def arrival_speakers(self, conversation_id: UUID) -> tuple[SpokenArrival, ...]:
+        """Attribution for every member-admitted row of the conversation, waiting or drained. The
+        engine's `<context>` tag names a folded message by its queue-row id rather than a turn id,
+        so the projection that labels who spoke reads these beside `list_turns` — a turn row only
+        names the message that founded it."""
+        if not await self._owned_conversation(conversation_id):
+            return ()
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.inbound_message.c.id,
+                        tables.inbound_message.c.context,
+                        tables.inbound_message.c.speaker_member_id,
+                    ).where(
+                        tables.inbound_message.c.workspace_id == self.workspace_id,
+                        tables.inbound_message.c.conversation_id == conversation_id,
+                        tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                    )
+                )
+            ).all()
+        return tuple(
+            SpokenArrival(
+                id=row.id,
+                sender=None if row.context is None else TurnContext(**row.context).sender,
+                speaker_member_id=row.speaker_member_id,
             )
             for row in rows
         )

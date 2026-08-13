@@ -58,6 +58,14 @@ export function ownerLabel(email: string | null, viewer: string | null): string 
   return email === viewer ? "You" : email;
 }
 
+/** A speaker as a row or a bubble names one: the human name where the surface reported
+ *  `Name (email)`, the local part of a bare address, else the word itself. */
+export function speakerName(speaker: string): string {
+  const reported = speaker.match(/^(.+) \(([^()]+@[^()]+)\)$/);
+  if (reported) return reported[1];
+  return speaker.includes("@") ? speaker.split("@", 1)[0] : speaker;
+}
+
 const EVERY_MEMBER = "Every member";
 const NO_MEMBER_GRANTS = "No member grants — admins only";
 

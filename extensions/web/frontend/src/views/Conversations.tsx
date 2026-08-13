@@ -22,6 +22,7 @@ import {
   isMemberAudience,
   origin as surfaceOrigin,
   ownerLabel,
+  speakerName,
   useViewer,
 } from "@/lib/audience";
 import type { WorkspacePlace } from "@/lib/route";
@@ -95,14 +96,6 @@ export function Disclose({
       </Section>
     </>
   );
-}
-
-/** A speaker as a row names one: the human name where the surface reported `Name (email)`, the
- *  local part of a bare address, else the word itself. */
-function speakerName(speaker: string): string {
-  const reported = speaker.match(/^(.+) \(([^()]+@[^()]+)\)$/);
-  if (reported) return reported[1];
-  return speaker.includes("@") ? speaker.split("@", 1)[0] : speaker;
 }
 
 /** Who a conversation belongs to, as a member reads it: `You` for the viewer's own, another

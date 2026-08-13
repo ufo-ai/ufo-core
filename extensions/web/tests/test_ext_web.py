@@ -80,6 +80,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
 from ufo.ext.surface import (
+    AMBIENT_CONTEXT_ELEMENT,
     fence_member_message,
     mint_marker,
     record_transcript_access,
@@ -8824,3 +8825,240 @@ def test_a_members_bubble_carries_no_recalled_memory() -> None:
         {"role": "user", "text": "hi"},
         {"role": "assistant", "text": "Hello."},
     ]
+
+
+def test_a_bubble_reads_as_the_members_words_out_of_the_surface_fence() -> None:
+    """A channel surface fences the member's words between the ambient digest and what their
+    attachments delivered, and that fence is the prompt's wire: a bubble carrying it shows the
+    reader bystanders' traffic and markup they never typed."""
+    spoken = "44444444-4444-4444-4444-444444444444"
+    marker = mint_marker()
+    ambient = (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n"
+        "[18:09] @Robin Vale: Draft announcement tweets\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n"
+    )
+    fenced = fence_member_message(
+        marker, ambient, "give me three variants on this tweet storm", "poster.png: delivered"
+    )
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content=f"<context>\nmessage_ref: {spoken}\n</context>\n{fenced}"),
+            Message(role="assistant", content="Here are three."),
+        ),
+        None,
+        frozenset({spoken}),
+        frozenset(),
+    )
+    assert rendered == [
+        {"role": "user", "text": "give me three variants on this tweet storm"},
+        {"role": "assistant", "text": "Here are three."},
+    ]
+
+
+def test_a_bubble_names_its_speaker_exactly_where_the_read_names_one() -> None:
+    """The read hands the projection who spoke each turn; a turn it names no speaker for keeps the
+    bare bubble, so a viewer's own words carry no label and everyone else's carry theirs."""
+    theirs = "55555555-5555-5555-5555-555555555555"
+    mine = "66666666-6666-6666-6666-666666666666"
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content=f"<context>\nmessage_ref: {theirs}\n</context>\nship it"),
+            Message(role="assistant", content="Shipping."),
+            Message(role="user", content=f"<context>\nmessage_ref: {mine}\n</context>\nhold on"),
+            Message(role="assistant", content="Holding."),
+        ),
+        None,
+        frozenset({theirs, mine}),
+        frozenset(),
+        {theirs: "Mel Okafor (m@example.com)"},
+    )
+    assert rendered == [
+        {"role": "user", "text": "ship it", "speaker": "Mel Okafor (m@example.com)"},
+        {"role": "assistant", "text": "Shipping."},
+        {"role": "user", "text": "hold on"},
+        {"role": "assistant", "text": "Holding."},
+    ]
+
+
+async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A workspace-shared Slack conversation read in the portal states each message as the words
+    its member typed — never the fence the surface wrote around them — and names every speaker but
+    the viewer, whose own bubbles the pane already accounts for. The rule reaches the rows the
+    written transcript does not hold yet: a running turn's prompt and a queued arrival are named
+    the same way."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C7:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    marker = mint_marker()
+    ambient = (
+        f"<{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n"
+        "[18:09] @Robin Vale: Draft announcement tweets\n"
+        f"</{AMBIENT_CONTEXT_ELEMENT}_{marker}>\n"
+    )
+    first = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound=fence_member_message(marker, ambient, "draft the tweets", ""),
+        speaker_member_id=peer_id,
+        context=TurnContext(sender="Sam Frost (peer@example.com)"),
+    )
+    second = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="thanks",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)"),
+    )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=2,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {first}\n</context>\n"
+                    + fence_member_message(marker, ambient, "draft the tweets", ""),
+                ),
+                Message(role="assistant", content="Drafted."),
+                Message(
+                    role="user", content=f"<context>\nmessage_ref: {second}\n</context>\nthanks"
+                ),
+                Message(role="assistant", content="Any time."),
+            ),
+        )
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    settled = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+
+    assert settled.status_code == 200
+    assert settled.json()["messages"] == [
+        {"role": "user", "text": "draft the tweets", "speaker": "Sam Frost (peer@example.com)"},
+        {"role": "assistant", "text": "Drafted."},
+        {"role": "user", "text": "thanks"},
+        {"role": "assistant", "text": "Any time."},
+    ]
+
+    running = uuid4()
+    folded = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=3,
+                status="running",
+                inbound=fence_member_message(marker, ambient, "now the launch email", ""),
+                admission_source="member",
+                speaker_member_id=peer_id,
+                context=TurnContext(sender="Sam Frost (peer@example.com)").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=folded,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body=fence_member_message(marker, ambient, "and a blog post", ""),
+                admission_source="member",
+                speaker_member_id=member_id,
+                context=TurnContext(sender="Mel Okafor (m@example.com)").model_dump(mode="json"),
+                admitted_turn_id=running,
+                consumed_turn_id=None,
+                created_at=sa.func.now(),
+            )
+        )
+
+    mid = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+
+    assert mid.status_code == 200
+    tail = mid.json()["messages"][-2:]
+    assert tail[0] == {
+        "role": "user",
+        "text": "now the launch email",
+        "speaker": "Sam Frost (peer@example.com)",
+    }
+    assert tail[1]["text"] == "and a blog post"
+    assert "speaker" not in tail[1]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == running)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="Sent.").model_dump(mode="json"),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.inbound_message)
+            .where(tables.inbound_message.c.id == folded)
+            .values(consumed_turn_id=running)
+        )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=3,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {running}\n</context>\n"
+                    + fence_member_message(marker, ambient, "now the launch email", ""),
+                ),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {folded}\n</context>\n"
+                    + fence_member_message(marker, ambient, "and a blog post", ""),
+                ),
+                Message(role="assistant", content="Sent."),
+            ),
+        )
+    )
+
+    written = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
+    )
+
+    assert written.status_code == 200
+    settled = written.json()["messages"][-3:]
+    assert settled[0] == {"role": "user", "text": "now the launch email"}
+    assert settled[1] == {
+        "role": "user",
+        "text": "and a blog post",
+        "speaker": "Mel Okafor (m@example.com)",
+    }
+    assert settled[2] == {"role": "assistant", "text": "Sent."}
+
+    own = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+
+    assert own.json()["messages"][-2] == {"role": "user", "text": "and a blog post"}

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import { Reveal } from "@/components/ui/reveal";
+import { speakerName } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
@@ -23,6 +24,10 @@ const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate
  *  wait lasts as long as the call it is inside, and the words take their weight back when the
  *  turn says it took them up.
  *
+ *  A bubble somebody other than the viewer spoke is headed by their name — the read hands it over
+ *  only then, so the viewer's own bubbles stay the unlabelled default and the label marks exactly
+ *  the words another member said.
+ *
  *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
  *  under it: a run is opened through the conversation that spawned it, which is the route by which
  *  a member reading a transcript reaches the run's own record. */
@@ -42,6 +47,11 @@ export function MessageLog({
           <Meta key={index}>{message.text}</Meta>
         ) : (
           <Speech key={index} mine={message.role === "user"}>
+            {message.role === "user" && message.speaker ? (
+              <div className="text-label font-medium opacity-(--muted)">
+                {speakerName(message.speaker)}
+              </div>
+            ) : null}
             {message.role !== "user" ? (
               <Markdown text={message.text} />
             ) : message.arrival_id ? (

@@ -293,6 +293,12 @@ place that knows the count — is where changes are reached. A run's link is roo
 conversation that spawned it: the one being read for a run under a reply, that run's own for the
 runs it spawned in turn — which is the conversation the read behind the link authorizes against.
 
+A bubble states the member's words, never the prompt the turn ran on: a channel surface fences
+those words between the ambient digest and their attachments, and the projection takes them back
+out, so no markup a surface wrote reaches a reader. A bubble somebody other than the viewer spoke
+is headed by their name (`speakerName`, the same cut a conversation row takes) — the viewer's own
+bubbles stay unlabelled, because the exception is what gets labelled.
+
 The composer stays live while a turn runs, because a message sent then joins that running turn
 rather than queueing behind it. The member's bubble states the wait in its own words — the message
 text set italic and muted (`opacity-(--muted)`), no copy added beneath it — and the words take their
