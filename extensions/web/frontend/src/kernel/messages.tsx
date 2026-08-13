@@ -22,7 +22,9 @@ const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate
  *  A member message a running turn has not taken up yet states that in its own words — italic and
  *  muted, no line added beneath them: a turn absorbs what arrived at its round boundaries, so the
  *  wait lasts as long as the call it is inside, and the words take their weight back when the
- *  turn says it took them up.
+ *  turn says it took them up. Those messages are drawn last, under the reply streaming above them:
+ *  the turn answers what it is already inside before it takes up the next thing, so that is the
+ *  place the drain will leave them in, and a message drawn anywhere else moves when the fold lands.
  *
  *  A bubble somebody other than the viewer spoke is headed by their name — the read hands it over
  *  only then, so the viewer's own bubbles stay the unlabelled default and the label marks exactly
@@ -40,41 +42,45 @@ export function MessageLog({
   live?: LiveTurn | null;
   conversationId: string | null;
 }) {
+  const waiting = messages.findIndex(
+    (message) => message.arrival_id !== undefined || message.queued === true,
+  );
+  const settled = waiting === -1 ? messages : messages.slice(0, waiting);
+  const queued = waiting === -1 ? [] : messages.slice(waiting);
+  const bubble = (message: Bubble, index: number) =>
+    message.role === "error" ? (
+      <Meta key={index}>{message.text}</Meta>
+    ) : (
+      <Speech key={index} mine={message.role === "user"}>
+        {message.role === "user" && message.speaker ? (
+          <div className="text-label font-medium opacity-(--muted)">
+            {speakerName(message.speaker)}
+          </div>
+        ) : null}
+        {message.role === "user" ? null : (
+          <Activity
+            events={message.events ?? []}
+            runs={message.subagents ?? []}
+            root={conversationId}
+          />
+        )}
+        {message.role !== "user" ? (
+          <Markdown text={message.text} />
+        ) : message.arrival_id ? (
+          <span className="italic opacity-(--muted)">{message.text}</span>
+        ) : (
+          message.text
+        )}
+        {message.files ? <Files files={message.files} /> : null}
+        {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
+        {message.meta ? <Meta>{message.meta}</Meta> : null}
+      </Speech>
+    );
   return (
     <>
-      {messages.map((message, index) =>
-        message.role === "error" ? (
-          <Meta key={index}>{message.text}</Meta>
-        ) : (
-          <Speech key={index} mine={message.role === "user"}>
-            {message.role === "user" && message.speaker ? (
-              <div className="text-label font-medium opacity-(--muted)">
-                {speakerName(message.speaker)}
-              </div>
-            ) : null}
-            {message.role !== "user" ? (
-              <Markdown text={message.text} />
-            ) : message.arrival_id ? (
-              <span className="italic opacity-(--muted)">{message.text}</span>
-            ) : (
-              message.text
-            )}
-            {message.role === "user" ? null : (
-              <Activity
-                events={message.events ?? []}
-                runs={message.subagents ?? []}
-                root={conversationId}
-              />
-            )}
-            {message.files ? <Files files={message.files} /> : null}
-            {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
-            {message.meta ? <Meta>{message.meta}</Meta> : null}
-          </Speech>
-        ),
-      )}
+      {settled.map(bubble)}
       {live ? (
         <Speech mine={false} entering>
-          <StreamingBody text={live.text} />
           <Activity
             events={live.events}
             runs={live.subagents}
@@ -85,12 +91,14 @@ export function MessageLog({
                 : (live.activity ?? (live.text ? undefined : "Thinking…"))
             }
           />
+          <StreamingBody text={live.text} />
           {live.files ? <Files files={live.files} /> : null}
           {live.connectUrl ? <ConnectLink url={live.connectUrl} /> : null}
           {live.meter ? <Meta>{live.meter}</Meta> : null}
           {live.meta ? <Meta>{live.meta}</Meta> : null}
         </Speech>
       ) : null}
+      {queued.map((message, index) => bubble(message, settled.length + index))}
     </>
   );
 }
@@ -122,7 +130,9 @@ function Speech({
 
 export function Meta({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">{children}</div>
+    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">
+      {children}
+    </div>
   );
 }
 
@@ -157,7 +167,10 @@ function Activity({
     >
       <summary className="cursor-pointer">
         {working === undefined ? null : (
-          <span aria-hidden className={cn(PULSE, "mr-sm inline-block align-middle")} />
+          <span
+            aria-hidden
+            className={cn(PULSE, "mr-sm inline-block align-middle")}
+          />
         )}
         {working ?? latestActivity(events, runs)}
       </summary>
@@ -183,15 +196,29 @@ function ActivityTree({
     <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
       {events.map((event, index) => (
         <li key={index} className="whitespace-pre-wrap">
-          {event.kind === "note" ? <Reveal bare>{event.text}</Reveal> : eventLabel(event, "done")}
+          {event.kind === "note" ? (
+            <Reveal bare>{event.text}</Reveal>
+          ) : (
+            eventLabel(event, "done")
+          )}
         </li>
       ))}
       {runs.map((run) => (
         <li key={run.conversation_id} className="flex flex-col gap-hair">
-          <a href={subagentConversationHash(run.profile, run.conversation_id, root ?? undefined)}>
+          <a
+            href={subagentConversationHash(
+              run.profile,
+              run.conversation_id,
+              root ?? undefined,
+            )}
+          >
             Subagent · {run.profile}
           </a>
-          <ActivityTree events={run.events} runs={run.subagents} root={run.conversation_id} />
+          <ActivityTree
+            events={run.events}
+            runs={run.subagents}
+            root={run.conversation_id}
+          />
           {run.output ? (
             <div className="whitespace-pre-wrap pl-lg">
               <Reveal bare>{run.output}</Reveal>
@@ -216,8 +243,15 @@ export function Files({ files }: { files: ChatFile[] }) {
     <div className="mt-2xs flex flex-col gap-hair">
       {files.map((file) => (
         <div key={file.filename}>
-          {file.url ? <a href={file.url}>{file.filename}</a> : <span>{file.filename}</span>}
-          <span className="font-mono text-mono"> · {formatSize(file.size_bytes)}</span>
+          {file.url ? (
+            <a href={file.url}>{file.filename}</a>
+          ) : (
+            <span>{file.filename}</span>
+          )}
+          <span className="font-mono text-mono">
+            {" "}
+            · {formatSize(file.size_bytes)}
+          </span>
         </div>
       ))}
     </div>

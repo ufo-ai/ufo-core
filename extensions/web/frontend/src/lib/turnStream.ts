@@ -238,7 +238,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       const cut = messages.findIndex(
         (message) =>
           (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) ||
-          message.sending !== undefined,
+          message.queued === true,
       );
       const at = cut === -1 ? messages.length : cut;
       let inFlight = fresh.filter(
@@ -248,9 +248,9 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
         if (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) {
           return { ...message, arrival_id: undefined };
         }
-        if (message.sending !== undefined && inFlight > 0) {
+        if (message.queued === true && inFlight > 0) {
           inFlight -= 1;
-          return { ...message, sending: undefined };
+          return { ...message, queued: undefined };
         }
         return message;
       };
@@ -488,7 +488,15 @@ export async function sendMessage(
     ...state,
     busy: true,
     live: state.live ?? liveTurn(),
-    messages: (state.messages ?? []).concat({ role: "user", text: shown, sending: token }),
+    messages: (state.messages ?? []).concat({
+      role: "user",
+      text: shown,
+      sending: token,
+      // A turn is already running, so this message waits for it rather than opening one: it belongs
+      // under the reply that turn is streaming, which is where its drain will settle it. A send with
+      // nothing running is the prompt a reply answers and stands above it.
+      ...(state.turn !== null ? { queued: true } : {}),
+    }),
   }));
   const settled = (key: string, arrivalId: string | null) =>
     updateChat(key, (state) => ({
@@ -498,6 +506,7 @@ export async function sendMessage(
           ? {
               ...message,
               sending: undefined,
+              queued: undefined,
               ...(arrivalId !== null && !state.absorbed.includes(arrivalId)
                 ? { arrival_id: arrivalId }
                 : {}),

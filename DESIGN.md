@@ -283,7 +283,7 @@ more than one, since a select with one option states a choice the member does no
 
 A conversation the member reads rather than continues draws the chat's own log, `MessageLog`
 (`kernel/messages.tsx`): the member's words in a bubble, the agent's as markdown, the files listed,
-and under each reply the whole activity disclosure below — down to the work of the runs it spawned.
+and over each reply the whole activity disclosure — down to the work of the runs it spawned.
 The live chat hands it the turn it is streaming and puts a composer under it; a read-only pane hands
 it none and heads itself with the conversation's title. A second renderer for the same messages is a
 second answer to what a conversation looks like, and the copy the member reads least often is the
@@ -302,7 +302,14 @@ bubbles stay unlabelled, because the exception is what gets labelled.
 The composer stays live while a turn runs, because a message sent then joins that running turn
 rather than queueing behind it. The member's bubble states the wait in its own words — the message
 text set italic and muted (`opacity-(--muted)`), no copy added beneath it — and the words take their
-weight back on the turn saying it took that message up, never on the next frame to arrive. A turn
+weight back on the turn saying it took that message up, never on the next frame to arrive. A message
+still waiting is drawn last, under the reply streaming above it and over the composer: the turn
+answers what it is already inside before it takes up the next thing, so that is the order the drain
+will settle it in and the place the transcript will read it back from. Drawn above the stream it
+would state an order the turn contradicts, and every bubble on the page would shift the moment the
+fold landed. Only a message that went into a turn already running is drawn there — a send with
+nothing running opens a turn rather than joining one, so it is the prompt the reply answers and
+stands above it, exactly where the member said it. A turn
 absorbs what arrived at its round boundaries, so the wait lasts as long as the call the turn is
 inside: the copy promises nothing sooner and nothing counts down against it. It also lasts no longer
 than the stream: a wait names a turn that is working on it, so the stream ending ends the wait too,
@@ -361,7 +368,11 @@ surface its neighbours do not have. The fold is the portal's one answer to lengt
 of it cuts text to fit a screen it cannot see.
 
 A reply states what the agent did as one line and opens onto the rest, in the live chat and in every
-transcript read back, since one component draws a reply wherever it is drawn. The disclosure is a
+transcript read back, since one component draws a reply wherever it is drawn. The line stands above
+the reply, because that is when the work happened: the tools ran, and then the agent wrote about
+what they returned. Set underneath, it reads as a footnote to an answer the member has already
+finished, and while the turn runs it puts the one line stating what is happening now under text that
+is still growing. The disclosure is a
 native `<details>` (`Activity` in `kernel/messages.tsx`) — its own marker, its own keyboard, its own
 announced state, and so no glyph of the portal's own — and its summary is the *latest* activity,
 never a count: a

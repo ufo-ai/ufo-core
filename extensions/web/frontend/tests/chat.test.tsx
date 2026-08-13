@@ -231,6 +231,102 @@ test("a live subagent run nests under the reply it produced", async () => {
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
+/** Where two strings stand relative to each other in the rendered page. */
+function order(first: string, second: string): boolean {
+  const log = document.body.textContent ?? "";
+  return log.indexOf(first) < log.indexOf(second);
+}
+
+test("what a reply did stands above the reply, in the order the turn did it", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "inspect it" },
+        {
+          role: "assistant",
+          text: "The tests pass.",
+          events: [
+            {
+              kind: "tool",
+              name: "bash",
+              preview: '{"command":"uv run pytest"}',
+              description: "Running the focused tests",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  // The tools ran before the agent wrote a word about them, so the disclosure states them where
+  // they happened — above the answer they produced, never under it.
+  expect(await screen.findByText("Running the focused tests")).toBeTruthy();
+  expect(order("Running the focused tests", "The tests pass.")).toBe(true);
+});
+
+test("a message that opens a turn stands above the reply it is waiting for", async () => {
+  let land: (payload: unknown) => void = () => {};
+  const admitted = new Promise<Response>((resolve) => {
+    land = (payload) => resolve(json(payload));
+  });
+  wire({ ...transcript(), "/chat": () => admitted });
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "write a poem");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  // Nothing was running when this was sent, so it is the prompt a turn answers rather than a
+  // message waiting on one — it stands where the member said it, above the reply to it, while
+  // its own POST is still in flight.
+  expect(await screen.findByText("write a poem")).toBeTruthy();
+  expect(order("write a poem", "Thinking…")).toBe(true);
+
+  land({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "poem" });
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
+
+  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(order("write a poem", "Ducks glide at dusk.")).toBe(true);
+});
+
+test("a queued message stays under the answer streaming above it, and never moves", async () => {
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "write another poem" }], turn: TURN_ID }),
+    "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
+  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+
+  // The turn answers the message it is already inside before it takes up the next one, so a message
+  // waiting on it stands after that answer — under the streaming reply and over the composer, which
+  // is where the drain will leave it. Drawn above, it would state an order the turn contradicts,
+  // and every bubble would shift the moment the fold landed.
+  await userEvent.type(screen.getByLabelText("Message the agent"), "4+4=");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText("4+4=")).toBeTruthy();
+  await waitFor(() => expect(order("Ducks glide at dusk.", "4+4=")).toBe(true));
+
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  StreamFake.last().emit("message", { text: "8" });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "8",
+    model: "opus",
+    tokens: 3,
+    cost_micro_usd: 1_000,
+  });
+
+  await screen.findByText("8");
+  expect(order("write another poem", "Ducks glide at dusk.")).toBe(true);
+  expect(order("Ducks glide at dusk.", "4+4=")).toBe(true);
+  expect(order("4+4=", "8")).toBe(true);
+});
+
 test("a message sent mid-turn joins the running turn, waits to be taken up, and is tailed once", async () => {
   const { calls } = wire({
     ...transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }),
