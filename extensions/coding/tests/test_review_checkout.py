@@ -81,6 +81,7 @@ async def _comparison(tmp_path: Path) -> tuple[Path, Path, str, str]:
     await _write(source / "changed.txt", "after\n")
     await _write(source / "added.txt", "new\n")
     await _write(source / "large.txt", f"TARGET {'x' * 10_000}\nTARGET second\n")
+    await _write(source / "wide.txt", "WIDE match\n" * 20_000)
     await _write(source / "asset.bin", bytes(reversed(range(64))))
     await _git(source, "add", ".")
     await _git(source, "commit", "-m", "head")
@@ -245,10 +246,17 @@ async def test_exact_comparison_checkout_refuses_every_wrong_identity(
     if wrong == "repository":
         remote = other
 
-    with pytest.raises(ValueError, match="comparison does not match"):
+    named = {
+        "repository": "exited",
+        "pull_number": "exited",
+        "base_sha": f"fetch {'0' * 40} exited",
+        "head_sha": f"checked out base {base} head {head}",
+    }
+    with pytest.raises(ValueError, match="comparison does not match") as refused:
         await ExactComparisonCheckout(
             await _sandbox(tmp_path), str(remote), "/workspace/.ufo-review/test"
         ).run(ExactComparison.model_validate(values))
+    assert named[wrong] in str(refused.value)
     reviews = tmp_path / "workspace" / ".ufo-review"
     assert not list(reviews.iterdir())
 
@@ -359,6 +367,43 @@ def test_review_prompt_writes_findings_in_simplified_technical_english() -> None
     assert "Write `title`, `trigger`, and `failure`" in prompt
     assert "one statement per sentence, active voice, present tense" in prompt
     assert "Reproduce paths, identifiers, and quoted diff lines exactly" in prompt
+
+
+async def test_review_grep_truncates_a_match_wider_than_the_pipe(tmp_path: Path) -> None:
+    remote, _, base, head = await _comparison(tmp_path)
+    turn_id = uuid4()
+    await ExactComparisonCheckout(
+        sandbox := await _sandbox(tmp_path),
+        str(remote),
+        f"/workspace/.ufo-review/{turn_id.hex}",
+    ).run(
+        ExactComparison(
+            repository="metalcraftai/ufo",
+            pull_number=PULL_NUMBER,
+            base_sha=base,
+            head_sha=head,
+        )
+    )
+    context = cast(ToolContext, SimpleNamespace(sandbox=sandbox, turn=SimpleNamespace(id=turn_id)))
+    grepped = await review_grep(
+        context,
+        ReviewGrepInput(pattern="WIDE", head_limit=2, user_description="Searching wide output."),
+    )
+    assert "[more matches omitted]" in grepped.content[0].text
+    assert grepped.content[0].text.count("wide.txt") == 2
+
+
+async def test_review_glob_refuses_when_the_checkout_is_absent(tmp_path: Path) -> None:
+    context = cast(
+        ToolContext,
+        SimpleNamespace(sandbox=await _sandbox(tmp_path), turn=SimpleNamespace(id=uuid4())),
+    )
+    with pytest.raises(RuntimeError, match="git could not list review files") as failed:
+        await review_glob(
+            context,
+            ReviewGlobInput(pattern="*.txt", user_description="Listing text files."),
+        )
+    assert "ls-files exited" in str(failed.value)
 
 
 async def test_review_file_tools_are_text_only_and_bound_to_this_turn(

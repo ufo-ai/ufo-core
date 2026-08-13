@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ufo.sdk.manifest import SubagentProfile
+from ufo.sdk.o11y import warn
 from ufo.sdk.sandbox import WORKSPACE_DIR, ExecResult, SandboxSession, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_coding.review_routing import ReviewTarget, record_review_conversation
@@ -24,10 +25,19 @@ REVIEW_READ_LINE_LIMIT = 2_000
 REVIEW_LINE_CHAR_LIMIT = 2_000
 REVIEW_GLOB_MATCH_LIMIT = 1_000
 REVIEW_GREP_MATCH_LIMIT = 500
+# The script exits with git's status, not the pipeline's. `sh` is dash, which has no `pipefail`, so
+# the status of `git | cut | sed` is sed's — always 0 — and every `exit_code` guard over this
+# command is dead. git's status crosses on fd 4 while `sed` still closes the pipe at the bound, so
+# a wide match is cut off at the producer rather than gathered whole. Reaching that bound is the
+# ordinary truncated read: `sed` quits, git dies of SIGPIPE, and 128 + 13 is not a failure.
+SIGPIPE_STATUS = 141
 BOUNDED_LINES_COMMAND = (
     'character_limit="$1"; line_limit="$2"; shift 2; '
-    'git "$@" | cut -c "1-$character_limit" | '
-    'sed -n "1,${line_limit}p;${line_limit}q"'
+    "exec 3>&1; "
+    'status=$({ { git "$@"; echo $? >&4; } | cut -c "1-$character_limit" | '
+    'sed -n "1,${line_limit}p;${line_limit}q" >&3; } 4>&1); '
+    f'[ "$status" -ne {SIGPIPE_STATUS} ] || status=0; '
+    'exit "$status"'
 )
 CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "subagent_code_review.md").read_text()
 
@@ -128,6 +138,24 @@ class CodeReviewCheckoutResult(ExactComparison):
     diff_path: str
 
 
+COMPARISON_REFUSED = "comparison does not match repository, pull request, or SHAs"
+GIT_STDERR_LIMIT = 500
+
+
+def _git_failure(event: str, step: str, result: ExecResult) -> str:
+    # The remote is a plain `https://github.com/<repo>.git` and the installation token rides a
+    # swapped header, so git's stderr carries no credential.
+    detail = " ".join(result.stderr.split())[:GIT_STDERR_LIMIT] or "no output"
+    warn(event, step=step, exit_code=result.exit_code, stderr=detail)
+    return f"{step} exited {result.exit_code}: {detail}"
+
+
+def _refused(step: str, result: ExecResult) -> ValueError:
+    return ValueError(
+        f"{COMPARISON_REFUSED} ({_git_failure('coding.review_checkout_refused', step, result)})"
+    )
+
+
 @dataclass(frozen=True)
 class ExactComparisonCheckout:
     sandbox: SandboxSession
@@ -146,7 +174,7 @@ class ExactComparisonCheckout:
                 "git", "clone", "--quiet", "--no-checkout", self.remote_url, checkout
             )
             if cloned.exit_code != 0:
-                raise ValueError("comparison does not match repository, pull request, or SHAs")
+                raise _refused("clone", cloned)
             await self._fetch(checkout, comparison.base_sha, "refs/ufo/base")
             await self._fetch(
                 checkout,
@@ -156,7 +184,13 @@ class ExactComparisonCheckout:
             base = await self._revision(checkout, "refs/ufo/base")
             head = await self._revision(checkout, "refs/ufo/head")
             if base != comparison.base_sha or head != comparison.head_sha:
-                raise ValueError("comparison does not match repository, pull request, or SHAs")
+                warn(
+                    "coding.review_checkout_moved",
+                    pull_number=comparison.pull_number,
+                    base=base,
+                    head=head,
+                )
+                raise ValueError(f"{COMPARISON_REFUSED} (checked out base {base} head {head})")
             remotes = await self._exec("git", "-C", checkout, "remote")
             if remotes.exit_code != 0:
                 raise RuntimeError("git could not enumerate review remotes")
@@ -198,12 +232,12 @@ class ExactComparisonCheckout:
             f"{source}:{target}",
         )
         if result.exit_code != 0:
-            raise ValueError("comparison does not match repository, pull request, or SHAs")
+            raise _refused(f"fetch {source}", result)
 
     async def _revision(self, checkout: str, reference: str) -> str:
         result = await self._exec("git", "-C", checkout, "rev-parse", f"{reference}^{{commit}}")
         if result.exit_code != 0:
-            raise ValueError("comparison does not match repository, pull request, or SHAs")
+            raise _refused(f"rev-parse {reference}", result)
         return result.stdout.strip()
 
     async def _git(self, checkout: str, *args: str) -> None:
@@ -372,7 +406,10 @@ async def review_glob(ctx: ToolContext, args: ReviewGlobInput) -> ToolResult:
         *(f":(glob){pattern}" for pattern in dict.fromkeys(patterns)),
     )
     if result.exit_code != 0:
-        raise RuntimeError("git could not list review files")
+        raise RuntimeError(
+            "git could not list review files "
+            f"({_git_failure('coding.review_glob_failed', 'ls-files', result)})"
+        )
     matches = result.stdout.splitlines()
     bounded = matches[:REVIEW_GLOB_MATCH_LIMIT]
     return ToolResult(
@@ -413,7 +450,10 @@ async def review_grep(ctx: ToolContext, args: ReviewGrepInput) -> ToolResult:
             *argv[1:],
         )
         if result.exit_code != 0:
-            raise RuntimeError("git could not search review files")
+            raise RuntimeError(
+                "git could not search review files "
+                f"({_git_failure('coding.review_grep_failed', 'grep', result)})"
+            )
         lines = result.stdout.splitlines()
         bounded = [line.removeprefix("HEAD:") for line in lines[: args.head_limit]]
         text = "\n".join(bounded)
