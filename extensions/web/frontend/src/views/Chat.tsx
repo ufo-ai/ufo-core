@@ -13,6 +13,7 @@ import {
   refreshTranscript,
   resyncChat,
   sendMessage,
+  stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
 import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
@@ -287,7 +288,11 @@ function Composer({
 }) {
   const state = useChat(target.key);
   const [text, setText] = useState(() => readDraft(draftKey));
+  const [stopping, setStopping] = useState(false);
   const files = useRef<HTMLInputElement>(null);
+  // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
+  // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
+  const running = state.turn;
   // Live during a turn, so a correction reaches the agent mid-reply. The exception is the send that
   // founds a conversation: until it answers there is no conversation for a second message to join,
   // and these words stay in the box rather than opening a conversation of their own.
@@ -298,6 +303,12 @@ function Composer({
   }, [input]);
 
   useEffect(() => installDraftFlush(), []);
+
+  async function stop(turnId: string) {
+    setStopping(true);
+    await stopTurn(target, turnId);
+    setStopping(false);
+  }
 
   function send() {
     const attached = Array.from(files.current?.files ?? []);
@@ -350,6 +361,11 @@ function Composer({
         aria-label="Message the agent"
         className="flex-1"
       />
+      {running ? (
+        <Button variant="outline" busy={stopping} onClick={() => void stop(running.id)}>
+          Stop
+        </Button>
+      ) : null}
       <Button type="submit" variant="send" disabled={disabled}>
         Send
       </Button>

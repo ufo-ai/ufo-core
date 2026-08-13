@@ -1279,6 +1279,188 @@ async def test_a_message_sent_while_a_turn_runs_joins_it_and_the_reload_still_sh
     }
 
 
+async def _seed_running_turn(
+    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, member_id: UUID, seq: int
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="running",
+                inbound="Review PR 1268.",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def _turn_status(turn_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+
+
+async def test_a_stop_ends_the_running_turn_and_admits_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The stop press is not a message: the header names the turn, the body is empty, and the route
+    admits nothing — so the transcript never mentions the press. The turn's row reads cancelled and
+    the tail the member is holding ends on the cancelled terminal the stop published, which is how
+    the page learns the turn is over."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    running = await _seed_running_turn(workspace_id, conversation_id, agent_id, member_id, 2)
+
+    stopped = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        headers={**cookie, "x-ufo-stop-turn": str(running)},
+    )
+
+    assert stopped.status_code == 200
+    assert stopped.json() == {"stopped": True}
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == running
+                )
+            )
+        ).one()
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+        arrivals = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.inbound_message))
+        ).scalar_one()
+    assert row.status == "cancelled"
+    assert row.terminal["status"] == "cancelled"
+    assert (turns, arrivals) == (2, 0)
+    streamed, terminal = await _consume(client, token, str(running))
+    assert (streamed, terminal["status"]) == ("", "cancelled")
+
+
+async def test_a_stop_naming_another_conversations_turn_is_not_found(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A stop reaches only the conversation the route authorized: a turn of the member's other
+    conversation is not this one's to end, and it goes on running."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    done = TerminalFrame(status="done", text="Looked.")
+    mine, _first = await _seed_web_turn(
+        workspace_id, agent_id, member_id, "owner@example.com", done
+    )
+    theirs, _second = await _seed_web_turn(
+        workspace_id, agent_id, member_id, "owner@example.com", done
+    )
+    running = await _seed_running_turn(workspace_id, theirs, agent_id, member_id, 2)
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={mine}",
+        headers={**cookie, "x-ufo-stop-turn": str(running)},
+    )
+
+    assert refused.status_code == 404
+    assert refused.text == "no such turn in this conversation"
+    assert await _turn_status(running) == "running"
+
+
+async def test_a_stop_refused_by_its_own_shape_touches_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Every refusal of the stop lane lands before the turn is reached: a header that is no turn id,
+    a stop carrying a message, and a stop paired with the `new` sentinel — which names no turn to
+    end, so it opens no conversation on the way to finding that out."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    running = await _seed_running_turn(workspace_id, conversation_id, agent_id, member_id, 2)
+
+    malformed = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        headers={**cookie, "x-ufo-stop-turn": "not-a-turn"},
+    )
+    assert malformed.status_code == 400
+    assert malformed.text == "x-ufo-stop-turn must be a turn id"
+
+    spoken = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"stop and also read this",
+        headers={**cookie, "x-ufo-stop-turn": str(running)},
+    )
+    assert spoken.status_code == 400
+    assert spoken.text == "a stop admits no message"
+
+    fresh = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        headers={**cookie, "x-ufo-stop-turn": str(running)},
+    )
+    assert fresh.status_code == 400
+    assert fresh.text == "a stop names the conversation its turn runs in"
+
+    assert await _turn_status(running) == "running"
+    async with workspace_tx() as connection:
+        conversations = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
+        ).scalar_one()
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert (conversations, turns) == (1, 2)
+
+
+async def test_a_stop_of_a_settled_turn_reports_that_it_ended_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A press racing the turn's own last frame, and a second press behind the first, reach a turn
+    that is already terminal: the route answers that it stopped nothing and leaves the committed
+    outcome alone."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, settled = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+
+    stopped = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}", "x-ufo-stop-turn": str(settled)},
+    )
+
+    assert stopped.status_code == 200
+    assert stopped.json() == {"stopped": False}
+    assert await _turn_status(settled) == "done"
+
+
 async def _seed_arrival(
     workspace_id: UUID,
     conversation_id: UUID,

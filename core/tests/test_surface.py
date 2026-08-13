@@ -20,6 +20,7 @@ from cryptography.fernet import Fernet
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
+    UNREACHED_STOPPER,
     no_user_skills,
 )
 
@@ -249,6 +250,7 @@ def _context(
             admission=Admission(dbos=dbos, durable_surfaces=frozenset({SURFACE})),
         ),
         _tailer=HubTailer(hub=InProcessHub()),
+        _stopper=UNREACHED_STOPPER,
         _credentials=store,
         _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",

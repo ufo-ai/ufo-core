@@ -63,6 +63,7 @@ SECRET_HEADER = "x-ufo-secret"
 SECRET_SLOT_HEADER = "x-ufo-slot"
 CWD_HEADER = "x-ufo-cwd"
 OP_HEADER = "x-ufo-op"
+STOP_HEADER = "x-ufo-stop"
 SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
@@ -202,8 +203,12 @@ def _answer(
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, followed by one `file` line per file the turn shared and one `secret` line per
     still-unanswered credential prompt, so the shell collects exactly the missing values privately;
-    a failure says what to do next and prompts; a cancel says so and ends the client session
-    (`exit`), the conversation resuming on the next `ufo`.
+    a failure says what to do next and prompts.
+
+    A cancel divides on whether it carries words. An admission refusal cancels with its reason: the
+    member reads it and the client session ends (`exit`), the conversation resuming on the next
+    `ufo`. A member's own stop carries none — the turn ended because they pressed Esc — so the turn
+    is capped and the prompt returns.
 
     Files render on every terminal status, not only `done`: the upload committed before the turn
     reached its end, so a turn that shared a file and then failed or was cancelled still owes the
@@ -233,7 +238,9 @@ def _answer(
                 directive("ask", PROMPT),
             )
         case "cancelled":
-            return (directive("say", "cancelled"), *shared, directive("exit", "0"))
+            if frame.text:
+                return (*_say_lines(frame.text), *shared, directive("exit", "0"))
+            return (directive("say", "cancelled"), *shared, directive("ask", PROMPT))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
 
 
@@ -428,7 +435,11 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     conversation's sandbox: the first admitted turn claims the binding on the row and tells the
     member where the agent works, the held stream publishes the terminal for the claim's ops, and
     a reply to an op arrives as the next request under `x-ufo-op` — resolved here, never admitted,
-    never in the transcript — which then resumes the same tail."""
+    never in the transcript — which then resumes the same tail.
+
+    A stop (`x-ufo-stop`, the member's Esc) admits nothing either: it ends the conversation's
+    running turn and resumes that same tail, which replays to the cancelled terminal the stop
+    committed. A press with nothing running resumes the tail unchanged."""
     email = _authenticated_email(request, ctx.workspace_id)
     if email is None:
         return PlainTextResponse("unauthorized", status_code=401)
@@ -457,6 +468,13 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         turn_id = await ctx.latest_turn(conversation_id)
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
+    elif request.headers.get(STOP_HEADER, "").strip():
+        if await request.body():
+            return PlainTextResponse("a stop admits no message", status_code=400)
+        turn_id = await ctx.latest_turn(conversation_id)
+        if turn_id is None:
+            return PlainTextResponse(directive("ask", PROMPT))
+        await ctx.stop_turn(conversation_id, turn_id)
     else:
         if _stale_client(request):
             update = directive("install")

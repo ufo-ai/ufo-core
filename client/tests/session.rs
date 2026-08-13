@@ -13,6 +13,7 @@ struct Exchange {
 struct Served {
     url: String,
     handle: JoinHandle<Vec<Request>>,
+    arrived: std::sync::mpsc::Receiver<()>,
 }
 
 #[derive(Debug)]
@@ -20,12 +21,14 @@ struct Request {
     body: String,
     op_header: Option<String>,
     slot_header: Option<String>,
+    stop_header: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let (arrival, arrived) = std::sync::mpsc::channel();
     let handle = thread::spawn(move || {
         let mut seen = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -45,6 +48,7 @@ fn serve(script: Vec<Exchange>) -> Served {
             stream.set_nonblocking(false).expect("blocking stream");
             let request = read_request(&mut stream);
             seen.push(request);
+            let _ = arrival.send(());
             if exchange.delay_ms > 0 {
                 thread::sleep(std::time::Duration::from_millis(exchange.delay_ms));
             }
@@ -61,13 +65,17 @@ fn serve(script: Vec<Exchange>) -> Served {
         }
         seen
     });
-    Served { url, handle }
+    Served {
+        url,
+        handle,
+        arrived,
+    }
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> Request {
     let mut raw = Vec::new();
     let mut buffer = [0u8; 4096];
-    let (headers_end, mut content_length, mut op_header, mut slot_header) = loop {
+    let (headers_end, mut content_length, mut op_header, mut slot_header, mut stop_header) = loop {
         let read = stream.read(&mut buffer).expect("read");
         raw.extend_from_slice(&buffer[..read]);
         let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
@@ -77,6 +85,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         let mut length = 0usize;
         let mut op = None;
         let mut slot = None;
+        let mut stop = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -88,8 +97,11 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             if lower.starts_with("x-ufo-slot:") {
                 slot = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-stop:") {
+                stop = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
-        break (end + 4, length, op, slot);
+        break (end + 4, length, op, slot, stop);
     };
     while raw.len() < headers_end + content_length {
         let read = stream.read(&mut buffer).expect("read body");
@@ -103,6 +115,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         body: String::from_utf8_lossy(&raw[headers_end..]).to_string(),
         op_header: op_header.take(),
         slot_header: slot_header.take(),
+        stop_header: stop_header.take(),
     }
 }
 
@@ -135,6 +148,69 @@ fn run_client(url: &str, args: &[&str], stdin: &str, home: &std::path::Path) -> 
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
     )
+}
+
+/// The client on a real terminal: the fullscreen loop only runs on a tty, and only a tty delivers
+/// a key. The child is its own session, so the terminal queries it makes of `/dev/tty` reach
+/// nothing and answer instantly.
+#[cfg(unix)]
+struct OnPty {
+    keys: std::fs::File,
+    child: std::process::Child,
+}
+
+#[cfg(unix)]
+fn run_client_on_pty(url: &str, args: &[&str], home: &std::path::Path) -> OnPty {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let leader = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(leader >= 0, "a pty is available");
+    assert_eq!(unsafe { libc::grantpt(leader) }, 0, "the pty is granted");
+    assert_eq!(unsafe { libc::unlockpt(leader) }, 0, "the pty is unlocked");
+    let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(leader)) }.to_owned();
+    let follower = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(follower >= 0, "the pty follower opens");
+
+    let scratch_tmp = home.join("tmp");
+    std::fs::create_dir_all(&scratch_tmp).expect("scratch tmp");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ufo"));
+    command
+        .args(args)
+        .env("WORKSPACE_URL", url)
+        .env("UFO_URL", url)
+        .env("UFO_HOME", home)
+        .env("UFO_CHANNEL", "e2e-tty")
+        .env("TERM", "xterm-256color")
+        .env("TMPDIR", &scratch_tmp)
+        .env_remove("NO_COLOR")
+        .env_remove("UFO_PLAIN");
+    for slot in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        let held = unsafe { libc::dup(follower) };
+        assert!(held >= 0, "the follower duplicates");
+        let stdio = unsafe { std::process::Stdio::from_raw_fd(held) };
+        match slot {
+            libc::STDIN_FILENO => command.stdin(stdio),
+            libc::STDOUT_FILENO => command.stdout(stdio),
+            _ => command.stderr(stdio),
+        };
+    }
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = command.spawn().expect("spawn client on a pty");
+    unsafe { libc::close(follower) };
+
+    let keys = unsafe { std::fs::File::from_raw_fd(leader) };
+    let mut painted = keys.try_clone().expect("the leader duplicates");
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        while painted.read(&mut buffer).is_ok_and(|read| read > 0) {}
+    });
+    OnPty { keys, child }
 }
 
 fn scratch_home(name: &str) -> std::path::PathBuf {
@@ -381,4 +457,41 @@ fn a_message_that_supersedes_a_poll_clears_it() {
         "no stale poll posts a third time: {requests:?}"
     );
     assert_eq!(requests[1].body, "while polling");
+}
+
+#[cfg(unix)]
+#[test]
+fn esc_on_a_running_turn_posts_the_stop() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 2000,
+            reply_lines: &["txt\tthinking", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\tcancelled", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("stop");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home);
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    session
+        .keys
+        .write_all(b"\x1b")
+        .expect("Esc reaches the pty");
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[0].body, "go");
+    assert_eq!(
+        requests[1].stop_header.as_deref(),
+        Some("1"),
+        "Esc ends the turn on its own connection: {requests:?}"
+    );
+    assert_eq!(requests[1].body, "", "a stop admits no message");
+    let _ = std::fs::remove_dir_all(&home);
 }

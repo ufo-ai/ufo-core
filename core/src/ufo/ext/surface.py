@@ -303,6 +303,16 @@ class TurnTailer(Protocol):
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
 
 
+class TurnStopper(Protocol):
+    """End a running turn a member asked to stop — the member's write-half counterpart to
+    `TurnTailer`. The concrete stopper cancels the turn's durable workflow, commits its cancelled
+    terminal, and publishes that terminal so live tails end immediately; descendants are the
+    cancel reconciler's. Refuses a turn that is not the named conversation's; returns True iff
+    this call ended the turn."""
+
+    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> bool: ...
+
+
 TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
 MAX_WRITEBACK_ERROR_CHARS = 2_048
 WRITEBACK_POLL_SECONDS = 1.0
@@ -961,6 +971,7 @@ class SurfaceContext:
     _sandboxes: ConversationSandbox
     _admitter: MemberAdmitter
     _tailer: TurnTailer
+    _stopper: TurnStopper
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
@@ -1598,6 +1609,12 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if row is None else row.member_id
+
+    async def stop_turn(self, conversation_id: UUID, turn_id: UUID) -> bool:
+        """End a running turn of a conversation this surface already authorized for the acting
+        member — the surface's identity assertion is the gate, exactly as it is for `admit` and
+        `tail`. Idempotent: True iff this call ended the turn, False for one already terminal."""
+        return await self._stopper.stop(self.workspace_id, conversation_id, turn_id)
 
     async def turn_is_terminal(self, turn_id: UUID) -> bool:
         """Whether a turn has committed its terminal state, read from the row rather than the hub.

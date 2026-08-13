@@ -69,6 +69,8 @@ pub struct RawGuard {
 impl RawGuard {
     pub fn new() -> RawGuard {
         let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
+        #[cfg(unix)]
+        crate::interrupt::hold_modes();
         let _ = terminal::enable_raw_mode();
         let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
         if kitty {
@@ -88,6 +90,8 @@ impl Drop for RawGuard {
         }
         let _ = crossterm::execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
         let _ = terminal::disable_raw_mode();
+        #[cfg(unix)]
+        crate::interrupt::release_modes();
     }
 }
 
@@ -99,6 +103,7 @@ pub enum Reply {
     Choice(String),
     ChoiceCancelled,
     Secret(String),
+    Stop,
     Detach,
     Exit,
 }
@@ -545,9 +550,10 @@ impl App {
                 self.open_path_pick();
                 return Reply::None;
             }
+            KeyCode::Char('b') if ctrl && self.working => return Reply::Detach,
             KeyCode::Esc => {
                 if self.working && self.ask.text.is_empty() {
-                    return Reply::Detach;
+                    return Reply::Stop;
                 }
                 self.ask = AskState::new();
                 return Reply::None;

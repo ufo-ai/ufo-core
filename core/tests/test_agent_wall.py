@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
+    UNREACHED_STOPPER,
     no_user_skills,
 )
 
@@ -86,6 +87,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
             admission=Admission(dbos=_StubDbos(), durable_surfaces=frozenset()),
         ),
         _tailer=HubTailer(hub=InProcessHub()),
+        _stopper=UNREACHED_STOPPER,
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         _declared_slots=(),
         _artifact_token_secret="",

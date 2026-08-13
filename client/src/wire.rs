@@ -242,6 +242,17 @@ impl Session {
         })
     }
 
+    /// The stop this session would post, prepared while the member is still watching the stream it
+    /// ends — None on an onboarding stream, which holds no turn to stop. Nothing here touches the
+    /// held stream's agent: that one is mid-response, and the stop travels on its own connection.
+    pub fn stop(&self) -> Option<Stop> {
+        self.workspace_url.as_ref()?;
+        Some(Stop(
+            self.dressed(build_agent().request("POST", &self.endpoint()))
+                .set("x-ufo-stop", "1"),
+        ))
+    }
+
     /// POST one privately entered secret out of band; the response body is directive lines whose
     /// `say` fields are returned for the caller to render.
     pub fn post_secret(
@@ -311,9 +322,11 @@ impl Session {
     }
 
     fn request(&self, method: &str, url: &str) -> ureq::Request {
-        let mut request = self
-            .agent
-            .request(method, url)
+        self.dressed(self.agent.request(method, url))
+    }
+
+    fn dressed(&self, request: ureq::Request) -> ureq::Request {
+        let mut request = request
             .set("content-type", "text/plain")
             .set("x-ufo-session", &self.session_id)
             .set("x-ufo-tty", if self.tty { "1" } else { "0" })
@@ -331,6 +344,28 @@ impl Session {
             request = request.set("x-ufo-since", since);
         }
         request
+    }
+}
+
+/// One member stop, prepared and not yet sent: the whole request, so the thread watching for Esc
+/// fires it without reaching back into the session the drain is reading.
+pub struct Stop(ureq::Request);
+
+impl Stop {
+    /// End the conversation's running turn. The body is empty — a stop admits no message — and the
+    /// answer is the cancelled terminal the held stream is about to render, so it is discarded here.
+    pub fn send(self) -> Result<(), String> {
+        match self.0.send_string("") {
+            Ok(response) => {
+                let _ = response.into_string();
+                Ok(())
+            }
+            Err(ureq::Error::Status(code, response)) => Err(format!(
+                "the server answered {code}: {}",
+                response.into_string().unwrap_or_default().trim()
+            )),
+            Err(error) => Err(format!("lost connection ({error})")),
+        }
     }
 }
 
@@ -539,5 +574,86 @@ mod tests {
         session.workspace_url = Some("https://ws/".into());
         session.channel = "abc".into();
         assert_eq!(session.endpoint(), "https://ws/surface/ufo/abc");
+    }
+
+    #[test]
+    fn an_onboarding_session_holds_no_turn_to_stop() {
+        let session = Session::new(
+            "https://gw".into(),
+            None,
+            "onboard".into(),
+            None,
+            "sid".into(),
+            None,
+            false,
+            true,
+        );
+        assert!(session.stop().is_none());
+    }
+
+    fn served(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let port = listener.local_addr().expect("the bound address").port();
+        let reply = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("the client connects");
+            let mut seen: Vec<u8> = Vec::new();
+            let mut byte = [0u8; 1];
+            while !seen.ends_with(b"\r\n\r\n") {
+                match socket.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => seen.push(byte[0]),
+                }
+            }
+            socket.write_all(reply.as_bytes()).expect("the reply lands");
+            String::from_utf8_lossy(&seen).into_owned()
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    fn stopping(base: String) -> Session {
+        Session::new(
+            base.clone(),
+            Some(base),
+            "abc".into(),
+            Some("tok".into()),
+            "sid".into(),
+            None,
+            false,
+            true,
+        )
+    }
+
+    #[test]
+    fn a_stop_posts_an_empty_body_to_the_conversation() {
+        let (base, serving) = served("200 OK", "");
+        let session = stopping(base);
+        assert_eq!(session.stop().expect("a signed-in stop").send(), Ok(()));
+        let request = serving.join().expect("the server thread");
+        let lowered = request.to_lowercase();
+        assert!(
+            request.starts_with("POST /surface/ufo/abc HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(lowered.contains("x-ufo-stop: 1"), "{request}");
+        assert!(lowered.contains("content-length: 0"), "{request}");
+        assert!(lowered.contains("authorization: bearer tok"), "{request}");
+        assert!(lowered.contains("x-ufo-session: sid"), "{request}");
+    }
+
+    #[test]
+    fn a_refused_stop_names_what_the_server_answered() {
+        let (base, serving) = served("400 Bad Request", "a stop admits no message");
+        let session = stopping(base);
+        assert_eq!(
+            session.stop().expect("a signed-in stop").send(),
+            Err("the server answered 400: a stop admits no message".to_string())
+        );
+        let _ = serving.join();
     }
 }

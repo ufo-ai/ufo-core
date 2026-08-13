@@ -624,6 +624,29 @@ export async function answerQuestion(
   streamTurn(chatKey, turn, true);
 }
 
+/** End the turn the page is tailing. Nothing settles here: the stop admits no message, and the
+ *  cancelled terminal the server publishes reaches the tail already open, so the turn comes down the
+ *  way every other turn does. A refusal leaves the turn running with no field on the screen to
+ *  answer it, so it reports as the chat's toast. */
+export async function stopTurn(target: ChatTarget, turnId: string): Promise<void> {
+  let description: string;
+  try {
+    const res = await fetch(chatUrl(target), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "x-ufo-stop-turn": turnId },
+    });
+    if (res.ok) return;
+    description = "Error " + res.status + " — try again.";
+  } catch {
+    description = "Network error — try again.";
+  }
+  updateChat(target.key, (state) => ({
+    ...state,
+    fault: { title: "The turn did not stop.", description },
+  }));
+}
+
 /** A send that failed states its error in the log. Only a chat holding no live tail settles with
  *  it: the failure is the POST's alone, and a turn already streaming goes on — taking its bubble
  *  down would collapse the reply the member is reading under a send that never reached it. */

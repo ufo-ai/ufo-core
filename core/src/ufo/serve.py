@@ -138,6 +138,7 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
 from ufo.surfaces.hub_tail import HubTailer
+from ufo.surfaces.stop import MemberStop
 from ufo.workspace import init_workspace_credentials, ws
 
 PROXY_STARTUP_TIMEOUT_SECONDS = 30
@@ -865,6 +866,7 @@ def _mount_shared_surfaces(
     app.add_middleware(WorkspaceScopeBoundary)
     admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
     tailer = HubTailer(hub=hub)
+    stopper = MemberStop(client=dbos_client, hub=hub)
     registered: dict[str, SurfaceSpec] = {}
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
@@ -920,6 +922,7 @@ def _mount_shared_surfaces(
             _sandboxes=sandboxes,
             _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
             _tailer=tailer,
+            _stopper=stopper,
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,

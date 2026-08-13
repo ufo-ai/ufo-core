@@ -177,7 +177,8 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
         ("Mouse wheel", "Scroll the transcript"),
         ("Drag", "Select; releasing copies"),
         ("Click", "Clear the selection"),
-        ("Esc", "Detach from turn / cancel picker"),
+        ("Esc", "Stop the turn / cancel picker"),
+        ("Ctrl+B", "Detach from the turn, leaving it running"),
         ("Ctrl+C", "Exit"),
         ("?", "Hotkeys, on an empty composer"),
     ]

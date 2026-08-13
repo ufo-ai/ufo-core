@@ -402,7 +402,10 @@ writeback across all speakers — **identity** resolution (an external id → me
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
 channel-verified email matches the workspace's own domain, the first member's vetted email domain,
 so only that initial member onboards through provisioning — and `adopt_identity` to span a member across
-surfaces), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
+surfaces), **stop** (`stop_turn` ends a running turn of a conversation the surface authorized —
+the web stop button, the terminal's Esc — cancelling it durably and publishing its cancelled
+terminal so every live tail ends now; descendants are the cancel reconciler's, as for every cancel
+path), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
 `spend_rollup`, and the per-agent projections — `object_kind` with
 `list_member_objects`/`member_object`, `agent_skills`, `agent_spend`, and
 `memory_available`/`search_memory`. An extension registers a

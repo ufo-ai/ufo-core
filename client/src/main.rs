@@ -19,7 +19,7 @@ use crate::ui::history::{list_conversations, record_conversation, PastConversati
 use crate::ui::picker::{PickOutcome, Picker};
 use crate::ui::plain::Plain;
 use crate::ui::{App, Reply};
-use crate::wire::{Directive, OpRequest, PostBody, Session};
+use crate::wire::{Directive, OpRequest, PostBody, Session, Stop};
 
 const GATEWAY_URL_DEFAULT: &str = "https://flyingobject.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
@@ -351,6 +351,7 @@ enum WireEvent {
     MemberEcho(String),
     Reconnecting { attempt: u32, retry_in_s: u64 },
     WorkspaceChanged { url: String, channel: String },
+    Stoppable(Stop),
     StreamEnd { continues: bool },
     Fatal(String),
 }
@@ -383,6 +384,9 @@ struct Wire {
 }
 
 impl Wire {
+    /// Post, read the stream it opens, then post whatever that read left to send. Each post's stop
+    /// goes to the loop before the post itself, which blocks until the reply's headers arrive —
+    /// a member ends a turn while it is still thinking, and this thread cannot hear the key.
     fn run(mut self, first: String) {
         let mut body = if first.is_empty() {
             Some(PostBody::Empty)
@@ -393,6 +397,9 @@ impl Wire {
         let mut attempts = 0u32;
         loop {
             let Some(post) = body.take() else { return };
+            if let Some(stop) = self.session.stop() {
+                let _ = self.evt.send(WireEvent::Stoppable(stop));
+            }
             let stream = match self.session.post(post.clone()) {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -691,6 +698,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         }
     });
 
+    let stop_evt = evt_tx.clone();
     let wire_evt = evt_tx;
     let wire = Wire {
         session,
@@ -714,6 +722,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         app.begin_turn();
     }
     let mut gate = Gate::default();
+    let mut stop: Option<Stop> = None;
     let mut latest_workspace = workspace_url;
     let mut latest_channel = channel_name;
     let code = loop {
@@ -773,6 +782,18 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                             app.secret_begin(&prompt.clone());
                         } else {
                             settle(&mut app, &mut gate);
+                        }
+                    }
+                    Reply::Stop => {
+                        if let Some(prepared) = stop.take() {
+                            let notify = stop_evt.clone();
+                            thread::spawn(move || {
+                                if let Err(error) = prepared.send() {
+                                    let _ = notify.send(LoopEvent::Wire(WireEvent::Dir(
+                                        Directive::Note(format!("Not stopped: {error}")),
+                                    )));
+                                }
+                            });
                         }
                     }
                     Reply::Detach => {
@@ -836,6 +857,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         .to_string();
                     app.set_endpoint(host, channel);
                 }
+                WireEvent::Stoppable(prepared) => stop = Some(prepared),
                 WireEvent::StreamEnd { continues } => {
                     if let Some(code) = gate.exit.take() {
                         break code;
@@ -996,6 +1018,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 latest_workspace = Some(url);
                 latest_channel = channel;
             }
+            WireEvent::Stoppable(_) => {}
             WireEvent::StreamEnd { continues } => {
                 if let Some(code) = gate.exit.take() {
                     break code;
@@ -1173,6 +1196,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                 WireEvent::MemberEcho(_) => {}
                 WireEvent::Reconnecting { .. } => {}
                 WireEvent::WorkspaceChanged { .. } => {}
+                WireEvent::Stoppable(_) => {}
                 WireEvent::StreamEnd { continues } => {
                     if continues {
                         continue;
@@ -1207,9 +1231,56 @@ fn emit_json(event: &jsonio::Event) {
 #[cfg(unix)]
 mod interrupt {
     use std::ffi::CString;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
     static RESUME: AtomicUsize = AtomicUsize::new(0);
+    static MODES: AtomicPtr<(libc::c_int, libc::termios)> = AtomicPtr::new(std::ptr::null_mut());
+    static ALT: AtomicBool = AtomicBool::new(false);
+
+    /// Hold the terminal's modes as they are, before raw mode replaces them: the handler exits
+    /// through `_exit`, which runs no destructor, so it puts these back itself or the member's
+    /// shell is left without echo.
+    pub fn hold_modes() {
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+            return;
+        }
+        let mut modes: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut modes) } != 0 {
+            return;
+        }
+        let held = Box::into_raw(Box::new((libc::STDIN_FILENO, modes)));
+        drop_held(MODES.swap(held, Ordering::SeqCst));
+    }
+
+    pub fn release_modes() {
+        drop_held(MODES.swap(std::ptr::null_mut(), Ordering::SeqCst));
+    }
+
+    /// Whether the alternate screen is up, and so whether the handler leaves it.
+    pub fn hold_alt(entered: bool) {
+        ALT.store(entered, Ordering::SeqCst);
+    }
+
+    fn drop_held(held: *mut (libc::c_int, libc::termios)) {
+        if !held.is_null() {
+            drop(unsafe { Box::from_raw(held) });
+        }
+    }
+
+    /// Put the terminal back from inside the handler. Async-signal-safe: an atomic load, `write`,
+    /// and `tcsetattr`, all on the POSIX safe list — crossterm's own calls are not.
+    fn restore_terminal() {
+        if ALT.load(Ordering::SeqCst) {
+            let leave = crate::ui::term::ALT_LEAVE.as_bytes();
+            unsafe {
+                libc::write(1, leave.as_ptr() as *const libc::c_void, leave.len());
+            }
+        }
+        let held = MODES.load(Ordering::SeqCst);
+        if !held.is_null() {
+            unsafe { libc::tcsetattr((*held).0, libc::TCSANOW, &(*held).1) };
+        }
+    }
 
     pub fn set_resume(line: &str) {
         let rendered = if line.is_empty() {
@@ -1222,6 +1293,7 @@ mod interrupt {
     }
 
     extern "C" fn on_sigint(_signal: libc::c_int) {
+        restore_terminal();
         let pointer = RESUME.load(Ordering::SeqCst);
         unsafe {
             if pointer != 0 {

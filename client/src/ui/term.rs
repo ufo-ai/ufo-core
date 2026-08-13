@@ -224,7 +224,7 @@ impl<W: Write> DockTerm<W> {
 }
 
 const ALT_ENTER: &str = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
-const ALT_LEAVE: &str = "\x1b[?1049l\x1b[?25h";
+pub const ALT_LEAVE: &str = "\x1b[?1049l\x1b[?25h";
 
 /// The whole terminal, owned: every frame paints exactly the screen's rows, diffing against the
 /// previous frame so an unchanged row costs nothing. Rows position absolutely, so nothing the
@@ -248,6 +248,8 @@ impl<W: Write> AltScreen<W> {
 
     pub fn enter(&mut self) -> std::io::Result<()> {
         self.prev.clear();
+        #[cfg(unix)]
+        crate::interrupt::hold_alt(true);
         self.out.write_all(ALT_ENTER.as_bytes())?;
         self.out.flush()
     }
@@ -255,6 +257,8 @@ impl<W: Write> AltScreen<W> {
     /// Back to the main screen; the caller prints the exit document there.
     pub fn leave(&mut self) -> std::io::Result<()> {
         self.prev.clear();
+        #[cfg(unix)]
+        crate::interrupt::hold_alt(false);
         self.out.write_all(ALT_LEAVE.as_bytes())?;
         self.out.flush()
     }

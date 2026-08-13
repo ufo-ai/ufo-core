@@ -4,6 +4,7 @@ none of them passes something real and empty."""
 
 import asyncio
 from dataclasses import dataclass, field
+from uuid import UUID
 
 from ufo.ambient_reply import AmbientDecision, AmbientReplyClassifier
 from ufo.loop.subagents import SubagentRegistry
@@ -41,3 +42,15 @@ class FixedDecisionModel:
 
 
 UNREACHED_AMBIENT_REPLY = AmbientReplyClassifier(model=FixedDecisionModel())
+
+
+@dataclass(frozen=True)
+class UnreachedStopper:
+    """A surface context requires a stopper; a test whose surface stops no turn gets one that
+    fails loud on use."""
+
+    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> bool:
+        raise AssertionError("this surface stops no turn")
+
+
+UNREACHED_STOPPER = UnreachedStopper()

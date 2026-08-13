@@ -120,6 +120,7 @@ UPLOAD_CHUNK_BYTES = 65_536
 WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
+STOP_TURN_HEADER = "x-ufo-stop-turn"
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
@@ -669,6 +670,18 @@ def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response:
         return Response("malformed answer headers", status_code=400)
 
 
+def _stop_header(request: Request) -> UUID | None | Response:
+    """The turn a stop press names — validated before a body is read or a conversation opened, so a
+    malformed press leaves nothing behind — or None for an ordinary message."""
+    named = request.headers.get(STOP_TURN_HEADER, "").strip()
+    if not named:
+        return None
+    try:
+        return UUID(named)
+    except ValueError:
+        return Response(f"{STOP_TURN_HEADER} must be a turn id", status_code=400)
+
+
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
     """Admit one member message. The `conversation` query parameter continues that conversation —
     gated to the member's own chat with this agent — and the `new` sentinel opens a fresh one: the
@@ -683,7 +696,11 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     frames a tail already carries, so the page leaves that tail alone rather than opening a second
     stream on one turn. Every other outcome is the page's to tail, the refusals included: a
     seat-refused or cap-refused message founds a turn of its own carrying its own terminal, and the
-    stream replays it."""
+    stream replays it.
+
+    An `x-ufo-stop-turn` header over an empty body is the member ending a turn of this conversation
+    rather than saying anything into it: nothing is admitted, so the transcript never mentions the
+    press, and the cancelled terminal the stop publishes is what the member's live tail ends on."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -691,11 +708,17 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows(agent_id):
         return Response("no such agent", status_code=404)
+    stop = _stop_header(request)
+    if isinstance(stop, Response):
+        return stop
     parsed = await _parse_inbound(request)
     if isinstance(parsed, Response):
         return parsed
     text, uploads = parsed
-    if not text.strip() and not uploads:
+    if stop is not None:
+        if text or uploads:
+            return Response("a stop admits no message", status_code=400)
+    elif not text.strip() and not uploads:
         return Response("empty message", status_code=400)
     paths = _inbox_paths(uploads)
     inbound = _files_note(text, paths) if paths else text
@@ -711,6 +734,8 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     if requested == NEW_CONVERSATION:
         if answer is not None:
             return Response("an answer names the conversation it was asked in", status_code=400)
+        if stop is not None:
+            return Response("a stop names the conversation its turn runs in", status_code=400)
         conversation_id, title = await _open_conversation(
             ctx, store, agent_id, member_id, email, f"{agent_id}/{email}/{uuid4().hex}", text, paths
         )
@@ -723,6 +748,12 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         if record is None:
             return Response("no such conversation", status_code=404)
         title = record.title
+    if stop is not None:
+        try:
+            stopped = await ctx.stop_turn(conversation_id, stop)
+        except ValueError:
+            return Response("no such turn in this conversation", status_code=404)
+        return JSONResponse({"stopped": stopped})
     key = None if answer is None else f"{conversation_id}:{answer[0]}:answer:{answer[1]}"
     await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(

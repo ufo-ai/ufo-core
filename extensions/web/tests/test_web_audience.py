@@ -21,6 +21,7 @@ from ufo_ext_web.surface import SURFACE_WEB, _open_conversation
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
+    UNREACHED_STOPPER,
     no_user_skills,
 )
 
@@ -134,6 +135,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
             admission=Admission(dbos=None, durable_surfaces=frozenset()),
         ),
         _tailer=HubTailer(hub=InProcessHub()),
+        _stopper=UNREACHED_STOPPER,
         _credentials=None,
         _declared_slots=(),
         _artifact_token_secret="",

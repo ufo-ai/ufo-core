@@ -17,7 +17,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from starlette.datastructures import Headers
 from starlette.requests import Request as StarletteRequest
 from ufo_ext_index_default import DefaultIndex
@@ -152,9 +152,17 @@ def test_terminal_frame_maps_by_status_and_streamed() -> None:
         b"holds a value the provider wire cannot carry.\n",
         b"ask\t>\n",
     )
-    cancelled = Terminal(frame=TerminalFrame(status="cancelled"))
-    assert directives_for(cancelled, streamed=True) == (b"say\tcancelled\n", b"exit\t0\n")
     assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")
+
+
+def test_a_cancel_divides_on_whether_it_carries_words() -> None:
+    """A member's stop cancels with no text, so the turn ends and the prompt returns — the session
+    is the member's, and they stopped a turn rather than left. An admission refusal cancels with its
+    reason, which the member reads before the client exits."""
+    stopped = Terminal(frame=TerminalFrame(status="cancelled"))
+    assert directives_for(stopped, streamed=True) == (b"say\tcancelled\n", b"ask\t>\n")
+    refused = Terminal(frame=TerminalFrame(status="cancelled", text="Over the daily cap."))
+    assert directives_for(refused, streamed=True) == (b"say\tOver the daily cap.\n", b"exit\t0\n")
 
 
 def _request() -> CredentialRequest:
@@ -235,7 +243,7 @@ def test_a_shared_file_renders_after_the_answer_on_every_terminal_status() -> No
     assert directives_for(cancelled, streamed=True, files=files[:1]) == (
         b"say\tcancelled\n",
         b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
-        b"exit\t0\n",
+        b"ask\t>\n",
     )
     assert directives_for(done, streamed=True) == (b"ask\t>\n",)
 
@@ -808,6 +816,72 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
     assert [line[0] for line in resumed] == ["say", "ask"]
     assert resumed[0] == ["say", "Listed."]
     assert ["note", "running glob: Listing the folder"] in stale
+
+
+async def _post_stop(client: AsyncClient, token: str, body: bytes = b"") -> Response:
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        return await client.post(
+            "/surface/ufo/main",
+            content=body,
+            headers={"authorization": f"Bearer {token}", "x-ufo-stop": "1"},
+        )
+
+
+async def test_a_stop_ends_the_running_turn_and_returns_the_prompt(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """Esc on the member's keyboard: the stop header ends the conversation's running turn and the
+    same request resumes its tail, which replays to the cancelled terminal — so the member reads
+    that it stopped and keeps the session, rather than the client exiting."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+
+    response = await _post_stop(client, token)
+
+    assert response.status_code == 200
+    assert _lines(response.content) == [["say", "cancelled"], ["ask", ">"]]
+    stopped, status = await _sole_turn(workspace_id)
+    assert (stopped, status) == (turn_id, "cancelled")
+
+
+async def test_a_stop_with_no_live_turn_resumes_the_tail(ufo: tuple[AsyncClient, UUID]) -> None:
+    """A press with nothing running is not an error: a conversation holding no turn prompts, and one
+    whose turn already ended re-reads that answer and leaves it done."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    empty = await _post_stop(client, token)
+    assert empty.status_code == 200
+    assert _lines(empty.content) == [["ask", ">"]]
+    assert await _turn_count(workspace_id) == 0
+
+    await _post(client, "main", token, b"hello")
+    finished = await _post_stop(client, token)
+
+    assert finished.status_code == 200
+    answer = "".join(f for verb, *rest in _lines(finished.content) if verb == "say" for f in rest)
+    assert "echo:1" in answer
+    assert _lines(finished.content)[-1] == ["ask", ">"]
+    assert (await _sole_turn(workspace_id))[1] == "done"
+
+
+async def test_a_stop_carrying_a_message_is_refused(ufo: tuple[AsyncClient, UUID]) -> None:
+    """One request is one act: a stop admits nothing, so a body arriving with it is a client that
+    would have its message swallowed by the cancel."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+
+    refused = await _post_stop(client, token, b"stop and do this instead")
+
+    assert refused.status_code == 400
+    assert refused.text == "a stop admits no message"
+    assert await _sole_turn(workspace_id) == (turn_id, "running")
 
 
 async def _post(client: AsyncClient, channel: str, token: str, body: bytes) -> list[list[str]]:
