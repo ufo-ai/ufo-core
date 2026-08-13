@@ -1649,9 +1649,8 @@ class SurfaceContext:
         the scope ends the subscription and the tasks behind it, however the block ends."""
         return self._tailer.tail(turn_id, since)
 
-    async def spend_rollup(self, window_seconds: int) -> SpendReport:
-        """The workspace spend rollup over a window — the same sums `ufoctl spend` prints — for a
-        surface's spend view."""
+    async def spend_rollup(self, window_seconds: int | None) -> SpendReport:
+        """The workspace usage report for a selected range or all time."""
         async with workspace_tx() as connection:
             return await SpendRollup(self.workspace_id).read(connection, window_seconds)
 
@@ -1827,18 +1826,15 @@ class SurfaceContext:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return self._memory.listable_kinds()
 
-    async def agent_spend(self, agent_id: UUID, window_seconds: int) -> AgentSpendReport:
-        """One agent's rolling-window spend and its agent-scoped caps — the member-visible slice,
-        distinct from the workspace-wide `spend_rollup` an admin reads."""
+    async def agent_spend(self, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport:
+        """One agent's usage for a selected range or all time, plus its caps."""
         async with workspace_tx() as connection:
             return await SpendRollup(workspace_id=self.workspace_id).read_agent(
                 connection, agent_id, window_seconds
             )
 
-    async def member_spend(self, member_id: UUID, window_seconds: int) -> MemberSpendReport:
-        """One member's own rolling-window spend and their member-scoped caps — what a member may
-        read about their own burn, naming no other member and no agent, so a surface answers it to
-        the member themself without the admin gate `spend_rollup` carries."""
+    async def member_spend(self, member_id: UUID, window_seconds: int | None) -> MemberSpendReport:
+        """One member's usage for a selected range or all time, plus their caps."""
         async with workspace_tx() as connection:
             return await SpendRollup(workspace_id=self.workspace_id).read_member(
                 connection, member_id, window_seconds

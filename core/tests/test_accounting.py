@@ -600,6 +600,83 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     ]
 
 
+async def test_usage_details_report_history_models_execution_and_all_time(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        parent = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.agent_id,
+                    tables.turn.c.conversation_id,
+                    tables.conversation.c.member_id,
+                )
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.id == turn_id)
+            )
+        ).one()
+        child_conversation, child_turn = uuid4(), uuid4()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=child_conversation,
+                workspace_id=workspace_id,
+                agent_id=parent.agent_id,
+                surface="subagent",
+                queue_key=str(child_turn),
+                member_id=parent.member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=child_turn,
+                workspace_id=workspace_id,
+                conversation_id=child_conversation,
+                agent_id=parent.agent_id,
+                seq=1,
+                status="queued",
+                inbound="research",
+                terminal=None,
+                parent_turn_id=turn_id,
+                subagent_profile="research",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(connection, workspace_id, child_turn, "gpt-5.6-terra", FULL_USAGE)
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="tokens",
+                amount=7,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=datetime.now(UTC) - timedelta(minutes=90),
+                updated_at=sa.func.now(),
+            )
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert report.usage.selected.tokens == 20_000
+    assert report.usage.selected.token_micro_usd == 96_500 + 36_600
+    assert report.usage.all_time.tokens == 20_007
+    assert report.usage.all_time.total_micro_usd == 96_500 + 36_600 + 100
+    assert report.usage.previous_tokens == 7
+    assert report.usage.first_used_at is not None
+    assert sum(day.tokens for day in report.usage.daily) == 20_000
+    assert [(row.label, row.tokens) for row in report.usage.by_execution] == [
+        ("", 10_000),
+        ("research", 10_000),
+    ]
+    assert [(row.label, row.tokens) for row in report.usage.by_model] == [
+        ("claude-opus-4-8", 10_000),
+        ("gpt-5.6-terra", 10_000),
+    ]
+
+
 async def test_workspace_usage_is_anchorless_priced_and_stamped(db: None) -> None:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -638,7 +715,10 @@ async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> 
         "tokens": (20_000, 96_500 * 2)
     }
     assert [(s.label, s.priced_micro_usd) for s in report.by_member] == [("a@b.c", 96_500)]
-    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [("assistant", 96_500)]
+    assert [(s.label, s.priced_micro_usd) for s in report.by_agent] == [
+        ("assistant", 96_500),
+        ("Workspace jobs", 96_500),
+    ]
     assert [(p.price_digest, p.priced_micro_usd) for p in report.by_price_digest] == [
         (PRICE_DIGEST, 96_500 * 2)
     ]

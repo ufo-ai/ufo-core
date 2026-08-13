@@ -36,6 +36,7 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
 
+from ufo.sdk.accounting import AgentSpendReport, MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
@@ -148,6 +149,7 @@ NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
+USAGE_RANGES = {"7d": 604_800, "30d": 2_592_000, "90d": 7_776_000, "all": None}
 PORTAL_PATH = "/surface/web"
 CHAT_TARGET_PARAM = "c"
 PORTAL_BUILD = (
@@ -1325,9 +1327,13 @@ def _iso(moment: datetime | None) -> str | None:
     return None if moment is None else moment.isoformat()
 
 
-def _window_param(request: Request) -> int | Response:
-    """The `window_seconds` a spend read covers, or the 400 a bad value earns — non-integer,
-    non-positive, or beyond the year that bounds what these views present."""
+def _window_param(request: Request) -> int | None | Response:
+    """The named usage range, `None` for all time, or a valid rolling `window_seconds`."""
+    named = request.query_params.get("range")
+    if named is not None:
+        if named not in USAGE_RANGES:
+            return Response("range must be 7d, 30d, 90d, or all", status_code=400)
+        return USAGE_RANGES[named]
     raw = request.query_params.get("window_seconds", str(SPEND_WINDOW_DEFAULT_SECONDS))
     try:
         window = int(raw)
@@ -1338,6 +1344,49 @@ def _window_param(request: Request) -> int | Response:
             f"window_seconds must be between 1 and {MAX_USAGE_WINDOW_SECONDS}", status_code=400
         )
     return window
+
+
+def _usage_payload(report: AgentSpendReport | MemberSpendReport | SpendReport) -> dict[str, object]:
+    details = report.usage
+    return {
+        "selected": {
+            "tokens": details.selected.tokens,
+            "token_micro_usd": details.selected.token_micro_usd,
+            "total_micro_usd": details.selected.total_micro_usd,
+        },
+        "all_time": {
+            "tokens": details.all_time.tokens,
+            "token_micro_usd": details.all_time.token_micro_usd,
+            "total_micro_usd": details.all_time.total_micro_usd,
+        },
+        "first_used_at": _iso(details.first_used_at),
+        "previous_tokens": details.previous_tokens,
+        "daily": [
+            {
+                "day": line.day,
+                "tokens": line.tokens,
+                "token_micro_usd": line.token_micro_usd,
+                "total_micro_usd": line.total_micro_usd,
+            }
+            for line in details.daily
+        ],
+        "by_execution": [
+            {
+                "label": line.label,
+                "tokens": line.tokens,
+                "priced_micro_usd": line.priced_micro_usd,
+            }
+            for line in details.by_execution
+        ],
+        "by_model": [
+            {
+                "label": line.label,
+                "tokens": line.tokens,
+                "priced_micro_usd": line.priced_micro_usd,
+            }
+            for line in details.by_model
+        ],
+    }
 
 
 async def skills(ctx: SurfaceContext, request: Request) -> Response:
@@ -1502,7 +1551,7 @@ def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]:
 
 
 async def usage(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's rolling-window spend and its agent-scoped caps — the agent's whole
+    """The selected agent's range and all-time usage and its agent-scoped caps — the agent's whole
     ledger across every member's turns, so it answers an admin or a member whose explicit grant
     put the agent in front of them, and the main-agent default alone opens nothing here (chat
     projects no spend to a member); the workspace-wide rollup stays the workspace usage view."""
@@ -1536,6 +1585,7 @@ async def usage(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for cap in report.caps
             ],
+            "usage": _usage_payload(report),
         }
     )
 
@@ -2204,7 +2254,7 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
 
 
 async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
-    """The reader's own rolling-window spend and their member-scoped caps — a member's own burn is
+    """The reader's own range and all-time usage and their member-scoped caps — a member's burn is
     theirs to read, so this answers every member. An admin additionally receives the workspace
     rollup (totals by dimension, member, and agent) in the same payload — the workspace's whole
     financial state, which lives here and nowhere else; a non-admin's payload names no other
@@ -2236,6 +2286,7 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
             }
             for cap in own.caps
         ],
+        "usage": _usage_payload(own),
         "workspace": None,
     }
     if audience.admin:
@@ -2251,13 +2302,23 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
                 for line in rollup.by_dimension
             ],
             "by_member": [
-                {"label": subject.label, "priced_micro_usd": subject.priced_micro_usd}
+                {
+                    "label": subject.label,
+                    "tokens": subject.tokens,
+                    "priced_micro_usd": subject.priced_micro_usd,
+                }
                 for subject in rollup.by_member
             ],
             "by_agent": [
-                {"label": subject.label, "priced_micro_usd": subject.priced_micro_usd}
+                {
+                    "id": None if subject.subject_id is None else str(subject.subject_id),
+                    "label": subject.label,
+                    "tokens": subject.tokens,
+                    "priced_micro_usd": subject.priced_micro_usd,
+                }
                 for subject in rollup.by_agent
             ],
+            "usage": _usage_payload(rollup),
         }
     return JSONResponse(payload)
 

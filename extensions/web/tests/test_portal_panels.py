@@ -824,6 +824,18 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
     assert lines["sandbox_tokens"]["amount"] == 200
     assert lines["sandbox_tokens"]["priced_micro_usd"] > 0
     assert report["total_micro_usd"] == sum(line["priced_micro_usd"] for line in lines.values())
+    assert report["usage"]["selected"]["tokens"] == 3000 + 2000 + 66 + 200
+    assert report["usage"]["all_time"]["tokens"] == 3000 + 2000 + 66 + 33 + 200
+    assert report["usage"]["first_used_at"] is not None
+    assert report["usage"]["daily"]
+    assert report["usage"]["by_execution"] == [
+        {
+            "label": "",
+            "tokens": 3000 + 2000 + 66 + 200,
+            "priced_micro_usd": report["usage"]["selected"]["token_micro_usd"],
+        }
+    ]
+    assert {row["label"] for row in report["usage"]["by_model"]} == {"claude-opus-4-8"}
     hour = (
         await client.get(
             f"/surface/web/agents/{agent_b}/usage?window_seconds=3600", headers=headers
@@ -834,6 +846,15 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
     assert hour_lines["tokens"]["amount"] == 3000 + 2000
     assert hour_lines["tokens"]["priced_micro_usd"] == priced[3000] + priced[2000]
     assert hour["total_micro_usd"] < report["total_micro_usd"]
+    ninety_days = (
+        await client.get(f"/surface/web/agents/{agent_b}/usage?range=90d", headers=headers)
+    ).json()
+    assert ninety_days["window_seconds"] == 90 * 86_400
+    all_time = (
+        await client.get(f"/surface/web/agents/{agent_b}/usage?range=all", headers=headers)
+    ).json()
+    assert all_time["window_seconds"] is None
+    assert all_time["usage"]["selected"] == all_time["usage"]["all_time"]
     assert report["caps"] == [
         {"window_seconds": 3_600, "limit_micro_usd": 5_000_000, "on_breach": "park"},
         {"window_seconds": 86_400, "limit_micro_usd": 5_000_000, "on_breach": "park"},
@@ -862,6 +883,10 @@ async def test_usage_sums_only_the_selected_agents_ledger(portal) -> None:
             f"/surface/web/workspace/usage?window_seconds={bad_window}", headers=admin_headers
         )
         assert rollup_refused.status_code == 400
+    bad_range = await client.get(
+        f"/surface/web/agents/{agent_b}/usage?range=month", headers=headers
+    )
+    assert bad_range.status_code == 400
 
 
 async def test_usage_answers_empty_for_a_spend_free_agent(portal) -> None:

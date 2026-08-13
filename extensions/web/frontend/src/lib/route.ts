@@ -30,6 +30,7 @@ export type WorkspacePlace = {
   chip?: string;
   open?: string;
   agent?: string;
+  range?: string;
 };
 
 export type Route =
@@ -74,7 +75,7 @@ const WORKSPACE_HASH = /^#\/workspace\/([\w-]+)(?:\?(.*))?$/;
 const SECTION_HASH = /^#\/([a-z][a-z-]*)(?:\?(.*))?$/;
 const CUSTOMIZE_HASH = /^#\/customize\/([\w-]+)(?:\?(.*))?$/;
 
-const PLACE_KEYS = ["kind", "after", "q", "chip", "open", "agent"] as const;
+const PLACE_KEYS = ["kind", "after", "q", "chip", "open", "agent", "range"] as const;
 
 function parsePlace(raw: string | undefined): WorkspacePlace {
   if (!raw) return {};

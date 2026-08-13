@@ -277,6 +277,7 @@ ledger = sa.Table(
     sa.CheckConstraint("amount > 0", name="ledger_amount"),
     sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_priced"),
     sa.Index("ledger_turn", "turn_id"),
+    sa.Index("ledger_workspace_created", "workspace_id", "created_at"),
 )
 
 ledger_export = sa.Table(

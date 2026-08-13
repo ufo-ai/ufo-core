@@ -56,6 +56,33 @@ const OVERVIEW = {
   audience: [],
 };
 
+function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
+  return {
+    selected: {
+      tokens,
+      token_micro_usd: totalMicroUsd,
+      total_micro_usd: totalMicroUsd,
+    },
+    all_time: {
+      tokens: tokens * 4,
+      token_micro_usd: totalMicroUsd * 4,
+      total_micro_usd: totalMicroUsd * 4,
+    },
+    first_used_at: "2026-08-01T00:00:00+00:00",
+    previous_tokens: tokens / 2,
+    daily: [
+      {
+        day: "2026-08-12",
+        tokens,
+        token_micro_usd: totalMicroUsd,
+        total_micro_usd: totalMicroUsd,
+      },
+    ],
+    by_execution: [{ label: "", tokens, priced_micro_usd: totalMicroUsd }],
+    by_model: [{ label: "claude-opus-4-8", tokens, priced_micro_usd: totalMicroUsd }],
+  };
+}
+
 test("the overview states the agent's facts, renders its schema, and submits a settings intent", async () => {
   const posted: unknown[] = [];
   wire({
@@ -696,18 +723,24 @@ test("the sources listing groups a binding's streams and acts on the main agent'
 });
 
 test("a workspace usage read shows the member's own spend and the admin rollup when present", async () => {
-  wire({
+  const usageWire = wire({
     "/workspace/usage": () =>
       json({
         window_seconds: 86400,
         total_micro_usd: 1_500_000,
         by_dimension: [{ dimension: "tokens", amount: 1200, priced_micro_usd: 1_500_000 }],
         caps: [{ window_seconds: 86_400, limit_micro_usd: 4_000, on_breach: "park" }],
+        usage: usageDetails(1_500_000),
         workspace: {
           total_micro_usd: 9_000_000,
           by_dimension: [],
-          by_member: [{ label: "member@example.com", priced_micro_usd: 9_000_000 }],
-          by_agent: [],
+          by_member: [
+            { label: "member@example.com", tokens: 7_200, priced_micro_usd: 9_000_000 },
+          ],
+          by_agent: [
+            { id: AGENT_ID, label: "assistant", tokens: 7_200, priced_micro_usd: 9_000_000 },
+          ],
+          usage: usageDetails(9_000_000, 7_200),
         },
       }),
   });
@@ -717,15 +750,20 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
     </MainAgentProvider>,
   );
 
-  expect(await screen.findByText("You")).toBeTruthy();
-  expect(screen.getAllByText("$1.50").length).toBe(2);
-  expect(screen.getAllByText("$9.00").length).toBe(2);
-  expect(screen.getAllByText("Last 24 hours").length).toBe(2);
-  expect(screen.getByText("Model tokens")).toBeTruthy();
-  expect(screen.getByText("1,200")).toBeTruthy();
+  expect(await screen.findByText("All-time tokens")).toBeTruthy();
+  expect(screen.getAllByText("$9.00").length).toBeGreaterThan(1);
+  expect(screen.getAllByText("7.2K").length).toBeGreaterThan(1);
+  expect(screen.getByText("claude-opus-4-8")).toBeTruthy();
   expect(screen.getByText("<$0.01")).toBeTruthy();
   expect(screen.getByText("Suspend the turn")).toBeTruthy();
   expect(screen.getByText("member@example.com")).toBeTruthy();
+  expect(screen.getByRole("img", { name: "7.2K tokens across 1 daily buckets" })).toBeTruthy();
+  expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
+
+  await userEvent.click(screen.getByRole("button", { name: "90 days" }));
+  await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=90d"))).toBe(true));
+  expect(location.hash).toBe("#/workspace/usage?range=90d");
+  expect(screen.getByRole("link", { name: "View" }).getAttribute("href")).toContain("range=90d");
 });
 
 test("a member with no rollup sees only their own figure and no workspace section", async () => {
@@ -736,6 +774,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
         total_micro_usd: 1_500_000,
         by_dimension: [{ dimension: "egress", amount: 4, priced_micro_usd: 0 }],
         caps: [],
+        usage: usageDetails(0, 0),
         workspace: null,
       }),
   });
@@ -745,10 +784,10 @@ test("a member with no rollup sees only their own figure and no workspace sectio
     </MainAgentProvider>,
   );
 
-  expect(await screen.findByText("Your spend")).toBeTruthy();
+  expect(await screen.findByText("All-time tokens")).toBeTruthy();
   expect(screen.getByText("Sandbox requests")).toBeTruthy();
-  expect(screen.queryByText("Workspace spend")).toBeNull();
-  expect(screen.queryByText("Spend by member")).toBeNull();
+  expect(screen.queryByText("Agents")).toBeNull();
+  expect(screen.queryByText("Members")).toBeNull();
 });
 
 test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
@@ -949,6 +988,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
         total_micro_usd: 0,
         by_dimension: [],
         caps: [],
+        usage: usageDetails(0, 0),
         workspace: null,
       }),
   });
@@ -969,6 +1009,7 @@ test("empty caps say so on both the workspace and the agent views", async () => 
         total_micro_usd: 0,
         by_dimension: [],
         caps: [],
+        usage: usageDetails(0, 0),
       }),
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);

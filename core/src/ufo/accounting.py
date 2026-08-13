@@ -3,7 +3,7 @@
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -710,8 +710,9 @@ class DimensionTotal:
 
 @dataclass(frozen=True, slots=True)
 class SubjectTotal:
-    subject_id: UUID
+    subject_id: UUID | None
     label: str
+    tokens: int
     priced_micro_usd: int
 
 
@@ -722,18 +723,50 @@ class PriceDigestTotal:
 
 
 @dataclass(frozen=True, slots=True)
-class SpendReport:
-    """A window's ledger, summed four ways: the workspace total, per member, and per agent, plus
-    the per-dimension split so a reader sees priced tokens beside the egress request count, and the
-    per-price-digest split so an audit attributes each burn to the rate version that priced it —
-    the reconciliation seam over a window that spans a price-table change."""
+class UsageTotal:
+    tokens: int
+    token_micro_usd: int
+    total_micro_usd: int
 
-    window_seconds: int
+
+@dataclass(frozen=True, slots=True)
+class DailyUsageTotal:
+    day: str
+    tokens: int
+    token_micro_usd: int
+    total_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
+class UsageBreakdown:
+    label: str
+    tokens: int
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
+class UsageDetails:
+    selected: UsageTotal
+    all_time: UsageTotal
+    first_used_at: datetime | None
+    previous_tokens: int | None
+    daily: tuple[DailyUsageTotal, ...]
+    by_execution: tuple[UsageBreakdown, ...]
+    by_model: tuple[UsageBreakdown, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SpendReport:
+    """A selected range and all-time workspace ledger, with daily, execution, model, dimension,
+    member, agent, and price-table totals."""
+
+    window_seconds: int | None
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
     by_member: tuple[SubjectTotal, ...]
     by_agent: tuple[SubjectTotal, ...]
     by_price_digest: tuple[PriceDigestTotal, ...]
+    usage: UsageDetails
 
 
 @dataclass(frozen=True, slots=True)
@@ -745,45 +778,196 @@ class SpendCapLine:
 
 @dataclass(frozen=True, slots=True)
 class AgentSpendReport:
-    """One agent's slice of the same window: the total and per-dimension sums of ledger rows whose
-    turns ran as this agent, beside the agent-scoped caps that bound it — the member-visible
-    per-agent view, distinct from the workspace-wide `SpendReport` an admin reads."""
+    """One agent's selected range and all-time ledger, including its subagent turns and caps."""
 
-    window_seconds: int
+    window_seconds: int | None
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
     caps: tuple[SpendCapLine, ...]
+    usage: UsageDetails
 
 
 @dataclass(frozen=True, slots=True)
 class MemberSpendReport:
-    """One member's own slice of the same window: the total and per-dimension sums of ledger rows
-    whose turns ran in that member's conversations, beside the member-scoped caps that bound them —
-    what a member may read about their own burn, naming no other member and no agent."""
+    """One member's selected range and all-time ledger, naming no other member or agent."""
 
-    window_seconds: int
+    window_seconds: int | None
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
     caps: tuple[SpendCapLine, ...]
+    usage: UsageDetails
+
+
+TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
+
+
+def _token_sum() -> sa.ColumnElement[int]:
+    return sa.func.coalesce(
+        sa.func.sum(
+            sa.case(
+                (tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS), tables.ledger.c.amount), else_=0
+            )
+        ),
+        0,
+    )
+
+
+def _token_cost_sum() -> sa.ColumnElement[int]:
+    return sa.func.coalesce(
+        sa.func.sum(
+            sa.case(
+                (
+                    tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS),
+                    tables.ledger.c.priced_micro_usd,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    )
+
+
+async def _usage_details(
+    connection: AsyncConnection,
+    source: sa.FromClause,
+    scope: sa.ColumnElement[bool],
+    cutoff: datetime | None,
+    now: datetime,
+) -> UsageDetails:
+    selected_scope = scope if cutoff is None else scope & (tables.ledger.c.created_at >= cutoff)
+    selected_row = (
+        await connection.execute(
+            sa.select(
+                _token_sum().label("tokens"),
+                _token_cost_sum().label("token_cost"),
+                sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label("cost"),
+            )
+            .select_from(source)
+            .where(selected_scope)
+        )
+    ).one()
+    all_time_row = (
+        await connection.execute(
+            sa.select(
+                _token_sum().label("tokens"),
+                _token_cost_sum().label("token_cost"),
+                sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label("cost"),
+                sa.func.min(tables.ledger.c.created_at).label("first_used_at"),
+            )
+            .select_from(source)
+            .where(scope)
+        )
+    ).one()
+    day = sa.func.date(tables.ledger.c.created_at).label("day")
+    daily_rows = {
+        date.fromisoformat(str(row.day)): DailyUsageTotal(
+            day=str(row.day),
+            tokens=int(row.tokens),
+            token_micro_usd=int(row.token_cost),
+            total_micro_usd=int(row.cost),
+        )
+        for row in await connection.execute(
+            sa.select(
+                day,
+                _token_sum().label("tokens"),
+                _token_cost_sum().label("token_cost"),
+                sa.func.sum(tables.ledger.c.priced_micro_usd).label("cost"),
+            )
+            .select_from(source)
+            .where(selected_scope)
+            .group_by(day)
+            .order_by(day)
+        )
+    }
+    first_day = cutoff.date() if cutoff is not None else min(daily_rows, default=None)
+    daily: tuple[DailyUsageTotal, ...] = ()
+    if first_day is not None:
+        days = (now.date() - first_day).days + 1
+        daily = tuple(
+            daily_rows.get(current, DailyUsageTotal(str(current), 0, 0, 0))
+            for current in (first_day + timedelta(days=offset) for offset in range(days))
+        )
+    execution = sa.func.coalesce(tables.turn.c.subagent_profile, "").label("execution")
+    by_execution = tuple(
+        UsageBreakdown(row.execution, int(row.tokens), int(row.priced))
+        for row in await connection.execute(
+            sa.select(
+                execution,
+                sa.func.sum(tables.ledger.c.amount).label("tokens"),
+                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+            )
+            .select_from(source)
+            .where(
+                selected_scope,
+                tables.ledger.c.turn_id.isnot(None),
+                tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS),
+            )
+            .group_by(execution)
+            .order_by(execution)
+        )
+    )
+    by_model = tuple(
+        UsageBreakdown(row.model, int(row.tokens), int(row.priced))
+        for row in await connection.execute(
+            sa.select(
+                tables.ledger.c.model,
+                sa.func.sum(tables.ledger.c.amount).label("tokens"),
+                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+            )
+            .select_from(source)
+            .where(selected_scope, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
+            .group_by(tables.ledger.c.model)
+            .order_by(tables.ledger.c.model)
+        )
+    )
+    previous_tokens: int | None = None
+    if cutoff is not None:
+        previous_start = cutoff - (now - cutoff)
+        previous_tokens = int(
+            (
+                await connection.execute(
+                    sa.select(_token_sum())
+                    .select_from(source)
+                    .where(
+                        scope,
+                        tables.ledger.c.created_at >= previous_start,
+                        tables.ledger.c.created_at < cutoff,
+                    )
+                )
+            ).scalar_one()
+        )
+    first_used_at = all_time_row.first_used_at
+    if first_used_at is not None and first_used_at.tzinfo is None:
+        first_used_at = first_used_at.replace(tzinfo=UTC)
+    return UsageDetails(
+        selected=UsageTotal(
+            int(selected_row.tokens), int(selected_row.token_cost), int(selected_row.cost)
+        ),
+        all_time=UsageTotal(
+            int(all_time_row.tokens), int(all_time_row.token_cost), int(all_time_row.cost)
+        ),
+        first_used_at=first_used_at,
+        previous_tokens=previous_tokens,
+        daily=daily,
+        by_execution=by_execution,
+        by_model=by_model,
+    )
 
 
 @dataclass(frozen=True)
 class SpendRollup:
-    """Sum the workspace's ledger over a rolling window for the `ufoctl spend` CLI and the web
-    view. `read` is the whole workflow: the window total, then the per-dimension, per-member,
-    per-agent, and per-price-digest breakdowns — each a grouped sum the caller renders. Member and
-    agent rows join through the turn, so a turn with no member (a subagent conversation) drops out
-    of the member breakdown while still counting in the workspace total. The price-digest breakdown
-    covers only priced rows (egress rows carry no digest), so it attributes token spend to each rate
-    version present in the window."""
+    """Read workspace, member, and agent usage from the ledger. A range also returns its daily
+    history and preceding range; `None` selects all time. Token totals contain `tokens` and
+    `sandbox_tokens`. Other dimensions affect spend totals only."""
 
     workspace_id: UUID
 
-    async def read(self, connection: AsyncConnection, window_seconds: int) -> SpendReport:
-        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
-        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
-            tables.ledger.c.created_at >= cutoff
-        )
+    async def read(self, connection: AsyncConnection, window_seconds: int | None) -> SpendReport:
+        now = datetime.now(UTC)
+        cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
+        window = tables.ledger.c.workspace_id == self.workspace_id
+        if cutoff is not None:
+            window &= tables.ledger.c.created_at >= cutoff
         total = int(
             (
                 await connection.execute(
@@ -807,12 +991,13 @@ class SpendRollup:
             )
         )
         by_member = tuple(
-            SubjectTotal(row.member_id, row.email, int(row.priced))
+            SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))
             for row in await connection.execute(
                 sa.select(
                     tables.conversation.c.member_id,
                     tables.member.c.email,
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                    _token_sum().label("tokens"),
+                    _token_cost_sum().label("priced"),
                 )
                 .select_from(
                     tables.ledger.join(tables.turn)
@@ -822,23 +1007,33 @@ class SpendRollup:
                     )
                     .join(tables.member, tables.conversation.c.member_id == tables.member.c.id)
                 )
-                .where(window)
+                .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
                 .group_by(tables.conversation.c.member_id, tables.member.c.email)
                 .order_by(tables.member.c.email)
             )
         )
         by_agent = tuple(
-            SubjectTotal(row.agent_id, row.name, int(row.priced))
+            SubjectTotal(
+                row.agent_id,
+                row.name if row.agent_id is not None else "Workspace jobs",
+                int(row.tokens),
+                int(row.priced),
+            )
             for row in await connection.execute(
                 sa.select(
                     tables.turn.c.agent_id,
                     tables.agent.c.name,
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                    _token_sum().label("tokens"),
+                    _token_cost_sum().label("priced"),
                 )
-                .select_from(tables.ledger.join(tables.turn).join(tables.agent))
-                .where(window)
+                .select_from(
+                    tables.ledger.outerjoin(tables.turn).outerjoin(
+                        tables.agent, tables.turn.c.agent_id == tables.agent.c.id
+                    )
+                )
+                .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
                 .group_by(tables.turn.c.agent_id, tables.agent.c.name)
-                .order_by(tables.agent.c.name)
+                .order_by(tables.agent.c.name.nulls_last())
             )
         )
         by_price_digest = tuple(
@@ -853,22 +1048,35 @@ class SpendRollup:
                 .order_by(tables.ledger.c.price_digest)
             )
         )
+        usage = await _usage_details(
+            connection,
+            tables.ledger.outerjoin(tables.turn),
+            tables.ledger.c.workspace_id == self.workspace_id,
+            cutoff,
+            now,
+        )
         return SpendReport(
-            window_seconds, total, by_dimension, by_member, by_agent, by_price_digest
+            window_seconds,
+            total,
+            by_dimension,
+            by_member,
+            by_agent,
+            by_price_digest,
+            usage,
         )
 
     async def read_agent(
-        self, connection: AsyncConnection, agent_id: UUID, window_seconds: int
+        self, connection: AsyncConnection, agent_id: UUID, window_seconds: int | None
     ) -> AgentSpendReport:
-        """One agent's rolling-window spend plus its agent-scoped caps. Ledger rows reach an agent
-        through their turn, so a turn-less row (`record_workspace_usage` writes them) drops out of
-        the agent view rather than misattribute — it still counts in the workspace rollup."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
-        window = (
-            (tables.ledger.c.workspace_id == self.workspace_id)
-            & (tables.ledger.c.created_at >= cutoff)
-            & (tables.turn.c.agent_id == agent_id)
+        """One agent's selected and all-time usage plus its agent-scoped caps. Turn-less workspace
+        usage stays in the workspace rollup."""
+        now = datetime.now(UTC)
+        cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
+        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
+            tables.turn.c.agent_id == agent_id
         )
+        if cutoff is not None:
+            window &= tables.ledger.c.created_at >= cutoff
         joined = tables.ledger.join(tables.turn)
         by_dimension = tuple(
             DimensionTotal(row.dimension, int(row.amount), int(row.priced))
@@ -905,26 +1113,31 @@ class SpendRollup:
             sum(line.priced_micro_usd for line in by_dimension),
             by_dimension,
             caps,
+            await _usage_details(
+                connection,
+                joined,
+                (tables.ledger.c.workspace_id == self.workspace_id)
+                & (tables.turn.c.agent_id == agent_id),
+                cutoff,
+                now,
+            ),
         )
 
     async def read_member(
-        self, connection: AsyncConnection, member_id: UUID, window_seconds: int
+        self, connection: AsyncConnection, member_id: UUID, window_seconds: int | None
     ) -> MemberSpendReport:
-        """One member's own rolling-window spend plus their member-scoped caps. A ledger row reaches
-        a member through its turn's conversation — the same join `SpendEvaluator` sums a member cap
-        over and `read`'s per-member breakdown groups by — so a member's own number here and the
-        number their cap binds on are one truth. A turn-less or memberless row (a subagent
-        conversation's) drops out rather than misattribute; it still counts in the workspace
-        rollup."""
-        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        """One member's selected and all-time usage plus their member-scoped caps. Ledger rows
+        reach the member through each turn's conversation, as member caps do."""
+        now = datetime.now(UTC)
+        cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
         joined = tables.ledger.join(tables.turn).join(
             tables.conversation, tables.turn.c.conversation_id == tables.conversation.c.id
         )
-        window = (
-            (tables.ledger.c.workspace_id == self.workspace_id)
-            & (tables.ledger.c.created_at >= cutoff)
-            & (tables.conversation.c.member_id == member_id)
+        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
+            tables.conversation.c.member_id == member_id
         )
+        if cutoff is not None:
+            window &= tables.ledger.c.created_at >= cutoff
         by_dimension = tuple(
             DimensionTotal(row.dimension, int(row.amount), int(row.priced))
             for row in await connection.execute(
@@ -960,4 +1173,12 @@ class SpendRollup:
             sum(line.priced_micro_usd for line in by_dimension),
             by_dimension,
             caps,
+            await _usage_details(
+                connection,
+                joined,
+                (tables.ledger.c.workspace_id == self.workspace_id)
+                & (tables.conversation.c.member_id == member_id),
+                cutoff,
+                now,
+            ),
         )

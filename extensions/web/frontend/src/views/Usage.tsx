@@ -1,15 +1,23 @@
+import { useState } from "react";
+
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
-import { cn } from "@/lib/cn";
 import { money } from "@/lib/money";
+import { agentHash, workspaceHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 const HOUR_SECONDS = 3600;
+const RANGES = ["7d", "30d", "90d", "all"] as const;
+
+type Range = (typeof RANGES)[number];
 
 const METERED: Record<string, string> = {
   tokens: "Model tokens",
   sandbox_tokens: "Sandbox tokens",
   egress: "Sandbox requests",
+  images: "Generated images",
+  videos: "Generated videos",
 };
 
 const ON_BREACH: Record<string, string> = {
@@ -27,36 +35,149 @@ export type Cap = {
   limit_micro_usd: number;
   on_breach: string;
 };
-export type SubjectLine = { label: string; priced_micro_usd: number };
+export type BreakdownLine = {
+  id?: string | null;
+  label: string;
+  tokens: number;
+  priced_micro_usd: number;
+};
+export type UsageTotal = {
+  tokens: number;
+  token_micro_usd: number;
+  total_micro_usd: number;
+};
+export type DailyLine = UsageTotal & { day: string };
+export type UsageDetails = {
+  selected: UsageTotal;
+  all_time: UsageTotal;
+  first_used_at: string | null;
+  previous_tokens: number | null;
+  daily: DailyLine[];
+  by_execution: BreakdownLine[];
+  by_model: BreakdownLine[];
+};
 
 export type UsageReport = {
-  window_seconds: number;
+  window_seconds: number | null;
   total_micro_usd: number;
   by_dimension: DimensionLine[];
   caps: Cap[];
+  usage: UsageDetails;
 };
 
 export type WorkspaceUsageReport = UsageReport & {
   workspace: {
     total_micro_usd: number;
     by_dimension: DimensionLine[];
-    by_member: SubjectLine[];
-    by_agent: SubjectLine[];
+    by_member: BreakdownLine[];
+    by_agent: BreakdownLine[];
+    usage: UsageDetails;
   } | null;
 };
+
+function rangeFromHash(): Range {
+  const value = new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get("range");
+  return RANGES.find((range) => range === value) ?? "30d";
+}
 
 function hours(seconds: number): string {
   return seconds / HOUR_SECONDS + "h";
 }
 
-function windowLabel(seconds: number): string {
-  const count = seconds / HOUR_SECONDS;
-  return "Last " + count + (count === 1 ? " hour" : " hours");
+function rangeLabel(range: Range): string {
+  if (range === "all") return "All time";
+  return "Last " + Number.parseInt(range) + " days";
 }
 
-function Figures({ items }: { items: { label: string; value: string; note: string }[] }) {
+function dateLabel(value: string): string {
+  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(
+    new Date(value),
+  );
+}
+
+function tokenCount(value: number): string {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function percent(value: number, total: number): string {
+  if (!total) return "—";
+  const share = (100 * value) / total;
+  return share < 0.1 && share > 0 ? "<0.1%" : share.toFixed(1) + "%";
+}
+
+function blended(tokens: number, microUsd: number): string {
+  return tokens ? "$" + (microUsd / tokens).toFixed(2) + "/Mtok" : "—";
+}
+
+function otherDimensions(lines: DimensionLine[]): DimensionLine[] {
+  return lines.filter((line) => line.dimension !== "tokens" && line.dimension !== "sandbox_tokens");
+}
+
+function delegation(lines: BreakdownLine[]): BreakdownLine[] {
+  return [
+    {
+      label: "Agents",
+      tokens: lines.filter((line) => !line.label).reduce((sum, line) => sum + line.tokens, 0),
+      priced_micro_usd: lines
+        .filter((line) => !line.label)
+        .reduce((sum, line) => sum + line.priced_micro_usd, 0),
+    },
+    {
+      label: "Subagents",
+      tokens: lines.filter((line) => line.label).reduce((sum, line) => sum + line.tokens, 0),
+      priced_micro_usd: lines
+        .filter((line) => line.label)
+        .reduce((sum, line) => sum + line.priced_micro_usd, 0),
+    },
+  ].filter((line) => line.tokens);
+}
+
+function changeNote(details: UsageDetails, range: Range): string {
+  if (range === "all" || details.previous_tokens === null) return rangeLabel(range);
+  if (!details.previous_tokens) return rangeLabel(range);
+  const change = Math.round(
+    (100 * (details.selected.tokens - details.previous_tokens)) / details.previous_tokens,
+  );
+  return rangeLabel(range) + " · " + (change >= 0 ? "+" : "") + change + "%";
+}
+
+function RangeControl({ range, onRange }: { range: Range; onRange: (range: Range) => void }) {
   return (
-    <div className={cn("grid gap-lg", items.length > 1 && "grid-cols-2")}>
+    <div className="flex flex-wrap gap-xs" aria-label="Usage range">
+      {RANGES.map((entry) => (
+        <Button
+          key={entry}
+          variant="option"
+          aria-pressed={range === entry}
+          className={range === entry ? "bg-ink text-surface" : undefined}
+          onClick={() => onRange(entry)}
+        >
+          {entry === "all" ? "All time" : entry.replace("d", " days")}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function Figures({ details, range }: { details: UsageDetails; range: Range }) {
+  const first = details.first_used_at ? "Since " + dateLabel(details.first_used_at) : "No usage";
+  const activeDays = details.daily.filter((day) => day.tokens).length;
+  const items = [
+    { label: "Tokens", value: tokenCount(details.selected.tokens), note: changeNote(details, range) },
+    { label: "All-time tokens", value: tokenCount(details.all_time.tokens), note: first },
+    {
+      label: "Daily average",
+      value: tokenCount(details.selected.tokens / Math.max(details.daily.length, 1)),
+      note: activeDays + (activeDays === 1 ? " active day" : " active days"),
+    },
+    {
+      label: "Blended cost",
+      value: blended(details.selected.tokens, details.selected.token_micro_usd),
+      note: rangeLabel(range),
+    },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-lg">
       {items.map((item) => (
         <div key={item.label} className="rounded-panel border border-edge bg-surface p-xl">
           <div className="text-small opacity-(--muted)">{item.label}</div>
@@ -68,15 +189,43 @@ function Figures({ items }: { items: { label: string; value: string; note: strin
   );
 }
 
+function DailyHistory({ rows }: { rows: DailyLine[] }) {
+  if (!rows.length) return <PanelBlank body="No tokens were used in this range." />;
+  const top = Math.max(...rows.map((row) => row.tokens), 1);
+  const points = rows
+    .map((row, index) => {
+      const x = rows.length === 1 ? 50 : (100 * index) / (rows.length - 1);
+      return x + "," + (29 - (26 * row.tokens) / top);
+    })
+    .join(" ");
+  const total = rows.reduce((sum, row) => sum + row.tokens, 0);
+  return (
+    <div className="rounded-panel border border-edge bg-surface p-xl">
+      <svg
+        viewBox="0 0 100 32"
+        preserveAspectRatio="none"
+        className="h-(--size-usage-chart) w-full"
+        role="img"
+        aria-label={tokenCount(total) + " tokens across " + rows.length + " daily buckets"}
+      >
+        <path d="M0 29 H100" fill="none" stroke="currentColor" opacity="0.2" />
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="flex justify-between text-small opacity-(--muted)">
+        <span>{dateLabel(rows[0].day + "T00:00:00Z")}</span>
+        <span>{dateLabel(rows[rows.length - 1].day + "T00:00:00Z")}</span>
+      </div>
+    </div>
+  );
+}
+
 function Dimensions({ lines, empty }: { lines: DimensionLine[]; empty: string }) {
   if (!lines.length) return <PanelBlank body={empty} />;
   return (
     <Table>
       <thead>
         <tr>
-          {["Metered", "Units", "Cost"].map((column) => (
-            <Th key={column}>{column}</Th>
-          ))}
+          {["Metered", "Units", "Cost"].map((column) => <Th key={column}>{column}</Th>)}
         </tr>
       </thead>
       <tbody>
@@ -92,16 +241,72 @@ function Dimensions({ lines, empty }: { lines: DimensionLine[]; empty: string })
   );
 }
 
+function Breakdown({
+  heading,
+  rows,
+  empty,
+  links,
+  range,
+}: {
+  heading: string;
+  rows: BreakdownLine[];
+  empty: string;
+  links?: boolean;
+  range?: Range;
+}) {
+  if (!rows.length) return <PanelBlank body={empty} />;
+  const tokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const cost = rows.reduce((sum, row) => sum + row.priced_micro_usd, 0);
+  return (
+    <Table>
+      <thead>
+        <tr>
+          {[heading, "Tokens", "Token Share", "Cost", "$/Mtok", ...(links ? [""] : [])].map(
+            (column, index) => <Th key={column || index}>{column}</Th>,
+          )}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.id ?? row.label}>
+            <Td className="w-full">{row.label || "This agent"}</Td>
+            <Td className="whitespace-nowrap">{tokenCount(row.tokens)}</Td>
+            <Td className="whitespace-nowrap">{percent(row.tokens, tokens)}</Td>
+            <Td className="whitespace-nowrap">{money(row.priced_micro_usd)}</Td>
+            <Td className="whitespace-nowrap">{blended(row.tokens, row.priced_micro_usd)}</Td>
+            {links ? (
+              <Td>
+                {row.id ? (
+                  <a
+                    className={buttonVariants({ variant: "row" })}
+                    href={agentHash(row.id, "usage", { range })}
+                  >
+                    View
+                  </a>
+                ) : null}
+              </Td>
+            ) : null}
+          </tr>
+        ))}
+        <tr>
+          <Td className="w-full font-strong">Total</Td>
+          <Td className="whitespace-nowrap font-strong">{tokenCount(tokens)}</Td>
+          <Td className="whitespace-nowrap">{percent(tokens, tokens)}</Td>
+          <Td className="whitespace-nowrap font-strong">{money(cost)}</Td>
+          <Td className="whitespace-nowrap">{blended(tokens, cost)}</Td>
+          {links ? <Td /> : null}
+        </tr>
+      </tbody>
+    </Table>
+  );
+}
+
 function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   if (!caps.length) return <PanelBlank body={empty} />;
   return (
     <Table>
       <thead>
-        <tr>
-          {["Window", "Limit", "On Breach"].map((column) => (
-            <Th key={column}>{column}</Th>
-          ))}
-        </tr>
+        <tr>{["Window", "Limit", "On Breach"].map((column) => <Th key={column}>{column}</Th>)}</tr>
       </thead>
       <tbody>
         {caps.map((cap, index) => (
@@ -116,72 +321,37 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   );
 }
 
-function Subjects({
-  subject,
-  rows,
-  empty,
-}: {
-  subject: string;
-  rows: SubjectLine[];
-  empty: string;
-}) {
-  if (!rows.length) return <PanelBlank body={empty} />;
-  return (
-    <Table>
-      <thead>
-        <tr>
-          {[subject, "Cost"].map((column) => (
-            <Th key={column}>{column}</Th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((entry) => (
-          <tr key={entry.label}>
-            <Td className="w-full">{entry.label}</Td>
-            <Td className="whitespace-nowrap">{money(entry.priced_micro_usd)}</Td>
-          </tr>
-        ))}
-      </tbody>
-    </Table>
-  );
-}
-
 export function AgentUsage({ agent }: { agent: Agent }) {
-  const state = usePanelRead<UsageReport>("/agents/" + agent.id + "/usage");
+  const [range, setRange] = useState<Range>(rangeFromHash);
+  const state = usePanelRead<UsageReport>("/agents/" + agent.id + "/usage?range=" + range);
+  function pickRange(next: Range) {
+    setRange(next);
+    history.replaceState(null, "", agentHash(agent.id, "usage", { range: next }));
+  }
   return (
     <Panel
       state={state}
       failed={(message) => (
-        <PanelEmpty>
-          {message.startsWith("Error 404")
-            ? "Usage for this agent is not shared with you."
-            : message}
-        </PanelEmpty>
+        <PanelEmpty>{message.startsWith("Error 404") ? "Usage for this agent is not shared with you." : message}</PanelEmpty>
       )}
     >
       {(report) => (
         <>
           <Section title="Usage">
-            <Figures
-              items={[
-                {
-                  label: "This agent",
-                  value: money(report.total_micro_usd),
-                  note: windowLabel(report.window_seconds),
-                },
-              ]}
-            />
+            <RangeControl range={range} onRange={pickRange} />
+            <Figures details={report.usage} range={range} />
           </Section>
-          <Section title="Spend">
-            <Dimensions
-              lines={report.by_dimension}
-              empty={"Nothing " + agent.name + " ran in this window carried a price."}
-            />
+          <Section title="Daily usage"><DailyHistory rows={report.usage.daily} /></Section>
+          <Section title="Execution">
+            <Breakdown heading="Execution" rows={report.usage.by_execution} empty="No model tokens were used in this range." />
           </Section>
-          <Section title="Caps">
-            <Caps caps={report.caps} empty="No spend cap is set on this agent." />
+          <Section title="Models">
+            <Breakdown heading="Model" rows={report.usage.by_model} empty="No models were used in this range." />
           </Section>
+          <Section title="Other usage">
+            <Dimensions lines={otherDimensions(report.by_dimension)} empty={"Nothing else " + agent.name + " ran in this range carried a price."} />
+          </Section>
+          <Section title="Caps"><Caps caps={report.caps} empty="No spend cap is set on this agent." /></Section>
         </>
       )}
     </Panel>
@@ -189,62 +359,49 @@ export function AgentUsage({ agent }: { agent: Agent }) {
 }
 
 export function WorkspaceUsage() {
-  const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage");
+  const [range, setRange] = useState<Range>(rangeFromHash);
+  const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage?range=" + range);
+  function pickRange(next: Range) {
+    setRange(next);
+    history.replaceState(null, "", workspaceHash("usage", { range: next }));
+  }
   return (
     <Panel state={state}>
       {(payload) => {
-        const note = windowLabel(payload.window_seconds);
+        const report = payload.workspace?.usage ?? payload.usage;
         return (
           <>
             <Section title="Usage">
-              <Figures
-                items={[
-                  { label: "You", value: money(payload.total_micro_usd), note },
-                  ...(payload.workspace
-                    ? [
-                        {
-                          label: "Workspace",
-                          value: money(payload.workspace.total_micro_usd),
-                          note,
-                        },
-                      ]
-                    : []),
-                ]}
-              />
+              <RangeControl range={range} onRange={pickRange} />
+              <Figures details={report} range={range} />
             </Section>
-            <Section title="Your spend">
-              <Dimensions
-                lines={payload.by_dimension}
-                empty="Nothing you ran in this window carried a price."
-              />
-            </Section>
-            <Section title="Your caps">
-              <Caps caps={payload.caps} empty="No spend cap is set on you." />
-            </Section>
+            <Section title="Daily usage"><DailyHistory rows={report.daily} /></Section>
             {payload.workspace ? (
               <>
-                <Section title="Workspace spend">
-                  <Dimensions
-                    lines={payload.workspace.by_dimension}
-                    empty="Nothing in this workspace carried a price in this window."
-                  />
+                <Section title="Agents">
+                  <Breakdown heading="Agent" rows={payload.workspace.by_agent} empty="No agent used model tokens in this range." links range={range} />
                 </Section>
-                <Section title="Spend by member">
-                  <Subjects
-                    subject="Member"
-                    rows={payload.workspace.by_member}
-                    empty="No member was charged in this window."
-                  />
+                <Section title="Delegation">
+                  <Breakdown heading="Execution" rows={delegation(report.by_execution)} empty="No model tokens were used in this range." />
                 </Section>
-                <Section title="Spend by agent">
-                  <Subjects
-                    subject="Agent"
-                    rows={payload.workspace.by_agent}
-                    empty="No agent was charged in this window."
-                  />
+                <Section title="Members">
+                  <Breakdown heading="Member" rows={payload.workspace.by_member} empty="No member used model tokens in this range." />
+                </Section>
+                <Section title="Models">
+                  <Breakdown heading="Model" rows={report.by_model} empty="No models were used in this range." />
+                </Section>
+                <Section title="Other usage">
+                  <Dimensions lines={otherDimensions(payload.workspace.by_dimension)} empty="Nothing else in this workspace carried a price in this range." />
                 </Section>
               </>
-            ) : null}
+            ) : (
+              <>
+                <Section title="Execution"><Breakdown heading="Execution" rows={report.by_execution} empty="No model tokens were used in this range." /></Section>
+                <Section title="Models"><Breakdown heading="Model" rows={report.by_model} empty="No models were used in this range." /></Section>
+                <Section title="Other usage"><Dimensions lines={otherDimensions(payload.by_dimension)} empty="Nothing else you ran in this range carried a price." /></Section>
+              </>
+            )}
+            <Section title="Caps"><Caps caps={payload.caps} empty="No spend cap is set on you." /></Section>
           </>
         );
       }}
