@@ -408,8 +408,7 @@ terminal so every live tail ends now; descendants are the cancel reconciler's, a
 path), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
 `spend_rollup`, and the per-agent projections — `object_kind` with
 `list_member_objects`/`member_object`, `agent_skills`, `agent_spend`, and
-`memory_available`/`search_memory`. An extension registers a
-`surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
+`memory_available`/`search_memory`. An extension registers a `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
 Jobs and evals receive the separate internal `invoke` capability, which never consumes a member's
@@ -487,8 +486,11 @@ composition a turn loads), its connector accounts, its conversations, its config
 with the grant list inside it the admin's), and its rolling-window spend beside its agent-scoped
 caps — the ledger spans every member's turns, so spend answers an admin or a member whose
 explicit grant holds the agent, never the main-agent default alone. Beside the per-agent reads,
-`api/chats` lists the member's own web conversations across their audience agents — the rail's
-projection, each row titled from its first message. A `#/c/<conversation_id>` permalink opens a web
+`api/chats` lists the conversations this member is in across their audience agents — bound to them
+or holding a turn they spoke — and, under a bound of its own, the readable ones a colleague is in
+and they are not: the rail's projection, each row titled from its first message, flagged `mine`,
+and a colleague's naming who spoke it. A conversation no member spoke in is an extension's errand
+and is in neither. A `#/c/<conversation_id>` permalink opens a web
 chat normally and opens another surface's readable conversation in that same conversation view,
 read-only. A link into the portal from another surface names its target as `?c=<conversation_id>`,
 because a fragment never reaches the server: the sign-in redirect and the signed-in card carry that

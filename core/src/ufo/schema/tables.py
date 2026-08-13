@@ -209,7 +209,7 @@ turn = sa.Table(
         "turn_spoken",
         "workspace_id",
         "conversation_id",
-        "seq",
+        "speaker_member_id",
         postgresql_where=sa.text("speaker_member_id is not null"),
         sqlite_where=sa.text("speaker_member_id is not null"),
     ),

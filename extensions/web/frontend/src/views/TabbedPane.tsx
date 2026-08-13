@@ -1,7 +1,9 @@
 import type { Placement } from "@/kernel/pager";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import { TabPanel, TabStrip } from "@/kernel/tabs";
+import { cn } from "@/lib/cn";
 import type { PaneView } from "@/views/registry";
 
 /** A destination the sidebar reaches: a title, a tab array, and one registry. Workspace, Customize
@@ -34,8 +36,8 @@ export function TabbedPane<Tab extends string>({
   });
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
-      <div className="flex items-baseline gap-md px-2xl pt-lg">
+    <Pane>
+      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
         <h1 className="m-0 text-title font-strong">{title}</h1>
       </div>
       {tabs.length > 1 ? (
@@ -50,18 +52,21 @@ export function TabbedPane<Tab extends string>({
           <TabPanel
             group={group}
             current={view}
-            className="flex flex-1 flex-col overflow-y-auto p-2xl"
+            className={cn(COLUMN, "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl")}
             data-testid={group}
           >
             <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
           </TabPanel>
         </>
       ) : (
-        <div className="flex flex-1 flex-col overflow-y-auto p-2xl" data-testid={group}>
+        <div
+          className={cn(COLUMN, "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl")}
+          data-testid={group}
+        >
           <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
         </div>
       )}
-    </main>
+    </Pane>
   );
 }
 

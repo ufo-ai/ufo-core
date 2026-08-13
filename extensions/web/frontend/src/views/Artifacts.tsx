@@ -29,6 +29,10 @@ import { day } from "@/lib/moments";
 import { formatSize } from "@/lib/size";
 
 const SITE_KIND = "site";
+const CURSOR_SEPARATOR = "|";
+
+const CURSOR_OLDER = "older";
+
 const OBJECT_PREFIX = "object/";
 const NOT_FOUND = 404;
 const SITE_FAMILY = "Sites";
@@ -61,11 +65,13 @@ type FilesPayload = {
 type SitesPayload = { objects: ObjectRow[] };
 
 /** One card of the shelf. A site and a shared file are two families of the one thing the member
- *  came for — what the agents produced — so they are read down one grid, the small named family
- *  ahead of the directory it leads. */
+ *  came for — what the agents produced — so they are read down one grid, newest first whichever
+ *  family a card belongs to. `time` is what that order is taken on: a record the shelf cannot date
+ *  sorts last rather than sorting arbitrarily. */
 type Card = {
   key: string;
   name: string;
+  time: number;
   status: string | null;
   body: string | null;
   meta: string;
@@ -87,13 +93,28 @@ function visibilityLabel(visibility: string) {
   return visibility.charAt(0).toUpperCase() + visibility.slice(1);
 }
 
+/** One stamp as the order reads it. A record with no date, or a date the shelf cannot read, takes
+ *  the floor and stands at the foot of the shelf. */
+function moment(iso: string | null): number {
+  const at = iso === null ? NaN : Date.parse(iso);
+  return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at;
+}
+
 function siteCard(row: ObjectRow, viewer: string | null): Card {
+  const createdAt = typeof row.created_at === "string" ? row.created_at : null;
   return {
     key: OBJECT_PREFIX + SITE_KIND + "/" + row.name,
     name: row.name,
-    status: typeof row.visibility === "string" ? visibilityLabel(row.visibility) : null,
+    time: moment(createdAt),
+    status: day(createdAt),
     body: typeof row.summary === "string" ? row.summary : null,
-    meta: creator(row[OWNER_FIELD], viewer),
+    meta: [
+      "Site",
+      typeof row.visibility === "string" ? visibilityLabel(row.visibility) : null,
+      creator(row[OWNER_FIELD], viewer),
+    ]
+      .filter((part) => part)
+      .join(" · "),
     image: null,
     link: typeof row.site_url === "string" ? row.site_url : null,
     file: null,
@@ -104,6 +125,7 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
   return {
     key: entry.created_at + "|" + entry.filename,
     name: entry.filename,
+    time: moment(entry.created_at),
     status: day(entry.created_at),
     body: entry.subject,
     meta: ownerLabel(entry.owner_email, viewer),
@@ -115,23 +137,56 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
 
 /** The files walk is the shelf's own read: it fails the section, and it is the one page a cursor
  *  continues. A deploy with no sites extension answers the site read with a 404, which is a family
- *  that does not exist here rather than a fault — every other refusal is stated. */
+ *  that does not exist here rather than a fault — every other refusal is stated.
+ *
+ *  The sites arrive whole on every read, so a page keeps only the ones made inside its own window,
+ *  and the windows have to tile: a site between the oldest file of one page and the newest file of
+ *  the next belongs to exactly one of them, never to neither. The foot of the window is this page's
+ *  oldest file and the top is the position the cursor names — the last row of the page above, which
+ *  is that page's foot — so the two meet on one value and a record at it stands on the upper page
+ *  alone. The first page is open at the top and the last is open at the foot. */
+/** The moment a page starts under, read from the cursor that opened it: `side|created_at|item_id`.
+ *  Only a cursor walking older names this — it is the last row of the page above, so this page
+ *  holds what is older than it. A cursor walking newer names the row *below* this page, which
+ *  bounds its foot and says nothing about its top; read as a top it would put the whole window
+ *  under this page's own oldest file and leave no site standing anywhere. A page whose top is
+ *  unnamed — the newest page, or one walked back into from below — is open at the top, so a site
+ *  can stand on two pages while the member walks backwards but can never stand on none. */
+function startsUnder(after: string | undefined): number {
+  const [side, stamp] = (after ?? "").split(CURSOR_SEPARATOR);
+  const at = Date.parse(stamp ?? "");
+  return side === CURSOR_OLDER && !Number.isNaN(at) ? at : Number.POSITIVE_INFINITY;
+}
+
 function shelf(
   sites: PanelState<SitesPayload>,
   files: PanelState<FilesPayload>,
   viewer: string | null,
+  after: string | undefined,
 ): PanelState<Shelf> {
   if (files.phase !== "ready") return files;
   if (sites.phase === "loading") return sites;
   if (sites.phase === "failed" && sites.status !== NOT_FOUND) return sites;
-  const standing = sites.phase === "ready" ? sites.payload.objects : [];
+  const artifacts = files.payload.artifacts;
+  const oldestFile = Math.min(...artifacts.map((entry) => Date.parse(entry.created_at)));
+  const older = Boolean(files.payload.older);
+  const under = startsUnder(after);
+  const standing =
+    sites.phase === "ready"
+      ? sites.payload.objects.filter((row) => {
+          const at = moment(typeof row.created_at === "string" ? row.created_at : null);
+          return at < under && (!older || at >= oldestFile);
+        })
+      : [];
+  const cards = [
+    ...standing.map((row) => siteCard(row, viewer)),
+    ...artifacts.map((entry) => fileCard(entry, viewer)),
+  ];
+  cards.sort((left, right) => (left.time < right.time ? 1 : left.time > right.time ? -1 : 0));
   return {
     phase: "ready",
     payload: {
-      cards: [
-        ...standing.map((row) => siteCard(row, viewer)),
-        ...files.payload.artifacts.map((entry) => fileCard(entry, viewer)),
-      ],
+      cards,
       files: files.payload,
     },
   };
@@ -159,7 +214,11 @@ export function Artifacts({
   useEffect(() => setTyped(query), [query]);
 
   const media = MEDIA[picked];
-  const siteParams = new URLSearchParams({ agent: mainAgent?.id ?? "", order_by: "name" });
+  const siteParams = new URLSearchParams({
+    agent: mainAgent?.id ?? "",
+    order_by: "created_at",
+    order: "desc",
+  });
   if (query) siteParams.set("q", query);
   const held = usePanelRead<SitesPayload>(
     mainAgent ? "/objects/" + SITE_KIND + "?" + siteParams.toString() : null,
@@ -177,6 +236,7 @@ export function Artifacts({
     mainAgent && !media ? held : NO_SITES,
     picked === SITE_FAMILY ? NO_FILES : walked,
     viewer,
+    place.after,
   );
 
   const at = objectAt(place.open);
@@ -337,7 +397,7 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       {isImage(entry) ? (
         <FullImage entry={entry} />
       ) : isTextMedia(entry.media_type) ? (
-        <ArtifactText url={entry.url} mediaType={entry.media_type} />
+        <ArtifactText url={entry.url} name={entry.filename} mediaType={entry.media_type} />
       ) : (
         <div className="font-mono text-small opacity-(--muted)">
           No preview for this file type. Download it to open it.

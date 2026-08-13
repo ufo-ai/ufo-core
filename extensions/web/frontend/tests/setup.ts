@@ -17,7 +17,7 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem" | "
   };
 }
 
-function installPointerCaptureAndResizeObserverJsdomLacks() {
+function installWhatJsdomLacks() {
   Element.prototype.hasPointerCapture = () => false;
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};
@@ -27,9 +27,19 @@ function installPointerCaptureAndResizeObserverJsdomLacks() {
     unobserve() {}
     disconnect() {}
   };
+  globalThis.matchMedia = (media: string) => ({
+    media,
+    matches: false,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  });
 }
 
-if (typeof document !== "undefined") installPointerCaptureAndResizeObserverJsdomLacks();
+if (typeof document !== "undefined") installWhatJsdomLacks();
 
 beforeEach(() => {
   keyFaults = [];

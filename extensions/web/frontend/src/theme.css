@@ -1,4 +1,6 @@
 @import "tailwindcss" source(".");
+@source "../node_modules/streamdown/dist/*.js";
+
 
 @font-face {
   font-family: "Roboto Mono";
@@ -231,6 +233,7 @@
   --container-dialog: min(560px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 76ch;
+  --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
   --container-hint: 64ch;
   --container-form: 52ch;
   --container-empty: 44ch;
@@ -243,7 +246,9 @@
   --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
   --size-avatar: 24px;
   --size-band: 128px;
+  --size-cell: 32ch;
   --size-composer: 15em;
+  --size-control: 32px;
   --size-fact: 16ch;
   --size-glyph: 16px;
   --size-icon: 1em;
@@ -254,6 +259,53 @@
   --size-wordmark: 13px;
   --size-notice: 1em;
   --marker-width: 2px;
+}
+
+
+/* Streamdown ships its markup already classed, in shadcn's vocabulary: `bg-muted`, `border-border`,
+   `text-2xl`, `rounded-lg`. Naming those keys here is how that vocabulary resolves to this portal's
+   own — one mapping, so their components draw in our colours, type and radii, and no second palette
+   or scale reaches the page. A key left unnamed compiles Tailwind's own default, which is a literal
+   colour the zero-authored-colour test refuses, so every key they use is answered. */
+@theme {
+  --color-background: var(--color-surface);
+  --color-foreground: var(--color-ink);
+  --color-muted: var(--color-fill-subtle);
+  --color-muted-foreground: color-mix(in srgb, CanvasText 55%, Canvas);
+  --color-primary: var(--color-ink);
+  --color-primary-foreground: var(--color-surface);
+  --color-border: var(--color-edge);
+  --color-black: CanvasText;
+  --color-red-50: var(--color-fill-subtle);
+  --color-red-100: var(--color-fill-subtle);
+  --color-red-600: var(--color-ink);
+  --color-red-700: var(--color-ink);
+  --color-red-800: var(--color-ink);
+
+  /* The portal draws no `shadow-*` utility — its one shadow is written as a bracket `box-shadow`,
+     because Tailwind hangs the ring machinery off that utility and the machinery declares a literal
+     white the theme refuses. `initial` drops the key, so the class never compiles. */
+  --shadow-sm: initial;
+  --shadow-lg: initial;
+
+  --text-xs: var(--text-small);
+  --text-sm: var(--text-label);
+  --text-base: var(--text-ui);
+  --text-lg: var(--text-body);
+  --text-xl: var(--text-body);
+  --text-2xl: var(--text-subtitle);
+  --text-3xl: var(--text-title);
+  --text-xs--line-height: var(--leading-chrome);
+  --text-sm--line-height: var(--leading-chrome);
+  --text-base--line-height: var(--leading-chrome);
+  --text-lg--line-height: var(--leading-chrome);
+  --text-xl--line-height: var(--leading-chrome);
+  --text-2xl--line-height: var(--leading-chrome);
+  --text-3xl--line-height: var(--leading-chrome);
+
+  --radius-md: var(--radius-control);
+  --radius-lg: var(--radius-panel);
+  --radius-xl: var(--radius-panel);
 }
 
 @theme {
@@ -312,8 +364,175 @@
     font: inherit;
   }
 
-  :focus-visible {
+  /* The scrollbar is its thumb and nothing else: a track drawn in the browser's own grey is a
+     second surface running down the page, and it lands inside the reading column rather than at
+     the pane's edge. `scrollbar-color` inherits and `scrollbar-width` does not, so the width is
+     stated for every element and the colour once. A scrolling element then declares only
+     `scrollbar-gutter-stable`, which holds the gutter open so a growing reply never shifts the
+     line being read. */
+  :root {
+    scrollbar-color: var(--color-edge-control-strong) transparent;
+  }
+
+  * {
+    scrollbar-width: thin;
+  }
+
+  /* The second selector is a field drawn as a card: the box inside it draws no surface of its own,
+     so the outline belongs at the card's edge, and it is this one rather than another like it. */
+  :focus-visible,
+  [data-field-card]:has(textarea:focus-visible) {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+
+  [data-field-card] textarea:focus-visible {
+    outline: none;
+  }
+}
+
+@layer components {
+  /* A word fades in once, at the moment it lands. `lib/arrive.ts` wraps each word of a streaming
+     reply in a span; a span the browser has just inserted runs this, and one already on the page
+     has already run it. The global reduced-motion rule cuts it to nothing. */
+  @keyframes arrive {
+    from {
+      opacity: 0;
+    }
+  }
+
+  [data-arrive] {
+    animation: arrive 0.18s var(--ease-control) min(calc(var(--arrive) * 22ms), 400ms) both;
+  }
+
+  .typeset {
+    --typeset-flow: var(--spacing-lg);
+
+    overflow-wrap: break-word;
+  }
+
+  .typeset > :first-child {
+    margin-block-start: 0;
+  }
+
+  .typeset * {
+    &:where(p, ul, ol, blockquote, pre, table, img, hr) {
+      margin-block: var(--typeset-flow) 0;
+    }
+
+    &:where(h1, h2, h3, h4, h5, h6) {
+      margin-block: calc(var(--typeset-flow) * 2) 0;
+      font-weight: var(--font-weight-strong);
+    }
+
+    &:where(:is(h1, h2, h3, h4, h5, h6) + *) {
+      margin-block-start: var(--spacing-sm);
+    }
+
+    &:where(h1) {
+      font-size: var(--text-title);
+    }
+
+    &:where(h2) {
+      font-size: var(--text-subtitle);
+    }
+
+    &:where(h3) {
+      font-size: var(--text-body);
+    }
+
+    &:where(h4, h5, h6) {
+      font-size: var(--text-ui);
+    }
+
+    &:where(ul) {
+      list-style-type: disc;
+    }
+
+    &:where(ol) {
+      list-style-type: decimal;
+    }
+
+    &:where(ul, ol) {
+      padding-inline-start: var(--spacing-6xl);
+    }
+
+    &:where(li) {
+      margin-block-start: var(--spacing-2xs);
+    }
+
+    &:where(li > p, li > ul, li > ol) {
+      margin-block-start: var(--spacing-2xs);
+    }
+
+    &:where(li > input) {
+      margin-inline-end: var(--spacing-xs);
+      vertical-align: middle;
+      accent-color: var(--color-ink);
+    }
+
+    &:where(:not(pre) > code) {
+      padding-inline: var(--spacing-2xs);
+      border-radius: var(--radius-sm);
+      background: var(--color-fill-subtle);
+      font-family: var(--font-mono);
+      font-size: var(--text-label);
+    }
+
+    &:where(pre) {
+      overflow-x: auto;
+      padding: var(--spacing-lg);
+      border-radius: var(--radius-panel);
+      background: var(--color-fill-subtle);
+      font-family: var(--font-mono);
+      font-size: var(--text-label);
+      tab-size: 2;
+    }
+
+    &:where(pre code) {
+      padding: 0;
+      background: none;
+      font: inherit;
+    }
+
+    &:where(blockquote) {
+      margin-inline: 0;
+      padding-inline-start: var(--spacing-lg);
+      border-inline-start: var(--marker-width) solid var(--color-edge);
+      opacity: var(--muted-soft);
+    }
+
+    &:where(hr) {
+      border: 0;
+      border-block-start: 1px solid var(--color-edge-soft);
+    }
+
+    &:where(table) {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      border-collapse: separate;
+      border-spacing: 0;
+      border-block-end: 1px solid var(--color-edge-soft);
+      font-variant-numeric: tabular-nums;
+    }
+
+    &:where(th, td) {
+      padding: var(--spacing-2xs) var(--spacing-sm);
+      border-block-start: 1px solid var(--color-edge-soft);
+      text-align: start;
+      vertical-align: top;
+    }
+
+    &:where(img) {
+      max-width: 100%;
+      height: auto;
+      border-radius: var(--radius-panel);
+    }
+
+    &:where(a) {
+      color: var(--color-link);
+      text-decoration-line: underline;
+    }
   }
 }

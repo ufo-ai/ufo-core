@@ -196,10 +196,16 @@ test("a terminal that is not done states the status and error class it carries",
   expect(stream.closed).toBe(true);
 });
 
-test("a terminal that is not done and names no error class states the status alone", async () => {
+test("a cancelled turn reads as the member's own word for it", async () => {
   const stream = await streaming();
   stream.emit("terminal", { status: "cancelled" });
-  expect(await screen.findByText("(cancelled)")).toBeTruthy();
+  expect(await screen.findByText("Stopped.")).toBeTruthy();
+});
+
+test("a terminal that is not done and names no error class states the status alone", async () => {
+  const stream = await streaming();
+  stream.emit("terminal", { status: "refused" });
+  expect(await screen.findByText("(refused)")).toBeTruthy();
 });
 
 test("a parked turn states why it stopped and closes the stream", async () => {
@@ -240,16 +246,24 @@ async function asked(entry: Record<string, unknown>) {
   return stream;
 }
 
-test("a single-choice question offers a button per option", async () => {
+test("a single-choice question holds one option at a time", async () => {
   await asked(ENTRY);
-  expect(await screen.findByRole("button", { name: "Work" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Home" })).toBeTruthy();
+  const work = await screen.findByRole("button", { name: "Work" });
+  const home = screen.getByRole("button", { name: "Home" });
+  await userEvent.click(work);
+  await userEvent.click(home);
+  expect(work.getAttribute("aria-pressed")).toBe("false");
+  expect(home.getAttribute("aria-pressed")).toBe("true");
 });
 
-test("a multi-select question offers no option buttons", async () => {
+test("a multi-select question offers a toggle per option", async () => {
   await asked({ ...ENTRY, multi_select: true });
-  expect(await screen.findByText("Which calendar?")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Work" })).toBeNull();
+  const work = await screen.findByRole("button", { name: "Work" });
+  expect(work.getAttribute("aria-pressed")).toBe("false");
+  await userEvent.click(work);
+  expect(work.getAttribute("aria-pressed")).toBe("true");
+  await userEvent.click(screen.getByRole("button", { name: "Home" }));
+  expect(work.getAttribute("aria-pressed")).toBe("true");
 });
 
 test("a free-text-only question offers no option buttons", async () => {
@@ -302,6 +316,7 @@ test("an answer whose response is not json ends the wait rather than hanging", a
   });
 
   await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
@@ -313,6 +328,7 @@ test("an answer the server refuses states its status rather than hanging", async
   });
 
   await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
 });
 

@@ -120,6 +120,16 @@ export class StreamFake {
   }
 }
 
+/** A streaming reply is drawn word by word, so one line of prose lives in more than one element.
+ *  `saying` matches the innermost element whose whole text is that line. */
+export function saying(line: string | RegExp) {
+  const matches = (text: string) => (typeof line === "string" ? text === line : line.test(text));
+  return (_content: string, node: Element | null) =>
+    node !== null &&
+    matches(node.textContent ?? "") &&
+    !Array.from(node.children).some((child) => matches(child.textContent ?? ""));
+}
+
 export function useStreamFake() {
   StreamFake.reset();
   vi.stubGlobal("EventSource", StreamFake);
@@ -180,6 +190,8 @@ export const CHAT_ROW = {
   title: "Pick one thread",
   last_at: "2026-08-01T09:00:00.000Z",
   origin: null,
+  mine: true,
+  speaker: null,
 };
 
 export const json = (payload: unknown) => Response.json(payload);

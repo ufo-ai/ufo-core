@@ -16,6 +16,7 @@ import {
   TURN_ID,
   json,
   useStreamFake,
+  saying,
   wire,
 } from "./harness";
 
@@ -70,7 +71,7 @@ test("a dropped stream reattaches and the replay rebuilds the reply without dupl
   second.emit("open", {});
   second.emit("message", { text: "one " });
   second.emit("message", { text: "two" });
-  expect(await screen.findByText("one two")).toBeTruthy();
+  expect(await screen.findByText(saying("one two"))).toBeTruthy();
   expect(screen.queryByText("one one two")).toBeNull();
 
   second.emit("terminal", { status: "done", model: "opus", tokens: 3, cost_micro_usd: 0 });
@@ -144,7 +145,7 @@ test("a send during the backoff rebuilds the reply from the replay it reattached
   second.emit("open", {});
   second.emit("message", { text: "one " });
   second.emit("message", { text: "two" });
-  expect(await screen.findByText("one two")).toBeTruthy();
+  expect(await screen.findByText(saying("one two"))).toBeTruthy();
   expect(screen.queryByText("one one two")).toBeNull();
 });
 
@@ -159,7 +160,7 @@ test("a native retry shows a quiet reconnecting state and the stream carries on"
   stream.emit("open", {});
   await waitFor(() => expect(screen.queryByText("Reconnecting…")).toBeNull());
   stream.emit("message", { text: " resumed" });
-  expect(await screen.findByText("partial resumed")).toBeTruthy();
+  expect(await screen.findByText(saying("partial resumed"))).toBeTruthy();
 });
 
 test("persistent fatal closes give up with the loss stated once", async () => {
@@ -316,7 +317,7 @@ test("a native blip on a reattached source never wipes the rebuilt text", async 
   second.fail();
   second.emit("open", {});
   second.emit("message", { text: " intact" });
-  expect(await screen.findByText("rebuilt intact")).toBeTruthy();
+  expect(await screen.findByText(saying("rebuilt intact"))).toBeTruthy();
 });
 
 test("a transcript fetched before a send never erases the exchange", async () => {

@@ -172,6 +172,7 @@ def test_a_renamed_filename_verifies_but_addresses_a_different_blob() -> None:
 @pytest.mark.parametrize(
     "filename,media_type",
     [
+        ("index.html", "text/html"),
         ("report.pdf", "application/pdf"),
         ("data.csv", "text/csv"),
         ("photo.png", "image/png"),

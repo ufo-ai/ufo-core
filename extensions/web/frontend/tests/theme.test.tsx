@@ -10,7 +10,18 @@ import { Table, Td } from "@/components/ui/table";
 import { Notice } from "@/kernel/panel";
 import { MessageLog } from "@/kernel/messages";
 
-import { CHAT_ROW, CONVO_ID, AGENT, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import {
+  CHAT_ROW,
+  CONVO_ID,
+  AGENT,
+  MEMBER,
+  StreamFake,
+  TURN_ID,
+  json,
+  saying,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 
@@ -110,8 +121,8 @@ test("the page height tracks the visible viewport and respects device insets", (
 
 test("reply headings carry an emitted scale, not just declared tokens", () => {
   const css = builtStyles().replace(/\s+/g, "");
-  expect(css).toContain("h2{font-size:var(--text-subtitle)");
-  expect(css).toContain("font-size:var(--text-ui)");
+  expect(css).toContain(":where(h2){font-size:var(--text-subtitle)");
+  expect(css).toContain(":where(h4,h5,h6){font-size:var(--text-ui)");
 });
 
 test("a table scrolls its own overflow instead of squeezing the page", () => {
@@ -237,11 +248,11 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "streaming now" });
-  const live = (await screen.findByText("streaming now")).closest("[data-role=agent]")!;
+  const live = (await screen.findByText(saying("streaming now"))).closest("[data-role=agent]")!;
   expect(live.className).toContain("animate-appear");
   StreamFake.last().emit("terminal", { status: "done", model: "opus", tokens: 1, cost_micro_usd: 0 });
   await waitFor(() => {
-    const settled = screen.getByText("streaming now").closest("[data-role=agent]")!;
+    const settled = screen.getByText(saying("streaming now")).closest("[data-role=agent]")!;
     expect(settled.className).not.toContain("animate-appear");
   });
 });

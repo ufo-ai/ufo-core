@@ -1,10 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { GrowingTextarea } from "@/components/ui/field";
+import { Button } from "@/components/ui/button";
+import {
+  PromptInput,
+  PromptInputAttach,
+  PromptInputAttachments,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputToolbar,
+} from "@/components/ui/prompt-input";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Files, MessageLog, Meta } from "@/kernel/messages";
+import { COLUMN } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
@@ -43,7 +51,12 @@ export function Chat({
   const draftKey = member.id + "/" + chatKey;
   const state = useChat(chatKey);
   const log = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  const atFoot = useRef(true);
+  const [pinned, setPinned] = useState(true);
+  const pin = (standing: boolean) => {
+    atFoot.current = standing;
+    setPinned(standing);
+  };
   const composer = useRef<HTMLTextAreaElement>(null);
   const wasBusy = useRef(state.busy);
   const target: ChatTarget = {
@@ -92,11 +105,24 @@ export function Chat({
 
   useEffect(() => {
     const pane = log.current;
-    if (pane && pinned.current) pane.scrollTop = pane.scrollHeight;
+    if (pane === null) return;
+    const follow = () => {
+      if (atFoot.current) pane.scrollTop = pane.scrollHeight;
+    };
+    follow();
+    const watch = new MutationObserver(follow);
+    watch.observe(pane, { characterData: true, childList: true, subtree: true });
+    return () => watch.disconnect();
   }, [state]);
 
-  const repin = () => {
-    pinned.current = true;
+  const jumpToBottom = () => {
+    const pane = log.current;
+    if (!pane) return;
+    pin(true);
+    pane.scrollTo({
+      top: pane.scrollHeight,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
   };
 
   const messages = state.messages;
@@ -104,6 +130,7 @@ export function Chat({
   const stalled = messages === null ? state.fault : null;
   const trailing = state.live ? null : state.handoffs.files ?? null;
   const credentials = state.handoffs.credentials;
+  const held = state.busy || state.messages === null;
 
   return (
     <>
@@ -112,16 +139,29 @@ export function Chat({
         onScroll={() => {
           const pane = log.current;
           if (!pane) return;
-          pinned.current =
-            pane.scrollTop + pane.clientHeight >= pane.scrollHeight - PIN_THRESHOLD_PX;
+          pin(pane.scrollTop + pane.clientHeight >= pane.scrollHeight - PIN_THRESHOLD_PX);
         }}
-        className="flex flex-1 flex-col gap-md overflow-y-auto p-2xl"
+        className={cn(
+          COLUMN,
+          "flex flex-1 flex-col gap-md overscroll-contain overflow-y-auto scrollbar-gutter-stable p-2xl",
+        )}
         data-testid="log"
       >
         <MessageLog
           messages={messages ?? []}
           live={state.live}
           conversationId={conversationId}
+          question={(question) => (
+            <Question
+              target={target}
+              question={question}
+              held={held}
+              onAct={() => {
+                pin(true);
+                composer.current?.focus();
+              }}
+            />
+          )}
         />
         {trailing && trailing.length ? <Files files={trailing} /> : null}
         {credentials ? (
@@ -154,17 +194,6 @@ export function Chat({
             ))}
           </Handoff>
         ) : null}
-        {state.handoffs.question ? (
-          <Question
-            target={target}
-            question={state.handoffs.question}
-            held={state.busy || state.messages === null}
-            onAct={() => {
-              repin();
-              composer.current?.focus();
-            }}
-          />
-        ) : null}
         {stalled ? (
           <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
             <p>{stalled.title}</p>
@@ -178,8 +207,33 @@ export function Chat({
               : "No messages in this conversation yet."}
           </div>
         ) : null}
+        {!pinned ? (
+          <Button
+            variant="row"
+            size="icon"
+            aria-label="Jump to bottom"
+            onClick={jumpToBottom}
+            className="sticky bottom-0 self-end"
+          >
+            <svg viewBox="0 0 12 12" aria-hidden className="size-(--size-icon)">
+              <path
+                d="M3 4.5 6 7.5 9 4.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </Button>
+        ) : null}
       </div>
-      <Composer target={target} draftKey={draftKey} input={composer} onSend={repin} />
+      <Composer
+        target={target}
+        draftKey={draftKey}
+        input={composer}
+        onSend={() => pin(true)}
+      />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
@@ -200,12 +254,16 @@ function buttonable(entry: QuestionEntry): boolean {
   return Boolean(
     entry.options &&
       entry.options.length <= MAX_ANSWER_BUTTONS &&
-      !entry.multi_select &&
       !entry.free_text_only &&
       !entry.allow_attachments,
   );
 }
 
+/** What a turn asks, standing under the reply that asked it. Each entry commits on its own act:
+ *  the options select and the submit sends, so a multi-select says all of it in one message and a
+ *  single choice is still a choice until the member presses. An entry the member has answered
+ *  states the words the surface confirmed it admitted — hidden, it would leave the member with no
+ *  record of what they chose. */
 function Question({
   target,
   question,
@@ -218,56 +276,116 @@ function Question({
   onAct: () => void;
 }) {
   const asked: QuestionEntry[] = question.questions ?? [];
-  const answered = question.answered ?? [];
   return (
-    <Handoff>
-      <div>{question.title}</div>
-      {asked.map((entry, index) =>
-        answered.includes(index) ? null : (
-          <div key={index} className="flex flex-col gap-xs">
-            <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
-            {buttonable(entry) ? (
-              <div className="flex flex-wrap gap-xs">
-                {(entry.options ?? []).map((option) => (
-                  <Button
-                    key={option.label}
-                    variant="option"
-                    title={option.description}
-                    onClick={() => {
-                      if (held) return;
-                      onAct();
-                      void answerQuestion(
-                        target,
-                        question.turn_id,
-                        index,
-                        asked.length === 1
-                          ? option.label
-                          : option.label + " · " + entry.question,
-                      );
-                    }}
-                  >
-                    {option.label}
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <>
-                {(entry.options ?? []).map((option) => (
-                  <Meta key={option.label}>
-                    {option.description ? option.label + " — " + option.description : option.label}
-                  </Meta>
-                ))}
-                <Meta>
-                  {entry.multi_select
-                    ? "Select all that apply — answer in the message box below."
-                    : "Answer in the message box below."}
-                </Meta>
-              </>
-            )}
+    <div className="mt-sm">
+      <Handoff>
+        <div>{question.title}</div>
+        {asked.map((entry, index) => (
+          <Ask
+            key={index}
+            target={target}
+            question={question}
+            entry={entry}
+            index={index}
+            alone={asked.length === 1}
+            held={held}
+            onAct={onAct}
+          />
+        ))}
+      </Handoff>
+    </div>
+  );
+}
+
+function Ask({
+  target,
+  question,
+  entry,
+  index,
+  alone,
+  held,
+  onAct,
+}: {
+  target: ChatTarget;
+  question: ChatQuestion;
+  entry: QuestionEntry;
+  index: number;
+  alone: boolean;
+  held: boolean;
+  onAct: () => void;
+}) {
+  const [chosen, setChosen] = useState<string[]>([]);
+  const prompt = entry.header ? entry.header + " — " + entry.question : entry.question;
+  const landed = question.answered?.[index];
+  if (landed !== undefined) {
+    return (
+      <div className="flex flex-col gap-xs">
+        <div>{prompt}</div>
+        <Meta>{landed}</Meta>
+      </div>
+    );
+  }
+  const options = entry.options ?? [];
+  return (
+    <div className="flex flex-col gap-xs">
+      <div>{prompt}</div>
+      {buttonable(entry) ? (
+        <>
+          <div className="flex flex-wrap gap-xs">
+            {options.map((option) => (
+              <Button
+                key={option.label}
+                variant="option"
+                className="aria-pressed:bg-fill-subtle"
+                aria-pressed={chosen.includes(option.label)}
+                title={option.description}
+                onClick={() =>
+                  setChosen((current) =>
+                    current.includes(option.label)
+                      ? current.filter((label) => label !== option.label)
+                      : entry.multi_select
+                        ? current.concat(option.label)
+                        : [option.label],
+                  )
+                }
+              >
+                {option.label}
+              </Button>
+            ))}
           </div>
-        ),
+          <Button
+            variant="send"
+            className="self-start"
+            disabled={held || !chosen.length}
+            onClick={() => {
+              const joined = chosen.join(", ");
+              onAct();
+              void answerQuestion(
+                target,
+                question.turn_id,
+                index,
+                alone ? joined : joined + " · " + entry.question,
+              );
+            }}
+          >
+            Answer
+          </Button>
+        </>
+      ) : (
+        <>
+          {options.map((option) => (
+            <Meta key={option.label}>
+              {option.description ? option.label + " — " + option.description : option.label}
+            </Meta>
+          ))}
+          <Meta>
+            {entry.multi_select
+              ? "Select all that apply — answer in the message box below."
+              : "Answer in the message box below."}
+          </Meta>
+        </>
       )}
-    </Handoff>
+    </div>
   );
 }
 
@@ -289,7 +407,6 @@ function Composer({
   const state = useChat(target.key);
   const [text, setText] = useState(() => readDraft(draftKey));
   const [stopping, setStopping] = useState(false);
-  const files = useRef<HTMLInputElement>(null);
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
   // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
   const running = state.turn;
@@ -310,10 +427,9 @@ function Composer({
     setStopping(false);
   }
 
-  function send() {
-    const attached = Array.from(files.current?.files ?? []);
+  function send(attached: File[]): boolean {
     const trimmed = text.trim();
-    if ((!trimmed && !attached.length) || disabled) return;
+    if ((!trimmed && !attached.length) || disabled) return false;
     setText("");
     clearDraft(draftKey);
     const shown = trimmed || attached.map((file) => file.name).join(", ");
@@ -324,51 +440,45 @@ function Composer({
       for (const file of attached) form.append("file", file);
       body = form;
     }
-    if (files.current) files.current.value = "";
     onSend();
     input.current?.focus();
     void sendMessage(target, body, shown);
+    return true;
   }
 
   return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        send();
-      }}
-      className="flex items-end gap-sm border-t border-edge px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]"
-    >
-      <label
-        title="Attach files"
-        className={cn(buttonVariants(), "flex cursor-pointer items-center py-0 font-strong")}
-      >
-        <input ref={files} type="file" multiple hidden />+
-      </label>
-      <GrowingTextarea
-        ref={input}
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-          writeDraft(draftKey, event.target.value);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-          event.preventDefault();
-          send();
-        }}
-        autoComplete="off"
-        placeholder="Message the agent…"
-        aria-label="Message the agent"
-        className="flex-1"
-      />
-      {running ? (
-        <Button variant="outline" busy={stopping} onClick={() => void stop(running.id)}>
-          Stop
-        </Button>
-      ) : null}
-      <Button type="submit" variant="send" disabled={disabled}>
-        Send
-      </Button>
-    </form>
+    <div className={cn(COLUMN, "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]")}>
+      <PromptInput onSend={send}>
+        <PromptInputAttachments />
+        <PromptInputTextarea
+          ref={input}
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value);
+            writeDraft(draftKey, event.target.value);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }}
+          autoComplete="off"
+          placeholder="Message the agent…"
+          aria-label="Message the agent"
+        />
+        <PromptInputToolbar>
+          <PromptInputAttach />
+          <PromptInputSubmit
+            stops={Boolean(running && state.busy && !text.trim())}
+            busy={stopping}
+            disabled={disabled}
+            onStop={() => {
+              if (stopping || !running) return;
+              void stop(running.id);
+            }}
+          />
+        </PromptInputToolbar>
+      </PromptInput>
+    </div>
   );
 }

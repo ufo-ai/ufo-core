@@ -111,8 +111,10 @@ function Chip({ children }: { children: ReactNode }) {
 
 /** One value of an index cell or a status row. The column or the label already carries the field's
  *  name, so the value stands alone — and a value the record does not hold takes an em dash rather
- *  than an empty cell, which reads as a table that failed to draw. A status moment is the one the
- *  member is waiting on, so it reads as the wait; every calendar day takes `day()`. */
+ *  than an empty cell, which reads as a table that failed to draw. A moment still ahead is one the
+ *  member is waiting on and reads as the wait; a moment already past is the calendar day it fell
+ *  on, which is how every other date in the portal reads. Only the comparison goes through `Date`;
+ *  the day is still read off the ISO string, so no reader's zone moves it. */
 function cell(
   field: string,
   value: ObjectValue,
@@ -122,7 +124,10 @@ function cell(
   if (value === null || value === "") return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
-  if (isMoment(value)) return relativeMoment(value, now);
+  if (isMoment(value))
+    return new Date(value).getTime() > now.getTime()
+      ? relativeMoment(value, now)
+      : (day(value) ?? value);
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
   return value;
 }
@@ -335,10 +340,16 @@ function ObjectIndex({
                       </Td>
                     ) : null}
                     {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
-                    <Td>{row.summary || "—"}</Td>
+                    <Td>
+                      <span className="block max-w-(--size-cell) truncate">
+                        {row.summary || "—"}
+                      </span>
+                    </Td>
                     {shown.map((field) => (
                       <Td key={field}>
-                        {cell(field, row[field] ?? null, payload.spec_schema, now)}
+                        <span className="block max-w-(--size-cell) truncate">
+                          {cell(field, row[field] ?? null, payload.spec_schema, now)}
+                        </span>
                       </Td>
                     ))}
                     {acts || payload.fields.includes(CONVERSATION_FIELD) ? (

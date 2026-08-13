@@ -29,7 +29,10 @@ surface outside this system.
 (`surface`, `ink`, `edge`, `fill`, `attention`), spacing (`hair`…`6xl`), type (`mono`…`title`),
 radius (`sm`, `control`, `panel`, `bubble`), containers (`max-w-control`, `max-w-form`, …). A new
 value is a new token in `theme.css`, consumed as its utility or as `var(--…)` — the gate refuses
-the inline alternative.
+the inline alternative. A role-named spacing or radius is declared twice: in `theme.css`, and to
+`cn` (`lib/cn.ts`), because tailwind-merge cannot see that `rounded-panel` is a radius or `px-3xl` a
+padding unless it is told the names — untold, it keeps both sides of a conflict and lets the cascade
+decide, which makes every override a view passes in `className` silently positional.
 
 Under the roles sits the brand palette from `metalcraftai/ufo-brand-demo`: six ramps — `void`,
 `signal`, `sand`, `ember`, `heat`, `sage` — of twelve steps on one matched-lightness ladder, so
@@ -86,17 +89,27 @@ across the whole audience, which no single agent's tab can head.
 Artifacts is what the agents produced, so a hosted site is one of its records and not a section
 beside it. A member who wants what came out of a conversation does not first decide whether it was
 a file or a site, and two sidebar buttons over one question is the split to refuse. The two are
-families of one shelf: the sites lead as the small named family, the shared files follow as the
-directory behind them, and one segmented filter (`Sites`, then `Images`, `Documents`, `Data`,
-`Other`) is how a member reads one alone. The axis is the family, not the source: sites are one
+families of one shelf, read newest first whichever family a record is in — the member asks what
+the agents made lately, and a shelf that leads with every site holds a page of records the member
+saw last week over the file made this morning. One segmented filter (`Sites`, then `Images`,
+`Documents`, `Data`, `Other`) is how a member reads one family alone. The axis is the family, not the source: sites are one
 family and the four media kinds are the file directory's own, so every option names a kind of
 record and the tablist stays one row. There is no `Files`, because the directory's four families
 already narrow it and sites are few enough to read past. Both reads narrow on the server, so the
 one search box and the pick travel to each — a member who searches is asking the workspace, never
-the page. A site's visibility is a fact of the record and rides its card's status slot; who made
-it rides the meta line, as a file's owner does. The files walk is the shelf's own read: it fails
-the section, and its cursor is the one page the pager continues, so the pager is drawn only where
-the files are shown. A deploy with no sites extension answers that read with a 404, which is a
+the page. The status slot carries the date on every card, because that is what the one order is
+read against; a site names its family and its visibility on the meta line, over who made it, as a
+file's owner rides the meta line alone. The files walk is the shelf's own read: it fails the
+section, and its cursor is the one page the pager continues, so the pager is drawn only where the
+files are shown. A continued page therefore holds only the sites made inside that page's date
+window — the sites arrive whole on every read, and a site outside the window would stand on two
+pages at once. The windows tile: a page runs from its own oldest file up to the position named by
+the cursor that walked to it, which is the foot of the page above, so a site made between one page's
+oldest file and the next page's newest stands on exactly one of them. A page bounded by its own
+newest file instead leaves that site on neither, and the shelf loses it. Only a cursor walking older
+names that top — one walking back names the row below the page it lands on, and a page whose top is
+unnamed is open at the top, because a site the member sees twice while walking backwards is one they
+can still reach. A deploy with no sites extension answers that read with a 404, which is a
 family that does not exist here rather than a fault — the shelf is then its files alone, the
 `Sites` option is not drawn, and every other refusal is stated.
 
@@ -107,11 +120,23 @@ and not the scope — the pane the member is standing in already states the scop
 duplicated: one `ObjectPane` draws both, taking the agent to read in or null to read across the
 audience, which is the same choice the index route itself offers.
 
+The rail partitions before it groups. The member's own conversations — the ones bound to them or
+holding a turn they spoke — come first under the ladder the sort names, and everyone else's follow
+as one group at the foot, `Other members`. Grouped, never filtered: a member who answered in a
+colleague's thread has work there, and a rail that lists only what they opened hides it. The foot
+group is not `Workspace`, which is a sidebar row eight lines above and would spell one column's two
+destinations the same way, and not `Everyone else`, which promises rows a `member:` audience can
+never yield. It is never subdivided and never nested: a `--container-sidebar` column carries two
+heading weights, not three, so it stays one recency-ordered list under either sort. `railGroups`
+(`lib/rail.ts`) is where that partition and both groupings live.
+
 A rail row states the conversation's title, and nothing else the member did not ask for. The rail
 is already ordered by recency and already grouped under `Today` / `Yesterday`, so a stamp on every
 row restates the group it sits in, in the one place with the least width to spare. A second line
-appears only where the row carries a fact the group cannot: a conversation held by an agent other
-than the main one names that agent, and a conversation from another surface names its origin. The
+appears only where the row carries a fact the group cannot: a row under `Other members` names who
+spoke it, a conversation held by an agent other than the main one names that agent, and a
+conversation from another surface names its origin. The speaker is the same cut a conversation row
+takes (`speakerName`) — one conversation is named one way on every surface. The
 group label is the smaller, muted type
 (`text-label font-medium opacity-(--muted)`) so the eye reads titles first and the labels as
 the scaffolding between them.
@@ -146,9 +171,19 @@ opened inside the pane — an object detail, a conversation — heads itself at 
 The outcome notice renders first in the body,
 at `text-ui` and under `role="status"`, so a result the member did not scroll to is still announced
 and still legible.
-The body is `Canvas`, like every other surface. Sections run from the left at `max-w-section`,
-never centred: the body and the title share `px-2xl`, so a section's left edge lands on the same
-line as the `<h1>` and the tab strip, and the eye returns to one margin down the whole page.
+The body is `Canvas`, like every other surface. The page is read as one column, `COLUMN`
+(`kernel/pane.tsx`): `mx-auto` at `max-w-page`, centred in whatever width the shell leaves, so the
+`<h1>`, the tabs, and a section's left edge all land on one line and a 2560px display widens the
+margins rather than the measure. `--container-page` is `--container-section` plus the gutters a
+section is read inside, so a section reaches exactly its own width and no screen is wider than the
+text it holds. Every band takes that class rather than one wrapper taking it for all of them,
+because the top bar is the exception: `Pane` — the `<main>` every destination draws inside — runs
+the full width the shell leaves, and the bar's rule runs with it. A rule that stops two thirds of
+the way across states a boundary the surface does not have, and the header of a page is chrome over
+the whole pane rather than the first row of its content. The bar's own contents stay in the column,
+so the title still stands over the records it heads. Within the column a section runs from the
+left, never centred inside it — a heading set over the middle of a left-set table states a second
+margin the records do not keep.
 
 Sections are headed by the shared `Section` component — never hand-written heading markup. A section stacks three bands: the heading, then `Section bar`, then the records. The bar
 runs left with the rest — the search over the section's records at `max-w-control-row`, then the act
@@ -265,6 +300,15 @@ rule on top, not underneath — collapsed borders fold the first row's rule into
 last row meets the card edge with no second line beside it. No vertical rule, no zebra, no cell
 border. The card is drawn by `Table`, never by a view.
 
+A cell holding a value the member scans across is cut at `--size-cell`. A table sizes each column
+to its widest cell, so one summary running to a paragraph sets the width of that column on every
+row and pushes the whole table off the right edge into a horizontal scroll — and a member reading
+down a column of names then has to scroll sideways to reach the acts. The cut is a definite width
+on the truncating span (`max-w-(--size-cell) truncate`), never a percentage: a percentage resolves
+against a column whose width is still being measured, so an auto-layout table reads `max-w-full` as
+no bound at all and the truncation never happens. `whitespace-nowrap` on the cell beside it states
+nothing `truncate` does not. The record's own page carries the value whole.
+
 A pane's facts about its own subject are a column, not a line. `Facts` (`components/ui/facts.tsx`)
 draws the card `Table` draws — one row a fact, the label in a `w-(--size-fact)` column at the size
 and weight a `Th` takes, the value beside it. A subagent's model, round limit, and untrusted wall,
@@ -296,6 +340,54 @@ agent either way — the detail opens under it, the row's delete posts to its la
 act asks which agent runs the new row, drawn only in the section and only where the audience holds
 more than one, since a select with one option states a choice the member does not have.
 
+Markdown is a document, and `typeset` (`theme.css`) is the one register it is read in — a reply, a
+shared markdown file, a source snippet. It is a container class holding one rule per element, and
+every rule sets `margin-block-start` alone: a block appended mid-stream adds its own space and never
+restyles the block above it, which a `:last-child` or a `+` rule read backwards would. The selectors
+are `:where()`, so they cost no specificity, and the block sits in the `components` layer, which is
+what lets a utility on the element win. Every value is a theme token, so the document is set in the
+same type, spacing and rules as the tables and cards around it.
+
+`Streamdown` (`lib/markdown.tsx`) is the renderer under it. It splits the text into blocks and
+memoises each, so a settled paragraph is not re-parsed on every frame of a streaming reply, and it
+completes the block still being written — a half-typed fence reads as the code block it is becoming
+rather than as three backticks.
+
+It ships its markup already classed, in shadcn's vocabulary, and `theme.css` names those keys
+against this portal's own: `bg-muted` resolves to the subtle fill, `text-2xl` to the subtitle size,
+`rounded-lg` to the panel radius. One mapping, so a component of theirs draws in our colours, type
+and radii and no second palette or scale reaches the page — a key left unnamed would compile
+Tailwind's own default, which is a literal colour the zero-authored-colour test refuses. That is
+also why the portal draws no `shadow-*` utility and writes its one shadow as a bracket
+`box-shadow`: Tailwind hangs the ring machinery off that utility and the machinery declares a
+literal white, so the two shadow keys are dropped and the class never compiles.
+
+What the mapping buys is the two components that draw more than an element can — the code block,
+headed by its language and scrolling its own overflow, and the table, in a card with its own
+scroll. Prose is drawn bare and set by the `typeset` instead: Streamdown classes it for a width it
+does not know, putting a wrapped list line under its own bullet and setting a quotation in italic
+behind a four-pixel rule, and a reply is read in the same register as every other document here.
+
+What a reply may do to the page is one policy in one map: a link opens in its own tab with no
+opener and only where a reader can follow it, an image loads only from this origin, a task-list
+checkbox is a mark and not a control, and raw HTML an agent wrote stays the characters it wrote,
+because a reply that says `<script>` is talking about `<script>`.
+
+A streaming reply fades each word in as it lands, so the reply reads as writing. Nothing drives a
+frame and no component animates: `arrive` (`lib/arrive.ts`) wraps every word of a live reply in a
+span, the browser runs the `arrive` keyframe on a span it has just inserted, and React reuses the
+spans already on the page — so the words that animate on a frame are exactly the words that frame
+added. A tracked count of what is new, or a component per word, would be a second answer to that,
+arriving a frame later than the reconciler's. What the reconciler cannot say is where a word stands
+in the run that just landed, and a chunk fading in at once reads as a paragraph blinking rather
+than as writing, so the words of one frame are numbered from the point the block reached on the
+frame before, and the theme turns that number into the word's delay. The number a word carries may
+fall but never rise: a delay pushed further out puts a word that has finished arriving back before
+its own start and the browser plays it again, which is a settled paragraph fading in a second time
+while a later one is still being written. Code keeps its own text, because a fence arrives
+a line at a time and a word is not what it is read in; and a settled transcript wraps nothing at
+all, having already arrived.
+
 A conversation the member reads rather than continues draws the chat's own log, `MessageLog`
 (`kernel/messages.tsx`): the member's words in a bubble, the agent's as markdown, the files listed,
 and over each reply the whole activity disclosure — down to the work of the runs it spawned.
@@ -307,6 +399,39 @@ drawn there stands over conversations that changed no file, which is why the slo
 place that knows the count — is where changes are reached. A run's link is rooted at the
 conversation that spawned it: the one being read for a run under a reply, that run's own for the
 runs it spawned in turn — which is the conversation the read behind the link authorizes against.
+
+The chat is one pane of that shape: its `<main>` is the grid the slot drawer opens in, and the
+header, the transcript and the composer each take `COLUMN` inside the chat's own cell of that
+grid — one column while the drawer is closed, and a narrower one beside the drawer, which is the
+width the conversation is actually read at either way. The header keeps the full-bleed rule every
+top bar carries; the composer carries none. A rule over the message box divides the transcript from
+the box that writes into it, which is a division a member reading down one conversation does not
+have — the box already states where it is, in the field surface and its own placeholder. The log
+follows the
+foot of the conversation only while the member is standing there — within `PIN_THRESHOLD_PX` of the
+end — and lets go the moment they scroll up, because a page that jumps to the newest frame takes
+the line they were reading off the screen mid-sentence. Whether it follows is one piece of state,
+read off the scroll position and nothing else; kept twice it is two answers to where the member is
+standing. It is written in the one place it is read from — the scroll — and held where a render
+cannot lag it: the log changes between renders, so a value the following reads a render late is a
+value that puts the member back at the foot they just scrolled away from. What it follows is the log
+changing, not the chat rendering: the markdown renderer settles a streamed block in a transition of
+its own, so the last line lands after any effect keyed to the chat's own state has run, and a
+transcript followed that way stops a line short of its own foot. The way back is one
+control: the chevron alone in the icon button every glyph-only act takes, sticky at the foot of the
+log, drawn only while the
+member is away from it and in a settled transcript as much as a running one — a member who scrolled
+up to read is as far from the end as a member watching a reply arrive. It scrolls smoothly, and
+jumps under reduced motion. `overscroll-contain` stops a scroll that reaches either end there,
+rather than carrying the page behind it.
+
+A scrollbar is its thumb and nothing else. The browser's own track is a second surface running the
+height of the page, and inside a centred column it lands in the middle of the screen rather than at
+its edge; the thumb alone states the same position at the same width. `theme.css` sets the colour
+once — it inherits — and the width on every element, because that one does not. What a scrolling
+element declares for itself is `scrollbar-gutter-stable`: the gutter is held open whether or not
+there is anything to scroll, so a reply growing past the fold never shifts the line being read
+sideways.
 
 A bubble states the member's words, never the prompt the turn ran on: a channel surface fences
 those words between the ambient digest and their attachments, and the projection takes them back
@@ -382,6 +507,23 @@ tables — a reply's activity tree has no card beside it, so a bordered block th
 surface its neighbours do not have. The fold is the portal's one answer to length: nothing upstream
 of it cuts text to fit a screen it cannot see.
 
+A shared file the portal can read is read in the pane, never downloaded first to be looked at.
+`ArtifactText` (`kernel/artifact.tsx`) draws markdown through the renderer a reply is drawn with,
+and holds every other text type preformatted — a `.txt` or a `.csv` means the characters it holds,
+and a markdown pass would eat them. HTML is the one kind that is a document rather than characters,
+and it is drawn in an iframe under `sandbox=""`, a CSP meta admitting nothing but `data:` images and
+inline style, and `referrerPolicy="no-referrer"`: the file is a member's, not the portal's code, so
+it runs nothing, fetches nothing, and tells no one who read it. The frame is titled with the
+filename its caller already holds — a name reconstructed from the url is a second answer to what the
+record is called, and a url the component was promised nothing about.
+
+The read is bounded at the fetch — 64KB of text, 256KB of HTML — and a text file that hit the bound
+says so (`First 64 KB shown.`) under what it did show, which is that file's own first pages. A
+document is not read that way: cut mid-tag it renders as something its author never wrote, so an
+HTML file over the bound is refused instead — one line stating the size and pointing at the
+download. The bound is the only thing that decides which of the two a file gets; the fold decides
+nothing here, because a frame the member is reading inside is already its own scroll.
+
 A reply states what the agent did as one line and opens onto the rest, in the live chat and in every
 transcript read back, since one component draws a reply wherever it is drawn. The line stands above
 the reply, because that is when the work happened: the tools ran, and then the agent wrote about
@@ -408,6 +550,20 @@ findings rather than sentences is still read rather than guessed at, and a field
 list says `none` rather than vanishing, since a review that found nothing did answer. A payload
 holding no field at all says nothing, having nothing to say it about.
 
+A question stands under the reply that asked it, because that is the reply it answers. The
+projection carries it on that reply — only the newest committed turn's, since a later turn
+supersedes what an earlier one asked — and `MessageLog` draws it there, in the live chat and on a
+reload alike; a pane that cannot answer passes no form and states the reply alone. Pinned to the
+foot of the pane instead, it names no question when a member has scrolled a conversation's worth of
+replies between the two.
+
+An entry commits on its own act: the options select, carrying `aria-pressed`, and one submit sends,
+disabled until something is chosen — an act that cannot yet succeed says so before the press. So a
+multi-select says all of it in one message, joined into the sentence a single choice already
+composes (`label · question` where more than one entry is asked), and a single choice is still a
+choice until the member presses. An answered entry states the words the surface confirmed it
+admitted; hidden, it would leave the member with no record of what they chose.
+
 The surface sends every character it has, and how much of it stands on a screen is the fold's
 decision at the other end: a run's answer and the lines an agent wrote between its calls are both
 held at `Reveal`, which is why neither is cut on the way out. Truncating in the projection settles
@@ -432,7 +588,11 @@ a stamp across midnight and no locale reorders the parts. `2026-08-07 14:32` is 
 and a clock time the member did not ask for; `8/7/2026` is a different date in half the world. The
 chat rail shows no date at all — its groups carry the recency. The one moment that is not a calendar
 day is the one a member is waiting on — a scheduled task's next run — which reads as the wait
-(`relativeMoment`, `in 3h`): the date it falls on is the fact the member already knows.
+(`relativeMoment`, `in 3h`): the date it falls on is the fact the member already knows. Which of the
+two a typed object's own moment takes is decided by the moment itself, never by its field name: one
+still ahead is being waited on, and one already past is the day it fell on, so a kind that adds a
+stamp reads correctly without a list naming it. `6d ago` is what a member has to subtract before
+they can say when a record was made.
 
 Every value a member reads is a member's word, never the wire's. `tokens` is `Model tokens`,
 `egress` is `Sandbox requests`, a cap's `park` is `Suspend the turn` — the map lives beside the
@@ -691,6 +851,14 @@ from `SelectTrigger` / `SelectValue` / `SelectContent` / `SelectItem`. A view co
 never retypes their markup — a hand-drawn border or field surface beside the primitive is the shape
 to refuse.
 
+A button lays its content out as a centred row, so a glyph sits in the middle of its box rather than
+on the text baseline at the left edge of it. `size="icon"` is the box a glyph alone is drawn in: one
+`--size-control` circle, which is what an icon-only act standing on its own is — the composer's
+attach, its send and stop, the way back to the foot of a conversation. A view that sizes and rounds
+a circle for itself is the shape to refuse; it is one name on the button, as the variants are. A
+glyph inside a record — the cross that takes an attachment back off its chip — is part of that
+record and takes its measure, never the circle.
+
 Every control answers the pointer the same way: a hover fill (`hover:bg-fill-hover`, or
 `hover:bg-ink-hover` on `send`), `active:scale-[0.96]`, over 100ms on `ease-control`. Reduced
 motion cuts the transition, and the global `:focus-visible` outline is the only focus ring. A
@@ -725,10 +893,10 @@ The chevron, tick, sort caret, and leaving arrow stay drawn inline where they ar
 `currentColor`; the sidebar's row icons are the one place a package (`@tabler/icons-react`)
 supplies the drawing, because they follow the Figma's Tabler vocabulary.
 
-A row that pairs controls is `items-stretch`, never `items-center`. Two controls on the same
-surface still resolve their heights from their own content, and centring unequal boxes leaves the
-shorter one floating with its chevron off the line the row reads along. Stretching makes the row's
-height the one both agree to.
+A row that pairs controls is `items-stretch`, never `items-center` — the composer's footer included.
+Two controls on the same surface still resolve their heights from their own content, and centring
+unequal boxes leaves the shorter one floating with its chevron off the line the row reads along.
+Stretching makes the row's height the one both agree to.
 
 The message box is the one control that sizes itself to what is in it. `GrowingTextarea`
 (`components/ui/field.tsx`) draws the value twice — once in an invisible mirror that sets the row's
@@ -738,9 +906,36 @@ is the shape to refuse: a second answer to how tall the box is, arriving a paint
 stops at `--size-composer`, so a long message holds the fold and scrolls inside it instead of
 pushing the conversation off the screen. Enter sends and Shift+Enter opens a line, which is the
 pairing every chat composer ships and so the one a member arrives already knowing; an IME
-composition keeps its own Enter. The composer's row is the one row that is `items-end` rather than
-`items-stretch`: its acts belong to the last line of the message, and a `Send` stretched to a
-nine-line box is a button the size of what was written.
+composition keeps its own Enter.
+
+The composer is one card, and the card is the field: `PromptInput`
+(`components/ui/prompt-input.tsx`) draws the field surface and stacks what a message is made of —
+the files attached to it, the words, then the acts. The box inside it draws no surface of its own,
+because a second border and fill inside the first states a box within a box; it is the field
+primitive drawn `bare`, and the card carries the focus for it, which is the one outline the theme
+states, moved rather than redrawn. The acts sit on a footer row under the words they act on: what
+adds to the message on the left, what sends it on the right. A file reaches the card three ways —
+the attach control, a drop onto the card, a paste into the box — because a member holding a file
+does whichever of those their hands are already doing, and all three name one list. What is
+attached is named on the card before it is sent, one chip a file with its size and the control that
+takes it back off: a message about to leave with a file the member cannot see is a message they
+cannot check.
+
+Send and stop are one control, at the end of the composer's footer: a `--size-control` circle
+carrying the arrow that sends and, while it stops, the square every player
+and every chat surface stops with. Two buttons side by side ask the member to read a pair of words
+before pressing either; one control in the place the eye already goes says the whole state at a
+glance, which is why the acts are glyphs and their words are the accessible name. Which act it
+carries is what the member has in the box, never what the turn is doing: words in it mean send, and
+the composer stays live during a turn precisely so that send reaches the agent mid-reply; an empty
+box under a running turn means the only act left is stopping it. So the two never contend for the
+same press, and neither is ever the act the member did not mean. Enter sends whatever is typed,
+whichever the button is showing. The attach control takes the same circle at the footer's other
+end. Stopping posts the cancel and states
+nothing itself — the turn's own tail delivers
+the cancelled terminal, which is the same frame a turn cancelled from anywhere else arrives on, and
+the reply states it as `Stopped.` rather than as the wire's status in brackets. A refusal is a
+toast, since the composer has no field the sentence belongs beside.
 
 A listing filter is `Filter` (`components/ui/filter.tsx`) — one component, every screen. It is a
 segmented `role="tablist"` on no container surface: `All` plus one tab per declared state as muted
@@ -815,8 +1010,8 @@ Copy a known-good implementation instead of composing from rules:
 - `views/Memory.tsx` — a bespoke section (server-side search, dynamic filters) wearing the same
   bar, tablist, table, and dialog as the declared listings.
 - `views/Artifacts.tsx` — a bespoke section merging two server-narrowed reads into one `CardGrid`:
-  a typed object kind's small family ahead of the paged file directory, one search and one family
-  filter reaching both, with a leaving-the-portal anchor beside the row's `View`.
+  a typed object kind and the paged file directory read down one newest-first order, one search and
+  one family filter reaching both, with a leaving-the-portal anchor beside the row's `View`.
 - `kernel/objects.tsx` — one kind's index and detail, read in one agent's namespace or across the
   audience: the owner as a linked column where the scope needs it, and every act addressed to the
   row's own agent.
@@ -836,6 +1031,10 @@ Copy a known-good implementation instead of composing from rules:
 - `kernel/cards.tsx` — the card grid both the declared and the bespoke card sections draw.
 - `components/ui/item.tsx` — the card of hairline-divided rows a directory of same-shaped
   records reads as.
+- `kernel/pane.tsx` — the full-width pane and the centred column every band under its bar takes.
+- `lib/arrive.ts` — the word a streaming reply just added, wrapped so the browser animates it once.
+- `lib/markdown.tsx` — the one markdown renderer, bare elements under `typeset`, and the single
+  policy for what a reply may link to, load, and run.
 - `kernel/panel.tsx` — the section's rhythm, the shaped skeleton, and the blank card.
 - `components/ui/filter.tsx` — the one segmented filter every listing narrows with.
 - `views/SubagentPane.tsx` — a subject's own pane: its facts as a column, its prompt behind the
@@ -843,16 +1042,23 @@ Copy a known-good implementation instead of composing from rules:
 - `views/Conversations.tsx` — the one conversation list every screen draws, and an index of row
   lines whose row is itself the control that opens a record inside the pane: one way back above the
   record, the record's own heading, and its sections beneath.
-- `kernel/messages.tsx` — the message log the live chat and every read-only transcript draw, and
-  the activity disclosure a reply opens onto.
+- `kernel/messages.tsx` — the message log the live chat and every read-only transcript draw, the
+  activity disclosure a reply opens onto, and the place a question stands: under the reply that
+  asked it, drawn by the form the view passes in.
+- `lib/rail.ts` — the rail's partition into the member's own and everyone else's, and both the
+  recency and the agent grouping over the first of them.
 - `kernel/rows.tsx` — the row-line list both the declared listings and the bespoke sections draw.
 - `kernel/row.ts` — the one way a record's whole row becomes the control that opens it.
 - `components/ui/facts.tsx` — the labelled column a pane states its subject's facts in.
 - `components/ui/reveal.tsx` — the fold long content is held at.
+- `kernel/artifact.tsx` — a shared file read in the pane: markdown as a document, text as its own
+  characters, HTML sandboxed, each bounded at the fetch.
 - `components/ui/toast.tsx` — the two-line report of an outcome, or of a read no field can answer.
 - `views/Overview.tsx` — an agent's facts, its schema-driven settings as a form card, its prompt
   behind the fold.
 - `components/ui/field.tsx` — the labelled field and the card its form is set in.
+- `components/ui/prompt-input.tsx` — the composer as one card: what is attached, the words,
+  and the acts that send them.
 
 ## Conformance
 

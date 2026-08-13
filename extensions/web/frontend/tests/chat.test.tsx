@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -15,6 +15,7 @@ import {
   StreamFake,
   TURN_ID,
   json,
+  saying,
   useStreamFake,
   wire,
   type Route,
@@ -80,7 +81,7 @@ test("an empty conversation states it, and the composer sends a message and stre
 
   StreamFake.last().emit("message", { text: "one " });
   StreamFake.last().emit("message", { text: "two" });
-  expect(await screen.findByText("one two")).toBeTruthy();
+  expect(await screen.findByText(saying("one two"))).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -90,6 +91,32 @@ test("an empty conversation states it, and the composer sends a message and stre
   });
   expect(await screen.findByText("opus · 12 tok · $2.00")).toBeTruthy();
   expect(StreamFake.last().closed).toBe(true);
+});
+
+test("the one control carries the act the member has, and stops the turn once", async () => {
+  const { handler } = wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe(null);
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and this too");
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  await userEvent.clear(screen.getByLabelText("Message the agent"));
+
+  await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+  const stops = () =>
+    handler.mock.calls.filter(([, init]) => (init?.headers as Record<string, string>)?.["x-ufo-stop-turn"]);
+  await waitFor(() => expect(stops()).toHaveLength(1));
+  StreamFake.last().emit("terminal", { status: "cancelled" });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).toBeNull());
+  expect(stops()).toHaveLength(1);
 });
 
 test("a reloaded conversation states its latest activity and opens onto the rest", async () => {
@@ -287,7 +314,7 @@ test("a message that opens a turn stands above the reply it is waiting for", asy
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
 
-  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
   expect(order("write a poem", "Ducks glide at dusk.")).toBe(true);
 });
 
@@ -300,7 +327,7 @@ test("a queued message stays under the answer streaming above it, and never move
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
-  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   // The turn answers the message it is already inside before it takes up the next one, so a message
   // waiting on it stands after that answer — under the streaming reply and over the composer, which
@@ -335,22 +362,22 @@ test("a message sent mid-turn joins the running turn, waits to be taken up, and 
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const send = screen.getByRole("button", { name: "Send" });
-  expect((send as HTMLButtonElement).disabled).toBe(false);
   StreamFake.last().emit("message", { text: "reading it" });
-  expect(await screen.findByText("reading it")).toBeTruthy();
+  expect(await screen.findByText(saying("reading it"))).toBeTruthy();
 
   // Admission opened no run for the follow-up, so its frames come up the tail already open on that
   // turn — a second attach would leave two EventSources writing one live turn, every chunk doubled
   // and the reply recorded twice.
   await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
+  const send = screen.getByRole("button", { name: "Send" });
+  expect((send as HTMLButtonElement).disabled).toBe(false);
   await userEvent.click(send);
   await waitFor(() =>
     expect(calls.filter((url) => url.includes("/chat?conversation=")).length).toBe(1),
   );
   expect(StreamFake.opened.length).toBe(1);
   await waitFor(() => expect(waiting("and again")).toBe(true));
-  expect(screen.getByText("reading it")).toBeTruthy();
+  expect(screen.getByText(saying("reading it"))).toBeTruthy();
 
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   await waitFor(() => expect(waiting("and again")).toBe(false));
@@ -376,7 +403,7 @@ test("a reply the turn finished before the fold settles ahead of the message it 
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
-  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -397,7 +424,7 @@ test("a reply the turn finished before the fold settles ahead of the message it 
   });
 
   await screen.findByText("2");
-  expect(screen.getByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(screen.getByText(saying("Ducks glide at dusk."))).toBeTruthy();
   const log = document.body.textContent ?? "";
   expect(log.indexOf("Ducks glide at dusk.")).toBeGreaterThan(log.indexOf("write a poem"));
   expect(log.indexOf("1+1=")).toBeGreaterThan(log.indexOf("Ducks glide at dusk."));
@@ -416,7 +443,7 @@ test("a drain that beats the response still settles the reply ahead of the messa
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
-  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -453,7 +480,7 @@ test("a second fold anchors on its own message, never one an earlier drain took"
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "Ducks glide at dusk." });
-  expect(await screen.findByText("Ducks glide at dusk.")).toBeTruthy();
+  expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
   // The first fold's drain beats its response, so the reply settles on the bubble's in-flight
   // marker. The response landing afterwards must settle that same bubble — moved one place by the
@@ -463,7 +490,7 @@ test("a second fold anchors on its own message, never one an earlier drain took"
   expect(await screen.findByText("1+1=")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   StreamFake.last().emit("message", { text: "The answer is 2." });
-  expect(await screen.findByText("The answer is 2.")).toBeTruthy();
+  expect(await screen.findByText(saying("The answer is 2."))).toBeTruthy();
   responses[0]({ ...FOLDED, arrival_id: ARRIVAL_ID });
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "2+2=");
@@ -500,7 +527,7 @@ test("a drain that beats the response leaves no wait under the message it took u
   land({ ...FOLDED, arrival_id: ARRIVAL_ID });
   StreamFake.last().emit("message", { text: "reading both" });
 
-  expect(await screen.findByText("reading both")).toBeTruthy();
+  expect(await screen.findByText(saying("reading both"))).toBeTruthy();
   expect(waiting("and again")).toBe(false);
   expect(StreamFake.opened.length).toBe(1);
 });
@@ -525,17 +552,17 @@ test("a failed mid-turn send states the error and leaves the reply streaming", a
   await sendingMidTurn(() => failed);
 
   StreamFake.last().emit("message", { text: "reading it" });
-  expect(await screen.findByText("reading it")).toBeTruthy();
+  expect(await screen.findByText(saying("reading it"))).toBeTruthy();
   fail();
 
   // The failure is the POST's alone: the turn it never reached goes on streaming up the tail the
   // page holds, so the reply stays standing and the next delta lands on it, not on a blank bubble.
   expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();
-  expect(screen.getByText("reading it")).toBeTruthy();
+  expect(screen.getByText(saying("reading it"))).toBeTruthy();
   expect(StreamFake.opened.length).toBe(1);
 
   StreamFake.last().emit("message", { text: ", and reviewed" });
-  expect(await screen.findByText("reading it, and reviewed")).toBeTruthy();
+  expect(await screen.findByText(saying("reading it, and reviewed"))).toBeTruthy();
 });
 
 test("a refused mid-turn message is tailed on the turn it founded, behind no live source", async () => {
@@ -580,7 +607,7 @@ test("a refusal states itself alone, never glued to the reply the page stopped t
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "reading it" });
-  expect(await screen.findByText("reading it")).toBeTruthy();
+  expect(await screen.findByText(saying("reading it"))).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -790,7 +817,7 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const log = screen.getByTestId("log");
-  expect(log.parentElement?.children).toHaveLength(2);
+  expect(log.parentElement?.children).toHaveLength(3);
   expect(log.parentElement?.parentElement?.children).toHaveLength(2);
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention/25");
@@ -1327,32 +1354,100 @@ test("a failed post states the error instead of opening a stream", async () => {
   expect(StreamFake.opened.length).toBe(0);
 });
 
-test("a question handoff answers by its option button and posts the answer headers", async () => {
+const ASKING = (entry: Record<string, unknown>, title = "Pick one") => ({
+  role: "assistant",
+  text: "asking",
+  question: { turn_id: TURN_ID, title, questions: [entry] },
+});
+
+const ASKED = { question: "Which?", options: [{ label: "left" }, { label: "right" }] };
+
+test("a question submits its choice once, and only once a choice exists", async () => {
   const posts: RequestInit[] = [];
   wire({
-    ...transcript({
-      messages: [{ role: "assistant", text: "asking" }],
-      question: {
-        turn_id: TURN_ID,
-        title: "Pick one",
-        questions: [{ question: "Which?", options: [{ label: "left" }, { label: "right" }] }],
-      },
-    }),
+    ...transcript({ messages: [ASKING(ASKED)] }),
     "/chat": (_url, init) => {
       posts.push(init ?? {});
-      return json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "left" });
+      return json({ turn_id: REFUSED_TURN, body: "left" });
     },
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "left" }));
+  const submit = await screen.findByRole("button", { name: "Answer" });
+  expect(submit.hasAttribute("disabled")).toBe(true);
+
+  const left = screen.getByRole("button", { name: "left" });
+  await userEvent.click(left);
+  expect(left.getAttribute("aria-pressed")).toBe("true");
+  expect(submit.hasAttribute("disabled")).toBe(false);
+  expect(posts.length).toBe(0);
+
+  await userEvent.click(submit);
 
   await waitFor(() => expect(posts.length).toBe(1));
   const headers = posts[0].headers as Record<string, string>;
   expect(headers["x-ufo-answer-turn"]).toBe(TURN_ID);
   expect(headers["x-ufo-answer-question"]).toBe("0");
-  expect(await screen.findByText("left")).toBeTruthy();
+  expect(posts[0].body).toBe("left");
   await waitFor(() => expect(screen.queryByRole("button", { name: "right" })).toBeNull());
+});
+
+test("a multi-select question sends every label it holds in one answer", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript({
+      messages: [
+        ASKING(
+          {
+            question: "Which calendars?",
+            options: [{ label: "Work" }, { label: "Home" }, { label: "Team" }],
+            multi_select: true,
+          },
+          "Pick any",
+        ),
+      ],
+    }),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: REFUSED_TURN, body: "Work, Home" });
+    },
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  await userEvent.click(screen.getByRole("button", { name: "Team" }));
+  await userEvent.click(screen.getByRole("button", { name: "Home" }));
+  await userEvent.click(screen.getByRole("button", { name: "Team" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  expect(posts[0].body).toBe("Work, Home");
+});
+
+test("an answered question states the words the surface confirmed it admitted", async () => {
+  wire({
+    ...transcript({ messages: [ASKING(ASKED)] }),
+    "/chat": () => json({ turn_id: REFUSED_TURN, body: "left · Which?" }),
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "left" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+
+  await waitFor(() => expect(screen.queryByRole("button", { name: "left" })).toBeNull());
+  const reply = screen.getByText("asking").closest("[data-role=agent]") as HTMLElement;
+  expect(within(reply).getByText("Which?")).toBeTruthy();
+  expect(within(reply).getByText("left · Which?")).toBeTruthy();
+});
+
+test("a question stands under the reply that asked it, not at the foot of the log", async () => {
+  wire(transcript({ messages: [ASKING(ASKED), { role: "user", text: "one moment" }] }));
+  open();
+
+  const left = await screen.findByRole("button", { name: "left" });
+  const reply = screen.getByText("asking").closest("[data-role=agent]") as HTMLElement;
+  expect(reply.contains(left)).toBe(true);
+  expect(screen.getByTestId("log").lastElementChild?.textContent).toBe("one moment");
 });
 
 test("a files frame lists each shared file with its size", async () => {
@@ -1410,7 +1505,6 @@ test("a streamed chunk never steals focus from where the member put it", async (
 });
 
 test("streaming keeps the log pinned at the bottom but never yanks a reader back down", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
@@ -1421,12 +1515,17 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
   const log = screen.getByTestId("log");
   Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
   Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  Object.defineProperty(log, "scrollTo", { configurable: true, value: vi.fn() });
 
   log.scrollTop = 100;
   fireEvent.scroll(log);
+  expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
   StreamFake.last().emit("message", { text: "while reading" });
-  await screen.findByText("while reading");
+  await screen.findByText(saying("while reading"));
   expect(log.scrollTop).toBe(100);
+  expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Jump to bottom" }));
+  expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
 
   log.scrollTop = 700;
   fireEvent.scroll(log);
@@ -1435,8 +1534,110 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
   expect(log.scrollTop).toBe(1000);
 });
 
+test("a dropped file is named on the composer, comes off it, and rides the message", async () => {
+  const { handler } = wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]")!;
+  const drop = (name: string) =>
+    fireEvent.drop(composer, {
+      dataTransfer: { types: ["Files"], files: [new File(["body"], name, { type: "text/plain" })] },
+    });
+
+  drop("notes.txt");
+  drop("second.txt");
+  expect(screen.getByText("notes.txt")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Remove notes.txt" }));
+  expect(screen.queryByText("notes.txt")).toBeNull();
+  expect(screen.getByText("second.txt")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(screen.queryByLabelText("Attached files")).toBeNull());
+  const sent = handler.mock.calls.find(([url]) => String(url).includes("/chat?"))?.[1]?.body;
+  expect(sent).toBeInstanceOf(FormData);
+  expect((sent as FormData).getAll("file").map((file) => (file as File).name)).toEqual([
+    "second.txt",
+  ]);
+  expect(await screen.findByText("second.txt")).toBeTruthy();
+});
+
+test("a send the composer cannot answer leaves the attachment where the member put it", async () => {
+  wire({ ...transcript(), "/chat": () => new Promise<Response>(() => {}) });
+  location.hash = "#/";
+  open();
+  await screen.findByText("Message assistant to start.");
+
+  const composer = document.querySelector("form[data-field-card]")!;
+  const chips = () => within(composer as HTMLElement).queryAllByRole("listitem");
+  fireEvent.drop(composer, {
+    dataTransfer: { types: ["Files"], files: [new File(["body"], "held.txt")] },
+  });
+  await waitFor(() => expect(chips().length).toBe(1));
+
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(chips().length).toBe(0));
+
+  fireEvent.drop(composer, {
+    dataTransfer: { types: ["Files"], files: [new File(["body"], "second.txt")] },
+  });
+  await userEvent.type(screen.getByLabelText("Message the agent"), "{Enter}");
+  expect(chips().length).toBe(1);
+});
+
+test("a file pasted into the message box is attached rather than typed", async () => {
+  wire({ ...transcript() });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  fireEvent.paste(screen.getByLabelText("Message the agent"), {
+    clipboardData: { files: [new File(["body"], "pasted.txt", { type: "text/plain" })] },
+  });
+
+  expect(await screen.findByText("pasted.txt")).toBeTruthy();
+  expect((screen.getByLabelText("Message the agent") as HTMLTextAreaElement).value).toBe("");
+});
+
+test("a member who scrolls up while a reply streams stays where they scrolled", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 0;
+  log.dispatchEvent(new Event("scroll"));
+
+  log.appendChild(document.createElement("p"));
+  await waitFor(() => expect(log.childElementCount).toBeGreaterThan(0));
+  expect(log.scrollTop).toBe(0);
+});
+
+test("the log follows a line that lands after the render that asked for it", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  const log = screen.getByTestId("log");
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  log.scrollTop = 0;
+
+  log.appendChild(document.createElement("p"));
+  await waitFor(() => expect(log.scrollTop).toBe(1000));
+});
+
 test("sending while scrolled up re-pins the log to the bottom", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
@@ -1454,17 +1655,9 @@ test("sending while scrolled up re-pins the log to the bottom", async () => {
 });
 
 test("answering a question while scrolled up re-pins the log to the bottom", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   wire({
-    ...transcript({
-      messages: [{ role: "assistant", text: "asking" }],
-      question: {
-        turn_id: TURN_ID,
-        title: "Pick one",
-        questions: [{ question: "Which?", options: [{ label: "left" }, { label: "right" }] }],
-      },
-    }),
-    "/chat": () => json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "left" }),
+    ...transcript({ messages: [ASKING(ASKED)] }),
+    "/chat": () => json({ turn_id: REFUSED_TURN, body: "left" }),
   });
   open();
   await screen.findByText("asking");
@@ -1476,12 +1669,11 @@ test("answering a question while scrolled up re-pins the log to the bottom", asy
   fireEvent.scroll(log);
 
   await userEvent.click(screen.getByRole("button", { name: "left" }));
-  await screen.findByText("left");
-  expect(log.scrollTop).toBe(1000);
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await waitFor(() => expect(log.scrollTop).toBe(1000));
 });
 
 test("switching conversations remounts the log so scroll state never leaks across", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   const other = {
     ...CHAT_ROW,
     conversation_id: "66666666-6666-4666-8666-666666666666",
@@ -1536,7 +1728,6 @@ test("the log opens pinned: loading a transcript lands at the bottom untouched",
 });
 
 test("a reader inside the tolerance band still counts as at the bottom", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
@@ -1568,44 +1759,44 @@ test("sending returns focus to the composer instead of stranding it on the page"
 
 test("answering a question returns focus to the composer", async () => {
   wire({
-    ...transcript({
-      messages: [{ role: "assistant", text: "asking" }],
-      question: {
-        turn_id: TURN_ID,
-        title: "Pick one",
-        questions: [{ question: "Which?", options: [{ label: "left" }, { label: "right" }] }],
-      },
-    }),
-    "/chat": () => json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "left" }),
+    ...transcript({ messages: [ASKING(ASKED)] }),
+    "/chat": () => json({ turn_id: REFUSED_TURN, body: "left" }),
   });
   open();
   await userEvent.click(await screen.findByRole("button", { name: "left" }));
-  await screen.findByText("left");
-  expect(document.activeElement).toBe(screen.getByLabelText("Message the agent"));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByLabelText("Message the agent")),
+  );
 });
 
 test("a second answer clicked mid-stream neither posts nor yanks the reader", async () => {
-  const { fireEvent } = await import("@testing-library/react");
   const posts: string[] = [];
   wire({
     ...transcript({
-      messages: [{ role: "assistant", text: "asking" }],
-      question: {
-        turn_id: TURN_ID,
-        title: "Two things",
-        questions: [
-          { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
-          { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
-        ],
-      },
+      messages: [
+        {
+          role: "assistant",
+          text: "asking",
+          question: {
+            turn_id: TURN_ID,
+            title: "Two things",
+            questions: [
+              { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+              { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+            ],
+          },
+        },
+      ],
     }),
     "/chat": (url) => {
       posts.push(url);
-      return json({ turn_id: "44444444-4444-4444-8444-444444444444", body: "alpha" });
+      return json({ turn_id: REFUSED_TURN, body: "alpha · First?" });
     },
   });
   open();
   await userEvent.click(await screen.findByRole("button", { name: "alpha" }));
+  await userEvent.click(screen.getAllByRole("button", { name: "Answer" })[0]);
   await waitFor(() => expect(posts.length).toBe(1));
 
   const log = screen.getByTestId("log");
@@ -1615,9 +1806,12 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
   fireEvent.scroll(log);
 
   await userEvent.click(screen.getByRole("button", { name: "gamma" }));
+  const submit = screen.getByRole("button", { name: "Answer" });
+  expect(submit.hasAttribute("disabled")).toBe(true);
+  await userEvent.click(submit);
   expect(posts.length).toBe(1);
   StreamFake.last().emit("message", { text: "still streaming" });
-  await screen.findByText(/still streaming/);
+  await screen.findByText(saying(/still streaming/));
   expect(log.scrollTop).toBe(100);
 });
 
@@ -1632,7 +1826,7 @@ test("agent markdown renders as elements while the member's text stays literal",
   expect(screen.getByText("**hi**")).toBeTruthy();
   StreamFake.last().emit("message", { text: "see [docs][ref]\n\n" });
   StreamFake.last().emit("message", { text: "**mid**" });
-  expect((await screen.findByText("mid")).tagName).toBe("STRONG");
+  expect((await screen.findByText(saying("mid"))).closest("strong")).not.toBeNull();
   StreamFake.last().emit("message", { text: "\n\n**bold**\n\n[ref]: https://example.com/d\n" });
   StreamFake.last().emit("terminal", {
     status: "done",

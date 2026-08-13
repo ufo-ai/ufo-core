@@ -3,6 +3,7 @@ import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { Table, Td, Th } from "@/components/ui/table";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
@@ -50,8 +51,8 @@ export function SubagentPane({
 }: SubagentPaneProps) {
   const base = "/subagents/" + subagent.name;
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
-      <div className="flex items-baseline gap-md px-2xl pt-lg">
+    <Pane>
+      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
         <h1 className="m-0 text-title font-strong">{subagent.name}</h1>
         <span className="opacity-(--muted-strong)">subagent</span>
       </div>
@@ -65,7 +66,7 @@ export function SubagentPane({
       <TabPanel
         group="subagent"
         current={tab}
-        className="flex-1 overflow-y-auto p-2xl"
+        className={cn(COLUMN, "flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl")}
         data-testid="panel"
       >
         {tab === "overview" ? <SubagentOverview base={base} /> : null}
@@ -79,7 +80,7 @@ export function SubagentPane({
         ) : null}
         {tab === "skills" ? <SubagentSkills base={base} /> : null}
       </TabPanel>
-    </main>
+    </Pane>
   );
 }
 

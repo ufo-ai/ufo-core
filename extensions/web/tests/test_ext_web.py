@@ -2289,6 +2289,47 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
     assert (await client.get(f"{ARTIFACTS_PATH}?media=bad", headers=headers)).status_code == 400
 
 
+async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID) -> None:
+    """One finished turn with priced usage and an egress request, so the rollup has real sums to
+    report against a known member and agent."""
+    async with workspace_tx() as connection:
+        conversation_id, turn_id = uuid4(), uuid4()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="x",
+                terminal=TerminalFrame(status="done").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000, output_tokens=2000),
+        )
+        await record_egress_request(connection, workspace_id, turn_id)
+
+
 async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollup(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -3526,16 +3567,17 @@ async def test_the_rail_reads_every_surface_under_its_bound(
     assert rows[0]["origin"] == "slack"
 
 
-async def test_the_rail_lists_only_the_conversations_this_member_opened(
+async def test_the_rail_groups_the_members_own_conversations_and_everyone_elses(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A workspace-shared conversation is readable by everyone, so the rail asks who opened it. The
-    member's own public-channel thread stands; a thread another member opened, and a run an
-    extension triggered with no member turn at all, do not. Answering in another's thread is
-    joining it, not opening it."""
+    """A workspace-shared conversation is readable by everyone, so the rail asks who is in it and
+    says so on the row. The member's own thread and the one they answered in are `mine`; the peer's
+    is theirs, named by the peer who spoke it; a run an extension triggered with no member turn at
+    all is nobody's and stands in neither group. Each member reads the same two threads from the
+    opposite sides."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    peer_id, _peer_token = await _seed_member(workspace_id, "peer@example.com")
+    peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     mine_id, theirs_id, triggered_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -3568,7 +3610,20 @@ async def test_the_rail_lists_only_the_conversations_this_member_opened(
     )
     await _seed_listed_turn(workspace_id, triggered_id, agent_id, seq=1, inbound="review run")
     rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(mine_id)]
+    rows = {row["conversation_id"]: row for row in rail.json()["chats"]}
+    assert set(rows) == {str(mine_id), str(theirs_id)}
+    assert rows[str(mine_id)]["mine"] is True
+    assert rows[str(theirs_id)]["mine"] is True
+    assert rows[str(mine_id)]["speaker"] is None
+
+    peer_rail = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={peer_token}"}
+    )
+    peer_rows = {row["conversation_id"]: row for row in peer_rail.json()["chats"]}
+    assert set(peer_rows) == {str(mine_id), str(theirs_id)}
+    assert peer_rows[str(theirs_id)]["mine"] is True
+    assert peer_rows[str(mine_id)]["mine"] is False
+    assert peer_rows[str(mine_id)]["speaker"] == "owner@example.com"
 
 
 async def test_an_answer_into_a_fresh_conversation_is_refused(
@@ -4033,47 +4088,6 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
         headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
     )
     assert crossed.status_code == 403
-
-
-async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID) -> None:
-    """One finished turn with priced usage and an egress request, so the rollup has real sums to
-    report against a known member and agent."""
-    async with workspace_tx() as connection:
-        conversation_id, turn_id = uuid4(), uuid4()
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="web",
-                queue_key=uuid4().hex,
-                member_id=member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="x",
-                terminal=TerminalFrame(status="done").model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await record_turn_usage(
-            connection,
-            workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            Usage(input_tokens=1000, output_tokens=2000),
-        )
-        await record_egress_request(connection, workspace_id, turn_id)
 
 
 async def test_admin_view_reads_the_workspace_shape(
@@ -4564,12 +4578,6 @@ async def test_question_affordance_admits_the_first_answer_only(
         TerminalFrame(status="done", text="one question", question=QUESTION),
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
-        headers=cookie,
-    )
-    assert loaded.json()["question"]["turn_id"] == str(asked_turn)
-    assert loaded.json()["question"]["title"] == "Pick a deploy window"
     answer_headers = {
         **cookie,
         "x-ufo-answer-turn": str(asked_turn),
@@ -4620,6 +4628,49 @@ async def test_question_affordance_admits_the_first_answer_only(
     ]
     assert answers[0].idempotency_key.endswith(":answer:0")
     assert answers[1].idempotency_key.endswith(":answer:1")
+
+
+async def test_transcript_reply_carries_the_question_it_asked(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A question rides the reply that asked it, so the portal draws it under those words rather
+    than at the foot of the pane."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="one question", question=QUESTION),
+    )
+    await Transcript(blob=blob, conversation_id=conversation_id).write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {asked_turn}\n</context>\nDeploy it.",
+                ),
+                Message(role="assistant", content="one question"),
+            ),
+        )
+    )
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    reply = loaded.json()["messages"][-1]
+    assert reply["role"] == "assistant"
+    assert reply["text"] == "one question"
+    assert reply["question"]["turn_id"] == str(asked_turn)
+    assert reply["question"]["title"] == "Pick a deploy window"
+    assert [entry["question"] for entry in reply["question"]["questions"]] == [
+        "When should the deploy run?",
+        "Page the on-call?",
+    ]
 
 
 async def test_credential_prompts_stream_pending_and_fulfill_privately(

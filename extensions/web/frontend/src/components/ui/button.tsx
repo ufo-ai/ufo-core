@@ -5,9 +5,11 @@ import { cn } from "@/lib/cn";
 
 export const buttonVariants = cva(
   cn(
+    "inline-flex items-center justify-center gap-xs",
     "rounded-panel transition-[background-color,border-color,opacity,scale]",
     "duration-100 ease-control active:scale-[0.96]",
     "disabled:pointer-events-none disabled:opacity-(--disabled)",
+    "[&_svg]:pointer-events-none [&_svg]:shrink-0",
   ),
   {
     variants: {
@@ -19,20 +21,29 @@ export const buttonVariants = cva(
         option:
           "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
       },
+      size: {
+        default: "",
+        icon: "size-(--size-control) rounded-full p-0",
+      },
     },
-    defaultVariants: { variant: "outline" },
+    defaultVariants: { variant: "outline", size: "default" },
   },
 );
 
 export type ButtonProps = ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & { busy?: boolean };
 
-/** `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
+/** A button lays its content out as a centred row, so a glyph sits in the middle of the box rather
+ *  than on the text baseline at its left edge, and `size="icon"` is the box a glyph alone is drawn
+ *  in: one `--size-control` circle, which is the shape every icon-only act in the portal takes.
+ *
+ *  `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
  *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation
  *  instead, so a second click cannot commit the act twice or submit the form it sits in. */
 export function Button({
   className,
   variant,
+  size,
   type = "button",
   busy,
   onClick,
@@ -41,7 +52,7 @@ export function Button({
   return (
     <button
       type={type}
-      aria-disabled={busy}
+      aria-disabled={busy ? true : undefined}
       onClick={(event) => {
         if (busy) {
           event.preventDefault();
@@ -50,7 +61,7 @@ export function Button({
         onClick?.(event);
       }}
       className={cn(
-        buttonVariants({ variant }),
+        buttonVariants({ variant, size }),
         busy && "opacity-(--muted) animate-working motion-reduce:animate-none",
         className,
       )}

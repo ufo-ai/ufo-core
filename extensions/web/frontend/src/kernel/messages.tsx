@@ -8,7 +8,7 @@ import { subagentConversationHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
-import type { ChatFile, SubagentRun } from "@/lib/types";
+import type { ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
 
 const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
 
@@ -30,6 +30,11 @@ const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate
  *  only then, so the viewer's own bubbles stay the unlabelled default and the label marks exactly
  *  the words another member said.
  *
+ *  A question stands under the reply that asked it, because that is the reply it answers. The log
+ *  decides the place and the view supplies the form: `question` draws one and a pane that cannot
+ *  answer passes none, so a transcript read back states the same reply without offering an act on
+ *  a turn it does not own.
+ *
  *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
  *  under it: a run is opened through the conversation that spawned it, which is the route by which
  *  a member reading a transcript reaches the run's own record. */
@@ -37,10 +42,12 @@ export function MessageLog({
   messages,
   live = null,
   conversationId,
+  question,
 }: {
   messages: Bubble[];
   live?: LiveTurn | null;
   conversationId: string | null;
+  question?: (asked: ChatQuestion) => ReactNode;
 }) {
   const waiting = messages.findIndex(
     (message) => message.arrival_id !== undefined || message.queued === true,
@@ -74,6 +81,7 @@ export function MessageLog({
         {message.files ? <Files files={message.files} /> : null}
         {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
         {message.meta ? <Meta>{message.meta}</Meta> : null}
+        {message.question && question ? question(message.question) : null}
       </Speech>
     );
   return (

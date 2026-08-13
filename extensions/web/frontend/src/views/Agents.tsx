@@ -5,8 +5,10 @@ import { Input } from "@/components/ui/field";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { CardGrid } from "@/kernel/cards";
 import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { PanelBlank, PanelEmpty, Section, outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { webAudienceLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
@@ -71,7 +73,7 @@ export function Agents({
   }
 
   return (
-    <main className="flex flex-col overflow-y-auto p-2xl">
+    <Pane className={cn(COLUMN, "overflow-y-auto scrollbar-gutter-stable p-2xl")}>
       <h1 className="m-0 mb-2xl text-title font-strong">Agents</h1>
       <Section
         title="Workspace agents"
@@ -174,6 +176,6 @@ export function Agents({
         />
       ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
-    </main>
+    </Pane>
   );
 }

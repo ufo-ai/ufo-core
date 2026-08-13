@@ -66,7 +66,7 @@ test("a live turn is stopped by the header alone, and the stream's terminal ends
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
   const stop = await screen.findByRole("button", { name: "Stop" });
-  expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
   await userEvent.click(stop);
 
   await waitFor(() => expect(posts(handler)).toHaveLength(1));
@@ -109,7 +109,7 @@ test("a stop in flight swallows a second press", async () => {
 
   expect(posts(handler)).toHaveLength(1);
   land();
-  await waitFor(() => expect(stop.getAttribute("aria-disabled")).toBe("false"));
+  await waitFor(() => expect(stop.getAttribute("aria-disabled")).toBeNull());
 });
 
 test("a refused stop reports as a toast and leaves the turn streaming", async () => {

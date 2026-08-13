@@ -81,6 +81,14 @@ export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
 
 const GROWING_CELL = "col-start-1 row-start-1 w-full";
 
+/** The box inside a card that is itself the field: it draws no surface of its own, because a second
+ *  border and fill inside the first states a box within a box. The mirror takes the same string, so
+ *  the row it sizes is the row the member is typing into. */
+const BARE = cn(
+  "border-0 bg-transparent p-0 text-field-ink font-inherit",
+  "text-subtitle narrow:text-ui placeholder:opacity-(--muted)",
+);
+
 /** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a
  *  mirror that sizes the row, once in the textarea laid over it — so the box grows on the
  *  browser's own layout pass, in the same paint as the keystroke. Measuring `scrollHeight` and
@@ -91,14 +99,16 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
 export function GrowingTextarea({
   className,
   value,
+  bare = false,
   ...props
-}: Omit<ComponentProps<"textarea">, "value" | "rows"> & { value: string }) {
+}: Omit<ComponentProps<"textarea">, "value" | "rows"> & { value: string; bare?: boolean }) {
+  const surface = bare ? BARE : CONTROL;
   return (
     <div className={cn("grid", className)}>
       <div
         aria-hidden
         className={cn(
-          CONTROL,
+          surface,
           GROWING_CELL,
           "invisible max-h-(--size-composer) overflow-hidden whitespace-pre-wrap wrap-anywhere",
         )}
@@ -108,7 +118,7 @@ export function GrowingTextarea({
       <textarea
         rows={1}
         value={value}
-        className={cn(CONTROL, GROWING_CELL, "resize-none overflow-y-auto")}
+        className={cn(surface, GROWING_CELL, "resize-none overflow-y-auto")}
         {...props}
       />
     </div>

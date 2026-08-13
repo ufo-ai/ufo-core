@@ -2460,16 +2460,17 @@ class SurfaceContext:
         limit: int,
         surface: str | None = None,
         conversation_id: UUID | None = None,
-        initiated: bool = False,
+        participation: Literal["mine", "others"] | None = None,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
         `surface` narrows to one surface's conversations in the query, before the bound, so a
         member's rows are never displaced by another surface's newer traffic under the cap.
-        `initiated` narrows the same way to the ones this member opened — `_initiated` defines
-        that — which is what a rail lists and what an agent's directory does not. Each
-        entry carries `readable` (content this viewer reads now) and `disclosable` (an admin may
-        acknowledge and read another member's private one — `record_transcript_access` is the
+        `participation` narrows the same way to one side of the member: `mine` is the ones they
+        are in — `_participated` defines that — and `others` the readable ones somebody else spoke
+        and they did not. A rail reads both, one bound each; an agent's directory reads neither.
+        Each entry carries `readable` (content this viewer reads now) and `disclosable` (an admin
+        may acknowledge and read another member's private one — `record_transcript_access` is the
         act). Subagent conversations are absent: they are the agent's own work on a request,
         listed nested under the turn that spawned them, never beside it. `conversation_id` selects
         one exact row before the bound for a durable permalink.
@@ -2519,8 +2520,13 @@ class SurfaceContext:
             query = query.where(tables.conversation.c.surface == surface)
         if conversation_id is not None:
             query = query.where(tables.conversation.c.id == conversation_id)
-        if initiated:
-            query = query.where(self._initiated(member_id))
+        match participation:
+            case "mine":
+                query = query.where(self._participated(member_id))
+            case "others":
+                query = query.where(self._others(member_id))
+            case None:
+                pass
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
         async with workspace_tx() as connection:
@@ -2555,32 +2561,51 @@ class SurfaceContext:
             for row in rows
         )
 
-    def _initiated(self, member_id: UUID) -> sa.ColumnElement[bool]:
-        """Whether this member opened the conversation: it is bound to them, or they spoke its
-        first member turn. A conversation an extension opened — a trigger run, a review, an
-        agent's own errand — carries no member and has no member turn to be first in, so it
-        belongs to nobody's rail; a public channel's thread carries no member either and belongs
-        to whoever spoke into it first. Later turns do not qualify: a member who answers in
-        another's thread has joined it, not opened it.
+    def _spoken(self, member_id: UUID | None) -> sa.ColumnElement[bool]:
+        """Whether the conversation holds a member turn — this member's where one is named, any
+        member's where none is.
 
         Correlated on the row being listed rather than grouped over the workspace: `turn_spoken`
         indexes exactly this lookup, so each candidate costs one seek instead of every turn in the
-        workspace being reduced to a first-speaker table the bound then throws most of away."""
-        spoke_first = (
-            sa.select(tables.turn.c.speaker_member_id)
+        workspace being reduced to a speaker table the bound then throws most of away."""
+        speaker = (
+            tables.turn.c.speaker_member_id.is_not(None)
+            if member_id is None
+            else tables.turn.c.speaker_member_id == member_id
+        )
+        return (
+            sa.select(sa.literal(1))
             .where(
                 tables.turn.c.workspace_id == self.workspace_id,
                 tables.turn.c.conversation_id == tables.conversation.c.id,
-                tables.turn.c.speaker_member_id.is_not(None),
+                speaker,
             )
-            .order_by(tables.turn.c.seq)
-            .limit(1)
             .correlate(tables.conversation)
-            .scalar_subquery()
+            .exists()
         )
+
+    def _participated(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether this member is in the conversation: it is bound to them, or they spoke a turn of
+        it. Answering in another member's thread counts — the member was there, and a rail that
+        drops it hides work they did. A conversation an extension opened — a trigger run, a review,
+        an agent's own errand — carries no member and holds no member turn, so it is in nobody's."""
         return sa.or_(
             tables.conversation.c.member_id == member_id,
-            spoke_first == member_id,
+            self._spoken(member_id),
+        )
+
+    def _others(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """The complement, over the conversations a member turn stands in: somebody spoke, and it
+        was not this member, and the row is not bound to them either.
+
+        `is_distinct_from` carries the binding test because `member_id` is null on exactly the rows
+        this group is made of — a shared thread belongs to no member — and `member_id <> :me` is
+        null there, which a `where` reads as false. Negating the participation predicate whole
+        would empty the group in silence."""
+        return sa.and_(
+            tables.conversation.c.member_id.is_distinct_from(member_id),
+            sa.not_(self._spoken(member_id)),
+            self._spoken(None),
         )
 
     async def _conversation_openings(self, listed: Sequence[UUID]) -> dict[UUID, str]:

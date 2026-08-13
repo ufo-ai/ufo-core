@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
@@ -166,7 +167,7 @@ export function ConversationSlotPane({
           </button>
         ) : null}
       </div>
-      <div className="flex-1 overflow-y-auto p-xl">
+      <div className="flex-1 overflow-y-auto scrollbar-gutter-stable p-xl">
         <Panel
           state={state}
           failed={(message) => (
@@ -192,7 +193,7 @@ export function ConversationSlotPane({
       </aside>
     );
   }
-  return <main className="flex min-h-0 min-w-0 flex-col">{content}</main>;
+  return <Pane className={COLUMN}>{content}</Pane>;
 }
 
 export function SlotIcon({ icon }: { icon: PortalIcon }) {
@@ -427,6 +428,7 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
         <div className="mt-sm">
           <ArtifactText
             url={textUrl}
+            name={artifact.filename}
             mediaType={artifact.media_type}
             display={opened ? "inline" : "excerpt"}
           />
@@ -445,7 +447,13 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
             Preview
           </summary>
           <div className="mt-sm">
-            {opened ? <ArtifactText url={textUrl} mediaType={artifact.media_type} /> : null}
+            {opened ? (
+              <ArtifactText
+                url={textUrl}
+                name={artifact.filename}
+                mediaType={artifact.media_type}
+              />
+            ) : null}
           </div>
         </details>
       ) : null}

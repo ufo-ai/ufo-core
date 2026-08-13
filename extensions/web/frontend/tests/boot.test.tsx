@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -32,6 +32,22 @@ test("the built page names a hashed module and stylesheet under this surface", (
   expect(/assets\/index-[A-Za-z0-9_-]+\.js/.test(page)).toBe(true);
   expect(/assets\/index-[A-Za-z0-9_-]+\.css/.test(page)).toBe(true);
   expect(page).toContain("<!doctype html>");
+});
+
+test("the page loads one script, which is the one this test runs", () => {
+  const scripts = readdirSync(join(STATIC, "assets")).filter((name) => name.endsWith(".js"));
+  expect(scripts).toHaveLength(1);
+});
+
+const DIAGRAM_LIBRARIES = ["cytoscape", "roughjs", "d3-selection", "d3-scale", "elkjs"];
+
+const BUNDLE_CEILING_BYTES = 1_400_000;
+
+test("the one script carries no diagram library, and stays under its ceiling", () => {
+  const script = readdirSync(join(STATIC, "assets")).find((name) => name.endsWith(".js"))!;
+  const bundle = readFileSync(join(STATIC, "assets", script), "utf8");
+  expect(DIAGRAM_LIBRARIES.filter((name) => bundle.includes(name))).toEqual([]);
+  expect(bundle.length).toBeLessThan(BUNDLE_CEILING_BYTES);
 });
 
 test("the built bundle mounts into the served page and asks for the session's agents", async () => {

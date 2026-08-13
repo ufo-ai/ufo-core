@@ -9,10 +9,12 @@ import {
   type Bubble,
   type LiveTurn,
 } from "@/lib/chatStore";
-import type { ChatFile, ChatQuestion, SubagentRun, Transcript } from "@/lib/types";
+import type { ChatFile, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
+const CANCELLED = "cancelled";
+const STOPPED = "Stopped.";
 
 export const NEW_CONVERSATION = "new";
 
@@ -134,10 +136,15 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
     updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
 
+  /** The reply this turn settles into, carrying what the turn still asks of the member: the
+   *  question stands under the words that asked it, so the reply is recorded for a question alone
+   *  even when the turn wrote nothing else. */
   const record = () =>
     updateChat(chatKey, (state) => {
       const live = state.live;
-      if (!live || (!live.text && !live.subagents.length)) return state;
+      const asked = state.handoffs.question;
+      const question = asked && asked.turn_id === turnId ? asked : null;
+      if (!live || (!live.text && !live.subagents.length && question === null)) return state;
       return {
         ...state,
         messages: (state.messages ?? []).concat({
@@ -148,6 +155,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
           ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
+          ...(question ? { question } : {}),
         }),
       };
     });
@@ -336,7 +344,9 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       } else {
         const fallback =
           frame.text ||
-          "(" + frame.status + (frame.error_class ? ": " + frame.error_class : "") + ")";
+          (frame.status === CANCELLED
+            ? STOPPED
+            : "(" + frame.status + (frame.error_class ? ": " + frame.error_class : "") + ")");
         text = text ? text + "\n" + fallback : fallback;
         if (!answering) handoffs.question = null;
       }
@@ -430,14 +440,7 @@ export async function refreshTranscript(
     if (onlyIfEmpty && current.messages !== null) return { ...current, fault: null };
     if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
-    const incoming = ("question" in payload && payload.question) || null;
-    const held = current.handoffs.question ?? null;
-    const question =
-      incoming === null
-        ? held
-        : held && held.turn_id === incoming.turn_id
-          ? { ...incoming, answered: held.answered }
-          : incoming;
+    const question = current.handoffs.question ?? null;
     const running = ("turn" in payload && payload.turn) || null;
     return {
       ...current,
@@ -458,6 +461,11 @@ export async function refreshTranscript(
     streamTurn(chatKey, streaming.id, streaming.answering);
   }
 }
+
+/** Stop one running turn. The reply is the cancel landing, never the cancelled state — the turn's
+ *  own tail delivers that terminal, as it does for a turn stopped from any other surface. A stop
+ *  that did not land is reported, since the member pressed it and nothing else on the page says
+ *  the turn is still going. */
 
 /** Admit one message and tail what it landed on.
  *
@@ -615,11 +623,10 @@ export async function answerQuestion(
   const landed = typeof payload.body === "string" && payload.body ? payload.body : body;
   updateChat(chatKey, (current) => ({
     ...current,
-    messages: (current.messages ?? []).concat({ role: "user", text: landed }),
-    handoffs: {
-      ...current.handoffs,
-      question: markAnswered(current.handoffs.question, questionIndex, turnId),
-    },
+    messages: markAnswered(current.messages, turnId, questionIndex, landed).concat({
+      role: "user",
+      text: landed,
+    }),
   }));
   streamTurn(chatKey, turn, true);
 }
@@ -662,13 +669,24 @@ function failTurn(chatKey: string, message: string): void {
   });
 }
 
-export function markAnswered(
-  question: ChatQuestion | null | undefined,
-  index: number,
+/** The words the surface confirmed it admitted, recorded on the entry they answer. The reply that
+ *  asked holds the question, so the answer is written there too: the entry states what the member
+ *  chose instead of disappearing, and a second submit has nothing left to send. */
+function markAnswered(
+  messages: Bubble[] | null,
   turnId: string,
-): ChatQuestion | null {
-  if (!question || question.turn_id !== turnId) return question ?? null;
-  const answered = (question.answered ?? []).concat(index);
-  if (answered.length >= question.questions.length) return null;
-  return { ...question, answered };
+  index: number,
+  body: string,
+): Bubble[] {
+  return (messages ?? []).map((message) =>
+    message.question?.turn_id === turnId
+      ? {
+          ...message,
+          question: {
+            ...message.question,
+            answered: { ...message.question.answered, [index]: body },
+          },
+        }
+      : message,
+  );
 }

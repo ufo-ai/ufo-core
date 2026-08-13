@@ -34,6 +34,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
+const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
+
 const OVERVIEW = {
   agent: {
     name: "assistant",
@@ -169,7 +171,7 @@ test("the scheduled index lists declared fields and its detail pauses through th
         name: "digest",
         summary: "0 9 * * * — summarize",
         spec: { schedule: "0 9 * * *", prompt: "summarize", paused: false },
-        status: { next_run_at: "2026-08-01T09:00:00Z", paused: false },
+        status: { next_run_at: IN_THREE_HOURS, paused: false },
         links: [],
         created_at: "2026-07-01T09:00:00Z",
         updated_at: "2026-07-01T09:00:00Z",
@@ -180,7 +182,7 @@ test("the scheduled index lists declared fields and its detail pauses through th
           name: "digest",
           summary: "0 9 * * * — summarize",
           mine: true,
-          next_run_at: "2026-08-01T09:00:00Z",
+          next_run_at: IN_THREE_HOURS,
           origin: "#general",
           owner_email: "member@example.com",
           paused: false,
@@ -199,7 +201,7 @@ test("the scheduled index lists declared fields and its detail pauses through th
   const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
   expect(said[1]).toBe("You");
   expect(said[2]).toBe("0 9 * * * — summarize");
-  expect(said[3]).toContain(" ago");
+  expect(said[3]).toContain("in ");
   expect(said[4]).toBe("#general");
   expect(said[5]).toBe("No");
 

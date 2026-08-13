@@ -131,7 +131,9 @@ test("an index is a table: one column per field the kind declares, headed by a m
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();
 
-  await screen.findByRole("link", { name: "daily-brief" });
+  const name = await screen.findByRole("link", { name: "daily-brief" });
+  const row = name.closest("tr");
+  expect(row).not.toBeNull();
   expect(headings()).toEqual([
     "Name",
     "Agent",
@@ -150,6 +152,12 @@ test("an index is a table: one column per field the kind declares, headed by a m
   expect(said[4]).toContain("in ");
   expect(said[5]).toBe("#general");
   expect(said[6]).toBe("No");
+  const rowCells = [...(row?.querySelectorAll("td") ?? [])];
+  for (const index of [3, 4, 5, 6]) {
+    expect(rowCells[index].querySelector("span")?.className).toContain(
+      "block max-w-(--size-cell) truncate",
+    );
+  }
 });
 
 test("a record's conversation is where its name leads, never a column of uuids", async () => {

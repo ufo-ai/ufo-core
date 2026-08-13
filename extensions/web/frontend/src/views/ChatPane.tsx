@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 
 import { Chat, type ChatProps } from "@/views/Chat";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import {
@@ -35,9 +36,9 @@ export function ChatPane({
   const selected =
     slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
-  return (
-    <main className="flex min-h-0 min-w-0 flex-col">
-      <div className="flex items-baseline gap-md border-b border-edge px-2xl py-lg">
+  const header = (
+    <div className="border-b border-edge">
+      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl py-lg")}>
         <button
           type="button"
           onClick={() => onOpenAgent(agent.id)}
@@ -67,6 +68,10 @@ export function ChatPane({
           </div>
         ) : null}
       </div>
+    </div>
+  );
+  return (
+    <Pane>
       <div
         className={cn(
           "relative grid min-h-0 flex-1 grid-cols-1",
@@ -74,6 +79,7 @@ export function ChatPane({
         )}
       >
         <div className="flex min-h-0 min-w-0 flex-col">
+          {header}
           <Chat
             agent={agent}
             member={member}
@@ -94,6 +100,6 @@ export function ChatPane({
           />
         ) : null}
       </div>
-    </main>
+    </Pane>
   );
 }

@@ -23,7 +23,8 @@ import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CUSTOMIZE_VIEWS, SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
-import { Viewer, surfaceWord } from "@/lib/audience";
+import { Viewer, speakerName, surfaceWord } from "@/lib/audience";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -39,9 +40,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   bumpChat,
-  groupChats,
-  groupChatsByAgent,
   mergeChats,
+  railGroups,
   stampIso,
   type ChatRow,
   type ChatsPayload,
@@ -264,6 +264,8 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
         title,
         last_at: stampIso(new Date()),
         origin: null,
+        mine: true,
+        speaker: null,
       };
       setRail((current) => ({ ...current, rows: mergeChats(current.rows, [row]) }));
       const seen = routeRef.current;
@@ -430,7 +432,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
             </footer>
           </nav>
           </TooltipProvider>
-          <Pane
+          <RoutedPane
             route={route}
             agents={agents}
             subagents={subagents}
@@ -459,7 +461,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
   );
 }
 
-function Pane({
+function RoutedPane({
   route,
   agents,
   subagents,
@@ -623,9 +625,9 @@ function Pane({
       if (!outcome) return <PaneNote>Loading…</PaneNote>;
       if (outcome.kind === "signed-out") {
         return (
-          <main className="flex min-h-0 min-w-0 flex-col">
+          <Pane className={COLUMN}>
             <SignIn />
-          </main>
+          </Pane>
         );
       }
       if (outcome.kind === "failed") return <PaneNote>{outcome.message}</PaneNote>;
@@ -674,7 +676,7 @@ function LinkedPane({
   const [disclosed, setDisclosed] = useState(false);
   const back = () => onOpenAgent(agent.id, "conversations");
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
+    <Pane className={COLUMN}>
       <div className="flex-1 overflow-y-auto p-2xl" data-testid="panel">
         {conversation.readable || disclosed ? (
           <>
@@ -693,7 +695,7 @@ function LinkedPane({
           />
         )}
       </div>
-    </main>
+    </Pane>
   );
 }
 
@@ -703,9 +705,9 @@ function NotShared() {
 
 function PaneNote({ children }: { children: React.ReactNode }) {
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
+    <Pane className={COLUMN}>
       <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">{children}</div>
-    </main>
+    </Pane>
   );
 }
 
@@ -856,32 +858,37 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {(sort === "agent" ? groupChatsByAgent(rail.rows) : groupChats(rail.rows, now)).map((group) => (
+      {railGroups(rail.rows, sort, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
           <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium opacity-(--muted-strong) max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
-            {group.rows.map((row) => (
-              <li key={row.conversation_id}>
-                <RailRow
-                  current={
-                    (route.kind === "chat" || route.kind === "conversation-slot") &&
-                    route.conversationId === row.conversation_id
-                  }
-                  onClick={() => onOpen(row.conversation_id)}
-                >
-                  <span className="block truncate">{row.title}</span>
-                  {row.origin || (mainAgent && row.agent_id !== mainAgent.id) ? (
-                    <span className="block truncate text-small opacity-(--muted-strong) max-narrow:hidden">
-                      {[row.origin, mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null]
-                        .filter((fact): fact is string => fact !== null)
-                        .join(" · ")}
-                    </span>
-                  ) : null}
-                </RailRow>
-              </li>
-            ))}
+            {group.rows.map((row) => {
+              const facts = [
+                row.speaker ? speakerName(row.speaker) : null,
+                row.origin,
+                mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null,
+              ].filter((fact): fact is string => fact !== null);
+              return (
+                <li key={row.conversation_id}>
+                  <RailRow
+                    current={
+                      (route.kind === "chat" || route.kind === "conversation-slot") &&
+                      route.conversationId === row.conversation_id
+                    }
+                    onClick={() => onOpen(row.conversation_id)}
+                  >
+                    <span className="block truncate">{row.title}</span>
+                    {facts.length ? (
+                      <span className="block truncate text-small opacity-(--muted-strong) max-narrow:hidden">
+                        {facts.join(" · ")}
+                      </span>
+                    ) : null}
+                  </RailRow>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ))}

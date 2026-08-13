@@ -7,6 +7,8 @@ export type ChatRow = {
   title: string;
   last_at: string;
   origin: string | null;
+  mine: boolean;
+  speaker: string | null;
 };
 
 /** The rail, and — for a permalink to a conversation another surface holds, which has no chat row
@@ -30,7 +32,7 @@ function groupLabel(raw: string, now: Date): (typeof GROUPS)[number] {
   return "Older";
 }
 
-export function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
+function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
   const buckets = new Map<string, ChatRow[]>();
   for (const row of rows) {
     const label = groupLabel(row.last_at, now);
@@ -44,12 +46,26 @@ export function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
 
 export type RailSort = "recency" | "agent";
 
-export function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
+function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
   const buckets = new Map<string, ChatRow[]>();
   for (const row of rows) {
     buckets.set(row.agent_name, (buckets.get(row.agent_name) ?? []).concat(row));
   }
   return [...buckets.entries()].map(([label, grouped]) => ({ label, rows: grouped }));
+}
+
+const OTHER_MEMBERS = "Other members";
+
+/** The rail's groups, in the order it draws them. The member's own conversations take the ladder
+ *  the sort names, and the readable ones their colleagues are in follow as one group at the foot —
+ *  never subdivided, and by recency under either sort: a sidebar column holds two heading weights,
+ *  not three, and a colleague's thread is read for what happened lately in it. The group is drawn
+ *  only when it holds a row. */
+export function railGroups(rows: ChatRow[], sort: RailSort, now: Date): RailGroup[] {
+  const own = rows.filter((row) => row.mine);
+  const theirs = rows.filter((row) => !row.mine);
+  const grouped = sort === "agent" ? groupChatsByAgent(own) : groupChats(own, now);
+  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
 }
 
 export function stampIso(at: Date): string {

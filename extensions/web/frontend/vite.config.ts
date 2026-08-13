@@ -13,6 +13,7 @@ export default defineConfig({
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
+    rollupOptions: { output: { inlineDynamicImports: true } },
   },
   server: {
     proxy: {

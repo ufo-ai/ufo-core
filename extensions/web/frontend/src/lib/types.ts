@@ -91,11 +91,14 @@ export type QuestionEntry = {
   allow_attachments?: boolean;
 };
 
+/** What a turn asks of the member, named by the turn that asked. `answered` holds what the surface
+ *  confirmed it admitted for each entry the member has submitted — the words the transcript will
+ *  read back, so the entry states its answer rather than vanishing. */
 export type ChatQuestion = {
   turn_id: string;
   title?: string;
   questions: QuestionEntry[];
-  answered?: number[];
+  answered?: Record<number, string>;
 };
 
 export type CredentialPrompt = { slot: string; prompt: string; stored?: boolean };
@@ -135,12 +138,13 @@ export type Message = {
   arrival_id?: string;
   events?: ActivityEvent[];
   subagents?: SubagentRun[];
+  /** What this reply asked the member, carried by the reply that asked it. */
+  question?: ChatQuestion;
 };
 
 export type Transcript = {
   messages: Message[];
   turn?: string;
-  question?: ChatQuestion | null;
   credentials?: CredentialRequest | null;
   files?: ChatFile[] | null;
 };

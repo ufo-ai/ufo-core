@@ -5,7 +5,11 @@ import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
 
 const ARTIFACT_TEXT_BYTES = 64 * 1024;
+const ARTIFACT_HTML_BYTES = 256 * 1024;
 const MARKDOWN_MEDIA_TYPE = "text/markdown";
+const HTML_MEDIA_TYPE = "text/html";
+const HTML_CSP =
+  "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">";
 
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
@@ -16,16 +20,19 @@ export function isTextMedia(mediaType: string): boolean {
  *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
 export function ArtifactText({
   url,
+  name,
   mediaType,
   display = "frame",
 }: {
   url: string | null;
+  name: string;
   mediaType: string;
   display?: "excerpt" | "frame" | "inline";
 }) {
   const [body, setBody] = useState<string | null>(null);
   const [bounded, setBounded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const byteLimit = mediaType === HTML_MEDIA_TYPE ? ARTIFACT_HTML_BYTES : ARTIFACT_TEXT_BYTES;
 
   useEffect(() => {
     if (!url) return;
@@ -41,7 +48,7 @@ export function ArtifactText({
         const chunks: Uint8Array[] = [];
         let read = 0;
         let ended = false;
-        while (!ended && read <= ARTIFACT_TEXT_BYTES) {
+        while (!ended && read <= byteLimit) {
           const step = await reader.read();
           if (step.done) ended = true;
           else {
@@ -57,8 +64,8 @@ export function ArtifactText({
           at += chunk.length;
         }
         if (!live) return;
-        setBody(new TextDecoder().decode(bytes.slice(0, ARTIFACT_TEXT_BYTES)));
-        setBounded(read > ARTIFACT_TEXT_BYTES);
+        setBody(new TextDecoder().decode(bytes.slice(0, byteLimit)));
+        setBounded(read > byteLimit);
       } catch {
         if (live) setMessage("Network error — try again.");
       }
@@ -66,10 +73,16 @@ export function ArtifactText({
     return () => {
       live = false;
     };
-  }, [url]);
+  }, [byteLimit, url]);
 
   if (message) return <div className="font-mono text-small opacity-(--muted)">{message}</div>;
   if (body === null) return <div>Loading…</div>;
+  if (mediaType === HTML_MEDIA_TYPE && bounded)
+    return (
+      <div className="font-mono text-small opacity-(--muted)">
+        This page is larger than {formatSize(byteLimit)}. Download it to open it.
+      </div>
+    );
   return (
     <>
       {mediaType === MARKDOWN_MEDIA_TYPE ? (
@@ -89,6 +102,14 @@ export function ArtifactText({
             />
           ) : null}
         </div>
+      ) : mediaType === HTML_MEDIA_TYPE ? (
+        <iframe
+          sandbox=""
+          srcDoc={HTML_CSP + body}
+          referrerPolicy="no-referrer"
+          title={name}
+          className="h-(--media-tall) max-h-(--media-tall) w-full rounded-panel border border-edge"
+        />
       ) : (
         <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
           {body}
@@ -96,7 +117,7 @@ export function ArtifactText({
       )}
       {bounded && display !== "excerpt" ? (
         <div className="font-mono text-small opacity-(--muted)">
-          First {formatSize(ARTIFACT_TEXT_BYTES)} shown.
+          First {formatSize(byteLimit)} shown.
         </div>
       ) : null}
     </>

@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { bumpChat, groupChats, groupChatsByAgent, mergeChats, type ChatRow } from "@/lib/rail";
+import {
+  bumpChat,
+  mergeChats,
+  railGroups,
+  type ChatRow,
+} from "@/lib/rail";
 
 import {
   AGENT,
@@ -43,11 +48,17 @@ function row(id: string, last_at: string): ChatRow {
     title: "chat " + id,
     last_at,
     origin: null,
+    mine: true,
+    speaker: null,
   };
 }
 
+function theirs(id: string, last_at: string, speaker: string): ChatRow {
+  return { ...row(id, last_at), mine: false, speaker };
+}
+
 test("chats group by recency in rail order and empty groups are absent", () => {
-  const grouped = groupChats(
+  const grouped = railGroups(
     [
       row("a", hoursAgo(3)),
       row("b", hoursAgo(20)),
@@ -55,6 +66,7 @@ test("chats group by recency in rail order and empty groups are absent", () => {
       row("d", hoursAgo(20 * 24)),
       row("e", hoursAgo(90 * 24)),
     ],
+    "recency",
     NOW,
   );
   expect(grouped.map((group) => group.label)).toEqual([
@@ -71,19 +83,45 @@ test("chats group by recency in rail order and empty groups are absent", () => {
     ["d"],
     ["e"],
   ]);
-  expect(groupChats([row("a", hoursAgo(4))], NOW)).toHaveLength(1);
+  expect(railGroups([row("a", hoursAgo(4))], "recency", NOW)).toHaveLength(1);
 });
 
 test("agent sort groups rows under their agent and keeps recency within each group", () => {
-  const grouped = groupChatsByAgent([
-    row("a", hoursAgo(1)),
-    { ...row("b", hoursAgo(2)), agent_name: "support" },
-    row("c", hoursAgo(3)),
-  ]);
+  const grouped = railGroups(
+    [
+      row("a", hoursAgo(1)),
+      { ...row("b", hoursAgo(2)), agent_name: "support" },
+      row("c", hoursAgo(3)),
+    ],
+    "agent",
+    NOW,
+  );
   expect(grouped.map((group) => group.label)).toEqual(["assistant", "support"]);
   expect(grouped.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
     ["a", "c"],
     ["b"],
+  ]);
+});
+
+test("everyone else's conversations are one group at the foot, under either sort", () => {
+  const rows = [
+    row("a", hoursAgo(1)),
+    theirs("t1", hoursAgo(2), "Pat Reyes (pat@example.com)"),
+    row("b", hoursAgo(20)),
+    theirs("t2", hoursAgo(30 * 24), "sam@example.com"),
+  ];
+
+  const byRecency = railGroups(rows, "recency", NOW);
+  expect(byRecency.map((group) => group.label)).toEqual(["Today", "Yesterday", "Other members"]);
+  expect(byRecency[2].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
+
+  const byAgent = railGroups(rows, "agent", NOW);
+  expect(byAgent.map((group) => group.label)).toEqual(["assistant", "Other members"]);
+  expect(byAgent[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
+  expect(byAgent[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
+
+  expect(railGroups([row("a", hoursAgo(1))], "recency", NOW).map((group) => group.label)).toEqual([
+    "Today",
   ]);
 });
 
@@ -320,6 +358,27 @@ test("a row with an origin states it in the rail", async () => {
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
   expect(railRow.textContent).toContain("Direct message");
+});
+
+test("a conversation another member spoke stands at the foot and names them", async () => {
+  const colleague = {
+    ...CHAT_ROW,
+    conversation_id: "55555555-5555-4555-8555-555555555555",
+    title: "The deploy thread",
+    mine: false,
+    speaker: "Pat Reyes (pat@example.com)",
+  };
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, colleague] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /The deploy thread/ });
+  expect(railRow.textContent).toContain("Pat Reyes");
+  const section = railRow.closest("section");
+  expect(section?.textContent).toContain("Other members");
+  expect(section?.textContent).not.toContain("Pick one thread");
+  expect(
+    screen.getByRole("button", { name: /Pick one thread/ }).closest("section")?.textContent,
+  ).not.toContain("Other members");
 });
 
 test("an origin rail row opens the read-only pane, never the live chat", async () => {

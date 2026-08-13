@@ -132,6 +132,7 @@ ARTIFACT_LIST_LIMIT = 100
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
+OTHER_CONVERSATION_LIMIT = 25
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 CHAT_STORE_PREFIX = "chat/"
@@ -949,6 +950,7 @@ def _rendered_messages(
     turn_ids: frozenset[str] = frozenset(),
     agent_origin: frozenset[str] = frozenset(),
     speakers: Mapping[str, str] | None = None,
+    questions: Mapping[str, dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -960,8 +962,14 @@ def _rendered_messages(
     fences those words between the ambient digest and their attachments, and
     `member_message_text` is what takes them back out. `speakers` names who spoke each turn — the
     bubble carries the label so a conversation more members than the viewer are in reads as who
-    said what."""
+    said what.
+
+    `questions` names what a turn still asks of the member, keyed by the turn that asked: the
+    reply carries it, so the portal draws the question under the words that asked it rather than
+    at the foot of the pane. A turn that asked and wrote nothing still renders its reply — the
+    question needs the reply it belongs to."""
     subagents = subagents or {}
+    questions = questions or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
@@ -969,18 +977,18 @@ def _rendered_messages(
 
     def flush_reply(include_subagents: bool) -> None:
         nonlocal answer, pending
-        runs = (
-            subagents.get(current_turn_id, [])
-            if include_subagents and current_turn_id is not None
-            else []
-        )
-        if not answer and not pending and not runs:
+        closing = current_turn_id if include_subagents else None
+        runs = [] if closing is None else subagents.get(closing, [])
+        asked = None if closing is None else questions.get(closing)
+        if not answer and not pending and not runs and asked is None:
             return
         reply: dict[str, object] = {"role": "assistant", "text": answer}
         if pending:
             reply["events"] = pending
         if runs:
             reply["subagents"] = runs
+        if asked is not None:
+            reply["question"] = asked
         rendered.append(reply)
         pending = []
         answer = ""
@@ -1064,7 +1072,11 @@ async def _conversation_messages(
     `viewer`'s own: their bubbles are the unlabelled default, so the label marks exactly the words
     somebody else said. The transcript refers to a message by the turn it founded or, for one
     folded into a running turn, by its queue row, so the speakers map is keyed by both — a folded
-    message keeps its speaker after the turn writes it."""
+    message keeps its speaker after the turn writes it.
+
+    A question stands on the reply that asked it, because that is the reply it answers. Only the
+    newest committed turn's: a later turn supersedes what an earlier one asked, so an older
+    question is a choice the member no longer has."""
     recorded, agent_origin, spoken = await asyncio.gather(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
@@ -1075,6 +1087,16 @@ async def _conversation_messages(
         for arrival in spoken
         if arrival.sender is not None and arrival.speaker_member_id != viewer
     }
+    latest = await ctx.latest_turn(conversation_id)
+    detail = None if latest is None else await ctx.turn_detail(latest)
+    asking: dict[str, dict[str, object]] = {}
+    if detail is not None and detail.turn.terminal is not None:
+        question = detail.turn.terminal.question
+        if question is not None:
+            asking[str(detail.turn.id)] = {
+                "turn_id": str(detail.turn.id),
+                **question.model_dump(mode="json"),
+            }
     if recorded is None:
         rendered: list[dict[str, object]] = []
     else:
@@ -1095,13 +1117,12 @@ async def _conversation_messages(
                 and turn.context.sender is not None
                 and turn.speaker_member_id != viewer
             },
+            asking,
         )
         if any(turn.subagent_profile is not None for turn in turns):
             for reply in rendered:
                 if reply["role"] == "assistant":
                     reply["text"] = _run_answer(str(reply["text"]))
-    latest = await ctx.latest_turn(conversation_id)
-    detail = None if latest is None else await ctx.turn_detail(latest)
     if detail is None:
         return rendered, None
     if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
@@ -1172,15 +1193,10 @@ async def _open_handoffs(
     ctx: SurfaceContext, turn_id: UUID, terminal: TerminalFrame
 ) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
-    re-renders the same affordances the live stream drew: an unanswered question (a later turn
-    would have superseded it), credential prompts still awaiting values, and the turn's shared
-    files."""
+    re-renders the same affordances the live stream drew: credential prompts still awaiting values,
+    and the turn's shared files. A question is not among them — it rides the reply that asked it,
+    which is where the member answers it."""
     handoffs: dict[str, object] = {}
-    if terminal.question is not None:
-        handoffs["question"] = {
-            "turn_id": str(turn_id),
-            **terminal.question.model_dump(mode="json"),
-        }
     if terminal.credential_request is not None:
         prompts = await _pending_prompts(ctx, terminal.credential_request)
         if prompts is not None:
@@ -1192,15 +1208,20 @@ async def _open_handoffs(
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The rail: every conversation this member opened, across the agents their web audience holds,
-    newest activity first. Opened, not merely readable — a workspace-shared conversation is readable
-    by everyone, so a review an extension triggered and a public channel's thread another member
-    started would otherwise stand in this member's rail and displace their own work under the bound.
-    What the workspace holds is the agent's conversations directory; this is the member's own.
+    """The rail: every conversation this member is in, across the agents their web audience holds,
+    plus the readable ones their colleagues are in, newest activity first. `mine` says which of the
+    two a row is, and the rail groups on it — a member who answered in a thread has work there, and
+    a thread nobody here spoke in is a review an extension triggered, which belongs to no rail.
+
+    Each side reads under its own bound, because one bound over the merged order is the whole
+    workspace's traffic displacing a member's own: the member's own gets `CONVERSATION_LIST_LIMIT`
+    and everyone else's `OTHER_CONVERSATION_LIMIT`. Both read as this member, never as an admin, so
+    an admin's rail is their own work and not every private conversation in the workspace.
 
     Web conversations use the chat row this surface stores; another surface's conversations use
     their opening message, and their origin names the surface. A same-surface conversation without
-    a chat row is dropped: the member's prepared-intent lane."""
+    a chat row is dropped: the member's prepared-intent lane. A colleague's row also names who
+    spoke it, which is the one fact the member cannot get from the title."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1209,34 +1230,44 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     requested = request.query_params.get("conversation", "").strip()
     if requested:
         return await _resolve_chat(ctx, store, audience, member_id, email, requested)
+    sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
+        ("mine", CONVERSATION_LIST_LIMIT),
+        ("others", OTHER_CONVERSATION_LIMIT),
+    )
     rows: list[dict[str, object]] = []
     for agent in audience.agents:
-        listed = await ctx.list_agent_conversations(
-            agent.id, member_id, admin=False, limit=CONVERSATION_LIST_LIMIT, initiated=True
-        )
-        records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
-        for entry in listed:
-            value = records.get(_chat_row_key(entry.summary.id))
-            if value is None:
-                if entry.summary.surface == SURFACE_WEB or not entry.readable:
-                    continue
-                title = _chat_title(entry.opening_message, ())
-            else:
-                title = ChatRecord.model_validate(value).title
-            rows.append(
-                {
-                    "conversation_id": str(entry.summary.id),
-                    "agent_id": str(agent.id),
-                    "agent_name": agent.name,
-                    "title": title,
-                    "origin": (
-                        None
-                        if entry.summary.surface == SURFACE_WEB
-                        else entry.surface_label or entry.summary.surface
-                    ),
-                    "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
-                }
+        for participation, limit in sides:
+            listed = await ctx.list_agent_conversations(
+                agent.id, member_id, admin=False, limit=limit, participation=participation
             )
+            records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
+            for entry in listed:
+                value = records.get(_chat_row_key(entry.summary.id))
+                if value is None:
+                    if entry.summary.surface == SURFACE_WEB or not entry.readable:
+                        continue
+                    title = _chat_title(entry.opening_message, ())
+                else:
+                    title = ChatRecord.model_validate(value).title
+                speakers = [who.sender or who.email for who in entry.speakers]
+                rows.append(
+                    {
+                        "conversation_id": str(entry.summary.id),
+                        "agent_id": str(agent.id),
+                        "agent_name": agent.name,
+                        "title": title,
+                        "mine": participation == "mine",
+                        "speaker": (
+                            None if participation == "mine" or not speakers else speakers[0]
+                        ),
+                        "origin": (
+                            None
+                            if entry.summary.surface == SURFACE_WEB
+                            else entry.surface_label or entry.summary.surface
+                        ),
+                        "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
+                    }
+                )
     rows.sort(key=lambda row: (str(row["last_at"]), str(row["conversation_id"])), reverse=True)
     return JSONResponse({"chats": rows})
 
@@ -1253,7 +1284,10 @@ async def _resolve_chat(
     surface returns its read-only conversation projection. The same audience gates as their
     ordinary views answer, down to the viewer's own admin flag — so a row the conversations panel
     offers an admin to disclose resolves here too, carrying `readable: false` rather than reading
-    as a conversation that does not exist. A malformed or turnless id is absent."""
+    as a conversation that does not exist. A malformed or turnless id is absent.
+
+    The row it returns is this member's own chat — `_own_chat` answers nothing else — so it is
+    `mine` and names no speaker."""
     try:
         named = UUID(requested)
     except ValueError:
@@ -1276,6 +1310,8 @@ async def _resolve_chat(
                         "agent_id": str(agent.id),
                         "agent_name": agent.name,
                         "title": record.title,
+                        "mine": True,
+                        "speaker": None,
                         "last_at": _iso(detail.turn.created_at),
                     }
                 ]
@@ -2323,26 +2359,38 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload)
 
 
-async def stream(ctx: SurfaceContext, request: Request) -> Response:
-    """Tail one turn's live frames. Gated like every portal route: the turn must belong to the
-    member AND its agent must still be in their web audience, so a revocation ends streaming
-    access alongside chat and transcript — an out-of-audience agent's turn is not-found."""
+async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID] | Response:
+    """One turn this member may reach, as the member and the turn, or the refusal to answer with.
+    The turn must belong to the member AND its agent must still be in their web audience, so a
+    revocation ends tailing and stopping alongside chat and transcript — an out-of-audience
+    agent's turn is not-found."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
+    absent = Response("That turn is not available.", status_code=404, headers={REFUSAL_HEADER: "1"})
     try:
         turn_id = UUID(request.path_params["turn_id"])
     except ValueError:
-        return Response("no such turn", status_code=404)
+        return absent
     owner = await ctx.turn_owner(turn_id)
     if owner is None:
-        return Response("no such turn", status_code=404)
+        return absent
     if owner != member_id:
-        return Response("turn belongs to another member", status_code=403)
+        return Response(
+            "That turn belongs to another member.", status_code=403, headers={REFUSAL_HEADER: "1"}
+        )
     detail = await ctx.turn_detail(turn_id)
     if detail is None or not audience.allows(detail.turn.agent_id):
-        return Response("no such turn", status_code=404)
+        return absent
+    return member_id, turn_id
+
+
+async def stream(ctx: SurfaceContext, request: Request) -> Response:
+    reached = await _member_turn(ctx, request)
+    if isinstance(reached, Response):
+        return reached
+    member_id, turn_id = reached
     since = request.headers.get("last-event-id", "")
     return StreamingResponse(
         _events(ctx, turn_id, member_id, since), media_type="text/event-stream"

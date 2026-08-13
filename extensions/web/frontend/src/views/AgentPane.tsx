@@ -1,4 +1,5 @@
 import { ObjectPane } from "@/kernel/objects";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabStrip } from "@/kernel/tabs";
 import { AgentConnectors } from "@/views/Connectors";
@@ -7,6 +8,7 @@ import { AgentSkills } from "@/views/AgentSkills";
 import { Overview } from "@/views/Overview";
 import { AgentUsage } from "@/views/Usage";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
+import { cn } from "@/lib/cn";
 import type { Agent } from "@/lib/types";
 
 const SCHEDULED_TASK_KIND = "scheduled_task";
@@ -37,8 +39,8 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
     onPlace,
   });
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
-      <div className="flex items-baseline gap-md px-2xl pt-lg">
+    <Pane>
+      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
         <h1 className="m-0 text-title font-strong">{agent.name}</h1>
         <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
       </div>
@@ -52,7 +54,7 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
       <TabPanel
         group="agent"
         current={tab}
-        className="flex-1 overflow-y-auto p-2xl"
+        className={cn(COLUMN, "flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl")}
         data-testid="panel"
       >
         {tab === "overview" ? <Overview agent={agent} /> : null}
@@ -71,6 +73,6 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
         {tab === "skills" ? <AgentSkills agent={agent} /> : null}
         {tab === "usage" ? <AgentUsage agent={agent} /> : null}
       </TabPanel>
-    </main>
+    </Pane>
   );
 }

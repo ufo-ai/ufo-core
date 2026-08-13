@@ -1,193 +1,22 @@
 import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
 
-import {
-  FENCE_SPLIT_CHARS,
-  Markdown,
-  SETTLED_MIN_CHARS,
-  StreamingBody,
-  renderMarkdown,
-  splitSettled,
-} from "@/lib/markdown";
-
-const PARAGRAPH = "A paragraph that carries enough words to add up across repetitions.\n\n";
-
-const LONG_FENCE = "```\n" + "a fenced line followed by a blank line\n\n".repeat(80) + "```\n\n";
-
-const GIANT_FENCE = "```\n" + "a code line that keeps arriving\n".repeat(560) + "```\n\n";
-
-const FIXTURE = [
-  "# Report\n\n",
-  PARAGRAPH.repeat(40),
-  LONG_FENCE,
-  PARAGRAPH.repeat(40),
-  "~~~\ntilde fence holding ``` unclosed\n\nstill fenced\n~~~\n\n",
-  PARAGRAPH.repeat(40),
-  "- alpha\n\n- beta\n\n",
-  "y".repeat(2100) + "\n\n- gamma\n\n- delta\n\n",
-  PARAGRAPH.repeat(40),
-  "The tail line",
-].join("");
-
-test("the long fence outgrows the settle threshold so its blank lines are live candidates", () => {
-  expect(LONG_FENCE.length).toBeGreaterThan(SETTLED_MIN_CHARS);
-});
-
-test("a fixture crossing the hard-settle bound stays append-only on a sampled walk", () => {
-  expect(GIANT_FENCE.length).toBeGreaterThan(FENCE_SPLIT_CHARS);
-  const crossing = FIXTURE + "\n\n" + GIANT_FENCE + PARAGRAPH.repeat(4) + "The tail line";
-  const hard = splitSettled(crossing).settled.filter((segment) => segment.parsePrefix !== "");
-  expect(hard.length).toBeGreaterThan(0);
-  let previous: { text: string; parsePrefix: string }[] = [];
-  for (let length = 1; length <= crossing.length; length += 199) {
-    const { settled, tail } = splitSettled(crossing.slice(0, length));
-    expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(
-      crossing.slice(0, length),
-    );
-    expect(settled.slice(0, previous.length)).toEqual(previous);
-    previous = settled;
-  }
-});
-
-test("a partial line completing into a fence marker never retracts a settle", () => {
-  const boundary = "```\n" + "a".repeat(16_379) + "\n```\n\nafter text\n";
-  const midMarker = "```\n" + "a".repeat(16_377) + "\n```\n\nafter text\n";
-  for (const repro of [boundary, midMarker]) {
-    let previous: { text: string; parsePrefix: string }[] = [];
-    for (let length = 1; length <= repro.length; length += 1) {
-      const { settled, tail } = splitSettled(repro.slice(0, length));
-      expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(
-        repro.slice(0, length),
-      );
-      expect(settled.slice(0, previous.length)).toEqual(previous);
-      previous = settled;
-    }
-    expect(previous.length).toBeGreaterThan(0);
-  }
-});
-
-test("a hard settle tripping at the fence's end never renders an empty code block", () => {
-  const text =
-    "```\n" +
-    "a code line that keeps arriving\n".repeat(512) +
-    "```\n\n" +
-    "p".repeat(2500) +
-    "\n\ntrailing text\n";
-  const { settled, tail } = splitSettled(text);
-  expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(text);
-  for (const segment of settled) {
-    if (segment.parsePrefix === "") continue;
-    const firstLine = segment.text.slice(0, segment.text.indexOf("\n"));
-    expect(/^ {0,3}(`{3,}|~{3,})/.test(firstLine)).toBe(false);
-  }
-  const { container } = render(<StreamingBody text={text} />);
-  for (const pre of Array.from(container.querySelectorAll("pre"))) {
-    expect(pre.textContent?.trim()).not.toBe("");
-  }
-});
-
-test("entity-like text round-trips through the escaped raw-html and failure paths", () => {
-  const { container } = render(<Markdown text={'before <tag title="a&amp;b"> after'} />);
-  expect(container.textContent).toContain('<tag title="a&amp;b">');
-  const bomb = ">".repeat(2500) + " a &amp; b";
-  const failed = render(<Markdown text={bomb} />);
-  expect(failed.container.querySelector("pre")?.textContent).toContain("a &amp; b");
-});
-
-test("settled segments are append-only across every prefix and always reassemble", () => {
-  let previous: { text: string; parsePrefix: string }[] = [];
-  for (let length = 0; length <= FIXTURE.length; length += 1) {
-    const prefix = FIXTURE.slice(0, length);
-    const { settled, tail } = splitSettled(prefix);
-    expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(prefix);
-    expect(settled.slice(0, previous.length)).toEqual(previous);
-    if (settled.length < previous.length) throw new Error("a settled segment was retracted");
-    previous = settled;
-  }
-  expect(previous.length).toBeGreaterThan(1);
-});
-
-test("a blank line inside a backtick or tilde fence never splits", () => {
-  const { settled, tail } = splitSettled(FIXTURE);
-  settled.forEach((segment, index) => {
-    const nextPrefix = index + 1 < settled.length ? settled[index + 1].parsePrefix : tail.parsePrefix;
-    if (segment.parsePrefix !== "" || nextPrefix !== "") return;
-    const backticks = segment.text.match(/^ {0,3}```/gm) ?? [];
-    const tildes = segment.text.match(/^ {0,3}~~~/gm) ?? [];
-    expect(backticks.length % 2).toBe(0);
-    expect(tildes.length % 2).toBe(0);
-  });
-});
-
-test("an unterminated lookahead line never settles a boundary", () => {
-  const base = "x".repeat(SETTLED_MIN_CHARS + 10) + "\n\n";
-  expect(splitSettled(base + "-").settled).toEqual([]);
-  expect(splitSettled(base + "- item\n").settled).toEqual([]);
-  expect(splitSettled(base + "text\n").settled).toEqual([{ text: base, parsePrefix: "" }]);
-});
-
-test("every continuation shape blocks a settle: ordered, bullet, quote, indent", () => {
-  const base = "x".repeat(SETTLED_MIN_CHARS + 10) + "\n\n";
-  expect(splitSettled(base + "1. item\n").settled).toEqual([]);
-  expect(splitSettled(base + "7) item\n").settled).toEqual([]);
-  expect(splitSettled(base + "* item\n").settled).toEqual([]);
-  expect(splitSettled(base + "> quoted\n").settled).toEqual([]);
-  expect(splitSettled(base + "  indented\n").settled).toEqual([]);
-});
-
-test("a fence closes only on its own marker at its own length or longer", () => {
-  const pad = "y".repeat(SETTLED_MIN_CHARS + 10);
-  const mixed = "```\n~~~\n" + pad + "\n```\n\nafter text\n";
-  expect(splitSettled(mixed).settled).toEqual([
-    { text: "```\n~~~\n" + pad + "\n```\n\n", parsePrefix: "" },
-  ]);
-  const nested = "````\n```\n" + pad + "\n````\n\nafter text\n";
-  expect(splitSettled(nested).settled).toEqual([
-    { text: "````\n```\n" + pad + "\n````\n\n", parsePrefix: "" },
-  ]);
-  const tilde = "~~~\n```\n" + pad + "\n~~~\n\nafter text\n";
-  expect(splitSettled(tilde).settled).toEqual([
-    { text: "~~~\n```\n" + pad + "\n~~~\n\n", parsePrefix: "" },
-  ]);
-});
-
-test("a giant unclosed fence still settles bounded segments that render as code", () => {
-  const giant = "```\n" + "a code line that keeps arriving\n".repeat(2200);
-  const { settled, tail } = splitSettled(giant);
-  expect(settled.length).toBeGreaterThan(1);
-  expect(settled[1].parsePrefix).toBe("```\n");
-  expect(tail.text.length).toBeLessThan(FENCE_SPLIT_CHARS + 100);
-  expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(giant);
-
-  const { container } = render(<StreamingBody text={giant} />);
-  expect(container.querySelectorAll("pre").length).toBeGreaterThan(1);
-  expect(container.querySelector("p")).toBeNull();
-});
+import { Markdown, StreamingBody } from "@/lib/markdown";
 
 test("raw html in agent prose renders as text instead of vanishing", () => {
   render(<Markdown text={"use <username> as the placeholder, compare a<b and c<d"} />);
-  expect(
-    screen.getByText(/use <username> as the placeholder, compare a<b and c<d/),
-  ).toBeTruthy();
-});
-
-test("a parse failure renders the raw text instead of unmounting the page", () => {
-  const bomb = ">".repeat(2500) + " quoted";
-  const { container } = render(<Markdown text={bomb} />);
-  expect(container.querySelector("pre")?.textContent).toContain("quoted");
+  expect(screen.getByText(/use <username> as the placeholder, compare a<b and c<d/)).toBeTruthy();
 });
 
 test("single newlines break lines inside a paragraph", () => {
   const { container } = render(<Markdown text={"line one\nline two"} />);
-  expect(container.innerHTML).toContain("<br");
+  expect(container.querySelector("br")).not.toBeNull();
 });
 
 test("the tag surface renders: tables, quotes, rules, strikethrough, small headings", () => {
   const { container } = render(
     <Markdown
-      text={
-        "##### fine print\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\n---\n\n~~gone~~"
-      }
+      text={"##### fine print\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted\n\n---\n\n~~gone~~"}
     />,
   );
   expect(container.querySelector("h5")).not.toBeNull();
@@ -195,15 +24,20 @@ test("the tag surface renders: tables, quotes, rules, strikethrough, small headi
   expect(container.querySelector("blockquote")).not.toBeNull();
   expect(container.querySelector("hr")).not.toBeNull();
   expect(container.querySelector("del")).not.toBeNull();
-  expect((container.firstChild as HTMLElement).className).toContain("[&_a]:text-link");
-  expect((container.firstChild as HTMLElement).className).toContain("[&_pre]:");
-  expect((container.firstChild as HTMLElement).className).toContain("h5,h6");
+  expect((container.firstChild as HTMLElement).className).toContain("typeset");
 });
 
-test("a short text stays wholly in the tail", () => {
-  const short = "one paragraph\n\nanother\n";
-  expect(short.length).toBeLessThan(SETTLED_MIN_CHARS);
-  expect(splitSettled(short)).toEqual({ settled: [], tail: { text: short, parsePrefix: "" } });
+test("prose is drawn bare for the typeset; the code block and the table keep their own chrome", () => {
+  const { container } = render(
+    <Markdown text={"# head\n\n> quoted\n\n- one\n\n**two**\n\n---"} />,
+  );
+  const document = container.querySelector(".typeset")!;
+  const classed = Array.from(document.querySelectorAll("*")).map((node) => node.className);
+  expect(classed.filter(Boolean)).toEqual([]);
+
+  const rich = render(<Markdown text={"| a |\n|---|\n| 1 |\n\n```py\nx = 1\n```"} />);
+  expect(rich.container.querySelector("table")?.className).toBeTruthy();
+  expect(rich.container.querySelector('[data-streamdown="code-block"]')).not.toBeNull();
 });
 
 test("raw html renders as visible text, elements and handlers included", () => {
@@ -212,7 +46,7 @@ test("raw html renders as visible text, elements and handlers included", () => {
   );
   expect(container.querySelector("script")).toBeNull();
   expect(container.querySelector("img")).toBeNull();
-  expect(container.textContent).toContain('<script>alert(2)</script>');
+  expect(container.textContent).toContain("<script>alert(2)</script>");
   expect(container.textContent).toContain("before");
   expect(container.textContent).toContain("after");
 });
@@ -235,19 +69,28 @@ test("a markdown link renders as a safe link and code renders as code", () => {
   expect(screen.getByText("plain").closest("pre")).toBeTruthy();
 });
 
-test("a settled message parses as one document so link reference definitions resolve", () => {
-  const text = "see [docs][ref]\n\n" + PARAGRAPH.repeat(40) + "[ref]: https://example.com/d\n";
-  expect(splitSettled(text).settled.length).toBeGreaterThan(0);
-  render(<Markdown text={text} />);
+test("a link the reader cannot follow stays the words it was written as", () => {
+  for (const href of ["javascript:alert(1)", "data:text/html,<script>alert(1)</script>"]) {
+    const { container, unmount } = render(<Markdown text={"see [bad](" + href + ") after"} />);
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.textContent).toContain("bad");
+    expect(container.textContent).toContain("after");
+    unmount();
+  }
+});
+
+test("a document parses as one, so link reference definitions resolve", () => {
+  render(<Markdown text={"see [docs][ref]\n\n[ref]: https://example.com/d\n"} />);
   expect(screen.getByRole("link", { name: "docs" }).getAttribute("href")).toBe(
     "https://example.com/d",
   );
 });
 
-test("a streamed body renders settled segments and the live tail", () => {
-  render(<StreamingBody text={PARAGRAPH.repeat(40) + "**still going**"} />);
-  expect(screen.getByText("still going").tagName).toBe("STRONG");
-  expect(screen.getAllByText(/carries enough words/).length).toBeGreaterThan(1);
+test("a streamed body completes the block still being written", () => {
+  const { container } = render(<StreamingBody text={"answering\n\n```py\nprint("} />);
+  expect(container.querySelector("pre")?.textContent).toContain("print(");
+  const bold = render(<StreamingBody text={"answering **still goi"} />);
+  expect(bold.container.querySelector("strong")?.textContent).toBe("still goi");
 });
 
 test("an image renders with its source and alt text, and a linked image stays linked", () => {
@@ -255,7 +98,9 @@ test("an image renders with its source and alt text, and a linked image stays li
     <Markdown
       text={
         "![the chart](/surface/web/files/chart.png)\n\n" +
-        "[![badge](" + location.origin + "/surface/web/files/badge.png)](https://example.com/build)"
+        "[![badge](" +
+        location.origin +
+        "/surface/web/files/badge.png)](https://example.com/build)"
       }
     />,
   );
@@ -272,9 +117,10 @@ test("an image from any foreign origin is removed entirely", () => {
     "http://attacker.example/p.png",
     "https://169.254.169.254/latest/meta-data",
   ]) {
-    const rendered = renderMarkdown("![leak](" + src + ") after");
-    expect(rendered).not.toContain("<img");
-    expect(rendered).toContain("after");
+    const { container, unmount } = render(<Markdown text={"![leak](" + src + ") after"} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("after");
+    unmount();
   }
 });
 
@@ -284,22 +130,12 @@ test("task-list items keep distinguishable checked and unchecked boxes, always d
   expect(boxes.length).toBe(2);
   expect(boxes.every((box) => box.getAttribute("type") === "checkbox")).toBe(true);
   expect(boxes.every((box) => box.hasAttribute("disabled"))).toBe(true);
-  expect(boxes.filter((box) => box.hasAttribute("checked")).length).toBe(1);
+  expect(boxes.filter((box) => (box as HTMLInputElement).checked).length).toBe(1);
 });
 
-test("the only live inputs are the checkboxes markdown itself mints, always disabled", () => {
-  const rendered = renderMarkdown("- [x] done\n- [ ] open\n\ntyped: <input type=\"text\">");
-  expect(rendered.match(/<input/g)?.length).toBe(2);
-  expect(rendered.match(/type="checkbox"/g)?.length).toBe(2);
-  expect(rendered.match(/disabled/g)?.length).toBe(2);
-});
-
-test("markdown-minted attributes survive and the hook forces link safety", () => {
-  const kept = renderMarkdown("3. third\n4. fourth");
-  expect(kept).toContain('start="3"');
-  const forced = renderMarkdown("[d](https://example.com/d)");
-  expect(forced).toContain('target="_blank"');
-  expect(forced).toContain('rel="noopener noreferrer"');
+test("markdown-minted attributes survive", () => {
+  const { container } = render(<Markdown text={"3. third\n4. fourth"} />);
+  expect(container.querySelector("ol")?.getAttribute("start")).toBe("3");
 });
 
 test("a raw-block opener never swallows or activates the prose that follows it", () => {
@@ -321,28 +157,81 @@ test("a raw-block opener never swallows or activates the prose that follows it",
   twoParagraphs.unmount();
 
   const minted = render(
-    <Markdown text={"See <code> then <img/src=/surface/web/files/secret.png alt=x> and <code> <em/x>"} />,
+    <Markdown
+      text={"See <code> then <img/src=/surface/web/files/secret.png alt=x> and <code> <em/x>"}
+    />,
   );
   expect(minted.container.querySelector("img")).toBeNull();
   expect(minted.container.querySelector("em")).toBeNull();
 });
 
-test("a newline-free blob inside a fence still settles bounded segments", () => {
-  const blob = "```\n" + "x".repeat(200_000);
-  const { settled, tail } = splitSettled(blob);
-  expect(settled.length).toBeGreaterThan(10);
-  expect(tail.text.length).toBeLessThan(FENCE_SPLIT_CHARS);
-  expect(settled.map((segment) => segment.text).join("") + tail.text).toBe(blob);
-  let previous: { text: string; parsePrefix: string }[] = [];
-  for (let length = 1; length <= blob.length; length += 977) {
-    const { settled: now } = splitSettled(blob.slice(0, length));
-    expect(now.slice(0, previous.length)).toEqual(previous);
-    previous = now;
+test("a streaming word animates on the frame that adds it, and never again", () => {
+  const { container, rerender } = render(<StreamingBody text={"one two"} />);
+  const first = Array.from(container.querySelectorAll("[data-arrive]"));
+  expect(first.map((word) => word.textContent)).toEqual(["one ", "two"]);
+
+  rerender(<StreamingBody text={"one two three"} />);
+  const then = Array.from(container.querySelectorAll("[data-arrive]"));
+  expect(then.map((word) => word.textContent)).toEqual(["one ", "two ", "three"]);
+  expect(then[0]).toBe(first[0]);
+  expect(then[1]).toBe(first[1]);
+  expect(then[2]).not.toBe(first[1]);
+});
+
+test("the words of one frame land in order, each numbered against the frame before it", () => {
+  const arriving = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("[data-arrive]")).map((word) =>
+      word.getAttribute("style"),
+    );
+  const { container, rerender } = render(<StreamingBody text={"alpha beta gamma"} />);
+
+  rerender(<StreamingBody text={"alpha beta gamma delta epsilon"} />);
+  expect(arriving(container).slice(-2)).toEqual(["--arrive: 0;", "--arrive: 1;"]);
+
+  rerender(<StreamingBody text={"alpha beta gamma delta epsilon zeta eta theta"} />);
+  expect(arriving(container).slice(-3)).toEqual([
+    "--arrive: 0;",
+    "--arrive: 1;",
+    "--arrive: 2;",
+  ]);
+  expect(arriving(container).slice(0, 3)).toEqual(["--arrive: 0;", "--arrive: 0;", "--arrive: 0;"]);
+});
+
+test("a word already on the page never waits longer than it did, so it cannot arrive twice", () => {
+  const number = (word: Element) => Number(/\d+/.exec(word.getAttribute("style") ?? "0")?.[0] ?? 0);
+  const numbers = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("[data-arrive]")).map(number);
+  const opening = "One paragraph, already read.";
+  const { container, rerender } = render(<StreamingBody text={opening} />);
+  const first = numbers(container);
+
+  rerender(<StreamingBody text={opening + "\n\nA second one, still being written"} />);
+  const then = numbers(container).slice(0, first.length);
+  expect(then.every((wait, index) => wait <= first[index])).toBe(true);
+});
+
+test("a streamed word keeps the space beside it, whatever stands next to it", () => {
+  for (const source of [
+    "hello *world* again",
+    "use `npm ci` first",
+    "see [docs](https://example.com/d) here",
+  ]) {
+    const { container, unmount } = render(<StreamingBody text={source} />);
+    const streamed = container.querySelector("p")!.textContent;
+    unmount();
+    const settled = render(<Markdown text={source} />);
+    expect(streamed).toBe(settled.container.querySelector("p")!.textContent);
+    settled.unmount();
   }
 });
 
-test("the settle threshold is inclusive at its exact boundary", () => {
-  const exact = "x".repeat(SETTLED_MIN_CHARS - 2) + "\n\n";
-  expect(exact.length).toBe(SETTLED_MIN_CHARS);
-  expect(splitSettled(exact + "text\n").settled).toEqual([{ text: exact, parsePrefix: "" }]);
+test("a settled document is drawn whole, so no reader is asked to read it word by word", () => {
+  const { container } = render(<Markdown text={"one two three"} />);
+  expect(container.querySelector("[data-arrive]")).toBeNull();
+  expect(container.querySelector("p")?.textContent).toBe("one two three");
+});
+
+test("a fence keeps its own text: code is read in lines, not in words", () => {
+  const { container } = render(<StreamingBody text={"```py\nx = 1\n```"} />);
+  expect(container.querySelector("code")?.querySelector("[data-arrive]")).toBeNull();
 });

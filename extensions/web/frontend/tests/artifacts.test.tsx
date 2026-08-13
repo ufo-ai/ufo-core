@@ -491,13 +491,16 @@ test("a file card binds its parts to the artifact payload", async () => {
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
 });
 
-test("a site is a card carrying its band, its visibility, and its summary", async () => {
+test("a site is a card carrying its date, type, visibility, and summary", async () => {
   shelf([DOCS], []);
   open();
 
   const card = (await screen.findAllByRole("listitem"))[0];
   expect(card.querySelector('[data-part="primary"]')?.textContent).toBe("docs-abc");
-  expect(card.querySelector('[data-part="status"]')?.textContent).toBe("Workspace");
+  expect(card.querySelector('[data-part="status"]')?.textContent).toBe("Jul 1 2026");
+  expect(card.querySelector('[data-part="meta"]')?.textContent).toBe(
+    "Site · Workspace · Workspace",
+  );
   expect(card.querySelector('[data-part="body"]')?.textContent).toBe(DOCS.summary);
   const band = card.querySelector('[data-part="mark"]');
   expect(band?.className).toContain("h-(--size-band)");
@@ -520,7 +523,7 @@ test("a site with a link opens it in a new tab, and one without draws no Open", 
   expect(within(notes!).getByRole("button", { name: "View" })).toBeTruthy();
 });
 
-test("the sites lead the files, and the shelf reads them on the main agent", async () => {
+test("the shelf merges sites and files newest first, and reads sites newest first", async () => {
   const { calls } = shelf([DOCS], [artifact()]);
   open();
 
@@ -528,8 +531,85 @@ test("the sites lead the files, and the shelf reads them on the main agent", asy
   const names = screen
     .getAllByRole("listitem")
     .map((card) => card.querySelector('[data-part="primary"]')?.textContent);
-  expect(names).toEqual(["docs-abc", "notes.txt"]);
-  expect(calls.some((url) => url.includes("/objects/site?agent=" + AGENT_ID))).toBe(true);
+  expect(names).toEqual(["notes.txt", "docs-abc"]);
+  expect(
+    calls.some(
+      (url) =>
+        url.includes("/objects/site?agent=" + AGENT_ID) &&
+        url.includes("order_by=created_at") &&
+        url.includes("order=desc"),
+    ),
+  ).toBe(true);
+});
+
+const cursorAt = (stamp: string, side = "older") =>
+  side + "|" + stamp + "|11111111-1111-4111-8111-111111111111";
+
+test("a continued file page clamps sites to that page's date window", async () => {
+  const latest = { ...DOCS, name: "latest-site", created_at: "2026-07-31T08:00:00Z" };
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, [latest, DOCS]),
+    "/workspace/artifacts": (url) =>
+      url.includes("after=")
+        ? json({ artifacts: [artifact({ filename: "older.txt", created_at: DOCS.created_at })] })
+        : json({ artifacts: [artifact()], older: cursorAt("2026-07-31T09:00:00") }),
+  });
+  open();
+
+  expect(await screen.findByText("latest-site")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("after="))).toBe(true));
+  expect(await screen.findByText("docs-abc")).toBeTruthy();
+  expect(screen.queryByText("latest-site")).toBeNull();
+});
+
+test("a site between two file pages stands on the older one, never on neither", async () => {
+  const between = { ...DOCS, name: "between-site", created_at: "2026-07-31T08:30:00Z" };
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, [between]),
+    "/workspace/artifacts": (url) =>
+      url.includes("after=")
+        ? json({ artifacts: [artifact({ filename: "older.txt", created_at: "2026-07-31T08:00:00Z" })] })
+        : json({
+            artifacts: [artifact({ created_at: "2026-07-31T09:00:00Z" })],
+            older: cursorAt("2026-07-31T09:00:00Z"),
+          }),
+  });
+  open();
+
+  await screen.findByText("notes.txt");
+  expect(screen.queryByText("between-site")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("after="))).toBe(true));
+  await screen.findByText("older.txt");
+  expect(screen.getByText("between-site")).toBeTruthy();
+});
+
+test("walking back to a page keeps its sites, which a foot cursor read as a top would drop", async () => {
+  const recent = { ...DOCS, name: "recent-site", created_at: "2026-07-31T10:00:00Z" };
+  const page1 = { artifacts: [artifact()], older: cursorAt("2026-07-31T09:00:00") };
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, [recent]),
+    "/workspace/artifacts": (url) =>
+      url.includes("after=older")
+        ? json({
+            artifacts: [artifact({ filename: "older.txt", created_at: DOCS.created_at })],
+            newer: cursorAt("2026-07-31T09:00:00", "newer"),
+          })
+        : json(page1),
+  });
+  open();
+
+  expect(await screen.findByText("recent-site")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+  expect(await screen.findByText("older.txt")).toBeTruthy();
+  expect(screen.queryByText("recent-site")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Newer" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("after=newer"))).toBe(true));
+  await screen.findByText("notes.txt");
+  expect(screen.getByText("recent-site")).toBeTruthy();
 });
 
 test("the family tabs narrow the shelf to sites or to one media kind", async () => {

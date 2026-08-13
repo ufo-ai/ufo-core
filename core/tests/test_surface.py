@@ -2699,13 +2699,12 @@ async def test_agent_conversations_order_and_bound_by_activity(db: None, tmp_pat
     assert [entry.summary.id for entry in linked] == [older]
 
 
-async def test_agent_conversations_narrow_to_the_ones_this_member_opened(
-    db: None, tmp_path
-) -> None:
-    """`initiated` keeps the conversations bound to this member and the shared ones whose first
-    member turn is theirs. A shared conversation another member opened, and one with no member turn
-    at all, drop — answering second in another's thread does not open it. Without the narrowing all
-    four still list: readable and opened are two different questions."""
+async def test_agent_conversations_narrow_to_the_side_of_the_member(db: None, tmp_path) -> None:
+    """`mine` keeps the conversations this member is in: bound to them, or holding a turn they
+    spoke — answering second in another's thread is being in it. `others` is the complement over
+    the conversations somebody spoke in, so the peer's own read carries that same thread. A
+    conversation with no member turn at all is in neither: nobody is in it. Without the narrowing
+    all four still list: readable and participated are two different questions."""
     workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
     assert member_id is not None
     peer_id = await _seed_member_row(workspace_id, "peer@example.com")
@@ -2739,12 +2738,44 @@ async def test_agent_conversations_narrow_to_the_ones_this_member_opened(
     )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
-    opened = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=50, initiated=True
+    ours = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, participation="mine"
     )
-    assert {entry.summary.id for entry in opened} == {bound, mine}
+    assert {entry.summary.id for entry in ours} == {bound, mine, theirs}
+    others = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, participation="others"
+    )
+    assert {entry.summary.id for entry in others} == set()
+    peers = await context.list_agent_conversations(
+        agent_id, peer_id, admin=False, limit=50, participation="others"
+    )
+    assert {entry.summary.id for entry in peers} == {mine}
     readable = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
     assert {entry.summary.id for entry in readable} == {bound, mine, theirs, triggered}
+
+
+async def test_agent_conversations_others_hold_a_shared_row_bound_to_nobody(
+    db: None, tmp_path
+) -> None:
+    """A shared conversation carries no member, so the binding test has to be null-safe: a plain
+    inequality against this member is null on every row of this group and the whole group would
+    come back empty."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
+    shared = await _seed_conversation(
+        workspace_id, agent_id, queue_key="shared", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_conversation_turn(
+        workspace_id, shared, agent_id, seq=1, inbound="theirs", speaker_member_id=peer_id
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    others = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, participation="others"
+    )
+    assert [entry.summary.id for entry in others] == [shared]
+    assert others[0].summary.member_email is None
 
 
 async def test_agent_conversations_carry_their_opening_words_and_their_speakers(

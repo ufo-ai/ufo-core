@@ -15,12 +15,13 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
+import { COLUMN, Pane } from "@/kernel/pane";
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
 
-const FRAME = "flex flex-col overflow-y-auto p-2xl";
+const FRAME = COLUMN + " overflow-y-auto scrollbar-gutter-stable p-2xl";
 
 function allowance(allowed: boolean): string {
   return allowed ? "Allowed" : "Blocked";
@@ -50,14 +51,14 @@ export function Admin() {
     <Panel
       state={state}
       loading={() => (
-        <main data-testid="admin-loading" className={FRAME}>
+        <Pane data-testid="admin-loading" className={FRAME}>
           <PanelSkeleton shape="table" />
-        </main>
+        </Pane>
       )}
       failed={(message) => (
-        <main className={FRAME}>
+        <Pane className={FRAME}>
           <PanelEmpty>{message}</PanelEmpty>
-        </main>
+        </Pane>
       )}
     >
       {(payload) => {
@@ -65,7 +66,7 @@ export function Admin() {
         const gated = payload.seats.limit !== null || payload.seats.included !== null;
 
         return (
-          <main className={FRAME} data-testid="admin">
+          <Pane className={FRAME} data-testid="admin">
             <h1 className="m-0 mb-2xl text-title font-strong">Administration</h1>
             <OutcomeNotice state={notice} />
 
@@ -158,7 +159,7 @@ export function Admin() {
                 )}
               </DataTable>
             </Section>
-          </main>
+          </Pane>
         );
       }}
     </Panel>
