@@ -254,7 +254,9 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     reporting into a shared conversation is read whole by every member, since its replies land
     there for all of them anyway; a task reporting into one member's own conversation is that
     member's alone, reaching an admin as a management row with its content elided (`spec` null,
-    the summary saying so) and no one else at all. Each read is walled by the agent named on it."""
+    the summary saying so) and no one else at all. A task no member created is read the same way —
+    by where it reports, so the private conversation elides it from the admin too. Each read is
+    walled by the agent named on it."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -304,7 +306,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     admin_view = await client.get(index, headers=admin_headers)
     by_name = {row["name"]: row for row in admin_view.json()["objects"]}
     assert by_name["daily-brief"]["summary"] == "0 9 * * * — private member task"
-    assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — queue sweep"
+    assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — private member task"
     management = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=admin_headers
     )
@@ -314,7 +316,8 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         f"/surface/web/objects/scheduled_task/creatorless-sweep?agent={agent_a}",
         headers=admin_headers,
     )
-    assert creatorless.json()["spec"]["prompt"] == "sweep the queue"
+    assert creatorless.json()["spec"] is None
+    assert creatorless.json()["status"]["next_run_at"] == NEXT_RUN.isoformat()
 
     other_view = await client.get(index, headers=other_headers)
     assert other_view.json()["objects"] == []

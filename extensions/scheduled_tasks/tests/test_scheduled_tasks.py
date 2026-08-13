@@ -245,6 +245,62 @@ async def test_list_reported_carries_audience_and_surface_label(db: None) -> Non
     assert not task_content_visible(by_name["private"], other_member)
 
 
+async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: None) -> None:
+    """A task nobody is recorded as creating is not everybody's to read: its content follows the
+    audience of the conversation it reports into, so a private conversation keeps it to that
+    conversation's own member and only a workspace-shared one answers every member."""
+    workspace_id, agent_id, private_conversation = await _seed()
+    async with workspace_tx() as connection:
+        conversation_member = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == private_conversation
+                )
+            )
+        ).scalar_one()
+    shared_conversation = uuid4()
+    other_member = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=shared_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="slack",
+                surface_label="#general",
+                queue_key="shared",
+                audience="shared",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id), agent(agent_id):
+        await ScheduleStore().create(
+            private_conversation,
+            "orphan-private",
+            DAILY_9AM,
+            "private prompt",
+            "private task",
+            datetime.now(UTC),
+        )
+        await ScheduleStore().create(
+            shared_conversation,
+            "orphan-shared",
+            DAILY_9AM,
+            "shared prompt",
+            "shared task",
+            datetime.now(UTC),
+        )
+        listed = await ScheduleStore().list_reported()
+
+    by_name = {row.task.name: row for row in listed}
+    assert by_name["orphan-private"].task.created_by_member_id is None
+    assert not task_content_visible(by_name["orphan-private"], other_member)
+    assert not task_content_visible(by_name["orphan-private"], None)
+    assert task_content_visible(by_name["orphan-private"], conversation_member)
+    assert task_content_visible(by_name["orphan-shared"], other_member)
+
+
 async def _second_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
     agent_id, conversation_id = uuid4(), uuid4()
     async with workspace_tx() as connection:

@@ -233,3 +233,30 @@ extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 - Roles (surfaces, workers, jobs, proxy) share nothing in memory; cross-role communication is
   queues, blob store, hub, or HTTP — enforced by the import-boundary gate, so a per-role process
   split is a config change.
+
+### What empty and error mean
+
+An empty policy value is a denial, never an absent policy: no resolver reads an empty rule set,
+tier, or allowlist as "unconstrained". Each resolver below answers one such value, and this is what
+it answers when its input is empty and when it faults.
+
+- `sandbox/proxy/rules.py` derives the ScopeRule / InternetRule / InjectionRule / MeterRule /
+  ForwardRule set the proxy reads; `EgressProxy._handle` in `sandbox/proxy/server.py` refuses a
+  CONNECT unless a ScopeRule names the host or an InternetRule exists, so an empty rule set denies
+  every host.
+- `_resolve_rules` answers a resolution fault with 503 and does not cache it, so the next connection
+  resolves again instead of reading a fault as an empty rule set.
+- `derive_credential_rules` is total: a slot that raises, or whose host is unavailable, is withheld
+  and the derivation continues, so a broken slot narrows egress and never widens it.
+- `ToolContext._connector_account_tiers` and `connector_connection` in `tools/context.py` raise on
+  an empty or ambiguous tier and on a named account this turn may not use; an account that resolves
+  to nothing is never an unscoped one.
+- `derive_cli_rules` gates on the acting member: a foreign private grant derives no ForwardRule, and
+  a memberless turn forwards only shared grants.
+- `HookChain.fire` in `ext/loader.py` turns a gating hook that raises or exceeds its timeout into a
+  `Deny` carrying `failed_closed`; only a non-gating hook's fault is swallowed.
+- `_subagent_tools` in `loop/queue.py` intersects a strict allowlist, so an empty `tool_names`
+  selects only the subagent-default tools (plus the profile's grants unless it is isolated), never
+  every tool.
+- `gate_member` in `seats.py` returns None for a scheduled fire that carries no
+  `on_behalf_of_member_id`, so that turn is gated on no member — the one known gap in this list.
