@@ -27,6 +27,9 @@ from ufo_ext_objectives.store import (
 )
 
 CONDITION_TIMEOUT_SECONDS = 120
+PLAN_PHASE = "plan"
+RECORD_PHASE = "record"
+PRODUCED_STATE_KINDS = frozenset({"file_exists", "file_contains"})
 STEPS_MAX = 12
 
 
@@ -50,8 +53,14 @@ class PlanObjectiveInput(BaseModel):
         "stretch of your own work — something that can fail on its own terms — never a single "
         "file write or tool call. Give each one `accepts`: the conditions on real state that "
         "close it, naming state you did not create so the condition could pass. Write them now, "
-        "while the work still looks easy; they are frozen once a step is attempted. A step with "
-        "no accepts closes on your word alone and guarantees nothing.",
+        "while the work still looks easy; they are frozen once a step is attempted. A "
+        "`file_exists` or `file_contains` condition already true when you plan it is refused: it "
+        "names an artifact the work is supposed to produce, so holding before the work starts "
+        "makes it close the step on nothing. A `command_succeeds` condition may already hold — a "
+        "suite that has to pass when you are finished, not only when your change lands, is green "
+        "before you start, and it is the check worth having, because it is the one that can go "
+        "back to failing when someone else's work lands. A step with no accepts closes on your "
+        "word alone and guarantees nothing.",
     )
     user_description: str = Field(
         description="What you are planning, in plain language for the activity timeline."
@@ -122,15 +131,18 @@ def render(view: ObjectiveView) -> str:
 async def evaluate(ctx: ToolContext, step: StepView) -> tuple[ConditionVerdict, ...]:
     verdicts: list[ConditionVerdict] = []
     for condition in step.accepts:
-        verdicts.append(await _verdict(ctx, condition))
+        verdicts.append(await _verdict(ctx, condition, RECORD_PHASE))
     return tuple(verdicts)
 
 
-async def _verdict(ctx: ToolContext, condition: Condition) -> ConditionVerdict:
-    """Each evaluation is counted by condition kind and whether it held. Whether the gate ever
-    refuses is the question the offline arcs could not settle, and in production it is this
-    counter: `objective_condition_total{holds="false"}` staying at zero means every step closed on
-    the first claim and the check is decoration."""
+async def _verdict(ctx: ToolContext, condition: Condition, phase: str) -> ConditionVerdict:
+    """Each evaluation is counted by condition kind, whether it held, and which gate asked. Whether
+    either gate ever refuses is the question the offline arcs could not settle, and in production it
+    is this counter: `objective_condition_total{phase="record",holds="false"}` staying at zero means
+    every step closed on the first claim and the closure check is decoration, while
+    `{phase="plan",holds="true"}` counts the plans refused for naming state that was already there.
+    The phases have to be read apart — a plan is admitted only when its gated conditions are false,
+    so plan-phase `holds="false"` is the ordinary case and says nothing about closure."""
     match condition:
         case FileExists():
             command = f"test -e {shlex.quote(condition.path)}"
@@ -140,13 +152,66 @@ async def _verdict(ctx: ToolContext, condition: Condition) -> ConditionVerdict:
             command = condition.command
     result = await ctx.sandbox.bash(command, timeout_s=CONDITION_TIMEOUT_SECONDS)
     holds = result.exit_code == 0
-    emit_metric("objective_condition_total", kind=condition.kind, holds=str(holds).lower())
+    emit_metric(
+        "objective_condition_total",
+        kind=condition.kind,
+        holds=str(holds).lower(),
+        phase=phase,
+    )
     detail = condition_summary(condition) if holds else f"{condition_summary(condition)} — false"
     return ConditionVerdict(condition=condition, holds=holds, detail=detail)
 
 
 async def plan_objective(ctx: ToolContext, args: PlanObjectiveInput) -> ToolResult:
+    """Refuse a condition that names produced state and already has it, then store the plan.
+
+    `file_exists` and `file_contains` name an artifact, so the whole of what they prove is that the
+    work made them true; one already true when the step is written closes it on nothing. Production
+    bore that out — they refused 0 of 45 claims, because a path the worker names is one the worker
+    is about to create. Those 45 were not working, they were manufacturing confidence, which the
+    design holds to be worse than no check at all.
+
+    `command_succeeds` is never gated, and that asymmetry is the design rather than an exemption.
+    A suite that has to pass when the work is finished is green before it starts, and it is the one
+    condition that can go back to `unmet` when someone else's commit lands — refusing it for being
+    green would leave only conditions that cannot fail, which is the failure this whole gate exists
+    to prevent. It refused 4 of 108 claims in production, so it is also the kind already working.
+
+    A condition already on the record is not re-checked. It was gated when it was written, and an
+    attempted step's `accepts` are frozen against revision anyway, so re-running either would refuse
+    a plan revision for having made progress — losing the steps it meant to add."""
     ext = _require_ext(ctx)
+    async with ext.transaction() as connection:
+        existing = await Objectives(connection, agent_current().workspace_id).named(
+            ctx.turn.conversation_id, args.name
+        )
+    recorded: dict[str, StepView] = (
+        {} if existing is None else {step.title: step for step in existing.steps}
+    )
+    vacuous: list[str] = []
+    for step in args.steps:
+        stored = recorded.get(step.title)
+        if stored is not None and stored.attempted:
+            continue
+        held = () if stored is None else stored.accepts
+        for condition in step.accepts:
+            if condition.kind not in PRODUCED_STATE_KINDS or condition in held:
+                continue
+            if (await _verdict(ctx, condition, PLAN_PHASE)).holds:
+                vacuous.append(f"{step.title!r}: {condition_summary(condition)}")
+    if vacuous:
+        listed = "\n".join(f"  {item}" for item in vacuous)
+        return ToolResult(
+            content=(
+                TextContent(
+                    text="these conditions name state that is already there, so they cannot close "
+                    f"anything — the work they stand for has not happened yet:\n{listed}\nName the "
+                    "state this step will actually produce, or gate the step on a command whose "
+                    "success depends on the work, and plan again."
+                ),
+            ),
+            is_error=True,
+        )
     async with ext.transaction() as connection:
         objectives = Objectives(connection, agent_current().workspace_id)
         view = await objectives.plan(
