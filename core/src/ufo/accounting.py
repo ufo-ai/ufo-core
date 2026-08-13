@@ -69,14 +69,20 @@ def _total_tokens(usage: Usage) -> int:
         usage.input_tokens
         + usage.output_tokens
         + usage.cache_read_tokens
-        + usage.cache_write_tokens
+        + usage.cache_write_5m_tokens
+        + usage.cache_write_1h_tokens
     )
 
 
 def _prompt_tokens(usage: Usage) -> int:
     """The tokens the provider read to answer, cached or not — the denominator of the cache share a
     terminal frame renders."""
-    return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    return (
+        usage.input_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_5m_tokens
+        + usage.cache_write_1h_tokens
+    )
 
 
 async def record_turn_usage(

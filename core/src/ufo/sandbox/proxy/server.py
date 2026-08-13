@@ -843,7 +843,12 @@ class EgressProxy:
                         input_tokens=previous.input_tokens + usage.input_tokens,
                         output_tokens=previous.output_tokens + usage.output_tokens,
                         cache_read_tokens=previous.cache_read_tokens + usage.cache_read_tokens,
-                        cache_write_tokens=previous.cache_write_tokens + usage.cache_write_tokens,
+                        cache_write_5m_tokens=(
+                            previous.cache_write_5m_tokens + usage.cache_write_5m_tokens
+                        ),
+                        cache_write_1h_tokens=(
+                            previous.cache_write_1h_tokens + usage.cache_write_1h_tokens
+                        ),
                     )
             record_counts[run] = record_counts.get(run, 0) + 1
         for run, count in record_counts.items():
@@ -1199,7 +1204,8 @@ class HttpTokenUsage:
     _input: int = field(default=0, init=False)
     _output: int = field(default=0, init=False)
     _cache_read: int = field(default=0, init=False)
-    _cache_write: int = field(default=0, init=False)
+    _cache_write_5m: int = field(default=0, init=False)
+    _cache_write_1h: int = field(default=0, init=False)
 
     def feed(self, chunk: bytes) -> None:
         if self._overflowed:
@@ -1250,7 +1256,8 @@ class HttpTokenUsage:
             input_tokens=self._input,
             output_tokens=self._output,
             cache_read_tokens=self._cache_read,
-            cache_write_tokens=self._cache_write,
+            cache_write_5m_tokens=self._cache_write_5m,
+            cache_write_1h_tokens=self._cache_write_1h,
         )
 
     def _feed_wire_body(self, chunk: bytes) -> None:
@@ -1397,7 +1404,12 @@ class HttpTokenUsage:
         if initial:
             self._input = _int_field(usage, "input_tokens")
             self._cache_read = _int_field(usage, "cache_read_input_tokens")
-            self._cache_write = _int_field(usage, "cache_creation_input_tokens")
+            creation = usage.get("cache_creation")
+            if isinstance(creation, dict):
+                self._cache_write_5m = _int_field(creation, "ephemeral_5m_input_tokens")
+                self._cache_write_1h = _int_field(creation, "ephemeral_1h_input_tokens")
+            else:
+                self._cache_write_5m = _int_field(usage, "cache_creation_input_tokens")
         output = usage.get("output_tokens")
         if isinstance(output, int) and not isinstance(output, bool):
             self._output = output

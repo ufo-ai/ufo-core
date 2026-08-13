@@ -99,7 +99,7 @@ JSON_RESPONSE = (
 )
 
 # Anthropic reports input/cache on message_start and the cumulative output on message_delta; this
-# shape prices to 96_500 micro-USD for claude-opus-4-8 (see test_accounting / test_proxy_server).
+# shape prices to 81_500 micro-USD for claude-opus-4-8 (see test_accounting / test_proxy_server).
 ANTHROPIC_SSE = (
     b"event: message_start\r\n"
     b'data: {"type":"message_start","message":{"id":"m","model":"claude-opus-4-8",'
@@ -319,7 +319,7 @@ async def test_sandbox_egress_injects_the_real_key_and_meters_sandbox_tokens(
         ).one()
     assert row.dimension == "sandbox_tokens"
     assert int(row.amount) == 10_000
-    assert int(row.priced_micro_usd) == 96_500
+    assert int(row.priced_micro_usd) == 81_500
     assert row.model == "claude-opus-4-8"
     assert row.price_digest is not None and row.price_digest.startswith("sha256:")
 

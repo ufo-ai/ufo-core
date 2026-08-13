@@ -191,7 +191,7 @@ SAMPLE_EMBED_VECTOR = (1.0, 0.0, 0.0)
 MODEL_PROVIDER_NAME = "sample_models"
 SAMPLE_MODEL = "sample-model-x1"
 SAMPLE_MODEL_REPLY = "sample model backend reply"
-SAMPLE_MODEL_PRICE = ModelPrice(input=2_000_000, output=4_000_000, cache_read=0, cache_write=0)
+SAMPLE_MODEL_PRICE = ModelPrice(2_000_000, 4_000_000, 0, 0, 0)
 SKILL_NAME = "sample_skill"
 SKILL_SCRIPT = "probe.py"
 SKILL_SCRIPT_MARKER = "sample-skill-probe-ok"

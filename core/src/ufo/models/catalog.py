@@ -72,11 +72,10 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     """Core's direct backends, built with the key-env names the deploy configured. The GPT-5.6
     models are called on the Responses surface (`api_surface="responses"`) — each rejects `tools` +
     `reasoning_effort` together on `/v1/chat/completions` (#568), so they declare the surface that
-    renders the legal request rather than tripping a mid-turn 400 — with `cache_write` at 1.25x base
+    renders the legal request rather than tripping a mid-turn 400 — with cache writes at 1.25x base
     input, the rate OpenAI bills a GPT-5.6 cache write at, and cache reads at 0.1x. `claude-opus-5`
     carries the 1M-token context window it ships with, at Opus-tier pricing unchanged from Opus 4.8.
-    Every Anthropic `cache_write` is the 1h-TTL rate — 2x base input — because `AnthropicClient`
-    requests `ttl: 1h` on every breakpoint; cache reads are 0.1x base input.
+    Anthropic cache writes are 1.25x base input at 5m and 2x at 1h; cache reads are 0.1x.
 
     The GPT-5.6 family accepts 1,050,000 tokens, but a request whose input passes 272,000 is billed
     at 2x input and 1.5x output for the whole request, which one rate per token class cannot
@@ -86,88 +85,88 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
     return (
         _anthropic(
             "claude-fable-5",
-            ModelPrice(10_000_000, 50_000_000, 1_000_000, 20_000_000),
+            ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-5",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
             "2026-05",
             anthropic_key_env,
             context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
         ),
         _anthropic(
             "claude-opus-4-8",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-4-7",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-opus-4-6",
-            ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+            ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
             "2025-08",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-sonnet-5",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
+            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
             "2026-01",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-sonnet-4-6",
-            ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
+            ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
             "2025-08",
             anthropic_key_env,
         ),
         _anthropic(
             "claude-haiku-4-5",
-            ModelPrice(1_000_000, 5_000_000, 100_000, 2_000_000),
+            ModelPrice(1_000_000, 5_000_000, 100_000, 1_250_000, 2_000_000),
             "2025-07",
             anthropic_key_env,
         ),
         _openai(
             "gpt-5.6-terra",
-            ModelPrice(2_000_000, 12_000_000, 200_000, 2_500_000),
+            ModelPrice(2_000_000, 12_000_000, 200_000, 2_500_000, 2_500_000),
             "2026-02",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
             "gpt-5.6-luna",
-            ModelPrice(200_000, 1_200_000, 20_000, 250_000),
+            ModelPrice(200_000, 1_200_000, 20_000, 250_000, 250_000),
             "2026-02",
             openai_key_env,
             api_surface="responses",
         ),
         _openai(
             "gpt-5.5",
-            ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000),
+            ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000, 5_000_000),
             "2025-12",
             openai_key_env,
         ),
         _openai(
             "gpt-5.4",
-            ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000),
+            ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000, 2_500_000),
             "2025-08",
             openai_key_env,
         ),
         _openai(
             "gpt-5.4-mini",
-            ModelPrice(750_000, 4_500_000, 75_000, 750_000),
+            ModelPrice(750_000, 4_500_000, 75_000, 750_000, 750_000),
             "2025-08",
             openai_key_env,
         ),
         _openai(
             "gpt-5.4-nano",
-            ModelPrice(200_000, 1_250_000, 20_000, 200_000),
+            ModelPrice(200_000, 1_250_000, 20_000, 200_000, 200_000),
             "2025-08",
             openai_key_env,
         ),

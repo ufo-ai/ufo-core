@@ -424,17 +424,17 @@ def _openrouter(
 OPENROUTER_MODEL_SPECS = (
     _openrouter(
         "google/gemini-2.5-pro",
-        ModelPrice(input=1_000_000, output=10_000_000, cache_read=0, cache_write=0),
+        ModelPrice(1_000_000, 10_000_000, 0, 0, 0),
         "2025-01",
     ),
     _openrouter(
         "z-ai/glm-5.2",
-        ModelPrice(input=1_000_000, output=3_000_000, cache_read=0, cache_write=0),
+        ModelPrice(1_000_000, 3_000_000, 0, 0, 0),
         "2026-03",
     ),
     _openrouter(
         "moonshotai/kimi-k3",
-        ModelPrice(input=3_000_000, output=15_000_000, cache_read=300_000, cache_write=0),
+        ModelPrice(3_000_000, 15_000_000, 300_000, 0, 0),
         "2026-04",
         context_window=1_000_000,
     ),

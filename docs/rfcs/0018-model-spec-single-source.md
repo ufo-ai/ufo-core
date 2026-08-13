@@ -60,7 +60,7 @@ class ModelSpec:
     provider: str                       # "anthropic" | "openai" | contributed — read in PR1 by
                                         #   registry.model_key_env (onboarding's eager key check)
     client: Callable[[ModelSpec, str], ModelClient]   # builds the client from (spec, key)
-    price: ModelPrice                   # input / output / cache_read / cache_write
+    price: ModelPrice                   # input / output / cache_read / cache_write_5m / cache_write_1h
     knowledge_cutoff: str               # MACHINE date "YYYY-MM" — rendered to "February 2026" at the seam
     context_window: int
     reasoning: ReasoningSupport
@@ -83,9 +83,9 @@ one is a
 construction error, so "a complete spec" is enforced by the type, not a checklist. The spec carries
 exactly the facts that were scattered per-model and each of which a seam reads in this same unit —
 so nothing lands as a dead declaration. Facts that are process-global and identical across every
-model today (image caps applied to the canonical messages before client translation, the Anthropic
-prompt-cache TTL, the reasoning-effort *default*) keep their single existing home; they fold onto
-the spec the first time a model needs a non-global value. Per-model **output-cap enforcement** is
+model today (image caps applied to the canonical messages before client translation and the
+reasoning-effort *default*) keep their single existing home; they fold onto the spec the first time
+a model needs a non-global value. Per-model **output-cap enforcement** is
 the RFC's designated later unit (see Resolved decisions), and its field is declared then, with its
 consumer — not now.
 
@@ -143,9 +143,9 @@ support vision". So client normalization eliminates only the shape half — the 
   inheritance split (models.dev `base_model`, Helicone `ModelProviderConfig`/`EndpointConfig`) —
   each spec stays flat and self-contained, one home per fact.
 - **Recorded as traps, deferred** (no current model needs them): tiered context pricing (Anthropic
-  1M-context doubles past 200k), cache-TTL price variants, dual-surface models. `ModelPrice` stays
-  flat; `api_surface` single-valued. If a 1M-context model is added, price becomes a tiered
-  structure — noted, not built.
+  1M-context doubles past 200k) and dual-surface models. `api_surface` stays single-valued. Cache
+  writes keep separate 5m and 1h rates because subagent and main-agent turns use both. If tiered
+  context pricing is added, price becomes a tiered structure — noted, not built.
 
 ## Doctrine fit / implications
 

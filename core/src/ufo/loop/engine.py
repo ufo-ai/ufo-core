@@ -628,7 +628,8 @@ def _total_usage(usage_events: list[Usage]) -> Usage:
         input_tokens=sum(u.input_tokens for u in usage_events),
         output_tokens=sum(u.output_tokens for u in usage_events),
         cache_read_tokens=sum(u.cache_read_tokens for u in usage_events),
-        cache_write_tokens=sum(u.cache_write_tokens for u in usage_events),
+        cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usage_events),
+        cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usage_events),
     )
 
 
@@ -1816,7 +1817,10 @@ class TurnEngine:
             ("input", round_usage.input_tokens),
             ("output", round_usage.output_tokens),
             ("cache_read", round_usage.cache_read_tokens),
-            ("cache_write", round_usage.cache_write_tokens),
+            (
+                "cache_write",
+                round_usage.cache_write_5m_tokens + round_usage.cache_write_1h_tokens,
+            ),
         ):
             if amount:
                 emit_metric(
@@ -1864,7 +1868,8 @@ class TurnEngine:
             usage.input_tokens
             + usage.output_tokens
             + usage.cache_read_tokens
-            + usage.cache_write_tokens
+            + usage.cache_write_5m_tokens
+            + usage.cache_write_1h_tokens
         )
         await self._publish(
             CostTick(cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens)

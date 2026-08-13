@@ -650,7 +650,7 @@ class UsageThenErrorModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.calls += 1
         yield TextDelta(text="partial")
-        yield Usage(input_tokens=9, output_tokens=2, cache_read_tokens=6, cache_write_tokens=4)
+        yield Usage(input_tokens=9, output_tokens=2, cache_read_tokens=6, cache_write_5m_tokens=4)
         raise RuntimeError("stream boom")
 
 
@@ -681,7 +681,7 @@ class ClockedModel:
         self.clock.now += FIRST_EVENT_SECONDS
         yield TextDelta(text="answer")
         self.clock.now += REST_OF_STREAM_SECONDS
-        yield Usage(input_tokens=11, output_tokens=5, cache_read_tokens=7, cache_write_tokens=3)
+        yield Usage(input_tokens=11, output_tokens=5, cache_read_tokens=7, cache_write_1h_tokens=3)
 
 
 ROUND_SECONDS = 30.0

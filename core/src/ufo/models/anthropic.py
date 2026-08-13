@@ -153,7 +153,8 @@ class AnthropicClient:
             reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
             input_tokens = 0
             cache_read_tokens = 0
-            cache_write_tokens = 0
+            cache_write_5m_tokens = 0
+            cache_write_1h_tokens = 0
             output_tokens: int | None = None
             stop_reason: str | None = None
             breakpoint_cache = {"type": "ephemeral", "ttl": request.prompt_cache_ttl}
@@ -201,7 +202,18 @@ class AnthropicClient:
                         case anthropic.types.RawMessageStartEvent(message=message):
                             input_tokens = message.usage.input_tokens
                             cache_read_tokens = message.usage.cache_read_input_tokens or 0
-                            cache_write_tokens = message.usage.cache_creation_input_tokens or 0
+                            creation = message.usage.cache_creation
+                            if creation is None:
+                                cache_creation_tokens = (
+                                    message.usage.cache_creation_input_tokens or 0
+                                )
+                                if request.prompt_cache_ttl == "5m":
+                                    cache_write_5m_tokens = cache_creation_tokens
+                                else:
+                                    cache_write_1h_tokens = cache_creation_tokens
+                            else:
+                                cache_write_5m_tokens = creation.ephemeral_5m_input_tokens
+                                cache_write_1h_tokens = creation.ephemeral_1h_input_tokens
                         case anthropic.types.RawContentBlockStartEvent(
                             content_block=anthropic.types.ToolUseBlock(id=block_id, name=name),
                             index=index,
@@ -312,6 +324,7 @@ class AnthropicClient:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cache_read_tokens=cache_read_tokens,
-                cache_write_tokens=cache_write_tokens,
+                cache_write_5m_tokens=cache_write_5m_tokens,
+                cache_write_1h_tokens=cache_write_1h_tokens,
             )
             return

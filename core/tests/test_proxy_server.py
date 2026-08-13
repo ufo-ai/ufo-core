@@ -73,7 +73,10 @@ SEARCH_HOST = "api.search.test"
 MODEL_HOST = "api.anthropic.com"
 
 FULL_TOKEN_USAGE = Usage(
-    input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
+    input_tokens=1000,
+    output_tokens=2000,
+    cache_read_tokens=3000,
+    cache_write_1h_tokens=4000,
 )
 RUN_TOKENS = RunTokenCodec(b"proxy-test-run-token-secret")
 STOP_DEADLINE_SECONDS = 5
@@ -84,7 +87,9 @@ ANTHROPIC_SSE_BODY = (
     b"event: message_start\r\n"
     b'data: {"type":"message_start","message":{"id":"m","model":"claude-opus-4-8",'
     b'"usage":{"input_tokens":1000,"cache_read_input_tokens":3000,'
-    b'"cache_creation_input_tokens":4000,"output_tokens":1}}}\r\n\r\n'
+    b'"cache_creation_input_tokens":4000,"cache_creation":{'
+    b'"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":4000},'
+    b'"output_tokens":1}}}\r\n\r\n'
     b"event: content_block_delta\r\n"
     b'data: {"type":"content_block_delta","index":0,'
     b'"delta":{"type":"text_delta","text":"hi"}}\r\n\r\n'
@@ -110,7 +115,9 @@ ANTHROPIC_JSON_BODY = (
     b'{"id":"msg","type":"message","role":"assistant","model":"claude-opus-4-8",'
     b'"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",'
     b'"usage":{"input_tokens":1000,"cache_read_input_tokens":3000,'
-    b'"cache_creation_input_tokens":4000,"output_tokens":2000}}'
+    b'"cache_creation_input_tokens":4000,"cache_creation":{'
+    b'"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":4000},'
+    b'"output_tokens":2000}}'
 )
 OPENAI_JSON_BODY = (
     b"HTTP/1.1 200 OK\r\n"

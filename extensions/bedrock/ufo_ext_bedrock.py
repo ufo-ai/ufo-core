@@ -4,8 +4,8 @@ Each model is one `ModelSpec`: the Anthropic ids route to core's `AnthropicClien
 Mantle Anthropic endpoint; the OpenAI ids route to core's `OpenAIClient`, which renders the Chat
 Completions or Responses request from the spec's `api_surface`. This extension carries no request
 translation of its own — only the endpoint and AWS-keyed client each spec builds. The Anthropic ids
-therefore inherit core's `ttl: 1h` cache breakpoints, so their `cache_write` is the 1h rate (2x base
-input); the OpenAI-compatible ids are charged no write premium."""
+therefore inherit core's 5m and 1h cache breakpoints and their distinct write rates; the
+OpenAI-compatible ids are charged no write premium."""
 
 import os
 from typing import cast
@@ -114,54 +114,54 @@ def _openai(
 BEDROCK_MODEL_SPECS = (
     _anthropic(
         "anthropic.claude-fable-5",
-        ModelPrice(10_000_000, 50_000_000, 1_000_000, 20_000_000),
+        ModelPrice(10_000_000, 50_000_000, 1_000_000, 12_500_000, 20_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-opus-5",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
         "2026-05",
         context_window=ANTHROPIC_LONG_CONTEXT_WINDOW,
     ),
     _anthropic(
         "anthropic.claude-opus-4-8",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-opus-4-7",
-        ModelPrice(5_000_000, 25_000_000, 500_000, 10_000_000),
+        ModelPrice(5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000),
         "2026-01",
     ),
     _anthropic(
         "anthropic.claude-sonnet-5",
-        ModelPrice(3_000_000, 15_000_000, 300_000, 6_000_000),
+        ModelPrice(3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000),
         "2026-01",
     ),
     _openai(
         "openai.gpt-oss-20b",
-        ModelPrice(70_000, 300_000, 0, 0),
+        ModelPrice(70_000, 300_000, 0, 0, 0),
         "2024-06",
         GPT_OSS_CONTEXT_WINDOW,
         "chat",
     ),
     _openai(
         "openai.gpt-oss-120b",
-        ModelPrice(150_000, 600_000, 0, 0),
+        ModelPrice(150_000, 600_000, 0, 0, 0),
         "2024-06",
         GPT_OSS_CONTEXT_WINDOW,
         "chat",
     ),
     _openai(
         "openai.gpt-5.4",
-        ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000),
+        ModelPrice(2_500_000, 15_000_000, 250_000, 2_500_000, 2_500_000),
         "2025-08",
         OPENAI_CONTEXT_WINDOW,
         "responses",
     ),
     _openai(
         "openai.gpt-5.5",
-        ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000),
+        ModelPrice(5_000_000, 30_000_000, 500_000, 5_000_000, 5_000_000),
         "2025-12",
         OPENAI_CONTEXT_WINDOW,
         "responses",

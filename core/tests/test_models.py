@@ -62,7 +62,7 @@ REQUEST = ModelRequest(
 )
 
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
-_PRICE = ModelPrice(0, 0, 0, 0)
+_PRICE = ModelPrice(0, 0, 0, 0, 0)
 ANTHROPIC_SPEC = ModelSpec(
     id="claude-opus-4-8",
     provider="anthropic",
@@ -121,8 +121,20 @@ def openai_sdk(create: ScriptedCreate) -> SimpleNamespace:
 
 
 def anthropic_message_start(
-    input_tokens: int = 0, cache_read: int = 0, cache_write: int = 0
+    input_tokens: int = 0,
+    cache_read: int = 0,
+    cache_write_5m: int = 0,
+    cache_write_1h: int = 0,
+    cache_creation_detail: bool = True,
 ) -> anthropic.types.RawMessageStartEvent:
+    cache_creation = (
+        anthropic.types.CacheCreation(
+            ephemeral_5m_input_tokens=cache_write_5m,
+            ephemeral_1h_input_tokens=cache_write_1h,
+        )
+        if cache_creation_detail
+        else None
+    )
     return anthropic.types.RawMessageStartEvent(
         type="message_start",
         message=anthropic.types.Message(
@@ -137,7 +149,8 @@ def anthropic_message_start(
                 input_tokens=input_tokens,
                 output_tokens=0,
                 cache_read_input_tokens=cache_read,
-                cache_creation_input_tokens=cache_write,
+                cache_creation_input_tokens=cache_write_5m + cache_write_1h,
+                cache_creation=cache_creation,
             ),
         ),
     )
@@ -444,7 +457,9 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
     create = ScriptedCreate(
         (
             [
-                anthropic_message_start(input_tokens=100, cache_read=11, cache_write=7),
+                anthropic_message_start(
+                    input_tokens=100, cache_read=11, cache_write_5m=7, cache_write_1h=13
+                ),
                 anthropic_text("Hel"),
                 anthropic_text("lo"),
                 anthropic_output(42),
@@ -457,8 +472,40 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
     assert events == [
         TextDelta(text="Hel"),
         TextDelta(text="lo"),
-        Usage(input_tokens=100, output_tokens=42, cache_read_tokens=11, cache_write_tokens=7),
+        Usage(
+            input_tokens=100,
+            output_tokens=42,
+            cache_read_tokens=11,
+            cache_write_5m_tokens=7,
+            cache_write_1h_tokens=13,
+        ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("ttl", "field"),
+    [("5m", "cache_write_5m_tokens"), ("1h", "cache_write_1h_tokens")],
+)
+async def test_anthropic_maps_aggregate_cache_creation_to_the_requested_ttl(
+    ttl: str, field: str
+) -> None:
+    create = ScriptedCreate(
+        (
+            [
+                anthropic_message_start(
+                    cache_write_5m=7,
+                    cache_creation_detail=False,
+                ),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        )
+    )
+    request = REQUEST.model_copy(update={"prompt_cache_ttl": ttl})
+    client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
+    events = [event async for event in client.complete(request)]
+    assert events[-1] == Usage(output_tokens=1, **{field: 7})
 
 
 async def test_anthropic_yields_the_whole_reasoning_sequence_once_the_stream_closes() -> None:
@@ -517,7 +564,7 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
     assert events == [
         TextDelta(text="a"),
         TextDelta(text="b"),
-        Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4, cache_write_tokens=0),
+        Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4),
     ]
 
 

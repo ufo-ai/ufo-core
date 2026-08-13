@@ -62,7 +62,7 @@ RESPONSES_SPEC = ModelSpec(
     id="gpt-5.6-terra",
     provider="openai",
     client=lambda spec, key: OpenAIClient(client=cast(openai.AsyncOpenAI, None), spec=spec),
-    price=ModelPrice(0, 0, 0, 0),
+    price=ModelPrice(0, 0, 0, 0, 0),
     knowledge_cutoff="2026-02",
     context_window=272_000,
     reasoning=ReasoningSupport(supported=True, tools_with_reasoning=True),

@@ -40,7 +40,10 @@ from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
 
 FULL_USAGE = Usage(
-    input_tokens=1000, output_tokens=2000, cache_read_tokens=3000, cache_write_tokens=4000
+    input_tokens=1000,
+    output_tokens=2000,
+    cache_read_tokens=3000,
+    cache_write_1h_tokens=4000,
 )
 
 
@@ -50,20 +53,23 @@ def test_priced_micro_usd_matches_hand_math() -> None:
 
 
 def test_cache_tokens_are_priced() -> None:
-    usage = Usage(cache_read_tokens=1_000_000, cache_write_tokens=1_000_000)
-    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 10_500_000
+    usage = Usage(
+        cache_read_tokens=1_000_000,
+        cache_write_5m_tokens=1_000_000,
+        cache_write_1h_tokens=1_000_000,
+    )
+    assert CORE_PRICING.micro_usd("claude-opus-4-8", usage) == 16_750_000
 
 
-def test_anthropic_cache_writes_are_priced_at_the_one_hour_ttl_rate() -> None:
-    """`AnthropicClient` stamps `ttl: 1h` on every cache breakpoint, and Anthropic bills a 1h cache
-    write at 2x base input (a 5m write is 1.25x) and a cache read at 0.1x. Every Anthropic spec's
-    rates carry that multiple, so the ledger reports the TTL the client actually requests."""
+def test_anthropic_cache_writes_are_priced_at_their_ttl_rates() -> None:
     anthropic_specs = [s for s in CORE_MODEL_SPECS if s.provider == PROVIDER_ANTHROPIC]
     assert anthropic_specs
     for spec in anthropic_specs:
-        write = Usage(cache_write_tokens=TOKENS_PER_MTOK)
+        write_5m = Usage(cache_write_5m_tokens=TOKENS_PER_MTOK)
+        write_1h = Usage(cache_write_1h_tokens=TOKENS_PER_MTOK)
         read = Usage(cache_read_tokens=TOKENS_PER_MTOK)
-        assert usage_priced_micro_usd(spec.id, write, CORE_PRICES) == spec.price.input * 2
+        assert usage_priced_micro_usd(spec.id, write_5m, CORE_PRICES) == spec.price.input * 5 // 4
+        assert usage_priced_micro_usd(spec.id, write_1h, CORE_PRICES) == spec.price.input * 2
         assert usage_priced_micro_usd(spec.id, read, CORE_PRICES) == spec.price.input // 10
 
 
@@ -88,7 +94,8 @@ def test_the_gpt_5_6_rows_price_at_the_published_rates() -> None:
     assert CORE_PRICING.micro_usd("gpt-5.6-luna", FULL_USAGE) == 3_660
     for model in ("gpt-5.6-terra", "gpt-5.6-luna"):
         price = CORE_PRICES[model]
-        assert price.cache_write == price.input * 5 // 4
+        assert price.cache_write_5m == price.input * 5 // 4
+        assert price.cache_write_1h == price.cache_write_5m
         assert price.cache_read == price.input // 10
 
 
@@ -99,12 +106,12 @@ def test_price_digest_is_stable_sha256() -> None:
 
 
 def test_price_digest_changes_when_price_table_changes() -> None:
-    changed = {**CORE_PRICES, "claude-opus-4-8": ModelPrice(1, 1, 1, 1)}
+    changed = {**CORE_PRICES, "claude-opus-4-8": ModelPrice(1, 1, 1, 1, 1)}
     assert price_digest(changed) != PRICE_DIGEST
 
 
 def test_pricing_from_prices_a_contributed_model() -> None:
-    contributed = {"vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0)}
+    contributed = {"vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0, 0)}
     pricing = pricing_from({**CORE_PRICES, **contributed})
     assert (
         pricing.micro_usd("vendor/model-x", Usage(input_tokens=1_000_000, output_tokens=1_000_000))
@@ -220,6 +227,41 @@ async def test_record_then_read_back(db: None) -> None:
     )
 
 
+async def test_ledger_prices_five_minute_and_one_hour_cache_writes_separately(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_5m, turn_5m = await _seed_turn(connection)
+        workspace_1h, turn_1h = await _seed_turn(connection)
+        await record_turn_usage(
+            connection,
+            workspace_5m,
+            turn_5m,
+            "claude-opus-4-8",
+            Usage(cache_write_5m_tokens=TOKENS_PER_MTOK),
+        )
+        await record_turn_usage(
+            connection,
+            workspace_1h,
+            turn_1h,
+            "claude-opus-4-8",
+            Usage(cache_write_1h_tokens=TOKENS_PER_MTOK),
+        )
+    async with workspace_tx() as connection:
+        cost_5m = await read_turn_cost(connection, turn_5m, TOKENS_DIMENSION)
+        cost_1h = await read_turn_cost(connection, turn_1h, TOKENS_DIMENSION)
+    assert cost_5m == TurnCost(
+        tokens=TOKENS_PER_MTOK,
+        micro_usd=6_250_000,
+        model="claude-opus-4-8",
+        cache_percent=0,
+    )
+    assert cost_1h == TurnCost(
+        tokens=TOKENS_PER_MTOK,
+        micro_usd=10_000_000,
+        model="claude-opus-4-8",
+        cache_percent=0,
+    )
+
+
 async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> None:
     """A turn parked mid-run and resumed bills each partial burn under its own attempt, so the read
     totals every field across those rows: tokens, cost and both halves of the prompt split sum, and
@@ -234,7 +276,7 @@ async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> N
                     input_tokens=300,
                     output_tokens=100,
                     cache_read_tokens=600,
-                    cache_write_tokens=100,
+                    cache_write_1h_tokens=100,
                 ),
             ),
             ("resumed-run", Usage(input_tokens=200, output_tokens=100, cache_read_tokens=800)),
@@ -427,7 +469,7 @@ async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None)
     stamped with its digest — never the core rate (which lacks the slug → $0) or the core digest —
     so it bills at the real rate and reconciles with the turn path's rows by digest."""
     pricing = pricing_from(
-        {**CORE_PRICES, "vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0)}
+        {**CORE_PRICES, "vendor/model-x": ModelPrice(1_000_000, 2_000_000, 0, 0, 0)}
     )
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
     async with workspace_tx() as connection:

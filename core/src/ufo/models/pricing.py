@@ -18,7 +18,8 @@ class ModelPrice:
     input: int
     output: int
     cache_read: int
-    cache_write: int
+    cache_write_5m: int
+    cache_write_1h: int
 
 
 def price_digest(prices: Mapping[str, ModelPrice]) -> str:
@@ -29,7 +30,8 @@ def price_digest(prices: Mapping[str, ModelPrice]) -> str:
                 "input": price.input,
                 "output": price.output,
                 "cache_read": price.cache_read,
-                "cache_write": price.cache_write,
+                "cache_write_5m": price.cache_write_5m,
+                "cache_write_1h": price.cache_write_1h,
             }
             for model, price in sorted(prices.items())
         },
@@ -49,7 +51,8 @@ def usage_priced_micro_usd(model: str, usage: Usage, prices: Mapping[str, ModelP
         usage.input_tokens * price.input
         + usage.output_tokens * price.output
         + usage.cache_read_tokens * price.cache_read
-        + usage.cache_write_tokens * price.cache_write
+        + usage.cache_write_5m_tokens * price.cache_write_5m
+        + usage.cache_write_1h_tokens * price.cache_write_1h
     )
     return micro_usd_mtok // TOKENS_PER_MTOK
 

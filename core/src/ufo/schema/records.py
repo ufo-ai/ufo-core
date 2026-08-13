@@ -90,7 +90,8 @@ class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_write_5m_tokens: int = 0
+    cache_write_1h_tokens: int = 0
 
 
 MAX_USER_QUESTIONS = 4
