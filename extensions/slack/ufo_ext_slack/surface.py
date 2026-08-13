@@ -2932,11 +2932,11 @@ def _reply_text(writeback: Writeback) -> str:
     cancelled turn carries the gate's reason when admission committed one — a seat refusal or a
     spend rejection — and that reason is the reply; the static marker covers a reasonless
     cancellation only."""
-    if writeback.status == "failed":
+    if writeback.terminal.status == "failed":
         return SLACK_TURN_FAILED_TEXT
-    if writeback.status == "cancelled":
-        return writeback.text or SLACK_TURN_CANCELLED_TEXT
-    return writeback.text or SLACK_EMPTY_REPLY_TEXT
+    if writeback.terminal.status == "cancelled":
+        return writeback.terminal.text or SLACK_TURN_CANCELLED_TEXT
+    return writeback.terminal.text or SLACK_EMPTY_REPLY_TEXT
 
 
 def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str:
@@ -2945,9 +2945,10 @@ def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str
     large to upload inline — a TTL download link so an over-cap artifact is delivered rather than
     silently dropped."""
     text = _reply_text(writeback)
-    if writeback.credential_request is not None:
+    if writeback.terminal.credential_request is not None:
+        reason = writeback.terminal.credential_request.reason
         text = (
-            f"{text}\n\n:lock: {writeback.credential_request.reason} — open your terminal, run "
+            f"{text}\n\n:lock: {reason} — open your terminal, run "
             "`ufo`, and ask me there to continue; secrets never pass through chat."
         )
     oversized = tuple(a for a in writeback.artifacts if a.size_bytes > SLACK_UPLOAD_MAX_BYTES)
@@ -3197,11 +3198,13 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     thread = thread_ts if separator else None
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     text = _reply_with_oversize_links(ctx, writeback)
-    actions = slack_ask_blocks(writeback.question) or slack_connect_blocks(
-        writeback.connect_request, writeback.turn_id
+    actions = slack_ask_blocks(writeback.terminal.question) or slack_connect_blocks(
+        writeback.terminal.connect_request, writeback.turn_id
     )
-    model = writeback.model or "no-model"
-    params = f"-[{writeback.reasoning}]" if writeback.reasoning is not None else ""
+    model = writeback.terminal.model or "no-model"
+    params = (
+        f"-[{writeback.terminal.reasoning}]" if writeback.terminal.reasoning is not None else ""
+    )
     metadata = await _slack_footer(
         ctx,
         bot_token,
@@ -3209,8 +3212,8 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         writeback.conversation_id,
         writeback.agent_id,
         writeback.turn_id,
-        f"${writeback.cost_micro_usd / 1_000_000:.6f} "
-        f"({writeback.tokens:,} tokens, {writeback.cache_percent}% cached) · "
+        f"${writeback.terminal.cost_micro_usd / 1_000_000:.6f} "
+        f"({writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached) · "
         f"{model}{params}",
     )
     parts = slack_reply_parts(text)

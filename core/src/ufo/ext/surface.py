@@ -116,13 +116,9 @@ from ufo.schema.records import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
-    AskUserInput,
-    ConnectRequest,
-    CredentialRequest,
     ReasoningEffort,
     SandboxSize,
     TerminalFrame,
-    TerminalStatus,
     ToolIntent,
     Turn,
     TurnAdmissionSource,
@@ -395,27 +391,18 @@ class SharedArtifact:
 @dataclass(frozen=True)
 class Writeback:
     """One terminal turn ready for delivery: its agent and conversation, the conversation's
-    `queue_key` (the surface decodes its own channel/thread from it), the terminal outcome and its
-    accounting/model metadata, the files the turn shared, and any structured final handoff. A
-    surface renders the reply and metadata, uploads `artifacts`, renders `question` as its own
-    answer affordance, collects credentials privately, or exposes `connect_request` only through
-    its authenticated member channel."""
+    `queue_key` (the surface decodes its own channel/thread from it), the turn's whole terminal
+    frame, and the files the turn shared. A surface renders the reply and metadata off `terminal`,
+    uploads `artifacts`, renders `terminal.question` as its own answer affordance, collects
+    credentials privately, or exposes `terminal.connect_request` only through its authenticated
+    member channel."""
 
     turn_id: UUID
     conversation_id: UUID
     agent_id: UUID
     queue_key: str
-    status: TerminalStatus
-    text: str
-    tokens: int
-    cost_micro_usd: int
-    cache_percent: int
-    model: str
-    reasoning: ReasoningEffort | None
+    terminal: TerminalFrame
     artifacts: tuple[SharedArtifact, ...]
-    question: AskUserInput | None
-    credential_request: CredentialRequest | None
-    connect_request: ConnectRequest | None
 
 
 AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
@@ -3859,22 +3846,12 @@ class WritebackPoller:
                     )
                 )
             ).all()
-        terminal = TerminalFrame.model_validate(row.terminal)
         writeback = Writeback(
             turn_id=turn_id,
             conversation_id=row.conversation_id,
             agent_id=row.agent_id,
             queue_key=row.queue_key,
-            status=terminal.status,
-            text=terminal.text,
-            tokens=terminal.tokens,
-            cost_micro_usd=terminal.cost_micro_usd,
-            cache_percent=terminal.cache_percent,
-            model=terminal.model,
-            reasoning=terminal.reasoning,
-            question=terminal.question,
-            credential_request=terminal.credential_request,
-            connect_request=terminal.connect_request,
+            terminal=TerminalFrame.model_validate(row.terminal),
             artifacts=tuple(
                 SharedArtifact(
                     blob_key=artifact.blob_key,

@@ -50,6 +50,7 @@ from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequest,
     SurfaceContext,
+    TerminalFrame,
     Writeback,
 )
 from ufo.tools.context import SpawnResult, ToolContext
@@ -797,21 +798,18 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
         conversation_id=uuid4(),
         agent_id=uuid4(),
         queue_key="C1:1.0",
-        status="done",
-        text="I need a value from Slack.",
-        tokens=0,
-        cost_micro_usd=0,
-        cache_percent=0,
-        model="",
-        reasoning=None,
-        artifacts=(),
-        question=None,
-        credential_request=CredentialRequest(
-            reason="connecting Slack",
-            prompts=(CredentialPrompt(slot=SLACK_BOT_TOKEN_SLOT, prompt="Bot User OAuth Token"),),
-            sealed="opaque",
+        terminal=TerminalFrame(
+            status="done",
+            text="I need a value from Slack.",
+            credential_request=CredentialRequest(
+                reason="connecting Slack",
+                prompts=(
+                    CredentialPrompt(slot=SLACK_BOT_TOKEN_SLOT, prompt="Bot User OAuth Token"),
+                ),
+                sealed="opaque",
+            ),
         ),
-        connect_request=None,
+        artifacts=(),
     )
     text = _reply_with_oversize_links(cast(SurfaceContext, None), writeback)
     assert "connecting Slack" in text
@@ -827,18 +825,12 @@ def test_reply_text_renders_a_cancelled_turns_reason() -> None:
         conversation_id=uuid4(),
         agent_id=uuid4(),
         queue_key="C1:1.0",
-        status="cancelled",
-        text="This workspace has no open seat for you yet — ask a workspace admin.",
-        tokens=0,
-        cost_micro_usd=0,
-        cache_percent=0,
-        model="",
-        reasoning=None,
+        terminal=TerminalFrame(
+            status="cancelled",
+            text="This workspace has no open seat for you yet — ask a workspace admin.",
+        ),
         artifacts=(),
-        question=None,
-        credential_request=None,
-        connect_request=None,
     )
-    assert _reply_text(refusal) == refusal.text
-    bare = replace(refusal, text="")
+    assert _reply_text(refusal) == refusal.terminal.text
+    bare = replace(refusal, terminal=TerminalFrame(status="cancelled"))
     assert _reply_text(bare) == slack.SLACK_TURN_CANCELLED_TEXT
