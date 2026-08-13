@@ -179,7 +179,7 @@ function AgentRow({
       <Td>
         {agent.name}
         {agent.main ? (
-          <span className="ml-xs text-small opacity-(--muted-strong)">Main</span>
+          <span className="ml-xs text-small opacity-(--opacity-muted-strong)">Main</span>
         ) : null}
       </Td>
       <Td>{agent.model}</Td>

@@ -4,8 +4,8 @@ import { cn } from "@/lib/cn";
 
 export function Table({ className, ...props }: ComponentProps<"table">) {
   return (
-    <div className="shrink-0 overflow-x-auto rounded-panel border border-edge bg-surface">
-      <table className={cn("w-full border-collapse", className)} {...props} />
+    <div data-slot="table-container" className="shrink-0 overflow-x-auto rounded-panel border border-edge bg-card text-card-foreground">
+      <table data-slot="table" className={cn("w-full border-collapse", className)} {...props} />
     </div>
   );
 }
@@ -13,10 +13,11 @@ export function Table({ className, ...props }: ComponentProps<"table">) {
 export function Th({ className, ...props }: ComponentProps<"th">) {
   return (
     <th
+      data-slot="table-head"
       scope="col"
       className={cn(
         "text-left align-baseline px-xl py-md border-b border-edge-soft tabular-nums",
-        "text-small font-strong opacity-(--muted)",
+        "text-small font-strong opacity-(--opacity-muted)",
         className,
       )}
       {...props}
@@ -29,6 +30,7 @@ export function Th({ className, ...props }: ComponentProps<"th">) {
 export function Td({ className, ...props }: ComponentProps<"td">) {
   return (
     <td
+      data-slot="table-cell"
       className={cn("text-left align-baseline px-xl py-lg border-t border-edge-soft tabular-nums", className)}
       {...props}
     />
@@ -41,7 +43,7 @@ export function Td({ className, ...props }: ComponentProps<"td">) {
 export function TableNote({ span, children }: { span: number; children: ReactNode }) {
   return (
     <tr>
-      <Td colSpan={span} className="opacity-(--muted-soft)">
+      <Td colSpan={span} className="opacity-(--opacity-muted-soft)">
         {children}
       </Td>
     </tr>

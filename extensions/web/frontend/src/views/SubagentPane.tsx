@@ -54,7 +54,7 @@ export function SubagentPane({
     <Pane>
       <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
         <h1 className="m-0 text-title font-strong">{subagent.name}</h1>
-        <span className="opacity-(--muted-strong)">subagent</span>
+        <span className="opacity-(--opacity-muted-strong)">subagent</span>
       </div>
       <TabStrip
         group="subagent"

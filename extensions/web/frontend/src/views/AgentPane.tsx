@@ -42,7 +42,7 @@ export function AgentPane({ agent, tab, tabs, onTab, place, onPlace }: AgentPane
     <Pane>
       <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl pt-lg")}>
         <h1 className="m-0 text-title font-strong">{agent.name}</h1>
-        <span className="font-mono text-mono opacity-(--muted-strong)">{agent.model}</span>
+        <span className="font-mono text-mono opacity-(--opacity-muted-strong)">{agent.model}</span>
       </div>
       <TabStrip
         group="agent"

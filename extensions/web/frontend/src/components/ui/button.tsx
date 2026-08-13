@@ -14,7 +14,7 @@ export const buttonVariants = cva(
   {
     variants: {
       variant: {
-        send: "bg-ink text-surface font-strong px-3xl py-md border border-transparent hover:bg-ink-hover",
+        send: "bg-primary text-primary-foreground font-strong px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline:
           "border border-edge-control bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
         row: "border border-edge-control bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill-hover",
@@ -51,6 +51,7 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
+      data-slot="button"
       type={type}
       aria-disabled={busy ? true : undefined}
       onClick={(event) => {
@@ -62,7 +63,7 @@ export function Button({
       }}
       className={cn(
         buttonVariants({ variant, size }),
-        busy && "opacity-(--muted) animate-working motion-reduce:animate-none",
+        busy && "opacity-(--opacity-muted) animate-working motion-reduce:animate-none",
         className,
       )}
       {...props}

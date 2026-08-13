@@ -7,14 +7,14 @@ import { cn } from "@/lib/cn";
  *  a field is the same object to the eye as the fields beside it. */
 export const CONTROL = cn(
   "rounded-panel border border-edge-control bg-field text-field-ink px-lg py-md font-inherit",
-  "text-subtitle narrow:text-ui placeholder:opacity-(--muted)",
+  "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
   "transition-[border-color] duration-100 ease-control hover:border-edge-control-strong",
   "user-invalid:border-ink user-invalid:border-dashed",
   "disabled:cursor-not-allowed disabled:opacity-(--disabled) disabled:hover:border-edge-control",
 );
 
 export function Label({ className, ...props }: ComponentProps<typeof LabelPrimitive.Root>) {
-  return <LabelPrimitive.Root className={cn("block font-strong", className)} {...props} />;
+  return <LabelPrimitive.Root data-slot="label" className={cn("block font-strong", className)} {...props} />;
 }
 
 /** One labelled control. The label sits over the control it names, never beside it: a settings
@@ -33,7 +33,7 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-2xs">
+    <div data-slot="field" className="flex flex-col gap-2xs">
       <Label htmlFor={htmlFor}>{label}</Label>
       {children}
       {description ? (
@@ -55,7 +55,7 @@ export function FieldGroup({
   ...props
 }: Omit<ComponentProps<"form">, "action"> & { submit: ReactNode }) {
   return (
-    <form className={cn("rounded-panel border border-edge bg-surface", className)} {...props}>
+    <form data-slot="field-group" className={cn("rounded-panel border border-edge bg-card text-card-foreground", className)} {...props}>
       <div className="flex flex-col gap-xl p-xl">{children}</div>
       <div className="flex justify-end border-t border-edge-soft px-xl py-lg">{submit}</div>
     </form>
@@ -63,12 +63,13 @@ export function FieldGroup({
 }
 
 export function Input({ className, type = "text", ...props }: ComponentProps<"input">) {
-  return <input type={type} className={cn(CONTROL, "w-full max-w-control", className)} {...props} />;
+  return <input data-slot="input" type={type} className={cn(CONTROL, "w-full max-w-control", className)} {...props} />;
 }
 
 export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
   return (
     <textarea
+      data-slot="textarea"
       className={cn(
         CONTROL,
         "w-full max-w-section min-h-[var(--size-textarea)] font-mono text-subtitle narrow:text-mono",
@@ -86,7 +87,7 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
  *  the row it sizes is the row the member is typing into. */
 const BARE = cn(
   "border-0 bg-transparent p-0 text-field-ink font-inherit",
-  "text-subtitle narrow:text-ui placeholder:opacity-(--muted)",
+  "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
 );
 
 /** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a
@@ -116,6 +117,7 @@ export function GrowingTextarea({
         {value + " "}
       </div>
       <textarea
+        data-slot="growing-textarea"
         rows={1}
         value={value}
         className={cn(surface, GROWING_CELL, "resize-none overflow-y-auto")}
@@ -128,6 +130,7 @@ export function GrowingTextarea({
 export function Checkbox({ className, ...props }: ComponentProps<"input">) {
   return (
     <input
+      data-slot="checkbox"
       type="checkbox"
       className={cn(
         "size-(--spacing-2xl) accent-ink align-middle",
@@ -143,7 +146,8 @@ export function Checkbox({ className, ...props }: ComponentProps<"input">) {
 export function Hint({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
-      className={cn("text-label opacity-(--muted-faint) max-w-hint mt-2xs mb-lg", className)}
+      data-slot="field-description"
+      className={cn("text-label opacity-(--opacity-muted-faint) max-w-hint mt-2xs mb-lg", className)}
       {...props}
     />
   );

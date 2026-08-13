@@ -15,6 +15,7 @@ export function TooltipContent({ className, side = "right", sideOffset = 8, ...p
   return (
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Content
+        data-slot="tooltip-content"
         side={side}
         sideOffset={sideOffset}
         className={cn(

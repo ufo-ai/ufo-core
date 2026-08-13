@@ -10,14 +10,15 @@ import { cn } from "@/lib/cn";
 export function ItemGroup({ className, ...props }: ComponentProps<"ul">) {
   return (
     <ul
-      className={cn("m-0 list-none rounded-panel border border-edge bg-surface p-0", className)}
+      data-slot="item-group"
+      className={cn("m-0 list-none rounded-panel border border-edge bg-card text-card-foreground p-0", className)}
       {...props}
     />
   );
 }
 
 export function Item({ className, ...props }: ComponentProps<"li">) {
-  return <li className={cn("flex items-center gap-lg px-xl py-lg", className)} {...props} />;
+  return <li data-slot="item" className={cn("flex items-center gap-lg px-xl py-lg", className)} {...props} />;
 }
 
 /** The rule between two items, drawn as its own row so no item carries an edge of its own and the
@@ -32,7 +33,7 @@ export function ItemContent({ children }: { children: ReactNode }) {
 
 export function ItemTitle({ children }: { children: ReactNode }) {
   return (
-    <div data-part="primary" className="truncate text-body">
+    <div data-slot="item-title" data-part="primary" className="truncate font-display text-body">
       {children}
     </div>
   );
@@ -40,7 +41,7 @@ export function ItemTitle({ children }: { children: ReactNode }) {
 
 export function ItemDescription({ children }: { children: ReactNode }) {
   return (
-    <p data-part="body" className="m-0 truncate text-small opacity-(--muted-soft)">
+    <p data-part="body" className="m-0 truncate text-small opacity-(--opacity-muted-soft)">
       {children}
     </p>
   );

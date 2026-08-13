@@ -254,7 +254,7 @@ export function AgentSkills({ agent }: { agent: Agent }) {
               className={cn(
                 buttonVariants({ variant: "outline" }),
                 "border-transparent no-underline transition-opacity",
-                "opacity-(--muted) hover:opacity-100",
+                "opacity-(--opacity-muted) hover:opacity-100",
               )}
             >
               Source ↗

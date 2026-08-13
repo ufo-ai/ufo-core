@@ -25,7 +25,7 @@ export type AgentsProps = {
 
 const AGENT_KIND = "agent";
 const MODEL_FIELD = "model";
-const MODEL = "font-mono text-mono opacity-(--muted-strong)";
+const MODEL = "font-mono text-mono opacity-(--opacity-muted-strong)";
 const MAIN = "The agent this workspace answers with by default.";
 const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
 const INHERITS = "Spawned by an agent for one task, on that agent's model.";

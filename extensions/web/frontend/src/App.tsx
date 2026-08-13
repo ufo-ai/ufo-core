@@ -11,6 +11,7 @@ import {
   IconUsers,
 } from "@tabler/icons-react";
 
+import logo from "@/assets/ufo-logo.svg";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
@@ -322,14 +323,15 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
           <TooltipProvider>
           <nav className="flex min-h-0 flex-col gap-sm border-r border-edge-faint bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
             <div className={cn("flex items-center justify-between px-2xl max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
-              <svg
-                viewBox="17.22 9.24 34.54 13"
+              <span
                 role="img"
                 aria-label="ufo"
-                className={cn("h-(--size-wordmark) w-auto", collapsed && "hidden max-narrow:block")}
-              >
-                <path fill="currentColor" d="M18.98 22.22V20.52H17.22V9.24H19.76V19.5H24.28V9.24H26.84V20.52H25.06V22.22H18.98ZM29.8708 22.22V9.24H37.7108V10.96H39.4908V13.68H36.9308V11.98H32.4108V14.38H35.9508V17.08H32.4108V22.22H29.8708ZM43.8909 22.22V20.52H42.1309V10.96H43.8909V9.24H49.9709V10.96H51.7509V20.52H49.9709V22.22H43.8909ZM44.6709 19.5H49.1909V11.98H44.6709Z" />
-              </svg>
+                className={cn(
+                  "h-(--size-wordmark) w-(--size-logo) bg-current",
+                  collapsed && "hidden max-narrow:block",
+                )}
+                style={{ mask: `url(${logo}) center / contain no-repeat` }}
+              />
               <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
                 <SidebarToggle
                   label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -412,7 +414,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
               </SidebarTooltip>
               <span className={cn("flex min-w-0 flex-1 flex-col max-narrow:hidden", collapsed && "hidden")}>
                 <span className="truncate">{member.email}</span>
-                <span className="text-small opacity-(--muted)">
+                <span className="text-small opacity-(--opacity-muted)">
                   {member.admin ? "Admin" : "Member"}
                 </span>
               </span>
@@ -422,7 +424,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
                   aria-label="Administration"
                   onClick={openAdmin}
                   className={cn(
-                    "rounded-control border-0 bg-transparent p-2xs opacity-(--muted) hover:bg-fill-hover",
+                    "rounded-control border-0 bg-transparent p-2xs opacity-(--opacity-muted) hover:bg-fill-hover",
                     collapsed && "hidden max-narrow:block",
                   )}
                 >
@@ -681,7 +683,7 @@ function LinkedPane({
         {conversation.readable || disclosed ? (
           <>
             <ConversationDetail agent={agent} conversation={conversation} onBack={back} />
-            <p className="max-w-hint opacity-(--muted-soft)">
+            <p className="max-w-hint opacity-(--opacity-muted-soft)">
               This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
               continue it.
             </p>
@@ -706,7 +708,7 @@ function NotShared() {
 function PaneNote({ children }: { children: React.ReactNode }) {
   return (
     <Pane className={COLUMN}>
-      <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">{children}</div>
+      <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">{children}</div>
     </Pane>
   );
 }
@@ -814,13 +816,13 @@ function RailList({
   return (
     <>
       <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
-        <h2 className="m-0 text-label font-medium opacity-(--muted-strong)">Conversations</h2>
+        <h2 className="m-0 text-label font-medium opacity-(--opacity-muted-strong)">Conversations</h2>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label="Conversation settings"
-              className="rounded-control border-0 bg-transparent p-2xs opacity-(--muted) hover:bg-fill-hover data-[state=open]:bg-fill-subtle"
+              className="rounded-control border-0 bg-transparent p-2xs opacity-(--opacity-muted) hover:bg-fill-hover data-[state=open]:bg-fill-subtle"
             >
               <IconAdjustments className="size-(--size-glyph)" aria-hidden />
             </button>
@@ -844,10 +846,10 @@ function RailList({
         </DropdownMenu>
       </div>
       {rail.phase === "loading" ? (
-        <div className="p-sm opacity-(--muted)">Loading…</div>
+        <div className="p-sm opacity-(--opacity-muted)">Loading…</div>
       ) : null}
       {rail.phase === "failed" ? (
-        <div className="flex flex-col gap-2xs p-sm opacity-(--muted)">
+        <div className="flex flex-col gap-2xs p-sm opacity-(--opacity-muted)">
           <span>Couldn't load conversations.</span>
           <button
             type="button"
@@ -860,7 +862,7 @@ function RailList({
       ) : null}
       {railGroups(rail.rows, sort, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium opacity-(--muted-strong) max-narrow:hidden">
+          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium opacity-(--opacity-muted-strong) max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
@@ -881,7 +883,7 @@ function RailList({
                   >
                     <span className="block truncate">{row.title}</span>
                     {facts.length ? (
-                      <span className="block truncate text-small opacity-(--muted-strong) max-narrow:hidden">
+                      <span className="block truncate text-small opacity-(--opacity-muted-strong) max-narrow:hidden">
                         {facts.join(" · ")}
                       </span>
                     ) : null}
@@ -911,7 +913,7 @@ function SidebarTooltip({ collapsed, label, children }: { collapsed: boolean; la
 
 function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
   return (
-    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs opacity-(--muted) hover:bg-fill-hover max-narrow:hidden">
+    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs opacity-(--opacity-muted) hover:bg-fill-hover max-narrow:hidden">
       <IconLayoutSidebarRight className="size-(--size-glyph)" aria-hidden />
     </button>
   );

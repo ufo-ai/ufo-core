@@ -75,11 +75,11 @@ export function ArtifactText({
     };
   }, [byteLimit, url]);
 
-  if (message) return <div className="font-mono text-small opacity-(--muted)">{message}</div>;
+  if (message) return <div className="font-mono text-small opacity-(--opacity-muted)">{message}</div>;
   if (body === null) return <div>Loading…</div>;
   if (mediaType === HTML_MEDIA_TYPE && bounded)
     return (
-      <div className="font-mono text-small opacity-(--muted)">
+      <div className="font-mono text-small opacity-(--opacity-muted)">
         This page is larger than {formatSize(byteLimit)}. Download it to open it.
       </div>
     );
@@ -116,7 +116,7 @@ export function ArtifactText({
         </pre>
       )}
       {bounded && display !== "excerpt" ? (
-        <div className="font-mono text-small opacity-(--muted)">
+        <div className="font-mono text-small opacity-(--opacity-muted)">
           First {formatSize(byteLimit)} shown.
         </div>
       ) : null}

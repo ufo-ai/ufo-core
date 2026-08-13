@@ -29,7 +29,7 @@ export function Reveal({ children, bare = false }: { children: ReactNode; bare?:
   }, [open, children]);
 
   return (
-    <div className={cn(!bare && "rounded-panel border border-edge bg-surface")}>
+    <div data-slot="reveal" className={cn(!bare && "rounded-panel border border-edge bg-card text-card-foreground")}>
       <div
         id={region}
         ref={frame}
@@ -39,7 +39,7 @@ export function Reveal({ children, bare = false }: { children: ReactNode; bare?:
         {over && !open ? (
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-x-0 bottom-0 h-6xl bg-linear-to-t from-surface"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-6xl bg-linear-to-t from-card"
           />
         ) : null}
       </div>

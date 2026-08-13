@@ -46,7 +46,7 @@ export function CardGrid<Row>({
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
         const state = status ? (
-          <div data-part="status" className="whitespace-nowrap text-small opacity-(--muted)">
+          <div data-part="status" className="whitespace-nowrap text-small opacity-(--opacity-muted)">
             {status(row)}
           </div>
         ) : null;
@@ -55,7 +55,7 @@ export function CardGrid<Row>({
             key={rowKey(row)}
             {...control}
             className={cn(
-              "flex flex-col overflow-hidden rounded-panel border border-edge bg-surface",
+              "flex flex-col overflow-hidden rounded-panel border border-edge bg-card text-card-foreground",
               control?.className,
               press && "hover:bg-fill-hover",
             )}
@@ -73,7 +73,7 @@ export function CardGrid<Row>({
                 </div>
               ) : null}
               <div className="flex items-baseline justify-between gap-md">
-                <div data-part="primary" className="min-w-0 truncate text-body">
+                <div data-part="primary" className="min-w-0 truncate font-display text-body">
                   {primary(row)}
                 </div>
                 {mark?.shape !== "square" ? state : null}
@@ -81,7 +81,7 @@ export function CardGrid<Row>({
               {said ? (
                 <p
                   data-part="body"
-                  className="m-0 mt-sm line-clamp-2 text-small opacity-(--muted-soft)"
+                  className="m-0 mt-sm line-clamp-2 text-small opacity-(--opacity-muted-soft)"
                 >
                   {said}
                 </p>
@@ -89,7 +89,7 @@ export function CardGrid<Row>({
               {from ? (
                 <p
                   data-part="meta"
-                  className="m-0 mt-sm truncate font-mono text-mono opacity-(--muted-soft)"
+                  className="m-0 mt-sm truncate font-mono text-mono opacity-(--opacity-muted-soft)"
                 >
                   {from}
                 </p>

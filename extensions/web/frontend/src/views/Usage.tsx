@@ -180,9 +180,9 @@ function Figures({ details, range }: { details: UsageDetails; range: Range }) {
     <div className="grid grid-cols-2 gap-lg">
       {items.map((item) => (
         <div key={item.label} className="rounded-panel border border-edge bg-surface p-xl">
-          <div className="text-small opacity-(--muted)">{item.label}</div>
+          <div className="text-small opacity-(--opacity-muted)">{item.label}</div>
           <div className="mt-2xs text-title font-strong">{item.value}</div>
-          <div className="mt-2xs text-small opacity-(--muted)">{item.note}</div>
+          <div className="mt-2xs text-small opacity-(--opacity-muted)">{item.note}</div>
         </div>
       ))}
     </div>
@@ -211,7 +211,7 @@ function DailyHistory({ rows }: { rows: DailyLine[] }) {
         <path d="M0 29 H100" fill="none" stroke="currentColor" opacity="0.2" />
         <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
       </svg>
-      <div className="flex justify-between text-small opacity-(--muted)">
+      <div className="flex justify-between text-small opacity-(--opacity-muted)">
         <span>{dateLabel(rows[0].day + "T00:00:00Z")}</span>
         <span>{dateLabel(rows[rows.length - 1].day + "T00:00:00Z")}</span>
       </div>

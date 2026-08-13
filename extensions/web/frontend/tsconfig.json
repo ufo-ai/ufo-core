@@ -15,7 +15,7 @@
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] },
-    "types": ["node"]
+    "types": ["node", "vite/client"]
   },
   "include": ["src", "tests", "dev-routing.ts", "vite.config.ts"]
 }

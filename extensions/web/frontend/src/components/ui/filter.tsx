@@ -31,6 +31,7 @@ export function Filter({
   }, [value, options]);
   return (
     <div
+      data-slot="filter"
       ref={list}
       role="tablist"
       aria-label="Filter"
@@ -64,7 +65,7 @@ export function Filter({
             className={cn(
               "relative rounded-control border-0 bg-transparent px-lg py-xs text-ui",
               "transition-[opacity] duration-100 ease-control motion-reduce:transition-none",
-              active ? "opacity-100" : "opacity-(--muted-soft) hover:opacity-100",
+              active ? "opacity-100" : "opacity-(--opacity-muted-soft) hover:opacity-100",
             )}
           >
             {entry.label}

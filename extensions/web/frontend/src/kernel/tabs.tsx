@@ -49,7 +49,7 @@ export function TabStrip<T extends string>({
             }}
             className={cn(
               "border-0 border-b-(length:--marker-width) border-b-transparent bg-transparent",
-              "px-md py-xs text-inherit opacity-(--muted-soft)",
+              "px-md py-xs text-inherit opacity-(--opacity-muted-soft)",
               name === current && "border-b-ink opacity-100",
             )}
           >

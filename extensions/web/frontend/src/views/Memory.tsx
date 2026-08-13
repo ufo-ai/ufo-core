@@ -162,7 +162,7 @@ export function Memory({
                           <Td className="w-full">{match.text}</Td>
                           <Td className="whitespace-nowrap">{kindLabel(match.kind)}</Td>
                           <Td className="whitespace-nowrap">{subjectLabel(match.subject)}</Td>
-                          <Td className="whitespace-nowrap opacity-(--muted)">
+                          <Td className="whitespace-nowrap opacity-(--opacity-muted)">
                             {day(match.created_at) ?? "—"}
                           </Td>
                           {corrections ? (

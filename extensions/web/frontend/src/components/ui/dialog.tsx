@@ -13,12 +13,13 @@ export function DialogContent({
 }: ComponentProps<typeof DialogPrimitive.Content>) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-10 bg-scrim animate-appear" />
+      <DialogPrimitive.Overlay data-slot="dialog-overlay" className="fixed inset-0 z-10 bg-scrim animate-appear" />
       <DialogPrimitive.Content
+        data-slot="dialog-content"
         className={cn(
           "fixed top-1/2 left-1/2 z-10 -translate-x-1/2 -translate-y-1/2",
           "w-dialog max-h-[var(--media-tall)] overflow-y-auto",
-          "flex flex-col gap-4xl rounded-card border border-edge-strong bg-surface p-4xl",
+          "flex flex-col gap-4xl rounded-card border border-edge-strong bg-popover text-popover-foreground p-4xl",
           "[box-shadow:var(--shadow-raised)] animate-raise",
           className,
         )}
@@ -31,7 +32,7 @@ export function DialogContent({
 }
 
 export function DialogHeader({ className, ...props }: ComponentProps<"div">) {
-  return <div className={cn("flex flex-col gap-2xs", className)} {...props} />;
+  return <div data-slot="dialog-header" className={cn("flex flex-col gap-2xs", className)} {...props} />;
 }
 
 export function DialogTitle({
@@ -40,6 +41,7 @@ export function DialogTitle({
 }: ComponentProps<typeof DialogPrimitive.Title>) {
   return (
     <DialogPrimitive.Title
+      data-slot="dialog-title"
       className={cn("m-0 text-subtitle font-strong [overflow-wrap:anywhere]", className)}
       {...props}
     />
@@ -52,7 +54,8 @@ export function DialogDescription({
 }: ComponentProps<typeof DialogPrimitive.Description>) {
   return (
     <DialogPrimitive.Description
-      className={cn("m-0 text-label opacity-(--muted-faint)", className)}
+      data-slot="dialog-description"
+      className={cn("m-0 text-label opacity-(--opacity-muted-faint)", className)}
       {...props}
     />
   );
@@ -75,6 +78,7 @@ export function DialogFooter({
 }: ComponentProps<"div"> & { lead?: ReactNode; leave?: string }) {
   return (
     <div
+      data-slot="dialog-footer"
       className={cn(
         "flex flex-wrap items-center justify-end gap-sm border-t border-edge-soft pt-lg",
         className,

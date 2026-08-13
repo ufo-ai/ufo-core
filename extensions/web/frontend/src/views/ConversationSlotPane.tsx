@@ -157,7 +157,7 @@ export function ConversationSlotPane({
             {agent.name}
           </button>
         ) : null}
-        <span className="inline-flex items-center gap-xs font-mono text-mono opacity-(--muted-strong)">
+        <span className="inline-flex items-center gap-xs font-mono text-mono opacity-(--opacity-muted-strong)">
           {resolved ? <SlotIcon icon={resolved.icon} /> : null}
           {label}
         </span>
@@ -228,7 +228,7 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
           <ChangedFile key={[change.path, index].join(":")} change={change} />
         ))}
         {payload.truncated ? (
-          <p className="m-0 opacity-(--muted-soft)">Some changes may not be shown.</p>
+          <p className="m-0 opacity-(--opacity-muted-soft)">Some changes may not be shown.</p>
         ) : null}
       </div>
     );
@@ -248,13 +248,13 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
             </a>
           </h2>
           {source.published_date ? (
-            <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+            <p className="m-0 mt-xs font-mono text-mono opacity-(--opacity-muted-strong)">
               {source.published_date}
             </p>
           ) : null}
           {source.snippet ? (
             <details className="mt-sm">
-              <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
+              <summary className="cursor-pointer select-none text-label opacity-(--opacity-muted-strong)">
                 Summary
               </summary>
               <div className="mt-sm break-words">
@@ -265,7 +265,7 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
         </article>
       ))}
       {payload.truncated ? (
-        <p className="m-0 opacity-(--muted-soft)">Some sources may not be shown.</p>
+        <p className="m-0 opacity-(--opacity-muted-soft)">Some sources may not be shown.</p>
       ) : null}
     </div>
   );
@@ -280,7 +280,7 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
   return (
     <section className="min-w-0">
       {payload.title ? <h2 className="m-0 text-title font-strong">{payload.title}</h2> : null}
-      <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+      <p className="m-0 mt-sm font-mono text-mono opacity-(--opacity-muted-strong)">
         {payload.completed_count} of {payload.total_count} completed.
       </p>
       {payload.tasks.length ? (
@@ -290,7 +290,7 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
               key={[task.description, index].join(":")}
               className="flex min-w-0 items-start gap-md rounded-panel border border-edge p-lg"
             >
-              <span className="shrink-0 font-mono text-mono opacity-(--muted-strong)">
+              <span className="shrink-0 font-mono text-mono opacity-(--opacity-muted-strong)">
                 {labels[task.status]}
               </span>
               <span className="min-w-0 break-words">{task.description}</span>
@@ -301,7 +301,7 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
         <PanelEmpty>No tasks.</PanelEmpty>
       )}
       {payload.truncated ? (
-        <p className="m-0 mt-lg opacity-(--muted-soft)">Some tasks may not be shown.</p>
+        <p className="m-0 mt-lg opacity-(--opacity-muted-soft)">Some tasks may not be shown.</p>
       ) : null}
     </section>
   );
@@ -324,16 +324,16 @@ function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
                 <p className="m-0 mt-sm break-words">{automation.description}</p>
               ) : null}
             </div>
-            <span className="font-mono text-mono opacity-(--muted-strong)">
+            <span className="font-mono text-mono opacity-(--opacity-muted-strong)">
               {automation.paused ? "Paused" : "Running"}
             </span>
           </div>
-          <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+          <p className="m-0 mt-sm font-mono text-mono opacity-(--opacity-muted-strong)">
             {automation.schedule} · Next {day(automation.next_run_at)} · Updated{" "}
             {day(automation.updated_at)}
           </p>
           {automation.last_run_at ? (
-            <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+            <p className="m-0 mt-xs font-mono text-mono opacity-(--opacity-muted-strong)">
               Last {day(automation.last_run_at)}
               {automation.latest_status ? " · " + automation.latest_status : ""}
             </p>
@@ -344,7 +344,7 @@ function AutomationsContent({ payload }: { payload: AutomationsPayload }) {
         </article>
       ))}
       {payload.truncated ? (
-        <p className="m-0 opacity-(--muted-soft)">Some automations may not be shown.</p>
+        <p className="m-0 opacity-(--opacity-muted-soft)">Some automations may not be shown.</p>
       ) : null}
     </div>
   );
@@ -361,7 +361,7 @@ function SitesContent({ payload }: { payload: SitesPayload }) {
           <div className="flex items-start gap-md">
             <div className="min-w-0 flex-1">
               <h2 className="m-0 break-all font-mono text-label font-strong">{site.name}</h2>
-              <p className="m-0 mt-xs font-mono text-mono opacity-(--muted-strong)">
+              <p className="m-0 mt-xs font-mono text-mono opacity-(--opacity-muted-strong)">
                 {site.visibility} · Created {day(site.created_at)} · Updated {day(site.updated_at)}
               </p>
             </div>
@@ -372,7 +372,7 @@ function SitesContent({ payload }: { payload: SitesPayload }) {
         </article>
       ))}
       {payload.truncated ? (
-        <p className="m-0 opacity-(--muted-soft)">Some sites may not be shown.</p>
+        <p className="m-0 opacity-(--opacity-muted-soft)">Some sites may not be shown.</p>
       ) : null}
     </div>
   );
@@ -391,7 +391,7 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
         />
       ))}
       {payload.truncated ? (
-        <p className="m-0 opacity-(--muted-soft)">Some artifacts may not be shown.</p>
+        <p className="m-0 opacity-(--opacity-muted-soft)">Some artifacts may not be shown.</p>
       ) : null}
     </div>
   );
@@ -421,7 +421,7 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
         )}
       </h2>
       {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
-      <p className="m-0 mt-sm font-mono text-mono opacity-(--muted-strong)">
+      <p className="m-0 mt-sm font-mono text-mono opacity-(--opacity-muted-strong)">
         {artifact.media_type} · {formatSize(artifact.size_bytes)} · {day(artifact.created_at)}
       </p>
       {textUrl && markdown ? (
@@ -443,7 +443,7 @@ function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
         </div>
       ) : textUrl ? (
         <details className="mt-sm" onToggle={(event) => setOpened(event.currentTarget.open)}>
-          <summary className="cursor-pointer select-none text-label opacity-(--muted-strong)">
+          <summary className="cursor-pointer select-none text-label opacity-(--opacity-muted-strong)">
             Preview
           </summary>
           <div className="mt-sm">
@@ -485,7 +485,7 @@ function ChangedFile({ change }: { change: Change }) {
         </pre>
       </div>
       {change.truncated ? (
-        <p className="m-0 border-t border-edge px-lg py-sm opacity-(--muted-soft)">
+        <p className="m-0 border-t border-edge px-lg py-sm opacity-(--opacity-muted-soft)">
           This diff is truncated.
         </p>
       ) : null}

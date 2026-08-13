@@ -14,7 +14,7 @@ function Chevron({ className }: { className?: string }) {
     <svg
       viewBox="0 0 12 12"
       aria-hidden
-      className={cn("size-(--spacing-lg) shrink-0 opacity-(--muted)", className)}
+      className={cn("size-(--spacing-lg) shrink-0 opacity-(--opacity-muted)", className)}
     >
       <path
         d="M3 4.5 6 7.5 9 4.5"
@@ -44,7 +44,7 @@ function Tick() {
 }
 
 export function SelectValue({ className, ...props }: ComponentProps<typeof SelectPrimitive.Value>) {
-  return <SelectPrimitive.Value className={cn("min-w-0 truncate", className)} {...props} />;
+  return <SelectPrimitive.Value data-slot="select-value" className={cn("min-w-0 truncate", className)} {...props} />;
 }
 
 export function SelectTrigger({
@@ -54,6 +54,7 @@ export function SelectTrigger({
 }: ComponentProps<typeof SelectPrimitive.Trigger>) {
   return (
     <SelectPrimitive.Trigger
+      data-slot="select-trigger"
       className={cn(
         CONTROL,
         "flex w-full max-w-control items-center justify-between gap-sm whitespace-nowrap",
@@ -71,7 +72,7 @@ export function SelectTrigger({
 
 function ScrollUp() {
   return (
-    <SelectPrimitive.ScrollUpButton className="flex cursor-default items-center justify-center py-2xs">
+    <SelectPrimitive.ScrollUpButton data-slot="select-scroll-up-button" className="flex cursor-default items-center justify-center py-2xs">
       <Chevron className="rotate-180" />
     </SelectPrimitive.ScrollUpButton>
   );
@@ -79,7 +80,7 @@ function ScrollUp() {
 
 function ScrollDown() {
   return (
-    <SelectPrimitive.ScrollDownButton className="flex cursor-default items-center justify-center py-2xs">
+    <SelectPrimitive.ScrollDownButton data-slot="select-scroll-down-button" className="flex cursor-default items-center justify-center py-2xs">
       <Chevron />
     </SelectPrimitive.ScrollDownButton>
   );
@@ -93,12 +94,13 @@ export function SelectContent({
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
+        data-slot="select-content"
         position="popper"
         sideOffset={4}
         className={cn(
           "z-10 max-h-(--radix-select-content-available-height) overflow-y-auto",
           "min-w-(--radix-select-trigger-width) origin-(--radix-select-content-transform-origin)",
-          "rounded-panel border border-edge-strong bg-surface p-2xs",
+          "rounded-panel border border-edge-strong bg-popover text-popover-foreground p-2xs",
           "[box-shadow:var(--shadow-raised)] animate-raise",
           className,
         )}
@@ -119,6 +121,7 @@ export function SelectItem({
 }: ComponentProps<typeof SelectPrimitive.Item>) {
   return (
     <SelectPrimitive.Item
+      data-slot="select-item"
       className={cn(
         "flex cursor-default select-none items-center justify-between gap-lg rounded-sm px-lg py-sm",
         "text-ui outline-none data-[highlighted]:bg-fill-hover",

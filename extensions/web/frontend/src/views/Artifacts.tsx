@@ -393,13 +393,13 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
         ) : null
       }
     >
-      <div className="font-mono text-small opacity-(--muted)">{meta}</div>
+      <div className="font-mono text-small opacity-(--opacity-muted)">{meta}</div>
       {isImage(entry) ? (
         <FullImage entry={entry} />
       ) : isTextMedia(entry.media_type) ? (
         <ArtifactText url={entry.url} name={entry.filename} mediaType={entry.media_type} />
       ) : (
-        <div className="font-mono text-small opacity-(--muted)">
+        <div className="font-mono text-small opacity-(--opacity-muted)">
           No preview for this file type. Download it to open it.
         </div>
       )}
@@ -411,7 +411,7 @@ function FullImage({ entry }: { entry: Artifact }) {
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
-      <div className="font-mono text-small opacity-(--muted)">
+      <div className="font-mono text-small opacity-(--opacity-muted)">
         The image did not load. Its link may have expired — reload the listing.
       </div>
     );

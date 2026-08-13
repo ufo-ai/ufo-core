@@ -85,7 +85,7 @@ test("a busy control reads as working, and still reads as working without motion
   const classes = screen.getByRole("button", { name: "Add member" }).className;
   expect(classes).toContain("animate-working");
   expect(classes).toContain("motion-reduce:animate-none");
-  expect(classes).toContain("opacity-(--muted)");
+  expect(classes).toContain("opacity-(--opacity-muted)");
 });
 
 test("a control that is not busy carries no busy marking", () => {

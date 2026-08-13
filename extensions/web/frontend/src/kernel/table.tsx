@@ -44,7 +44,7 @@ function Head({ column, sort }: { column: Column; sort?: Sort }) {
         onClick={() => sort.onSort(column.sort)}
         className={cn(
           "flex items-center gap-2xs border-0 bg-transparent p-0 text-left font-inherit text-inherit",
-          "transition-[opacity] duration-100 ease-control hover:opacity-(--muted-faint)",
+          "transition-[opacity] duration-100 ease-control hover:opacity-(--opacity-muted-faint)",
         )}
       >
         {column.label}

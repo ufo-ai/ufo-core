@@ -196,7 +196,35 @@ test("the brand faces are bundled and carry the chrome as well as the code", () 
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain('--font-sans:"RobotoMono"');
   expect(css).toContain('--font-mono:"RobotoMono"');
+  expect(css).toContain('--font-display:"Canela"');
   expect(/@font-face\{font-family:RobotoMono;src:url\(\/surface\/web\/static\/assets\/RobotoMono-[^)]+\.ttf\)/.test(css)).toBe(true);
+  expect(/@font-face\{font-family:Canela;src:url\(\/surface\/web\/static\/assets\/Canela-[^)]+\.otf\)/.test(css)).toBe(true);
+});
+
+test("the shadcn contract carries the brand theme", () => {
+  const css = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8").replace(
+    /\s+/g,
+    "",
+  );
+  for (const token of [
+    "background",
+    "foreground",
+    "card",
+    "popover",
+    "primary",
+    "secondary",
+    "muted",
+    "accent",
+    "destructive",
+    "border",
+    "input",
+    "ring",
+    "sidebar",
+  ]) {
+    expect(css).toContain(`--color-${token}:var(--${token})`);
+  }
+  expect(css).toContain("--radius:0.25rem");
+  expect(css).toContain("--accent:var(--sand-100)");
 });
 
 test("text is smoothed and wrapped, and headings balance", () => {
@@ -209,7 +237,7 @@ test("text is smoothed and wrapped, and headings balance", () => {
 test("a control answers the pointer, and reduced motion cuts the answer short", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain("active\\:scale-\\[0\\.96\\]:active{scale:.96}");
-  expect(css).toContain("--color-ink-hover:color-mix(insrgb,var(--foreground)88%,transparent)");
+  expect(css).toContain(".bg-primary{background-color:var(--primary)}");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*transition-duration:\.01ms!important/.test(css)).toBe(
     true,
   );
@@ -275,6 +303,7 @@ test("the wordmark is the drawn ufo mark in the sidebar", async () => {
 
   const brand = await screen.findByRole("img", { name: "ufo" });
   expect(brand.getAttribute("class")).not.toContain("tracking");
+  expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
 });
 
 test("a field shows the member that it is disabled, or that they left it invalid", () => {
@@ -287,6 +316,6 @@ test("a field shows the member that it is disabled, or that they left it invalid
 
 test("a placeholder is muted rather than mistaken for a value", () => {
   expect(builtStyles().replace(/\s+/g, "")).toContain(
-    ".placeholder\\:opacity-\\(--muted\\)::placeholder{opacity:var(--muted)}",
+    ".placeholder\\:opacity-\\(--opacity-muted\\)::placeholder{opacity:var(--opacity-muted)}",
   );
 });

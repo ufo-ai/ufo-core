@@ -11,7 +11,7 @@ export type Fact = { label: string; value: ReactNode };
  *  one unbroken word, and a fact the member came to read is never cut to fit the card. */
 export function Facts({ rows }: { rows: Fact[] }) {
   return (
-    <dl className="m-0 rounded-panel border border-edge bg-surface">
+    <dl data-slot="facts" className="m-0 rounded-panel border border-edge bg-card text-card-foreground">
       {rows.map((row, index) => (
         <div
           key={row.label}
@@ -20,7 +20,7 @@ export function Facts({ rows }: { rows: Fact[] }) {
             index && "border-t border-edge-soft",
           )}
         >
-          <dt className="w-(--size-fact) shrink-0 text-small font-strong opacity-(--muted)">
+          <dt className="w-(--size-fact) shrink-0 text-small font-strong opacity-(--opacity-muted)">
             {row.label}
           </dt>
           <dd className="m-0 min-w-0 flex-1 break-words">{row.value}</dd>

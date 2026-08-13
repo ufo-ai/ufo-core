@@ -517,7 +517,7 @@ export function ObjectDetail({
           Back
         </Button>
         <h2 className="m-0 text-title font-strong">{name}</h2>
-        <span className="opacity-(--muted-strong)">{noun(kind)}</span>
+        <span className="opacity-(--opacity-muted-strong)">{noun(kind)}</span>
       </div>
       <Panel state={state} shape="form">
         {(payload) => (
@@ -570,10 +570,10 @@ export function ObjectDetail({
                   ))}
                 </ul>
               ) : (
-                <p className="m-0 opacity-(--muted)">Nothing links out of this one.</p>
+                <p className="m-0 opacity-(--opacity-muted)">Nothing links out of this one.</p>
               )}
             </Section>
-            <div className="mb-2xl text-small opacity-(--muted-strong)">
+            <div className="mb-2xl text-small opacity-(--opacity-muted-strong)">
               {[
                 payload.created_at ? "Created " + day(payload.created_at) : null,
                 payload.updated_at ? "Updated " + day(payload.updated_at) : null,

@@ -132,7 +132,7 @@ export function Panel<T>({
 
 function Empty({ className, children }: { className?: string; children: ReactNode }) {
   return (
-    <div className={cn("m-auto max-w-empty text-center opacity-(--muted-soft)", className)}>
+    <div className={cn("m-auto max-w-empty text-center opacity-(--opacity-muted-soft)", className)}>
       {children}
     </div>
   );
@@ -151,7 +151,7 @@ export function PanelEmpty({ children }: { children: ReactNode }) {
 export function PanelBlank({ body, action }: { body: string; action?: ReactNode }) {
   return (
     <div className="rounded-panel border border-edge bg-surface px-xl py-4xl text-center">
-      <p className="m-0 mx-auto max-w-hint opacity-(--muted-soft)">{body}</p>
+      <p className="m-0 mx-auto max-w-hint opacity-(--opacity-muted-soft)">{body}</p>
       {action ? <div className="mt-lg">{action}</div> : null}
     </div>
   );
@@ -212,9 +212,9 @@ export function Section({
       {title || note ? (
         <div className="flex flex-col gap-xs">
           {title ? (
-            <h2 className="m-0 text-body font-strong opacity-(--muted-soft)">{title}</h2>
+            <h2 className="m-0 text-body font-strong opacity-(--opacity-muted-soft)">{title}</h2>
           ) : null}
-          {note ? <p className="m-0 text-small opacity-(--muted-soft)">{note}</p> : null}
+          {note ? <p className="m-0 text-small opacity-(--opacity-muted-soft)">{note}</p> : null}
         </div>
       ) : null}
       {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}

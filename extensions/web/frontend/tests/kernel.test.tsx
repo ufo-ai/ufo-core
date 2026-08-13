@@ -410,7 +410,7 @@ test("a table is a bordered card, and its last row meets the card edge alone", (
     </Table>,
   );
   const card = screen.getByRole("table").parentElement;
-  expect(card?.className).toContain("bg-surface");
+  expect(card?.className).toContain("bg-card");
   expect(card?.className).toContain("border-edge");
   expect(card?.className).toContain("rounded-panel");
   const cell = screen.getByRole("cell", { name: "lead@example.com" });

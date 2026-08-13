@@ -16,7 +16,7 @@ surface outside this system.
 | No `dark:` variant — `color-scheme` carries the scheme | `gates.py` `_portal_style_failures` |
 | Every colour resolves through the brand palette ramps | `theme.test.tsx` |
 | Reduced motion, `100dvh` + safe-area insets, table overflow | `theme.test.tsx` |
-| Wordmark is the drawn ufo mark, an inline SVG labelled `ufo` | `theme.test.tsx` |
+| Wordmark is the supplied brand SVG, labelled `ufo` | `theme.test.tsx` |
 | Hash grammar, place keys, push/replace/back history | `route.ts` types + `urlstate.test.tsx` |
 | A workspace tab or a section without a view is a compile error | `registry.tsx` totality |
 | Only the field primitives draw a field surface (`bg-field`) | `theme.test.tsx` |
@@ -26,10 +26,12 @@ surface outside this system.
 ## Tokens
 
 `theme.css` is the one token source. Tokens are named by role, never by appearance: colours
-(`surface`, `ink`, `edge`, `fill`, `attention`), spacing (`hair`…`6xl`), type (`mono`…`title`),
-radius (`sm`, `control`, `panel`, `bubble`), containers (`max-w-control`, `max-w-form`, …). A new
-value is a new token in `theme.css`, consumed as its utility or as `var(--…)` — the gate refuses
-the inline alternative. A role-named spacing or radius is declared twice: in `theme.css`, and to
+use the shadcn component contract (`background`, `card`, `primary`, `muted`, `accent`,
+`destructive`, `border`, `ring`, `sidebar`) and portal roles (`surface`, `ink`, `edge`, `fill`,
+`attention`). Spacing (`hair`…`6xl`), type (`mono`…`title`), radius (`sm`, `control`, `panel`,
+`bubble`), and containers (`max-w-control`, `max-w-form`, …) live there too. A new value is a new
+token in `theme.css`, consumed as its utility or as `var(--…)` — the gate refuses the inline
+alternative. A role-named spacing or radius is declared twice: in `theme.css`, and to
 `cn` (`lib/cn.ts`), because tailwind-merge cannot see that `rounded-panel` is a radius or `px-3xl` a
 padding unless it is told the names — untold, it keeps both sides of a conflict and lets the cascade
 decide, which makes every override a view passes in `className` silently positional.
@@ -38,16 +40,15 @@ Under the roles sits the brand palette from `metalcraftai/ufo-brand-demo`: six r
 `signal`, `sand`, `ember`, `heat`, `sage` — of twelve steps on one matched-lightness ladder, so
 contrast is a function of step distance rather than hue (distance ≥ 6 is AA body text, ≥ 5 is AA
 large text and UI). A ramp step is the only place a colour is written down, and every role
-composites from `--background` and `--foreground`, the two anchors a mode sets. A mode is those
-anchors and the four hue-carrying steps beside them (`--card`, `--primary`, `--sidebar`,
-`--brand-accent`) under `@media (prefers-color-scheme: dark)`: there is no `.dark` class and no
-`dark:` variant, so a scheme is nine declarations and a role never states a mode of its own.
+composites from `--background` and `--foreground`, the two anchors a mode sets. The remaining
+shadcn slots bind to ramp steps under `@media (prefers-color-scheme: dark)`: there is no `.dark`
+class and no `dark:` variant.
 
 Type is the brand's Roboto Mono, bundled under `src/assets/fonts` and declared once in `theme.css`.
 `--font-sans` and `--font-mono` name the same family, so `font-mono` separates a value from its
 label by size and weight rather than by face; the two tokens stay apart because the choice is the
-brand's to change, not a view's. The brand's display face (Canela) has no consumer here — the
-largest step is `--text-title` (18px) and display type belongs to the landing page.
+brand's to change, not a view's. Canela Light carries headings and Canela Regular carries card
+names.
 
 ## Navigation
 
@@ -138,7 +139,7 @@ spoke it, a conversation held by an agent other than the main one names that age
 conversation from another surface names its origin. The speaker is the same cut a conversation row
 takes (`speakerName`) — one conversation is named one way on every surface. The
 group label is the smaller, muted type
-(`text-label font-medium opacity-(--muted)`) so the eye reads titles first and the labels as
+(`text-label font-medium opacity-(--opacity-muted)`) so the eye reads titles first and the labels as
 the scaffolding between them.
 
 Tabs are `kernel/tabs.tsx` — `TabStrip` and `TabPanel`, always as a pair, sharing one `group`
@@ -441,7 +442,7 @@ bubbles stay unlabelled, because the exception is what gets labelled.
 
 The composer stays live while a turn runs, because a message sent then joins that running turn
 rather than queueing behind it. The member's bubble states the wait in its own words — the message
-text set italic and muted (`opacity-(--muted)`), no copy added beneath it — and the words take their
+text set italic and muted (`opacity-(--opacity-muted)`), no copy added beneath it — and the words take their
 weight back on the turn saying it took that message up, never on the next frame to arrive. A message
 still waiting is drawn last, under the reply streaming above it and over the composer: the turn
 answers what it is already inside before it takes up the next thing, so that is the order the drain
@@ -860,7 +861,7 @@ glyph inside a record — the cross that takes an attachment back off its chip �
 record and takes its measure, never the circle.
 
 Every control answers the pointer the same way: a hover fill (`hover:bg-fill-hover`, or
-`hover:bg-ink-hover` on `send`), `active:scale-[0.96]`, over 100ms on `ease-control`. Reduced
+reduced opacity on `send`), `active:scale-[0.96]`, over 100ms on `ease-control`. Reduced
 motion cuts the transition, and the global `:focus-visible` outline is the only focus ring. A
 disabled control is dimmed to `--disabled` and takes `pointer-events-none`, so it never answers a
 hover it cannot honour — both live on the shared base, never on a variant, so no variant can drift
@@ -950,7 +951,7 @@ in two, which `all={false}` states and which then draws no tab standing for ever
 Selection is drawn in colour and surface, never in weight — neither here nor on the `TabStrip`
 above. Bolding the active tab remeasures its text, so every tab after it slides sideways as the
 member moves along the strip and the strip they are aiming at is not where they saw it. The
-sliding pill and full opacity against `--muted-soft` say the same thing at a fixed width. The section bar
+sliding pill and full opacity against `--opacity-muted-soft` say the same thing at a fixed width. The section bar
 stretches its controls
 (`items-stretch`), so the search and the tablist share one height instead of three. A
 search box carries no button beside it, whether it narrows what is loaded or asks the server: the
@@ -971,27 +972,23 @@ and without colour.
 
 An act already in flight takes `Button busy`. It sets `aria-disabled` rather than `disabled`, so
 the button stays in the accessibility tree and the keyboard keeps its place across the submit; the
-handler guards the act instead. `animate-working` pulses it and `opacity-(--muted)` states the same
+handler guards the act instead. `animate-working` pulses it and `opacity-(--opacity-muted)` states the same
 thing under `motion-reduce`. `disabled` remains the shape for an act the member may not take at
 all.
 
-Nested radii are concentric: outer radius = inner radius + padding. `--radius-card` (28px) is
-`--radius-panel` plus `p-4xl`, which is why the sign-in card and the button inside it agree.
+The brand base radius is `0.25rem`. Each portal radius role resolves from that one shadcn token.
+`components.json` keeps the CLI, aliases, token mode, and icon library explicit. Primitives carry
+`data-slot`, as the Tailwind v4 component contract requires.
 
-Four divergences from shadcn/ui are deliberate. shadcn now distributes its visual rules as
-`cn-*` classes resolved by an installed stylesheet, across a base × style matrix; the portal has
-one theme and no `components.json`, so it takes the conventions and not the distribution.
+Two divergences from shadcn/ui are deliberate.
 
 | Divergence | Why |
 |---|---|
 | A destructive act confirms in place, not in an `AlertDialog` | The confirm guards the slip; the audited intent lane guards the act |
 | One global `:focus-visible` outline, not a per-control `ring-3` + `border-ring` | One ring cannot drift out of step with another |
-| Radii and spacing named by role, not derived from one `--radius` by a numeric ladder | A role survives a redesign; a rung does not |
-| No `data-slot` on the primitives | shadcn's style CSS selects on them; nothing here would read them, and the gate forbids the selector that would |
 
-The portal draws no destructive colour. The palette carries a destructive ramp (`heat`) and a
-confirm ramp (`sage`), and no role consumes either — the confirm guards the slip and the audited
-intent lane guards the act, so a red act would state a danger the flow does not have. `attention`
+The shadcn contract binds destructive to `heat` and success to `sage`. Member acts do not use those
+roles — the confirm guards the slip and the audited intent lane guards the act. `attention`
 (`ember`, the brand's signal gold) carries every wrong-state signal instead, and stays under the
 brand's ceiling of about 2% of a screen because only a notice and a removed diff line take it.
 

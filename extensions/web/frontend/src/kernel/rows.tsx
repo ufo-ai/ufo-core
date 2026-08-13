@@ -54,7 +54,7 @@ export function RowLines<Row>({
             {when ? (
               <div
                 data-part="when"
-                className="whitespace-nowrap font-mono text-small tabular-nums opacity-(--muted)"
+                className="whitespace-nowrap font-mono text-small tabular-nums opacity-(--opacity-muted)"
               >
                 {when(row)}
               </div>
@@ -71,7 +71,7 @@ function MetaLine({ parts }: { parts: ReactNode[] }) {
   const shown = parts.filter((entry) => entry !== null && entry !== undefined && entry !== "");
   if (!shown.length) return null;
   return (
-    <div data-part="meta" className="truncate text-small opacity-(--muted)">
+    <div data-part="meta" className="truncate text-small opacity-(--opacity-muted)">
       {shown.map((entry, index) => (
         <span key={index}>
           {index ? " · " : ""}

@@ -195,13 +195,13 @@ export function Chat({
           </Handoff>
         ) : null}
         {stalled ? (
-          <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
+          <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">
             <p>{stalled.title}</p>
             {stalled.description ? <p>{stalled.description}</p> : null}
           </div>
         ) : null}
         {showEmpty ? (
-          <div className="m-auto max-w-empty text-center opacity-(--muted-soft)">
+          <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">
             {conversationId === null
               ? "Message " + agent.name + " to start."
               : "No messages in this conversation yet."}

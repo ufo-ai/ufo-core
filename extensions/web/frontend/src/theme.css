@@ -18,6 +18,22 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Canela";
+  src: url("./assets/fonts/Canela-Light-Cy-Gr.otf") format("opentype");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Canela";
+  src: url("./assets/fonts/Canela-Regular-Cy-Gr.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* The brand palette: six ramps on one matched-lightness ladder, so contrast is a function of step
  * distance, not hue — distance >= 6 is AA body text, >= 5 is AA large text and UI. Every colour
  * the portal paints is one of these steps or a composite of two; nothing else names a colour. */
@@ -111,11 +127,41 @@
   --foreground: var(--void-900);
   --card: var(--paper);
   --card-foreground: var(--void-900);
+  --popover: var(--paper);
+  --popover-foreground: var(--void-900);
   --primary: var(--signal-600);
+  --primary-foreground: var(--sand-25);
+  --secondary: var(--signal-50);
+  --secondary-foreground: var(--signal-800);
+  --muted: var(--sand-100);
+  --muted-foreground: var(--void-700);
+  --accent: var(--sand-100);
+  --accent-foreground: var(--foreground);
+  --destructive: var(--heat-600);
+  --destructive-foreground: var(--heat-25);
+  --success: var(--sage-600);
+  --success-foreground: var(--sage-25);
+  --warning: var(--ember-700);
+  --warning-foreground: var(--ember-25);
+  --border: var(--sand-100);
+  --input: var(--sand-100);
   --ring: var(--signal-500);
+  --chart-1: var(--signal-500);
+  --chart-2: var(--ember-400);
+  --chart-3: var(--signal-700);
+  --chart-4: var(--sage-400);
+  --chart-5: var(--heat-400);
   --sidebar: var(--sand-100);
+  --sidebar-foreground: var(--void-900);
+  --sidebar-primary: var(--signal-600);
+  --sidebar-primary-foreground: var(--sand-25);
+  --sidebar-accent: var(--sand-200);
+  --sidebar-accent-foreground: var(--void-900);
+  --sidebar-border: var(--sand-200);
+  --sidebar-ring: var(--signal-500);
   --brand-accent: var(--ember-100);
   --brand-accent-foreground: var(--ember-800);
+  --radius: 0.25rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -124,12 +170,80 @@
     --foreground: var(--sand-50);
     --card: var(--void-900);
     --card-foreground: var(--sand-50);
+    --popover: var(--void-900);
+    --popover-foreground: var(--sand-50);
     --primary: var(--signal-400);
+    --primary-foreground: var(--void-950);
+    --secondary: var(--signal-800);
+    --secondary-foreground: var(--signal-100);
+    --muted: var(--void-800);
+    --muted-foreground: var(--void-300);
+    --accent: var(--void-800);
+    --accent-foreground: var(--foreground);
+    --destructive: var(--heat-300);
+    --destructive-foreground: var(--heat-950);
+    --success: var(--sage-300);
+    --success-foreground: var(--sage-950);
+    --warning: var(--ember-200);
+    --warning-foreground: var(--ember-900);
+    --border: var(--void-800);
+    --input: var(--void-800);
     --ring: var(--signal-400);
+    --chart-1: var(--signal-400);
+    --chart-2: var(--ember-200);
+    --chart-3: var(--signal-200);
+    --chart-4: var(--sage-300);
+    --chart-5: var(--heat-300);
     --sidebar: var(--void-900);
+    --sidebar-foreground: var(--sand-50);
+    --sidebar-primary: var(--signal-400);
+    --sidebar-primary-foreground: var(--void-950);
+    --sidebar-accent: var(--void-800);
+    --sidebar-accent-foreground: var(--sand-50);
+    --sidebar-border: var(--void-800);
+    --sidebar-ring: var(--signal-400);
     --brand-accent: var(--ember-200);
     --brand-accent-foreground: var(--ember-900);
   }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
 }
 
 @theme {
@@ -146,8 +260,6 @@
   --color-edge-control-strong: color-mix(in srgb, var(--foreground) 35%, transparent);
 
   --color-link: var(--primary);
-
-  --color-ink-hover: color-mix(in srgb, var(--foreground) 88%, transparent);
 
   --color-fill-subtle: color-mix(in srgb, var(--foreground) 5%, transparent);
   --color-fill-hover: color-mix(in srgb, var(--foreground) 8%, transparent);
@@ -182,10 +294,10 @@
     }
   }
 
-  --muted: 0.6;
-  --muted-strong: 0.5;
-  --muted-soft: 0.7;
-  --muted-faint: 0.75;
+  --opacity-muted: 0.6;
+  --opacity-muted-strong: 0.5;
+  --opacity-muted-soft: 0.7;
+  --opacity-muted-faint: 0.75;
   --disabled: 0.4;
 
   --spacing-hair: 2px;
@@ -201,15 +313,16 @@
   --spacing-5xl: 22px;
   --spacing-6xl: 40px;
 
-  --radius-sm: 4px;
-  --radius-control: 6px;
-  --radius-panel: 8px;
-  --radius-bubble: 12px;
-  --radius-menu: 16px;
-  --radius-card: 28px;
+  --radius-sm: var(--radius);
+  --radius-control: var(--radius);
+  --radius-panel: var(--radius);
+  --radius-bubble: var(--radius);
+  --radius-menu: var(--radius);
+  --radius-card: var(--radius);
 
   --font-sans: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Canela", Georgia, "Times New Roman", serif;
 
   --text-mono: 11px;
   --text-small: 12px;
@@ -256,7 +369,8 @@
   --size-row: 32px;
   --size-textarea: 12em;
   --size-usage-chart: 10em;
-  --size-wordmark: 13px;
+  --size-wordmark: 18px;
+  --size-logo: 72px;
   --size-notice: 1em;
   --marker-width: 2px;
 }
@@ -268,13 +382,6 @@
    or scale reaches the page. A key left unnamed compiles Tailwind's own default, which is a literal
    colour the zero-authored-colour test refuses, so every key they use is answered. */
 @theme {
-  --color-background: var(--color-surface);
-  --color-foreground: var(--color-ink);
-  --color-muted: var(--color-fill-subtle);
-  --color-muted-foreground: color-mix(in srgb, CanvasText 55%, Canvas);
-  --color-primary: var(--color-ink);
-  --color-primary-foreground: var(--color-surface);
-  --color-border: var(--color-edge);
   --color-black: CanvasText;
   --color-red-50: var(--color-fill-subtle);
   --color-red-100: var(--color-fill-subtle);
@@ -347,6 +454,8 @@
   h1,
   h2,
   h3 {
+    font-family: var(--font-display);
+    font-weight: 300;
     text-wrap: balance;
   }
 

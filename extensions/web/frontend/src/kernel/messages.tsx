@@ -60,7 +60,7 @@ export function MessageLog({
     ) : (
       <Speech key={index} mine={message.role === "user"}>
         {message.role === "user" && message.speaker ? (
-          <div className="text-label font-medium opacity-(--muted)">
+          <div className="text-label font-medium opacity-(--opacity-muted)">
             {speakerName(message.speaker)}
           </div>
         ) : null}
@@ -74,7 +74,7 @@ export function MessageLog({
         {message.role !== "user" ? (
           <Markdown text={message.text} />
         ) : message.arrival_id ? (
-          <span className="italic opacity-(--muted)">{message.text}</span>
+          <span className="italic opacity-(--opacity-muted)">{message.text}</span>
         ) : (
           message.text
         )}
@@ -138,7 +138,7 @@ function Speech({
 
 export function Meta({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--muted)">
+    <div className="mt-2xs font-mono text-small tabular-nums opacity-(--opacity-muted)">
       {children}
     </div>
   );
@@ -146,7 +146,7 @@ export function Meta({ children }: { children: ReactNode }) {
 
 function Working({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--muted)">
+    <div className="mt-2xs flex items-center gap-sm font-mono text-small opacity-(--opacity-muted)">
       <span aria-hidden className={PULSE} />
       {children}
     </div>
@@ -170,7 +170,7 @@ function Activity({
   }
   return (
     <details
-      className="mt-2xs font-mono text-small opacity-(--muted)"
+      className="mt-2xs font-mono text-small opacity-(--opacity-muted)"
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className="cursor-pointer">
