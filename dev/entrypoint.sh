@@ -10,6 +10,7 @@ set -euo pipefail
 PG_HOST="${PG_HOST:-postgres:5432}"
 APP_DB="${APP_DB:-ufo}"
 DEV_PACK="${UFO_DEV_PACK:-assistant}"
+PUBLIC_BASE_URL="${UFO_PUBLIC_BASE_URL:-http://localhost:8710}"
 RENDERED_CONFIG="/tmp/ufo.toml"
 
 render_config() {
@@ -20,6 +21,7 @@ print(serve_dsn("${PG_HOST}", "${APP_DB}"))
 PY
 )"
   sed -e "s#__SERVE_DSN__#${dsn}#g" -e "s#__PACK__#${DEV_PACK}#g" \
+    -e "s#__PUBLIC_BASE_URL__#${PUBLIC_BASE_URL}#g" \
     /app/dev/ufo.toml > "$RENDERED_CONFIG"
   export UFO_CONFIG="$RENDERED_CONFIG"
   export UFO_CONTROL_SERVE_DSN="$dsn"

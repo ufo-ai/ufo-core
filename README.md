@@ -37,22 +37,23 @@ sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 
 ```bash
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
-make stack                     # builds the portal, then docker compose up
+make stack STACK=1             # http://ufo-1.localhost:18080/login
+make stack STACK=2             # http://ufo-2.localhost:18180/login
 ```
 
 One image (`dev/Dockerfile`, the whole workspace via uv) runs as four roles (`dev/entrypoint.sh`):
 `init` migrates, shapes the `ufo_control` gateway ledgers (`ufo-control migrate`), and runs
 `rls-bootstrap` (the `ufo_serve` role + RLS policies);
-`gateway` serves `/login` on :8080 with the code emailed to the log (`UFO_CONTROL_EMAIL_MODE=console`
-— read it from `docker compose logs gateway`); `serve` runs the shared fleet on :8710 over the
+`gateway` serves `/login` on the selected host port with the code emailed to the log
+(`UFO_CONTROL_EMAIL_MODE=console` — read it with `make stack-logs STACK=N`); `serve` runs the shared fleet on :8710 over the
 `assistant` pack with local backends (filesystem blobs, in-process hub, the built-in `local` sandbox
-carrier). Sign in at `http://localhost:8080/login` with a work email and the code from the gateway
-log (local signup needs no invite — `UFO_INVITE_REQUIRED=false`), then open your workspace from the
-signed-in card, which posts the bearer to `http://localhost:8710/surface/web` and lands the session
-cookie; `http://localhost:8710/` redirects there too, and back to the sign-in page without a
-session. The portal is built by npm and not tracked in git, which is why `make stack` builds it
-first; reach for `docker compose up` directly and the portal route fails with the command in the
-serve log. Host ports override via
+carrier). `STACK` accepts 1 through 5. Each slot has its own Compose project, image, network,
+volumes, ports, and `ufo-N.localhost` browser origin. The origin keeps session cookies separate.
+Slot 1 uses gateway :18080, serve :18710, Postgres :15541, and Redis :15543. Each next slot adds 100
+to each port. Use `make stack-logs STACK=N` for its sign-in code. Stop it with
+`make stack-down STACK=N`. The portal is built by npm and not tracked in git, which is why `make
+stack` builds it first; reach for `docker compose up` directly and the portal route fails with the
+command in the serve log. Host ports override via
 `UFO_PG_PORT` / `UFO_GATEWAY_PORT_HOST` /
 `UFO_SERVE_PORT_HOST` / `UFO_REDIS_PORT`, and `UFO_DEV_PACK` selects the pack the serve config names
 (`assistant_billing` adds Metronome, so the owner's billing choice can be driven locally — see

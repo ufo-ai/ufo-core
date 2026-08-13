@@ -44,4 +44,4 @@ workspace_root = "/data/workspaces"
 # Where a provider sends the member's browser back after consent. The browser is on the host, which
 # reaches this container's serve on the published port.
 [connect]
-public_base_url = "http://localhost:8710"
+public_base_url = "__PUBLIC_BASE_URL__"

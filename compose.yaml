@@ -52,11 +52,11 @@ services:
 
   init:
     build: {context: ., dockerfile: dev/Dockerfile}
-    image: ufo-dev
+    image: ${UFO_DEV_IMAGE:-ufo-dev}
     command: ["init"]
     environment:
       <<: *dev-env
-      UFO_PUBLIC_BASE_URL: http://localhost:8080
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
     volumes:
       - ./dev:/app/dev:ro
     depends_on:
@@ -65,7 +65,7 @@ services:
     restart: "no"
 
   gateway:
-    image: ufo-dev
+    image: ${UFO_DEV_IMAGE:-ufo-dev}
     command: ["gateway"]
     environment:
       <<: *dev-env
@@ -74,8 +74,8 @@ services:
       # Dev onboarding writes workspaces through the owner role (RLS is a serve-side concern); the
       # hosted gateway uses the RLS-subject ufo_serve role here.
       UFO_CONTROL_SERVE_DSN: postgresql+asyncpg://ufo:ufo@postgres:5432/ufo
-      UFO_PUBLIC_BASE_URL: http://localhost:8080
-      UFO_WORKSPACE_BASE_URL: http://localhost:8710
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
+      UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
       # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
       # `docker compose up` needs nothing. Browser and terminal both collect the email on the
       # gateway's own pages; in console mode the Continue-with-Google hop lands on a local form
@@ -87,7 +87,7 @@ services:
       WORKOS_MODE: ${WORKOS_MODE:-console}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
-      WORKOS_REDIRECT_URI: http://localhost:8080/v1/onboard/auth/callback
+      WORKOS_REDIRECT_URI: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}/v1/onboard/auth/callback
       # Local signup opens without an invite; the hosted gateway leaves this unset (required).
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"
@@ -101,13 +101,14 @@ services:
     restart: unless-stopped
 
   serve:
-    image: ufo-dev
+    image: ${UFO_DEV_IMAGE:-ufo-dev}
     command: ["serve"]
     environment:
       <<: *dev-env
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
       UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
       AWS_REGION: us-east-1
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo

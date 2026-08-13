@@ -5,8 +5,27 @@ DEBUGGER := extensions/debugger/frontend
 EMAIL ?= $(shell git config user.email)
 T ?=
 FILE ?=
+STACK ?= 1
+STACKS := 1 2 3 4 5
 
-.PHONY: help install reinstall build init serve chat portal stack stack-down db \
+ifeq ($(filter $(STACK),$(STACKS)),)
+$(error STACK must be one of: $(STACKS))
+endif
+
+STACK_OFFSET := $(shell expr \( $(STACK) - 1 \) \* 100)
+STACK_NAME := ufo-$(STACK)
+STACK_HOST := $(STACK_NAME).localhost
+UFO_PG_PORT ?= $(shell expr 15541 + $(STACK_OFFSET))
+UFO_REDIS_PORT ?= $(shell expr 15543 + $(STACK_OFFSET))
+UFO_GATEWAY_PORT_HOST ?= $(shell expr 18080 + $(STACK_OFFSET))
+UFO_SERVE_PORT_HOST ?= $(shell expr 18710 + $(STACK_OFFSET))
+STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
+	UFO_PG_PORT=$(UFO_PG_PORT) UFO_REDIS_PORT=$(UFO_REDIS_PORT) \
+	UFO_GATEWAY_PORT_HOST=$(UFO_GATEWAY_PORT_HOST) \
+	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST)
+COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
+
+.PHONY: help install reinstall build init serve chat portal stack stack-down stack-logs db \
 	check fmt test test-one test-control test-web test-integration
 
 help: ## List targets
@@ -45,13 +64,17 @@ chat: ## Talk to the agent; sessions persist across runs
 portal: ## Open the portal in a browser, signed in with this machine's CLI token
 	uv run ufoctl portal
 
-stack: build ## Bring up the hosted topology in Docker — gateway :8080, serve :8710
-	docker compose up
+stack: build ## Bring up stack 1-5 in Docker (STACK=1)
+	@echo "Gateway: http://$(STACK_HOST):$(UFO_GATEWAY_PORT_HOST)/login"
+	$(COMPOSE) up
 
-stack-down: ## Stop the hosted stack
-	docker compose down
+stack-down: ## Stop stack 1-5 (STACK=1)
+	$(COMPOSE) down
 
-db: ## Start only Postgres — the Postgres half of the test and eval matrix, on :5541
+stack-logs: ## Follow gateway logs for stack 1-5 (STACK=1)
+	$(COMPOSE) logs --follow gateway
+
+db: ## Start only Postgres for tests and evals on :5541
 	docker compose up -d postgres
 
 check: ## Run every static gate CI runs — ruff, gates.py, mypy, control
