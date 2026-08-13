@@ -32,3 +32,5 @@ ufo.db-*
 docs/superpowers/
 e2e-evidence.md
 workspaces/
+control/clientbin/*
+!control/clientbin/.gitkeep

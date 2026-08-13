@@ -8,6 +8,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const CA_CERT_FILE: &str = "egress-ca.pem";
 const CA_CERT_CONSUMERS: [&str; 4] = [
@@ -18,7 +21,6 @@ const CA_CERT_CONSUMERS: [&str; 4] = [
 ];
 const SPAWN_FAILED_CODE: i32 = 127;
 const EXIT_POLL: Duration = Duration::from_millis(20);
-const HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(serde::Deserialize)]
 struct Params {
@@ -28,7 +30,7 @@ struct Params {
 }
 
 /// Run the params' argv with its env overlaid, in `cwd`, group-killed at `timeout_s`, and answer
-/// the `{"exit_code", "stdout_hex", "stderr_hex"}` reply JSON. Output lands in workdir files, not
+/// the `{"exit_code", "stdout_b64", "stderr_b64"}` reply JSON. Output lands in workdir files, not
 /// pipes: a backgrounded child inheriting the streams must not hold the reply open after the
 /// command itself exits.
 pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<Vec<u8>, String> {
@@ -130,19 +132,10 @@ fn exit_code(status: ExitStatus) -> i32 {
 fn reply(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "exit_code": exit_code,
-        "stdout_hex": hex(stdout),
-        "stderr_hex": hex(stderr),
+        "stdout_b64": STANDARD.encode(stdout),
+        "stderr_b64": STANDARD.encode(stderr),
     }))
     .expect("exec reply serializes")
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = Vec::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize]);
-        out.push(HEX[(byte & 15) as usize]);
-    }
-    String::from_utf8(out).expect("hex is ascii")
 }
 
 #[cfg(test)]
@@ -160,11 +153,16 @@ mod tests {
         serde_json::from_slice(reply).unwrap()
     }
 
+    fn decoded(result: &serde_json::Value, key: &str) -> Vec<u8> {
+        STANDARD.decode(result[key].as_str().unwrap()).unwrap()
+    }
+
     #[test]
-    fn hex_is_lowercase_bytes() {
-        assert_eq!(hex(b"hi\n"), "68690a");
-        assert_eq!(hex(&[]), "");
-        assert_eq!(hex(&[0x00, 0xff]), "00ff");
+    fn reply_is_padded_standard_base64() {
+        let result = parsed(&reply(0, b"hi\n", &[0x00, 0xff]));
+        assert_eq!(result["stdout_b64"], "aGkK");
+        assert_eq!(result["stderr_b64"], "AP8=");
+        assert_eq!(parsed(&reply(0, &[], &[]))["stdout_b64"], "");
     }
 
     #[cfg(unix)]
@@ -179,8 +177,8 @@ mod tests {
         .unwrap();
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 0);
-        assert_eq!(result["stdout_hex"], "68690a");
-        assert_eq!(result["stderr_hex"], "");
+        assert_eq!(decoded(&result, "stdout_b64"), b"hi\n");
+        assert_eq!(result["stderr_b64"], "");
     }
 
     #[cfg(unix)]
@@ -197,7 +195,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 0);
-        assert_eq!(result["stdout_hex"], hex(b"done\n"));
+        assert_eq!(decoded(&result, "stdout_b64"), b"done\n");
     }
 
     #[cfg(unix)]
@@ -227,7 +225,7 @@ mod tests {
         .unwrap();
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 127);
-        assert_ne!(result["stderr_hex"], "");
+        assert_ne!(result["stderr_b64"], "");
     }
 
     #[cfg(unix)]
@@ -242,7 +240,7 @@ mod tests {
         )
         .unwrap();
         let expected = format!("bar:{}", dir.display());
-        assert_eq!(parsed(&reply)["stdout_hex"], hex(expected.as_bytes()));
+        assert_eq!(decoded(&parsed(&reply), "stdout_b64"), expected.as_bytes());
     }
 
     #[cfg(unix)]
@@ -256,6 +254,6 @@ mod tests {
             30,
         )
         .unwrap();
-        assert_eq!(parsed(&reply)["stdout_hex"], hex(b"PEMDATAunset"));
+        assert_eq!(decoded(&parsed(&reply), "stdout_b64"), b"PEMDATAunset");
     }
 }

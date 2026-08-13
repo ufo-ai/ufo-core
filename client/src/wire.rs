@@ -285,6 +285,21 @@ impl Session {
             .collect())
     }
 
+    /// GET the served client binary for `target` from the gateway into `dest`.
+    pub fn fetch_client_binary(&self, target: &str, dest: &Path) -> Result<(), String> {
+        let url = format!(
+            "{}/ufo/bin/{target}",
+            self.gateway_url.trim_end_matches('/')
+        );
+        let response = opened(self.agent.get(&url).call())?;
+        let mut reader = response.into_reader();
+        let mut file = File::create(dest)
+            .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
+        std::io::copy(&mut reader, &mut file)
+            .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
+        Ok(())
+    }
+
     /// GET the staged bytes of an in-flight write op into `dest`.
     pub fn fetch_staged(&self, op_id: &str, dest: &Path) -> Result<(), String> {
         let workspace = self

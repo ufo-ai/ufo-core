@@ -1,7 +1,6 @@
 """The hosted onboarding server and shared-workspace resolver."""
 
 import asyncio
-import hashlib
 import logging
 import os
 import secrets
@@ -24,11 +23,10 @@ from starlette.responses import (
 )
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.surface import OPERATOR_EMAIL_DOMAIN
-from ufo.sandbox.terminal import client_program_bundle
 from ufo.sdk.http import set_session_cookie
 
 from ufo_control.gateway_claim import ClaimError, ClaimWorkflow, Verifier
-from ufo_control.gateway_directives import PROMPT, directive, first_run_install, render
+from ufo_control.gateway_directives import PROMPT, client_install, directive, render
 from ufo_control.gateway_email import (
     DEFAULT_PUBLIC_BASE_URL,
     PUBLIC_BASE_URL_ENV,
@@ -86,6 +84,7 @@ CLIENT_TARGETS = frozenset(
     {
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
+        "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
         "x86_64-pc-windows-msvc",
     }
@@ -98,7 +97,6 @@ GATEWAY_POOL_MIN_SIZE = 1
 GATEWAY_POOL_MAX_SIZE = 4
 
 _CLIENT_SCRIPT = Path(__file__).parent / "client" / "ufo"
-_PROGRAM_MARKER = "# ufo:programs"
 
 
 class _RequestInputError(ValueError):
@@ -106,11 +104,8 @@ class _RequestInputError(ValueError):
 
 
 def _stamp_script(text: str) -> str:
-    bundled = text.replace(_PROGRAM_MARKER, client_program_bundle(), 1)
-    version = hashlib.sha1(bundled.encode()).hexdigest()[:12]
     base_url = os.environ.get(PUBLIC_BASE_URL_ENV, DEFAULT_PUBLIC_BASE_URL)
-    stamped = bundled.replace("UFO_SCRIPT_VERSION=dev", f"UFO_SCRIPT_VERSION={version}", 1)
-    return stamped.replace(SCRIPT_URL_DEFAULT, f'UFO_URL="${{UFO_URL:-{base_url}}}"', 1)
+    return text.replace(SCRIPT_URL_DEFAULT, f'UFO_URL="${{UFO_URL:-{base_url}}}"', 1)
 
 
 STAMPED_SCRIPT = _stamp_script(_CLIENT_SCRIPT.read_text())
@@ -556,7 +551,7 @@ def gateway_app() -> FastAPI:
     async def onboard(channel: str, request: Request) -> Response:
         assert state is not None
         session = request.headers.get("x-ufo-session")
-        install = first_run_install(request.headers)
+        install = client_install(request.headers)
         if not session:
             return PlainTextResponse(
                 render(

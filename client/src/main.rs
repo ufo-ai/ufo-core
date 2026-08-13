@@ -69,13 +69,11 @@ fn main() {
         .to_str()
         .filter(|path| path.starts_with('/'))
         .map(String::from);
-    let installed = env::current_exe()
-        .map(|exe| exe.starts_with(home.bin()))
-        .unwrap_or(false);
+    let installed = config::installed(&home);
     let tty = std::io::stdout().is_terminal();
     let workdir = private_workdir().unwrap_or_else(|error| die(&error));
     let session = Session::new(
-        env_nonempty("UFO_URL").unwrap_or_else(|| GATEWAY_URL_DEFAULT.to_string()),
+        resolve_gateway(env_nonempty("UFO_URL"), home.gateway()),
         workspace_url,
         channel,
         token,
@@ -87,6 +85,7 @@ fn main() {
     #[cfg(unix)]
     interrupt::install();
     update_resume(&session, tty);
+    config::sweep_retired(&home);
     let mut client = Client {
         home,
         runtime: OpRuntime {
@@ -97,6 +96,7 @@ fn main() {
         session,
         tty,
         opened: false,
+        installed_this_run: false,
     };
     let code = client.run(message);
     process::exit(code);
@@ -180,6 +180,11 @@ fn private_workdir() -> Result<std::path::PathBuf, String> {
         "could not create a private working directory under {}",
         base.display()
     ))
+}
+
+fn resolve_gateway(env: Option<String>, stored: Option<String>) -> String {
+    env.or(stored)
+        .unwrap_or_else(|| GATEWAY_URL_DEFAULT.to_string())
 }
 
 fn resume_command(session: &Session) -> Option<String> {
@@ -280,6 +285,7 @@ struct Turn {
     poll_seconds: f64,
     op: Option<OpRequest>,
     exit_code: i32,
+    install: bool,
 }
 
 impl Default for Turn {
@@ -293,6 +299,7 @@ impl Default for Turn {
             poll_seconds: 1.0,
             op: None,
             exit_code: 0,
+            install: false,
         }
     }
 }
@@ -304,6 +311,7 @@ struct Client {
     session: Session,
     tty: bool,
     opened: bool,
+    installed_this_run: bool,
 }
 
 impl Client {
@@ -344,6 +352,9 @@ impl Client {
             }
             attempts = 0;
             self.fulfill_secrets(&turn.secrets);
+            if turn.install {
+                self.ensure_installed();
+            }
             body = match turn.next {
                 Next::End => return self.finish(0),
                 Next::Exit => return self.finish(turn.exit_code),
@@ -450,21 +461,14 @@ impl Client {
             }
             Directive::Workspace(url) => {
                 self.home.store_workspace(&url);
+                self.home.store_gateway(&self.session.gateway_url);
                 self.session.workspace_url = Some(url);
                 if self.session.channel == ONBOARDING_CHANNEL {
                     self.session.channel = random_channel();
                 }
                 update_resume(&self.session, self.tty);
             }
-            Directive::Install => match config::install_self(&self.home) {
-                Ok(installed) => {
-                    for line in installed.lines() {
-                        self.ui.note(line);
-                    }
-                    self.session.installed = true;
-                }
-                Err(error) => self.ui.note(&format!("install failed: {error}")),
-            },
+            Directive::Install => turn.install = true,
             Directive::Logout => {
                 self.home.clear_signin();
                 self.session.token = None;
@@ -475,6 +479,26 @@ impl Client {
                 turn.exit_code = code;
             }
             Directive::Unknown => {}
+        }
+    }
+
+    fn ensure_installed(&mut self) {
+        if self.installed_this_run {
+            return;
+        }
+        self.installed_this_run = true;
+        let session = &self.session;
+        let outcome = config::install_self(&self.home, |target, dest| {
+            session.fetch_client_binary(target, dest)
+        });
+        match outcome {
+            Ok(installed) => {
+                for line in installed.lines() {
+                    self.ui.note(line);
+                }
+                self.session.installed = true;
+            }
+            Err(error) => self.ui.note(&format!("Install failed: {error}")),
         }
     }
 
@@ -544,6 +568,18 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_resolution_prefers_env_then_stored_then_default() {
+        let env = Some("https://testing.example".to_string());
+        let stored = Some("https://stored.example".to_string());
+        assert_eq!(
+            resolve_gateway(env.clone(), stored.clone()),
+            "https://testing.example"
+        );
+        assert_eq!(resolve_gateway(None, stored), "https://stored.example");
+        assert_eq!(resolve_gateway(None, None), GATEWAY_URL_DEFAULT);
+    }
 
     #[test]
     fn private_workdirs_are_unique_and_private() {

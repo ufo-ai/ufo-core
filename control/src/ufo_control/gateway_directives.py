@@ -1,8 +1,10 @@
 """The server-driven directive wire rendered by the ufo terminal client."""
 
+import os
 from collections.abc import Mapping
 
 PROMPT = ">"
+CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 
 
 def directive(verb: str, *fields: str) -> bytes:
@@ -25,11 +27,14 @@ def header_value(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
-def first_run_install(headers: Mapping[str, str]) -> bytes:
-    """A fresh `curl | sh` (x-ufo-installed != "1") gets `install` prepended to its first screen:
-    the shell downloads itself into ~/.ufo/bin, adds it to PATH, then keeps rendering the same
-    session. The shell reports x-ufo-installed=1 once that binary exists, so the trigger
-    self-limits."""
-    if header_value(headers, "x-ufo-installed") == "1":
-        return b""
-    return directive("install")
+def client_install(headers: Mapping[str, str]) -> bytes:
+    """`install` prepended to the screen for a client that is not installed (a fresh `curl | sh`,
+    x-ufo-installed != "1") or one whose x-ufo-script version differs from the client this deploy
+    serves (`UFO_CLIENT_VERSION`, unset in local dev). The client installs or updates itself and
+    reports the served version afterwards, so the trigger self-limits."""
+    if header_value(headers, "x-ufo-installed") != "1":
+        return directive("install")
+    served = os.environ.get(CLIENT_VERSION_ENV, "")
+    if served and (header_value(headers, "x-ufo-script") or "").strip() != served:
+        return directive("install")
+    return b""

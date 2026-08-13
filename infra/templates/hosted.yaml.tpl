@@ -100,6 +100,8 @@ spec:
             # The workspace serve host the member's `ufo` surface talks to (has the `/surface` route),
             # distinct from the onboarding apex above — signed in, the member's turns go here.
             - {name: UFO_WORKSPACE_BASE_URL, value: "https://${shared_host}"}
+            # The terminal client version this deploy serves — a stale x-ufo-script gets `install`.
+            - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
             - {name: UFO_SES_REGION, value: "${ses_region}"}
             - name: UFO_CONTROL_POSTGRES_OWNER_DSN
@@ -196,6 +198,12 @@ spec:
                 port: {name: http}
           - path: /ufo
             pathType: Exact
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+          - path: /ufo/bin
+            pathType: Prefix
             backend:
               service:
                 name: ufo-gateway
@@ -604,6 +612,9 @@ spec:
           env:
             - {name: AWS_REGION, value: "${region}"}
             - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
+            # The terminal client version this deploy serves — the ufo surface tells a stale
+            # x-ufo-script to install.
+            - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             # The fleet's platform Fernet key (seals hosted credential rows) and artifact-delivery
             # secret — minted for the fleet, in the ufo-serve Secret.
             - name: UFO_CREDENTIAL_KEY

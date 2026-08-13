@@ -1,18 +1,18 @@
-"""The terminal-as-sandbox chain end to end, nothing doubled but the model.
+"""The terminal-as-sandbox chain end to end, nothing doubled but the model and the client binary.
 
-The shipped shell client (`control/src/ufo_control/client/ufo`) runs as a real subprocess against a
-real uvicorn serving the shared `ufo` surface over a real socket. Its message admits a real turn on
-the session DBOS worker; the StandIn model answers with one `bash` tool call; the turn's exec op
-rides the held stream back to the client as a `run` directive; the client executes it under real
-`osascript` in the directory it was launched from; the reply POST resolves the op and resumes the
-tail; the second model round streams the answer to the client's stdout. The proof is a file in the
-member's own directory, written by nothing but that chain.
+A wire driver speaking the client's exact protocol — the same headers, directives, op replies, and
+`since` cursor the Rust client sends — runs against a real uvicorn serving the shared `ufo` surface
+over a real socket. Its message admits a real turn on the session DBOS worker; the StandIn model
+answers with one `bash` tool call; the turn's exec op rides the held stream back as a `run`
+directive; the driver executes it as a subprocess in the directory it posted from and answers with
+the base64 reply the native client sends; the reply POST resolves the op and resumes the tail; the
+second model round streams the answer. The proof is a file in the member's own directory, written
+by nothing but that chain. The client binary's own half of the protocol is pinned by the crate's
+tests in `client/`.
 
-Headless drive: the client is started in its own session (no controlling tty), so `ask` falls to
-its stdin arm (`client:303-309`) and EOF after the answer is the clean exit. The terminal-op
-timeouts are tightened because the post-answer workspace-changes scan finds the member gone — by
-design it waits out the arrival grace and fails logged — and the drain in teardown must see the
-workflow settle inside its own 30s bound.
+The terminal-op timeouts are tightened because the post-answer workspace-changes scan finds the
+member gone — by design it waits out the arrival grace and fails logged — and the drain in
+teardown must see the workflow settle inside its own 30s bound.
 
 This runs the in-process transport. The cross-pod transport's equivalent — a turn admitted on the
 pod that does NOT hold the connection still landing the op on the member's machine — is proven at
@@ -22,6 +22,8 @@ pod's directory), because standing up two real serve instances with a load balan
 DBOS worker in a single test buys flakiness, not coverage the two-instance transport suite lacks."""
 
 import asyncio
+import base64
+import http.client
 import json
 import os
 import shutil
@@ -86,7 +88,6 @@ PROOF_FILENAME = "PROOF.txt"
 PROOF_CONTENT = b"hello"
 ANSWER_TEXT = "the proof file is written"
 CLIENT_TIMEOUT_SECONDS = 180
-CLIENT_RELATIVE = Path("control/src/ufo_control/client/ufo")
 SERVER_START_TIMEOUT_SECONDS = 10.0
 SERVER_POLL_SECONDS = 0.02
 SERVER_STOP_GRACE_SECONDS = 5
@@ -95,29 +96,109 @@ ARRIVAL_GRACE_SECONDS = 5.0
 OP_TIMEOUT_SECONDS = 15
 OP_DEADLINE_SLACK_SECONDS = 5.0
 
-requires_osascript = pytest.mark.skipif(
-    shutil.which("osascript") is None, reason="osascript is not installed"
-)
+
+def _unescape(field: str) -> str:
+    out: list[str] = []
+    characters = iter(field)
+    for character in characters:
+        if character != "\\":
+            out.append(character)
+            continue
+        match next(characters, None):
+            case "t":
+                out.append("\t")
+            case "n":
+                out.append("\n")
+            case "\\" | None:
+                out.append("\\")
+            case other:
+                out.append(f"\\{other}")
+    return "".join(out)
 
 
-def _client_script() -> Path:
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / CLIENT_RELATIVE
-        if candidate.is_file():
-            return candidate
-    raise AssertionError(f"{CLIENT_RELATIVE} not found above {__file__}")
+@dataclass(frozen=True)
+class _WireClient:
+    """The client's half of the protocol, spoken verbatim: one POST per request with the client's
+    headers, directives split on tabs and unescaped, each exec op run as a subprocess in the bound
+    directory and answered as the base64 reply the native client sends, the `since` cursor echoed
+    on every reconnect. Returns everything the member would have read."""
 
+    port: int
+    token: str
+    cwd: str
 
-def _served_client(tmp_path: Path) -> Path:
-    """The client a member actually runs: the shipped script with the op programs injected at the
-    marker, exactly as the gateway serves it. Run raw, the marker is inert and the op arms hold no
-    program to run."""
-    stamped = (
-        _client_script().read_text().replace("# ufo:programs", terminal.client_program_bundle(), 1)
-    )
-    served = tmp_path / "ufo"
-    served.write_text(stamped)
-    return served
+    def run(self, message: str) -> str:
+        deadline = time.monotonic() + CLIENT_TIMEOUT_SECONDS
+        transcript: list[str] = []
+        since = ""
+        body: bytes | None = message.encode()
+        op_reply: tuple[str, bytes] | None = None
+        while time.monotonic() < deadline:
+            lines = self._post(body, op_reply, since)
+            body, op_reply = b"", None
+            poll_seconds = None
+            done = False
+            for raw in lines:
+                verb, *fields = (_unescape(part) for part in raw.split("\t"))
+                match verb:
+                    case "say" | "note" | "txt":
+                        transcript.append(fields[0] if fields else "")
+                    case "since" if len(fields) >= 2:
+                        since = f"{fields[0]}:{fields[1]}"
+                    case "run":
+                        op_reply = (fields[0], self._exec(fields[5]))
+                    case "poll":
+                        poll_seconds = float(fields[0]) if fields else 1.0
+                    case "ask" | "exit":
+                        done = True
+                    case _:
+                        pass
+            if done:
+                return "".join(f"{line}\n" for line in transcript)
+            if op_reply is None and poll_seconds is not None:
+                time.sleep(poll_seconds)
+        raise AssertionError(f"the turn did not cap within {CLIENT_TIMEOUT_SECONDS}s")
+
+    def _post(
+        self, body: bytes | None, op_reply: tuple[str, bytes] | None, since: str
+    ) -> list[str]:
+        headers = {
+            "authorization": f"Bearer {self.token}",
+            "content-type": "text/plain",
+            "x-ufo-session": "wire-chain",
+            "x-ufo-tty": "1",
+            "x-ufo-cwd": self.cwd,
+        }
+        if since:
+            headers["x-ufo-since"] = since
+        if op_reply is not None:
+            headers["x-ufo-op"] = op_reply[0]
+            body = op_reply[1]
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
+        try:
+            connection.request("POST", f"/surface/ufo/{CHANNEL}", body=body, headers=headers)
+            response = connection.getresponse()
+            assert response.status == 200, response.read().decode()
+            return [line.decode() for line in response.read().splitlines() if line]
+        finally:
+            connection.close()
+
+    def _exec(self, params_field: str) -> bytes:
+        params = json.loads(params_field)
+        done = subprocess.run(
+            params["argv"],
+            cwd=self.cwd,
+            env={**os.environ, **params.get("env", {})},
+            capture_output=True,
+            timeout=OP_TIMEOUT_SECONDS,
+        )
+        return json.dumps(
+            {
+                "exit_code": done.returncode,
+                "stdout_b64": base64.b64encode(done.stdout).decode(),
+                "stderr_b64": base64.b64encode(done.stderr).decode(),
+            }
+        ).encode()
 
 
 @dataclass(frozen=True)
@@ -359,40 +440,23 @@ def terminal_server(
         )
 
 
-@requires_osascript
-def test_the_shipped_client_lands_a_bash_turn_in_its_own_directory(
+def test_a_wire_client_lands_a_bash_turn_in_its_own_directory(
     terminal_server: tuple[UUID, int], tmp_path: Path
 ) -> None:
-    """The whole chain in one run of the real client: a signed-in `$UFO_HOME`, a pinned channel, a
-    message posted from a project directory; the surface claims the terminal binding, the turn's
-    `bash` op executes via `osascript` in that directory, and the answer streams back — proven by
-    the sentinel file's bytes, the client's stdout, and the conversation row's `client:` handle."""
+    """The whole chain in one conversation over the client's wire: a message posted from a project
+    directory; the surface claims the terminal binding, the turn's `bash` op executes as a
+    subprocess in that directory, and the answer streams back — proven by the sentinel file's
+    bytes, the transcript the driver read, and the conversation row's `client:` handle."""
     workspace_id, port = terminal_server
-    home = tmp_path / "home"
-    home.mkdir()
     token = mint_token(TOKEN_SECRET, str(workspace_id), OWNER_EMAIL, timedelta(hours=1))
-    (home / "credentials").write_text(f"{token}\n")
-    (home / "workspace").write_text(f"http://127.0.0.1:{port}\n")
     project = tmp_path / "project"
     project.mkdir()
     bound = str(project.resolve())
-    env = {**os.environ, "UFO_HOME": str(home), "UFO_CHANNEL": CHANNEL}
-    env.pop("WORKSPACE_URL", None)
 
-    done = subprocess.run(
-        ["sh", str(_served_client(tmp_path)), "write a proof file"],
-        cwd=bound,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        start_new_session=True,
-        timeout=CLIENT_TIMEOUT_SECONDS,
-    )
+    transcript = _WireClient(port=port, token=token, cwd=bound).run("write a proof file")
 
-    assert done.returncode == 0, done.stderr.decode()
     assert (project / PROOF_FILENAME).read_bytes() == PROOF_CONTENT
-    stdout = done.stdout.decode()
-    assert f"Workspace: {bound}" in stdout
-    assert ANSWER_TEXT in stdout
+    assert f"Workspace: {bound}" in transcript
+    assert ANSWER_TEXT in transcript
     conversation = asyncio.run(_conversation_row(workspace_id))
     assert conversation.sandbox_handle == f"client:{bound}"

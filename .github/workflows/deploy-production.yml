@@ -360,6 +360,7 @@ jobs:
           HOST=$(terraform -chdir="$TF_DIR" output -raw hostname)
           curl -fsS -X POST "https://origin.$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
           curl -fsS "https://origin.$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          test "$(curl -fsS -o /dev/null -w '%{http_code}' "https://origin.$HOST/ufo/bin/x86_64-unknown-linux-musl")" = "200"
           curl -fsS "https://origin.$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
 
       - name: Terraform production edge init

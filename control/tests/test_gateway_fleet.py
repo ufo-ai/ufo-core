@@ -498,22 +498,17 @@ def test_every_word_a_member_reads_carries_no_ufo_metaphor(
 # typography is out of reach there, so each listed line is held verbatim at every site it
 # occurs. Presence proves each listed string, never that no unlisted one exists.
 CLIENT_MEMBER_COPY = (
-    ("""say 'Signed out.'""", 1),
-    ('say "${DIM}Resume this conversation: ${RESET}${BOLD}ufo --resume $UFO_CHANNEL${RESET}"', 1),
-    ("""die '--resume needs a conversation id.'""", 1),
-    ("die 'Could not read 16 random bytes from /dev/urandom'", 1),
     ('say "${DIM}✓ Installed ufo ($BIN)${RESET}"', 1),
     ('say "${DIM}✓ Added ufo to PATH in $profile${RESET}"', 1),
     ('say "${DIM}✓ Linked ufo into ~/.local/bin${RESET}"', 1),
     (r'say "${DIM}  For this shell:${RESET} export PATH=\"$UFO_HOME/bin:\$PATH\""', 1),
-    ('say "${DIM}No confirmation — ask the assistant to check.${RESET}"', 1),
-    ('say "${DIM}Skipped $SS_SLOT${RESET}"', 1),
-    ('say "Run ufo in a terminal to enter: $SS_PROMPT"', 1),
-    ('die "Could not fetch $UFO_URL/ufo"', 1),
-    ('die "No response from $UFO_URL"', 1),
-    ('F_LINE="shared $F_NAME ($F_SIZE bytes)"', 1),
+    ('die "no ufo client is built for $OS/$ARCH"', 3),
+    (
+        'die "on Windows, download $UFO_URL/ufo/bin/x86_64-pc-windows-msvc and save it as ufo.exe"',
+        1,
+    ),
+    ('die "Could not fetch $UFO_URL/ufo/bin/$TARGET"', 1),
     ("printf 'ufo: %s\\n'", 1),
-    ("printf '%s%s%s (hidden): '", 1),
     ("printf '\\n# added by ufo installer\\n%s\\n'", 1),
 )
 

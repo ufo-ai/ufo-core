@@ -711,9 +711,14 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
 def test_plans_run_only_for_selected_deployment_inputs() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
+    client = jobs["client"]
+    assert isinstance(client, dict)
+    assert client["needs"] == "changes"
+    assert client["if"] == "needs.changes.outputs.deploy == 'true'"
+
     rollout = jobs["rollout"]
     assert isinstance(rollout, dict)
-    assert rollout["needs"] == "changes"
+    assert rollout["needs"] == ["changes", "client"]
     assert rollout["if"] == "needs.changes.outputs.deploy == 'true'"
 
     edge = jobs["edge"]
@@ -2369,6 +2374,10 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         "    [ \"$BAD_RESPONSE\" != onboard ] || { printf 'wrong\\n'; exit; }\n"
         "    printf 'x-ufo-session header is required.\\n'\n"
         "    ;;\n"
+        '  *"/ufo/bin/"*)\n'
+        "    [ \"$BAD_RESPONSE\" != binary ] || { printf '404'; exit; }\n"
+        "    printf '200'\n"
+        "    ;;\n"
         "  */ufo)\n"
         "    [ \"$BAD_RESPONSE\" != ufo ] || { printf 'wrong\\n'; exit; }\n"
         '    printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_HOST"\n'
@@ -2396,9 +2405,11 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
     assert calls.read_text().splitlines() == [
         "-fsS -X POST https://origin.flyingobject.ai/v1/onboard/ufo",
         "-fsS https://origin.flyingobject.ai/ufo",
+        "-fsS -o /dev/null -w %{http_code} "
+        "https://origin.flyingobject.ai/ufo/bin/x86_64-unknown-linux-musl",
         "-fsS https://origin.flyingobject.ai/fleet",
     ]
-    for bad_response in ("onboard", "ufo", "fleet"):
+    for bad_response in ("onboard", "ufo", "binary", "fleet"):
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
             capture_output=True,
@@ -2773,6 +2784,8 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         '  *"/v1/onboard/ufo"*) [ "$FAIL_PATH" != onboard ] || '
         "{ printf 'wrong\\n'; exit; }; "
         "printf 'x-ufo-session header is required.\\n' ;;\n"
+        '  *"/ufo/bin/"*) [ "$FAIL_PATH" != binary ] || { printf \'404\'; exit; }; '
+        "printf '200' ;;\n"
         '  */ufo) [ "$FAIL_PATH" != ufo ] || exit 1; '
         'printf \'UFO_URL="${UFO_URL:-https://%s}"\\n\' "$ORIGIN_RESPONSE_HOST" ;;\n'
         '  */fleet) [ "$FAIL_PATH" != fleet ] || exit 1; printf \'%s\\n\' "$FLEET_BODY" ;;\n'
@@ -2802,9 +2815,13 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         env=environment,
     )
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 3
+    assert len(invoked) == 4
     assert any(call.endswith(f"https://origin.{hostname}/v1/onboard/ufo") for call in invoked)
     assert any(call.endswith(f"https://origin.{hostname}/ufo") for call in invoked)
+    assert any(
+        call.endswith(f"https://origin.{hostname}/ufo/bin/x86_64-unknown-linux-musl")
+        for call in invoked
+    )
     assert any(call.endswith(f"https://origin.{hostname}/fleet") for call in invoked)
     subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
@@ -2812,7 +2829,7 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         env=environment | {"FLEET_BODY": '{"craft":0}'},
     )
 
-    for failed_path in ("onboard", "ufo", "fleet"):
+    for failed_path in ("onboard", "ufo", "binary", "fleet"):
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
             capture_output=True,
@@ -3443,6 +3460,12 @@ def test_edge_doors_use_separate_environment_origins() -> None:
               service:
                 name: ufo-gateway
                 port: {name: http}
+          - path: /ufo/bin
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
           - path: /fleet
             pathType: Exact
             backend:
@@ -3469,3 +3492,19 @@ def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
     worker = (module / "worker.js").read_text()
     assert worker.count('"__LANDING_HTML__"') == 1
     assert worker.count('"__WAITLIST_SENDER__"') == 1
+
+
+def test_the_client_target_set_is_one_set_everywhere() -> None:
+    def matrix_targets(workflow: str, job: str) -> set[str]:
+        jobs = _workflow(WORKFLOWS / workflow)["jobs"]
+        assert isinstance(jobs, dict)
+        client = jobs[job]
+        assert isinstance(client, dict)
+        return {entry["target"] for entry in client["strategy"]["matrix"]["include"]}
+
+    gateway = (ROOT / "control" / "src" / "ufo_control" / "gateway.py").read_text()
+    literal = re.search(r"CLIENT_TARGETS = frozenset\(\s*\{(.*?)\}", gateway, re.DOTALL)
+    assert literal
+    served = set(re.findall(r'"([^"]+)"', literal.group(1)))
+    assert matrix_targets("client.yml", "build") == served
+    assert matrix_targets("deploy.yml", "client") == served

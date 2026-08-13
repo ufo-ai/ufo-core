@@ -16,18 +16,18 @@ while the surface holds the member's connection on serve's — so, exactly as th
 guards the shared state and every wakeup hops onto the waiter's own loop."""
 
 import asyncio
+import base64
 import json
 import shlex
 import threading
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from ufo.sandbox.containment import ContainmentError, contained_file
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
@@ -41,7 +41,6 @@ from ufo.sandbox.session import (
 )
 
 CLIENT_BACKEND = "client"
-CLIENT_PROGRAM_DIR = Path(__file__).parent / "client"
 _PATH_PARAMS = frozenset({"path", "workspace", "staged_path"})
 """The `sbxfs` op params that name a workspace path and so map onto the bound directory; a
 `pattern`, a `glob`, or an edit's text is a value, not a path, and is never rewritten."""
@@ -100,15 +99,15 @@ printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
 | /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
 """,
 }
-"""The one command each tree walk's program needs run first, reading `$UFO_WALK_ROOT` and leaving
-its listing in the relay's scratch dir, where the program's `enum` param names it. The walks read
-the listing rather than the tree because the runner has no subprocess and must not re-decide what a
-walk visits — `find` meets entries in the `readdir` order `os.walk` does, which is what keeps a
-truncated result identical to `sbxfs`'s. Only glob measures with `stat`, whose flags split by OS:
-`stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
-(macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the program
-parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
-`git`, and `xargs` are POSIX across both."""
+"""The one command each tree walk needs run first, reading `$UFO_WALK_ROOT` and leaving its
+listing in the client's op workdir, where the walk's `enum` param names it. The walks read the
+listing rather than the tree because the client must not re-decide what a walk visits — `find`
+meets entries in the `readdir` order `os.walk` does, which is what keeps a truncated result
+identical to `sbxfs`'s. Only glob measures with `stat`, whose flags split by OS: `stat --version`
+succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD (macOS), which takes
+`-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client parses one shape and
+the double it reconstructs is the one `os.stat` reports on either. `find`, `git`, and `xargs` are
+POSIX across both."""
 ARRIVAL_GRACE_SECONDS = 30.0
 """How long an op or an open waits for the terminal to reconnect. The client's stream ends at every
 hold and reconnects on a ~1s poll, so work landing in that gap is the normal case — a different
@@ -127,11 +126,10 @@ class TerminalOpFailed(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class TerminalOp:
-    """One request to a connected terminal, shaped so the relay never parses. `kind` picks the fixed
-    primitive arm; `name` is the op's program, which the client runs from its own bundle; `params`
-    is the JSON the relay writes to `op.json` for that program to read; `arg` is a copy primitive's
-    target path. The program itself never rides the wire — the client holds it bundled and the
-    server names it. The id is what the answer comes back under."""
+    """One request to a connected terminal. `kind` picks the client's primitive arm; `name` picks
+    the file op within it, which the client implements natively; `params` is that op's JSON; `arg`
+    is a copy primitive's target path. The server names work and carries values — never code. The
+    id is what the answer comes back under."""
 
     op_id: str
     kind: str
@@ -147,8 +145,8 @@ _Waiter = tuple["asyncio.Future[object]", asyncio.AbstractEventLoop]
 @dataclass
 class _Slot:
     """One conversation's live terminal state: where it stands, the op in flight, and what that op
-    sends down. `body` holds a copy-in's bytes — they never ride the directive line, which the
-    client reads into a shell variable — served by the op's own read projection. `reply` is the
+    sends down. `body` holds a copy-in's bytes — they never ride the directive line — served by
+    the op's own read projection. `reply` is the
     in-flight sender's waiter and `watcher` the stream's, each remembered with its own loop so the
     other side's thread can wake it. `queue` holds senders waiting their turn — a background
     subagent's op behind the parent's, an off-turn attachment write behind a running turn — so a
@@ -515,9 +513,8 @@ class Terminals:
 class TerminalCarrier:
     """The carrier whose sandbox is the member's own terminal: `/workspace` is the directory they
     launched `ufo` in, commands run as their subprocesses, and every op is asked over the rendezvous
-    rather than dialed. The op logic itself is JavaScript this process ships in the payload, run
-    under the client machine's stock `osascript` where it has one and `node` otherwise — the shell
-    relay pipes and never parses.
+    rather than dialed. The client implements each op natively; the wire carries the op's name and
+    params, never code.
 
     No isolation: the agent acts as the member, on their machine, guarded by nothing the member's
     own shell is not. The container carriers are where `containment` is load-bearing."""
@@ -587,11 +584,9 @@ class TerminalCarrier:
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         """One command on the member's machine, in the bound directory, under their own user. The
-        `/workspace` paths tools pass are rewritten here — path logic never reaches the shell — and
-        the reply carries streams as hex, because the runner has no base64 and a directive field
-        survives hex unescaped. `EGRESS_CA_CERT_ENV` rides the env whole; the relay's runner
-        materializes it to a file and points each client's own CA variable at it, since only the
-        client knows a path on its own disk."""
+        `/workspace` paths tools pass are rewritten here — path logic never reaches the client.
+        `EGRESS_CA_CERT_ENV` rides the env whole; the client materializes it to a file and points
+        each CA variable at it, since only the client knows a path on its own disk."""
         root = _root(handle)
         return await self._exec(
             handle, tuple(arg.replace(WORKSPACE_DIR, root) for arg in argv), timeout_s
@@ -619,15 +614,15 @@ class TerminalCarrier:
         result = _reply_object(reply, OP_EXEC)
         code = result.get("exit_code", 1)
         return ExecResult(
-            stdout=bytes.fromhex(str(result.get("stdout_hex", ""))).decode(errors="replace"),
-            stderr=bytes.fromhex(str(result.get("stderr_hex", ""))).decode(errors="replace"),
+            stdout=_reply_stream(result, "stdout").decode(errors="replace"),
+            stderr=_reply_stream(result, "stderr").decode(errors="replace"),
             exit_code=code if isinstance(code, int) else 1,
         )
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """The copy-in: the bytes are staged on the rendezvous and served by the op's own read
-        projection — never the directive line — and the relay lands them by staged temp and `mv`,
-        the same rename-into-place every carrier's write keeps."""
+        projection — never the directive line — and the client lands them by staged temp and
+        rename, the same rename-into-place every carrier's write keeps."""
         try:
             await self.terminals.send(
                 handle.conversation_id,
@@ -640,9 +635,9 @@ class TerminalCarrier:
             raise OSError(str(error)) from error
 
     async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
-        """The copy-out: the reply's body is the file, posted by the relay as `--data-binary`. Held
-        whole on the rendezvous — the reply is one request — so the surface bounds it where it
-        lands; a path holding no file answers `FileNotFoundError` on every carrier."""
+        """The copy-out: the reply's body is the file. Held whole on the rendezvous — the reply is
+        one request — so the surface bounds it where it lands; a path holding no file answers
+        `FileNotFoundError` on every carrier."""
         try:
             reply = await self.terminals.send(
                 handle.conversation_id,
@@ -660,11 +655,11 @@ class TerminalCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """One `sbxfs` op, run where the files are: the directive names the op's JS program by op
-        and the client runs its own bundled copy, so only the params and the result cross. A tree
-        walk is two ops: the enumeration `find` first, through the same exec primitive, then the
-        program reading its listing — the runner has no subprocess, so what a walk visits is
-        decided by a command this process composed, never by the program."""
+        """One `sbxfs` op, run where the files are: the directive names the op and the client runs
+        its native implementation, so only the params and the result cross. A tree walk is two
+        ops: the enumeration `find` first, through the same exec primitive, then the op reading
+        its listing — what a walk visits is decided by a command this process composed, never by
+        the client."""
         root = _root(handle)
         rewritten = {
             key: _under_root(root, value)
@@ -715,75 +710,15 @@ class TerminalCarrier:
         )
 
 
-_GENERIC_TRAILER = (
-    "function run(argv) { __start__(argv); "
-    'return main(JSON.parse(readFile(WORKDIR + "/op.json"))); }'
-)
-"""The one `run` entry every op program takes, param-free: it reads its params from `op.json` in
-the work dir rather than baking them in, so an op's directive names a program by op and carries no
-source. The relay writes `op.json` before running the program."""
-
-_NODE_ENTRY = "run(process.argv.slice(2));"
-"""osascript auto-invokes a top-level `run` handler with the argv after the program; node runs no
-handler on its own, so the node variant calls `run` with `mode`, `workdir`, and the op's own args —
-`process.argv[0]` is the node binary and `[1]` the program path."""
-
-_OP_PROGRAMS = ("exec", "read", "edit", "write", "grep", "glob", "changes")
-"""The op programs the client runs — the copy-in and copy-out primitives are shell arms and carry
-no program. A prelude is folded into each, so a bundled client holds one self-contained file per op
-per runtime."""
-
-
-def client_program_source(op: str) -> str:
-    """One op as the osascript program a bundled client holds: the JXA prelude, the op's own JS, and
-    the param-free `run` entry osascript auto-invokes with the argv after the program path."""
-    return f"{_client_program('prelude')}\n{_client_program(op)}\n{_GENERIC_TRAILER}"
-
-
-def client_program_node_source(op: str) -> str:
-    """The same op as a node program, for a client whose machine has no osascript. The node prelude
-    implements the identical contract over `fs` with byte-exact latin1 I/O; the op JS and `run`
-    entry are the shared runtime-neutral source; the trailing call invokes `run`, since node runs no
-    top-level handler the way osascript does."""
-    return (
-        f"{_client_program('prelude_node')}\n{_client_program(op)}\n"
-        f"{_GENERIC_TRAILER}\n{_NODE_ENTRY}"
-    )
-
-
-def client_program_bundle() -> str:
-    """The shell that writes the op programs to `$UFO_HOME/programs/` — the block the gateway
-    injects into the served client so a member's own copy holds them and the wire never carries a
-    program. Each op ships twice: `<op>.js` for osascript and `<op>.node.js` for node, so the client
-    picks a file and an interpreter by which runtime its machine has. Each program lands through a
-    quoted heredoc, so its JS is copied verbatim; the delimiter is unique per file and cannot occur
-    in the source. The script's version hash covers this block, so any edit to a program moves it
-    and the client's own auto-update re-fetches the bundle."""
-    blocks = ['mkdir -p "$UFO_HOME/programs"']
-    for op in _OP_PROGRAMS:
-        variants = (
-            (f"{op}.js", op.upper(), client_program_source(op)),
-            (f"{op}.node.js", f"{op.upper()}_NODE", client_program_node_source(op)),
-        )
-        for name, tag, source in variants:
-            delimiter = f"UFO_PROGRAM_EOF_{tag}"
-            blocks.append(
-                f"cat > \"$UFO_HOME/programs/{name}\" <<'{delimiter}'\n{source}\n{delimiter}"
-            )
-    return "\n".join(blocks)
-
-
-def _client_program(op: str) -> str:
-    """One op's JS, read through the containment guard — `op` names a file, and a name is an
-    ingress wherever it lands."""
-    try:
-        with contained_file(CLIENT_PROGRAM_DIR / f"{op}.js", CLIENT_PROGRAM_DIR) as source:
-            found = source.lstat()
-            if found is None:
-                raise RuntimeError(f"sbxfs {op} has no client program")
-            return source.read_text(found.st_size + 1)
-    except ContainmentError as error:
-        raise RuntimeError(f"sbxfs {op} has no client program") from error
+def _reply_stream(result: dict[str, object], name: str) -> bytes:
+    """One captured stream off an exec reply, base64 as the client sends it. A missing key or a
+    malformed value raises — an empty stream is an empty string under a present key, so absence is
+    a client speaking some other reply shape, and reading it as silence would hand the model empty
+    output as a success."""
+    encoded = result.get(f"{name}_b64")
+    if encoded is None:
+        raise RuntimeError(f"the terminal's exec reply carries no {name}_b64")
+    return base64.b64decode(str(encoded), validate=True)
 
 
 def _reply_object(reply: bytes, op: str) -> dict[str, object]:

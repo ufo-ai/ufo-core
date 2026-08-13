@@ -16,6 +16,7 @@ that outruns the hold ends the stream with `poll` and the shell reconnects with 
 admits nothing and resumes tailing the conversation's latest turn."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
@@ -62,6 +63,8 @@ CWD_HEADER = "x-ufo-cwd"
 OP_HEADER = "x-ufo-op"
 SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
+SCRIPT_HEADER = "x-ufo-script"
+CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
 
@@ -361,6 +364,15 @@ def _utf8_header(request: Request, name: str) -> str:
     return raw.encode("latin-1", "replace").decode("utf-8", "replace")
 
 
+def _stale_client(request: Request) -> bool:
+    """Whether this client's x-ufo-script version differs from the client the deploy serves
+    (`UFO_CLIENT_VERSION`) — unset in local dev, so no install is ever pushed there. The stale
+    client is told to update by an `install` prepended to its next screen; an op reply and a
+    secret fulfillment stay pure, so the directive rides only a message or resume stream."""
+    served = os.environ.get(CLIENT_VERSION_ENV, "")
+    return bool(served) and request.headers.get(SCRIPT_HEADER, "").strip() != served
+
+
 def _resumed_from(request: Request, turn_id: UUID) -> str:
     """Where the client's last stream got to, from the `since` directive it was given back — the
     turn it names and the cursor within it. The turn is what makes it safe to honour: a client
@@ -394,6 +406,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
     note: bytes | None = None
+    update = b""
     op_id = request.headers.get(OP_HEADER, "").strip()
     if op_id:
         reply = await request.body()
@@ -408,11 +421,13 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
     else:
+        if _stale_client(request):
+            update = directive("install")
         body = (await request.body()).decode("utf-8", "replace").strip()
         if not body:
             turn_id = await ctx.latest_turn(conversation_id)
             if turn_id is None:
-                return PlainTextResponse(directive("ask", PROMPT))
+                return PlainTextResponse(update + directive("ask", PROMPT))
         else:
             if len(body.encode()) > MAX_MESSAGE_BYTES:
                 return PlainTextResponse("message too large", status_code=413)
@@ -443,6 +458,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         if cwd:
             ctx.terminal_connect(conversation_id, cwd, member_id)
         try:
+            if update:
+                yield update
             if note is not None:
                 yield note
             async for line in directives:

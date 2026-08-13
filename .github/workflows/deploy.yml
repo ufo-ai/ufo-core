@@ -54,8 +54,58 @@ jobs:
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
-  rollout:
+  client:
     needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    strategy:
+      matrix:
+        include:
+          - {target: aarch64-apple-darwin, runner: macos-14}
+          - {target: x86_64-apple-darwin, runner: macos-14}
+          - {target: x86_64-unknown-linux-musl, runner: ubuntu-24.04}
+          - {target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm}
+          - {target: x86_64-pc-windows-msvc, runner: windows-2022}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+          key: ${{ matrix.target }}
+
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - working-directory: client
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Stage as <target>/<binary> so the merged download lands the whole tree the gateway
+      # serves from UFO_CLIENT_BIN_DIR.
+      - name: Stage the binary under its target
+        shell: bash
+        run: |
+          BIN=ufo
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            BIN=ufo.exe
+          fi
+          mkdir -p "stage/${{ matrix.target }}"
+          cp "client/target/${{ matrix.target }}/release/$BIN" "stage/${{ matrix.target }}/$BIN"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clientbin-${{ matrix.target }}
+          path: stage
+          if-no-files-found: error
+          retention-days: 7
+
+  rollout:
+    needs: [changes, client]
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -121,6 +171,15 @@ jobs:
           fi
           test -n "$E2B_TEMPLATES"
           echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
+
+      # The five client binaries land as clientbin/<target>/<binary> in the gateway build
+      # context, where the Dockerfile copies them under UFO_CLIENT_BIN_DIR.
+      - uses: actions/download-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          pattern: clientbin-*
+          merge-multiple: true
+          path: control/clientbin
 
       - name: Build + push gateway image
         if: github.event_name != 'pull_request'
@@ -198,6 +257,7 @@ jobs:
           HOST=$(terraform -chdir="$TF_DIR" output -raw hostname)
           curl -fsS -X POST "https://origin.$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
           curl -fsS "https://origin.$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
+          test "$(curl -fsS -o /dev/null -w '%{http_code}' "https://origin.$HOST/ufo/bin/x86_64-unknown-linux-musl")" = "200"
           curl -fsS "https://origin.$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
 
       - name: Gate sandbox egress proxy TLS

@@ -1,10 +1,11 @@
 # Onboarding
 
 Onboarding is CLI-first: the apex's public face is a Cloudflare edge worker, and the terminal
-client is the primary onboarding renderer. The gateway serves
-the client script and drives every screen server-side as directives over
-`POST /v1/onboard/{channel}`. A browser sign-in (`GET /login` + `POST /v1/onboard/web`) is a
-second renderer over the identical machine — see "Web login" below.
+client is the primary onboarding renderer. The gateway serves a bootstrap installer at `/ufo`
+that downloads the native client binary for the platform (`/ufo/bin/{target}`), and drives every
+screen server-side as directives over `POST /v1/onboard/{channel}`. A browser sign-in
+(`GET /login` + `POST /v1/onboard/web`) is a second renderer over the identical machine — see
+"Web login" below.
 
 ## Component map
 
@@ -135,7 +136,8 @@ pytest under the same four settings.
 The client is a pure renderer of tab-separated directive lines (`gateway_directives.py`): `say`,
 `ask`, `choose`, `status`, `ufo` (the animation), `poll`, `token`, `workspace`, `install`, `file`,
 `logout`, `exit`. `file` names one artifact a turn shared and the link that opens it; `install`
-self-installs the script into `~/.ufo/bin` on first run;
+downloads the served binary into `~/.ufo/bin` (first run, and again whenever the deploy serves a
+newer version than the client reports in `x-ufo-script`);
 `token` and `workspace` land in `~/.ufo/credentials` (chmod 600) and `~/.ufo/workspace` — the
 token is machine-consumed and never printed.
 
@@ -465,7 +467,7 @@ control/src/ufo_control/
   gateway_store.py        claim custody
   schema.py               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
   rls.py                  shared serve role and workspace policies
-  client/ufo              the POSIX terminal client (renders `secret` prompts)
+  client/ufo              the bootstrap installer `/ufo` serves — download the binary, exec it
 
 extensions/slack/ufo_ext_slack/
   surface.py              Slack ingest, OAuth install callback, identity record + url marker

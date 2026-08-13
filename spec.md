@@ -229,9 +229,9 @@ their results return as the client's next request (the rendezvous, §Extension s
 metering is cooperative there, since a command that ignores the proxy env reaches the member's own
 network, but the model sentinel is never exported, so no key leaks. A client-bound conversation
 with no connected terminal is unreachable — its turns and its file browser fail loud rather than
-running somewhere the member cannot see. The op logic itself ships from the deploy as JavaScript
-the member's stock `osascript` runs, so the contract has one home and the client carries no version
-of it.
+running somewhere the member cannot see. The op logic runs natively in the client binary the
+deploy builds and serves, held to the server's op contracts by the client's own tests; a stale
+client is told to update the moment the server sees its version.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real

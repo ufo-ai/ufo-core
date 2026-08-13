@@ -31,6 +31,10 @@ locals {
   # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
 
+  # The terminal client version this deploy serves and update-gates on, read from the crate the
+  # deploy's binaries were built from — one source for the images and both pods' env.
+  client_version = regex("(?m)^version = \"([^\"]+)\"", file("${path.module}/../../../client/Cargo.toml"))[0]
+
   ufo_prerequisite_manifests = data.kubectl_file_documents.cluster_services.manifests
 
   sandbox_proxy_manifests = {
@@ -199,6 +203,7 @@ data "kubectl_file_documents" "hosted" {
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image
+    client_version                   = local.client_version
     e2b_templates                    = var.e2b_templates
     serve_role_arn                   = module.platform.app_s3_role_arn
     workload_ha                      = false

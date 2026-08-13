@@ -1,5 +1,5 @@
-//! The `sbxfs` file ops, natively: same params in `op.json` shape, same result JSON, byte for
-//! byte with the server's own `sbxfs` where the differential test pins it.
+//! The `sbxfs` file ops, natively: same params JSON in, same result JSON out, byte for byte with
+//! the server's own `sbxfs`.
 
 mod changes;
 mod fs_edit;

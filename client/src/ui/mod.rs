@@ -344,11 +344,12 @@ impl Ui {
         picked
     }
 
-    /// Read one secret without echo; `None` on EOF, `Some("")` when skipped. A terminal on stdin
-    /// always goes through the raw-mode reader — plain mode included — so the typed value never
-    /// echoes; piped stdin reads a line, which no terminal echoes.
+    /// Read one secret without echo; `None` on EOF, `Some("")` when skipped. Any reachable
+    /// terminal goes through the raw-mode reader — crossterm falls back to the tty when stdin is
+    /// a pipe, which is what a `curl | sh` install leaves behind — so the typed value never
+    /// echoes; only a fully headless run reads a line from stdin, where no terminal echoes.
     pub fn secret(&mut self, prompt: &str) -> Option<String> {
-        if !io::stdin().is_tty() {
+        if !io::stdin().is_tty() && !io::stderr().is_tty() {
             let mut line = String::new();
             eprint!("{prompt} (hidden): ");
             let _ = io::stderr().flush();

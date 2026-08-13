@@ -405,12 +405,18 @@ test("the worker uses its configured environment origin", async () => {
       doorEnv,
     );
     const installer = await fresh.fetch(new Request(`https://${host}/ufo`), doorEnv);
+    const binary = await fresh.fetch(
+      new Request(`https://${host}/ufo/bin/aarch64-apple-darwin`),
+      doorEnv,
+    );
     const fleet = await fresh.fetch(new Request(`https://${host}/fleet`), doorEnv);
     assert.equal(await installer.text(), `origin:${origin}/ufo`);
+    assert.equal(await binary.text(), `origin:${origin}/ufo/bin/aarch64-apple-darwin`);
     assert.deepEqual(await fleet.json(), { craft: 0 });
     assert.deepEqual(outbound.slice(start), [
       `${origin}/fleet`,
       `${origin}/ufo`,
+      `${origin}/ufo/bin/aarch64-apple-darwin`,
       `${origin}/fleet`,
     ]);
   }

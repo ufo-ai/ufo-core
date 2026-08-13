@@ -5,16 +5,12 @@ every op is asked over it, the test playing the connected terminal."""
 import asyncio
 import base64
 import json
-import shutil
-import subprocess
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 from ufo.sandbox import terminal
 from ufo.sandbox.session import (
-    EGRESS_CA_CERT_ENV,
     WORKSPACE_DIR,
     ProxyEndpoint,
     SandboxSpec,
@@ -53,7 +49,7 @@ async def _refuse(terminals: Terminals, conversation_id: UUID, failed: str) -> T
 
 
 def _op_params(op: TerminalOp) -> dict:
-    """The params the op carries for its bundled program to read as `op.json`."""
+    """The params the op carries for the client's native implementation to read."""
     return json.loads(op.params)
 
 
@@ -280,7 +276,7 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     terminals.connect(conversation_id, "/Users/member/proj", None)
     handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
     reply = json.dumps(
-        {"exit_code": 0, "stdout_hex": b"out\n".hex(), "stderr_hex": b"".hex()}
+        {"exit_code": 0, "stdout_b64": base64.b64encode(b"out\n").decode(), "stderr_b64": ""}
     ).encode()
     running = asyncio.ensure_future(carrier.exec(handle, ("cat", "/workspace/a.txt"), timeout_s=30))
     await asyncio.sleep(0)
@@ -291,6 +287,54 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
     assert params["env"]["HTTP_PROXY"].startswith("http://run-token:@")
     assert result.exit_code == 0 and result.stdout == "out\n"
+
+
+async def test_exec_decodes_a_base64_reply() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    reply = json.dumps(
+        {
+            "exit_code": 3,
+            "stdout_b64": base64.b64encode(b"out\n").decode(),
+            "stderr_b64": base64.b64encode(b"err\n").decode(),
+        }
+    ).encode()
+    running = asyncio.ensure_future(carrier.exec(handle, ("true",), timeout_s=30))
+    await asyncio.sleep(0)
+    await _answer(terminals, conversation_id, reply)
+    result = await running
+    assert result.exit_code == 3 and result.stdout == "out\n" and result.stderr == "err\n"
+
+
+async def test_exec_refuses_a_malformed_base64_reply() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    reply = json.dumps({"exit_code": 0, "stdout_b64": "not base64!", "stderr_b64": ""}).encode()
+    running = asyncio.ensure_future(carrier.exec(handle, ("true",), timeout_s=30))
+    await asyncio.sleep(0)
+    await _answer(terminals, conversation_id, reply)
+    with pytest.raises(ValueError):
+        await running
+
+
+async def test_exec_refuses_a_reply_missing_its_streams() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    reply = json.dumps({"exit_code": 0, "stdout_hex": "6869", "stderr_hex": ""}).encode()
+    running = asyncio.ensure_future(carrier.exec(handle, ("true",), timeout_s=30))
+    await asyncio.sleep(0)
+    await _answer(terminals, conversation_id, reply)
+    with pytest.raises(RuntimeError, match="carries no stdout_b64"):
+        await running
 
 
 async def test_write_stages_the_bytes_and_maps_a_refusal() -> None:
@@ -370,7 +414,7 @@ async def test_file_op_names_its_program_and_maps_the_handled_error() -> None:
         )
     )
     await asyncio.sleep(0)
-    exec_ok = json.dumps({"exit_code": 0, "stdout_hex": "", "stderr_hex": ""}).encode()
+    exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
     listing = await _answer(terminals, conversation_id, exec_ok)
     assert listing.kind == "exec"
     enum_command = _op_params(listing)["argv"][2]
@@ -413,7 +457,7 @@ async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace() -> 
         )
     )
     await asyncio.sleep(0)
-    exec_ok = json.dumps({"exit_code": 0, "stdout_hex": "", "stderr_hex": ""}).encode()
+    exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
     listing = await _answer(terminals, conversation_id, exec_ok)
     enum_command = _op_params(listing)["argv"][2]
     assert f"UFO_WALK_ROOT={root}\n" in enum_command
@@ -459,80 +503,3 @@ def test_a_sender_on_another_loop_is_woken_from_this_one() -> None:
     asyncio.run(answer())
     thread.join(timeout=10)
     assert not thread.is_alive() and outcome == [b"cross-loop"]
-
-
-def test_exec_js_spells_the_python_constants() -> None:
-    """`exec.js` reads the CA off the env name `session.py` declares and exports the four bundle
-    variables `local.py` also spells — cross-language duplication a rename would silently break,
-    so the shipped source is pinned to the constants here."""
-    source = (terminal.CLIENT_PROGRAM_DIR / "exec.js").read_text()
-    assert EGRESS_CA_CERT_ENV in source
-    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
-        assert name in source
-
-
-def test_the_program_bundle_writes_a_self_contained_file_for_every_op() -> None:
-    """The gateway injects this block into the served client, so it must land one runnable file per
-    op the wire can name, once per runtime — the op's own JS and the param-free `run` entry that
-    reads `op.json`, folded onto a prelude the runtime can run."""
-    bundle = terminal.client_program_bundle()
-    for op in ("exec", "read", "edit", "write", "grep", "glob", "changes"):
-        assert f'cat > "$UFO_HOME/programs/{op}.js"' in bundle
-        assert f'cat > "$UFO_HOME/programs/{op}.node.js"' in bundle
-        osascript = terminal.client_program_source(op)
-        node = terminal.client_program_node_source(op)
-        for program in (osascript, node):
-            assert "function main" in program
-            assert 'readFile(WORKDIR + "/op.json")' in program
-        assert 'ObjC.import("Foundation")' in osascript
-        assert "process.argv" not in osascript
-
-
-def test_the_node_program_carries_node_io_and_calls_run_itself() -> None:
-    """node runs no top-level `run` handler and cannot reach JXA, so the node variant folds in the
-    `fs`-backed prelude and ends by invoking `run` with the argv after the program."""
-    node = terminal.client_program_node_source("edit")
-    assert 'require("node:fs")' in node
-    assert "ObjC" not in node and "$.NS" not in node
-    assert node.rstrip().endswith("run(process.argv.slice(2));")
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="the node variant runs under node")
-def test_the_node_edit_program_runs_and_answers_json(tmp_path: Path) -> None:
-    """The node variant, run the way the relay runs it: params land beside it as `op.json` and
-    `node <program> run <workdir>` reads them, editing the subject and answering one JSON object —
-    the byte-exact parity against the oracle is proven in test_sandbox_walks.py under node."""
-    program = tmp_path / "edit.node.js"
-    program.write_text(terminal.client_program_node_source("edit"))
-    subject = tmp_path / "subject.txt"
-    subject.write_bytes(b"alpha beta\n")
-    (tmp_path / "op.json").write_text(
-        json.dumps(
-            {
-                "path": str(subject),
-                "edits": [
-                    {
-                        "old_string_b64": base64.b64encode(b"beta", altchars=b"-_").decode(),
-                        "new_string_b64": base64.b64encode(b"BETA", altchars=b"-_").decode(),
-                        "replace_all": False,
-                    }
-                ],
-            }
-        )
-    )
-    run = subprocess.run(
-        [shutil.which("node"), str(program), "run", str(tmp_path)],
-        capture_output=True,
-        text=True,
-    )
-    assert run.stdout, run.stderr
-    result = json.loads(run.stdout)
-    assert result["replacements"] == 1
-    assert subject.read_bytes() == b"alpha BETA\n"
-
-
-def test_an_unknown_op_has_no_client_program() -> None:
-    with pytest.raises(RuntimeError, match="no client program"):
-        terminal.client_program_source("teleport")
-    with pytest.raises(RuntimeError, match="no client program"):
-        terminal.client_program_node_source("teleport")

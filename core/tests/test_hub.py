@@ -175,10 +175,11 @@ async def test_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_rec
     await resumed.aclose()
 
 
-async def test_a_reconnect_without_a_cursor_replays_only_what_it_missed():
-    """The client that has not learned to carry a cursor yet — an installed script the surface
-    never replaces — reconnects with none, and must not be handed the turn from its first frame:
-    it has printed everything before the gap already."""
+async def test_a_subscriber_without_a_cursor_replays_the_whole_retained_ring():
+    """A tail opened with no cursor — the portal loading mid-turn — wants everything retained,
+    across any gap a terminal client's op reconnects left; the Redis hub replays its stream the
+    same way. Every wire client carries a cursor, so nothing is double-printed by replaying
+    whole."""
     hub = InProcessHub()
     turn_id = uuid4()
     await hub.publish(turn_id, TextDelta(text="printed"))
@@ -188,6 +189,7 @@ async def test_a_reconnect_without_a_cursor_replays_only_what_it_missed():
     await hub.publish(turn_id, TextDelta(text="while away"))
 
     resumed = hub.subscribe(turn_id)
+    assert (await anext(resumed))[1] == TextDelta(text="printed")
     assert (await anext(resumed))[1] == TextDelta(text="while away")
     pending = await _pending_first(resumed)
     assert not pending.done()

@@ -165,6 +165,9 @@ export default {
     if (url.pathname.startsWith("/v1/onboard/")) {
       return fetch(new Request(`${env.ORIGIN_BASE}${url.pathname}${url.search}`, request));
     }
+    if (url.pathname.startsWith("/ufo/bin/")) {
+      return fetch(`${env.ORIGIN_BASE}${url.pathname}`);
+    }
     switch (url.pathname) {
       case "/":
         return landing(request, env, url);

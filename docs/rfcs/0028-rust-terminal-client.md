@@ -28,11 +28,11 @@ date: 2026-08-13
 
 ## Proposal
 
-One Rust crate, `client/`, builds the `ufo` binary for four targets: `aarch64-apple-darwin`,
-`x86_64-apple-darwin`, `x86_64-unknown-linux-musl` (static), `x86_64-pc-windows-msvc`. No runtime
-dependencies — no curl, no JS engine, no libc below musl on Linux. The wire is unchanged: the same
-tab-separated directives down, the same headers up, so the server drives both clients identically
-while both exist.
+One Rust crate, `client/`, builds the `ufo` binary for five targets: `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static),
+`x86_64-pc-windows-msvc`. No runtime dependencies — no curl, no JS engine, no libc below musl on
+Linux. The wire is unchanged: the same tab-separated directives down, the same headers up, so the
+server drives the already-installed sh clients identically until the version gate converts them.
 
 The op contract stays server-named. A `run` directive still carries `kind`/`name`/`params`; the
 client implements each op natively (exec with process-group kill, staged-rename write, windowed
@@ -48,39 +48,45 @@ refuse or upgrade a stale one.
 |---|---|
 | TCP + TLS handshake per request (every 85 s hold, every op reply, every poll) | One keep-alive connection reused across the whole session |
 | ~10–180 ms interpreter spawn + `op.json` temp-file relay per op | In-process dispatch; params parsed from the directive line |
-| stdout/stderr hex-doubled through the shell | Bytes held natively; `stdout_hex` stays on the wire for compatibility, and `stdout_b64` is the follow-up server change — both consumers are ours |
+| stdout/stderr hex-doubled through the shell | Bytes held natively; the exec reply is `stdout_b64`/`stderr_b64` |
 | `poll` sleep + fresh connection to resume a live turn | Immediate reply-chaining after `run`; reconnect is one round trip on the pooled connection |
 
 ### Delivery
 
-CI (`.github/workflows/client.yml`) builds the four release binaries on every `client/**` change
-and uploads each as `ufo-<target>`. The deploy bakes them into the gateway image under
-`UFO_CLIENT_BIN_DIR/<target>/ufo`, and the gateway serves `GET /ufo/bin/{target}` — an
-unconfigured deploy answers 404 and nothing else changes. The client's `install` directive
-self-copies the running binary into `$UFO_HOME/bin` and adds it to PATH, exactly where the script
-installed itself.
+CI (`.github/workflows/client.yml`) gates every `client/**` change across five targets — the four
+originals plus `aarch64-unknown-linux-musl`. The deploy builds the same five in a matrix beside
+the bundle image, stages them into the gateway build context as `clientbin/<target>/<binary>`,
+and the image carries them under `UFO_CLIENT_BIN_DIR=/app/clientbin`; the gateway serves
+`GET /ufo/bin/{target}`, and the deploy's origin gate curls one binary to prove the chain. A local
+image carries the empty directory and the route answers 404.
 
-The sh client remains the `curl | sh` bootstrap until the binary path is proven in a deploy; the
-bootstrap then becomes a stub that detects the platform, downloads the binary, and executes it.
-The sh client, the JS programs, the bundle injection, and the `osascript`/`node` probe tear out
-whole in that change, not before.
+`/ufo` serves a small bootstrap: detect the platform, download the binary into `$UFO_HOME/bin`,
+add it to PATH, exec it. `UFO_CLIENT_VERSION` — read by terraform from `client/Cargo.toml`, the
+same source the binaries build from — rides both the gateway and serve pods' env, and a request
+whose `x-ufo-script` names any other version is told to `install`: the binary re-downloads its
+target; a still-installed sh client re-fetches `/ufo`, lands the bootstrap, and converts on its
+own restart path. Production promotes the tested images, so the binaries and version ride the
+promotion unchanged.
 
 ### Compatibility
 
 `$UFO_HOME/credentials`, `session`, and `workspace` are shared byte-for-byte, so a member can move
-between clients mid-conversation. Unknown directives are dropped, as the sh client drops them.
-Windows gets the binary, chat, and native ops; server-composed walk enumerations assume POSIX
-`find`/`stat`/`git` and `exec` argvs assume `sh` — a named limit of the server's composition, not
-of this client.
+between clients mid-conversation. Unknown directives are dropped. The exec reply is
+`stdout_b64`/`stderr_b64`. A downloaded binary's integrity rests on TLS and the response length —
+no separate checksum; the deploy that serves the binary is the deploy being trusted with the
+conversation. Windows gets the binary, chat, and native
+ops; server-composed walk enumerations assume POSIX `find`/`stat`/`git` and `exec` argvs assume
+`sh` — a named limit of the server's composition, not of this client.
 
 ## Doctrine fit
 
 **Core doctrine** — untouched: the client is a served artifact like the script it replaces, driven
-entirely by the server. **Both ends** — the binary route ships with its producer (the CI matrix)
-and its consumer (the client's install flow and this RFC's bootstrap plan); the route refuses
+entirely by the server. **Both ends** — the binary route ships with its producer (the deploy's
+build matrix) and its consumers (the bootstrap and the client's install flow); the route refuses
 rather than half-serving when the deploy carries no binaries. **Fail loud** — a missing binary is
-a 404 sentence, never a fallback to a mismatched target. **Tear-outs land whole** — the sh client
-and the JS layer leave in one change once the binary is the served path.
+a 404 sentence, never a fallback to a mismatched target. **Tear-outs land whole** — the sh client,
+the seven JS op programs, the bundle injection, and the `osascript`/`node` probe left in one
+change, with the binary path gated in the same deploy.
 
 ## Alternatives
 
@@ -91,12 +97,12 @@ and the JS layer leave in one change once the binary is the served path.
 | A TUI framework (ratatui) over the whole screen | The client is a transcript plus a repainted bottom region, not an alternate-screen app; crossterm alone keeps the binary and the code small |
 | Ship the op programs to the binary as JS (embed an engine) | The engine is the weight; the op shapes are pinned by tests either way |
 | Change the wire to binary framing now | The wins land without it; a framing change would strand the sh client before its tear-out |
+| Fold the `write`/`read` op kinds into the `run` arm | Each carries relay behavior a program name would only re-encode — `write` fetches its staged bytes off the wire, `read` answers the file as the reply body; a fixed kind is the honest shape |
 
 ## Build order
 
 | # | Unit | Estimate |
 |---|---|---|
-| 1 | Crate: wire, renderer, session loop, native ops, tests | this change |
-| 2 | Gateway binary route + CI build matrix | this change |
-| 3 | Deploy bakes binaries; bootstrap serves them; sh client + JS injection tear out whole | after a proven deploy |
-| 4 | `stdout_b64` replaces `stdout_hex` on the op reply once the sh client is gone | with 3 |
+| 1 | Crate: wire, renderer, session loop, native ops, tests | landed |
+| 2 | Gateway binary route + CI build matrix | landed |
+| 3 | Deploy bakes five targets; bootstrap serves the binary; sh client + JS injection torn out whole; version-gated `install`; the exec reply is `stdout_b64` alone — no client in the field speaks hex | this change |

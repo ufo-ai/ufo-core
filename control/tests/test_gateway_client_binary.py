@@ -2,12 +2,15 @@
 binary directory, refused as the same 404 for an unknown target, an unconfigured deploy, and a
 target the directory does not hold."""
 
+import re
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from ufo_control.gateway import CLIENT_BIN_DIR_ENV, CLIENT_TARGETS, gateway_app
+
+BOOTSTRAP = Path(__file__).parent.parent / "src" / "ufo_control" / "client" / "ufo"
 
 DARWIN_TARGET = "aarch64-apple-darwin"
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
@@ -60,3 +63,9 @@ def test_absent_binary_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     response = _client().get(f"/ufo/bin/{DARWIN_TARGET}")
     assert response.status_code == 404
     assert response.text == f"no client binary for {DARWIN_TARGET}"
+
+
+def test_every_target_the_bootstrap_names_is_servable() -> None:
+    named = set(re.findall(r"TARGET=([a-z0-9_]+-[a-z0-9_-]+)", BOOTSTRAP.read_text()))
+    assert named
+    assert named <= CLIENT_TARGETS

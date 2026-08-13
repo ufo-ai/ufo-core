@@ -113,7 +113,6 @@ class _TurnStream:
     subscribers: list[tuple[asyncio.Queue[tuple[str, LiveFrame]], asyncio.AbstractEventLoop]]
     seq: int = 0
     ended: bool = False
-    detached_at: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,10 +128,9 @@ class InProcessHub:
     attached, because the terminal client disconnects at every op it hands the member's machine and
     a frame taken off the dying subscription but never rendered — the tool note racing the op
     directive — must replay on the cursor the reconnect carries rather than vanish with the ring.
-    The seq at that last detach is remembered, so a reconnect carrying no cursor — an installed
-    script from before cursors — replays only what arrived while it was away, never what it already
-    printed. A subscriber attaching after the ring is gone replays nothing and relies on the
-    durable poll for the terminal state.
+    A subscriber with no cursor replays the whole retained ring, exactly as the Redis hub replays
+    its stream; one attaching after the ring is gone replays nothing and relies on the durable poll
+    for the terminal state.
 
     Cursors are a per-turn monotonic sequence, and the turn keeps it across those drops: a sequence
     restarting at one would issue cursors a client already passed, so frames published after the
@@ -188,7 +186,7 @@ class InProcessHub:
         entry = (queue, asyncio.get_running_loop())
         with self._lock:
             stream = self._stream(turn_id)
-            after = int(cursor) if cursor else stream.detached_at
+            after = int(cursor) if cursor else 0
             stream.subscribers.append(entry)
             replay = [item for item in stream.buffer if int(item[0]) > after]
         try:
@@ -201,11 +199,8 @@ class InProcessHub:
                 held = self._turns.get(turn_id)
                 if held is not None and entry in held.subscribers:
                     held.subscribers.remove(entry)
-                    if not held.subscribers:
-                        if held.ended or not held.buffer:
-                            del self._turns[turn_id]
-                        else:
-                            held.detached_at = held.seq
+                    if not held.subscribers and (held.ended or not held.buffer):
+                        del self._turns[turn_id]
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
         if not cursor:
