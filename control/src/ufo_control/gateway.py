@@ -15,6 +15,7 @@ import asyncpg
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from starlette.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
@@ -80,6 +81,15 @@ TOUR_CHOICE = "Show me what you can do"
 WORKSPACE_PROMPT = "Choose a workspace:"
 SCRIPT_URL_DEFAULT = 'UFO_URL="${UFO_URL:-https://flyingobject.ai}"'
 SHELLSCRIPT_MEDIA_TYPE = "text/x-shellscript"
+CLIENT_BIN_DIR_ENV = "UFO_CLIENT_BIN_DIR"
+CLIENT_TARGETS = frozenset(
+    {
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "x86_64-pc-windows-msvc",
+    }
+)
 MAX_CHANNEL_BYTES = 64
 MAX_SESSION_BYTES = 128
 ONBOARD_SESSION_BYTES = 32
@@ -405,6 +415,20 @@ def gateway_app() -> FastAPI:
     @app.get("/ufo")
     async def serve_script() -> Response:
         return PlainTextResponse(STAMPED_SCRIPT, media_type=SHELLSCRIPT_MEDIA_TYPE)
+
+    @app.get("/ufo/bin/{target}")
+    async def client_binary(target: str) -> Response:
+        """The native terminal client for one build target, from the deploy's binary directory —
+        an unconfigured deploy answers the same 404 an unknown target does."""
+        directory = os.environ.get(CLIENT_BIN_DIR_ENV, "")
+        refusal = PlainTextResponse(f"no client binary for {target}", status_code=404)
+        if target not in CLIENT_TARGETS or not directory:
+            return refusal
+        name = "ufo.exe" if target == "x86_64-pc-windows-msvc" else "ufo"
+        binary = Path(directory) / target / name
+        if not binary.is_file():
+            return refusal
+        return FileResponse(binary, media_type="application/octet-stream", filename=name)
 
     @app.get("/fleet")
     async def fleet() -> Response:

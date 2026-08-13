@@ -106,12 +106,14 @@ def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFra
 
 @dataclass
 class _TurnStream:
-    """One turn's live state: the replay ring, the live subscribers, and the monotonic cursor
-    sequence. Mutated only under the hub's lock."""
+    """One turn's live state: the replay ring, the live subscribers, the monotonic cursor
+    sequence, and whether the turn's stream has ended. Mutated only under the hub's lock."""
 
     buffer: deque[tuple[str, LiveFrame]]
     subscribers: list[tuple[asyncio.Queue[tuple[str, LiveFrame]], asyncio.AbstractEventLoop]]
     seq: int = 0
+    ended: bool = False
+    detached_at: int = 0
 
 
 @dataclass(frozen=True)
@@ -121,19 +123,22 @@ class InProcessHub:
 
     Publishers and subscribers may live on different event loops (DBOS runs dequeued workflows on
     its own loop thread), so a lock guards the shared per-turn state and delivery hops onto the
-    subscriber's loop. The ring is dropped when a turn's stream ends (a Terminal or Parked) with no
-    subscriber attached, and when the last subscriber leaves, so retained memory is bounded to
-    in-flight turns; a subscriber attaching after the ring is gone replays nothing and relies on the
+    subscriber's loop. The ring is dropped once the turn's stream has ended (a Terminal or Parked):
+    at that publish when no subscriber is attached, else when the last one leaves — so retained
+    memory is bounded to in-flight turns. An in-flight turn keeps its ring while no subscriber is
+    attached, because the terminal client disconnects at every op it hands the member's machine and
+    a frame taken off the dying subscription but never rendered — the tool note racing the op
+    directive — must replay on the cursor the reconnect carries rather than vanish with the ring.
+    The seq at that last detach is remembered, so a reconnect carrying no cursor — an installed
+    script from before cursors — replays only what arrived while it was away, never what it already
+    printed. A subscriber attaching after the ring is gone replays nothing and relies on the
     durable poll for the terminal state.
 
-    Cursors are a per-turn monotonic sequence, and the turn keeps it across those drops: a surface
-    that reconnects between frames — the terminal client disconnects at every op it hands the
-    member's machine — leaves no subscriber behind while it is away, and a sequence restarting at
-    one there would issue cursors the client has already passed, so the frames published in the gap
-    would be filtered out as seen and lost. The ring the reconnect finds holds only what arrived
-    while it was away, which is what a client with no cursor at all wants replayed. The mark is
-    dropped on the turn's terminal, never on its park: a parked turn resumes under the same id, and
-    its resumed run must not reissue the cursors the client already holds.
+    Cursors are a per-turn monotonic sequence, and the turn keeps it across those drops: a sequence
+    restarting at one would issue cursors a client already passed, so frames published after the
+    restart would be filtered out as seen and lost. The mark is dropped on the turn's terminal,
+    never on its park: a parked turn resumes under the same id, and its resumed run must not
+    reissue the cursors the client already holds.
     """
 
     _turns: dict[UUID, _TurnStream] = field(default_factory=dict)
@@ -162,8 +167,10 @@ class InProcessHub:
             targets = list(stream.subscribers)
             if isinstance(frame, Terminal):
                 del self._marks[turn_id]
-            if isinstance(frame, Terminal | Parked) and not targets:
-                del self._turns[turn_id]
+            if isinstance(frame, Terminal | Parked):
+                stream.ended = True
+                if not targets:
+                    del self._turns[turn_id]
         for queue, loop in targets:
             loop.call_soon_threadsafe(_offer, queue, (cursor, frame))
         return cursor
@@ -179,9 +186,9 @@ class InProcessHub:
         was not fanned. Live frames therefore always follow the replay, never overlap it."""
         queue: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
         entry = (queue, asyncio.get_running_loop())
-        after = int(cursor) if cursor else 0
         with self._lock:
             stream = self._stream(turn_id)
+            after = int(cursor) if cursor else stream.detached_at
             stream.subscribers.append(entry)
             replay = [item for item in stream.buffer if int(item[0]) > after]
         try:
@@ -195,7 +202,10 @@ class InProcessHub:
                 if held is not None and entry in held.subscribers:
                     held.subscribers.remove(entry)
                     if not held.subscribers:
-                        del self._turns[turn_id]
+                        if held.ended or not held.buffer:
+                            del self._turns[turn_id]
+                        else:
+                            held.detached_at = held.seq
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool:
         if not cursor:

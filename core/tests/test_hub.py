@@ -88,7 +88,7 @@ async def test_overflow_drops_oldest():
     await stream.aclose()
 
 
-async def test_subscribe_cleans_up_registry_on_exit():
+async def test_subscribe_cleans_up_registry_once_the_turn_ends():
     hub = InProcessHub()
     turn_id = uuid4()
     stream = hub.subscribe(turn_id)
@@ -97,6 +97,9 @@ async def test_subscribe_cleans_up_registry_on_exit():
     assert (await first)[1] == TextDelta(text="x")
     assert turn_id in hub._turns
     await stream.aclose()
+    assert turn_id in hub._turns
+
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
     assert hub._turns == {}
 
 
@@ -133,25 +136,42 @@ async def test_covers_reports_whether_a_cursor_is_still_retained():
 
 async def test_a_turn_keeps_its_cursor_across_a_reconnect_so_the_gap_is_neither_lost_nor_repeated():
     """A surface that reconnects between frames leaves no subscriber behind while it is away — the
-    terminal client disconnects at every op it hands the member's machine. The ring it left goes,
-    but the turn's cursor sequence does not: restarting it would issue numbers the client has
-    already passed, and the frames published in the gap would be filtered out as seen. What the
-    reconnect finds is exactly the gap — replayed whole to a client with no cursor, and resumed
-    from for one that has it."""
+    terminal client disconnects at every op it hands the member's machine. The in-flight turn keeps
+    its ring and its cursor sequence across that gap: restarting the sequence would issue numbers
+    the client has already passed, and the frames published in the gap would be filtered out as
+    seen. What the reconnect resumes from its cursor is exactly the gap."""
     hub = InProcessHub()
     turn_id = uuid4()
     seen = await hub.publish(turn_id, TextDelta(text="printed"))
     stream = hub.subscribe(turn_id)
     assert (await anext(stream))[1] == TextDelta(text="printed")
     await stream.aclose()
-    assert hub._turns == {}
 
     missed = await hub.publish(turn_id, TextDelta(text="while away"))
     assert int(missed) > int(seen)
-    assert await hub.covers(turn_id, seen) is False
+    assert await hub.covers(turn_id, missed) is True
 
     resumed = hub.subscribe(turn_id, cursor=seen)
     assert (await anext(resumed))[1] == TextDelta(text="while away")
+    await resumed.aclose()
+
+
+async def test_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_reconnect():
+    """The op race: a tool note lands on the held stream's subscription in the same breath the op
+    directive ends it, so the note is taken off the queue but never rendered and never advances the
+    client's cursor. The reply's reconnect carries the cursor from before the note, and the ring —
+    which must survive the gap with no subscriber attached — replays it."""
+    hub = InProcessHub()
+    turn_id = uuid4()
+    rendered = await hub.publish(turn_id, TextDelta(text="cost tick"))
+    stream = hub.subscribe(turn_id)
+    assert (await anext(stream))[1] == TextDelta(text="cost tick")
+    note = ToolCall(tool="bash", description="", preview="pwd")
+    await hub.publish(turn_id, note)
+    await stream.aclose()
+
+    resumed = hub.subscribe(turn_id, cursor=rendered)
+    assert (await anext(resumed))[1] == note
     await resumed.aclose()
 
 
@@ -236,6 +256,7 @@ async def test_two_subscribers_both_receive():
     assert (await first_b)[1] == TextDelta(text="hi")
     await stream_a.aclose()
     await stream_b.aclose()
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
     assert hub._turns == {}
 
 

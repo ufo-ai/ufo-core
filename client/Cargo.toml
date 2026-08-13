@@ -1,0 +1,26 @@
+[package]
+name = "ufo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ufo"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+crossterm = "0.28"
+fancy-regex = "0.14"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-width = "0.2"
+ureq = { version = "2.12", features = ["native-certs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
