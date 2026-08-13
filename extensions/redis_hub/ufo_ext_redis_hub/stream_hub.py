@@ -23,6 +23,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from redis.typing import StreamEntry, XReadResponse
 
 from ufo.sdk.hub import (
+    Absorbed,
     CostTick,
     LiveFrame,
     Parked,
@@ -45,6 +46,7 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("cost_tick", CostTick),
     ("tool_call", ToolCall),
     ("skill_load", SkillLoad),
+    ("absorbed", Absorbed),
 )
 _KIND_BY_TYPE = {cls: kind for kind, cls in _FRAME_KINDS}
 _TYPE_BY_KIND = {kind: cls for kind, cls in _FRAME_KINDS}

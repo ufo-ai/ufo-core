@@ -293,6 +293,42 @@ place that knows the count — is where changes are reached. A run's link is roo
 conversation that spawned it: the one being read for a run under a reply, that run's own for the
 runs it spawned in turn — which is the conversation the read behind the link authorizes against.
 
+The composer stays live while a turn runs, because a message sent then joins that running turn
+rather than queueing behind it. The member's bubble states the wait under itself — the working pulse
+a reply's running activity already carries, over `Waiting for the agent to pick this up` — and the
+line clears on the turn saying it took that message up, never on the next frame to arrive. A turn
+absorbs what arrived at its round boundaries, so the wait lasts as long as the call the turn is
+inside: the copy promises nothing sooner and nothing counts down against it. It also lasts no longer
+than the stream: a wait names a turn that is working on it, so the stream ending ends the wait too,
+and a row that turn never took up is drawn as waiting again by the next read — the queue knows
+whether it is, and a pulse under a bubble with nothing running only claims it. A row the turn did
+take up stays on the page without the wait until the turn writes it: taken up is not yet written,
+and a message must not vanish between the two. That queue is
+not only the member's: an extension invoking prose into a live turn folds a row the same way, and a
+run's conversation carries what its children deliver. So whose message a row is is the row's
+admission source, and a wait is stated only over a member's own and only against a turn that can
+take it up — an agent's prompt draws its bubble, because the reply answers it, and claims nothing of
+the member's; a run's turn takes up only what its children deliver, so an external row on its page
+is stated with no wait at all. The same fact decides what the turn publishes: the frame a drain
+pushes names the member rows it folded, so a surface answering “did it land?” off that frame — the
+portal's pulse, Slack's thread status — never says it of a message no member sent. The composer is
+dead only where there is nothing to send into — a conversation that has not loaded, and the moment a
+first message is opening one. The `new` sentinel opens a conversation per request, so a second send
+before the first answers founds a second conversation instead of joining the first and the two halves
+are answered apart; the words wait in the box and cross with the draft into the conversation the
+first message opened. The send refuses that founding twice on its own account, because a form held by
+one render cannot speak for a request already in flight.
+
+Which turn the page tails is admission's answer, not the page's guess: the chat response carries
+`opened_run`, decided under the conversation-row lock, and false beside an arrival id is the one
+outcome whose frames a tail already carries. Everything else the page tails, a refusal included — a
+seat- or cap-refused message founds a turn of its own holding its own terminal, and that terminal
+is how the member learns it was refused. The page keeps one tail per conversation, so opening one
+closes whatever it held: two on one turn double every delta between them. A tail draws its bubble
+from what it replays — a source opens with no cursor, so the turn's retained frames arrive from the
+first of them — so opening one starts that bubble empty: whatever was drawn belongs to the tail being
+replaced, and a turn the page stops following is the transcript's to state on the next read of it.
+
 Conversations answer the same rule from one component: `ConversationList` (`views/Conversations.tsx`)
 draws an agent's own conversations and a subagent's runs alike, and the read decides what each row
 says about where it came from. A read spanning every agent carries the agent on the row; a read

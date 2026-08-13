@@ -61,7 +61,24 @@ class SkillLoad(BaseModel):
     skill: str
 
 
-LiveFrame = TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad
+class Absorbed(BaseModel):
+    """The member's inbound-queue rows a running turn just folded into its window, pushed at the
+    round boundary that drained them so a surface holding a message it admitted mid-turn learns the
+    agent has it. Non-terminal, and distinguished from the other frames by carrying the `arrivals`
+    it absorbed — the `inbound_message` ids member admission returns, and only those: a drain also
+    folds prompts an extension invoked and results a child delivered, which no member is waiting on
+    and no surface may report as theirs. One frame per drain: the ids a round absorbed clear
+    together, since they reach the model in the same round.
+
+    These are the ids in the window now, not a once-per-row announcement: parking releases every row
+    the attempt stamped, the absorbed ones included, because a resume is a fresh workflow that must
+    re-drain them — so a parked-and-resumed turn publishes an id it already published. A surface
+    acting on the frame acts idempotently."""
+
+    arrivals: tuple[UUID, ...]
+
+
+LiveFrame = TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad | Absorbed
 
 
 class Hub(Protocol):

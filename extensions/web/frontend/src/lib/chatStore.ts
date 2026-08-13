@@ -43,6 +43,10 @@ export type ChatState = {
   busy: boolean;
   live: LiveTurn | null;
   turn: StreamingTurn | null;
+  /** The arrival ids a turn has said it took up. A drain can be published before the send that
+   *  admitted the row has its response back, so the ids are kept rather than only cleared off the
+   *  bubbles they name: a message whose id is already here never states a wait it will not leave. */
+  absorbed: string[];
   handoffs: Handoffs;
   fault: ToastState | null;
 };
@@ -52,6 +56,7 @@ const EMPTY: ChatState = {
   busy: false,
   live: null,
   turn: null,
+  absorbed: [],
   handoffs: {},
   fault: null,
 };

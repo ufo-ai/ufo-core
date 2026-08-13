@@ -64,6 +64,9 @@ from ufo.ext.surface import (
     PortalSkill as PortalSkill,
 )
 from ufo.ext.surface import (
+    QueuedArrival as QueuedArrival,
+)
+from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
 )
 from ufo.ext.surface import (

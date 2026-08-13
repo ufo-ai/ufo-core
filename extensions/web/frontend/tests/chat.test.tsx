@@ -6,6 +6,7 @@ import { App } from "@/App";
 
 import {
   AGENT,
+  ARRIVAL_ID,
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
@@ -16,6 +17,7 @@ import {
   json,
   useStreamFake,
   wire,
+  type Route,
 } from "./harness";
 
 beforeEach(() => {
@@ -36,6 +38,26 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 
 function open() {
   return render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+}
+
+const WAITING = "Waiting for the agent to pick this up";
+const REFUSED_TURN = "44444444-4444-4444-8444-444444444444";
+
+/** What the chat route answers a message that joined the run a live turn already opened: admission
+ *  opened no run for this delivery, so the tail on that turn is the one carrying its frames. */
+const FOLDED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go", opened_run: false };
+
+async function sendingMidTurn(chat: Route): Promise<void> {
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }),
+    "/chat": chat,
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText("and again")).toBeTruthy();
 }
 
 test("an empty conversation states it, and the composer sends a message and streams the reply", async () => {
@@ -188,23 +210,36 @@ test("a live subagent run nests under the reply it produced", async () => {
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
-test("a conversation reloaded mid-turn holds the composer, so the turn is tailed once", async () => {
+test("a message sent mid-turn joins the running turn, waits to be taken up, and is tailed once", async () => {
   const { calls } = wire({
     ...transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }),
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
+    "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
   });
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const send = screen.getByRole("button", { name: "Send" });
-  expect((send as HTMLButtonElement).disabled).toBe(true);
+  expect((send as HTMLButtonElement).disabled).toBe(false);
+  StreamFake.last().emit("message", { text: "reading it" });
+  expect(await screen.findByText("reading it")).toBeTruthy();
 
-  // A folded follow-up returns the running turn's own id, so a second attach would leave two
-  // EventSources writing one live turn — every chunk doubled, and the reply recorded twice.
+  // Admission opened no run for the follow-up, so its frames come up the tail already open on that
+  // turn — a second attach would leave two EventSources writing one live turn, every chunk doubled
+  // and the reply recorded twice.
   await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
   await userEvent.click(send);
-  expect(calls.filter((url) => url.includes("/chat?conversation=")).length).toBe(0);
+  await waitFor(() =>
+    expect(calls.filter((url) => url.includes("/chat?conversation=")).length).toBe(1),
+  );
   expect(StreamFake.opened.length).toBe(1);
+  expect(await screen.findByText("Waiting for the agent to pick this up")).toBeTruthy();
+  expect(screen.getByText("reading it")).toBeTruthy();
+
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  await waitFor(() =>
+    expect(screen.queryByText("Waiting for the agent to pick this up")).toBeNull(),
+  );
+  expect(screen.getByText("and again")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -215,8 +250,137 @@ test("a conversation reloaded mid-turn holds the composer, so the turn is tailed
   });
 
   await screen.findByText("Reviewed it.");
-  await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
   expect(StreamFake.opened.length).toBe(1);
+});
+
+test("a drain that beats the response leaves no wait under the message it took up", async () => {
+  let land: (payload: unknown) => void = () => {};
+  const admitted = new Promise<Response>((resolve) => {
+    land = (payload) => resolve(json(payload));
+  });
+  await sendingMidTurn(() => admitted);
+
+  // The queue row is committed before the POST answers, so the turn can reach a round boundary,
+  // drain it and say so while the response is still in flight. Stamping the id afterwards would
+  // hold a wait nothing will ever name again.
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  land({ ...FOLDED, arrival_id: ARRIVAL_ID });
+  StreamFake.last().emit("message", { text: "reading both" });
+
+  expect(await screen.findByText("reading both")).toBeTruthy();
+  expect(screen.queryByText(WAITING)).toBeNull();
+  expect(StreamFake.opened.length).toBe(1);
+});
+
+test("a wait states nothing once the turn it was waiting on has ended", async () => {
+  await sendingMidTurn(() => json({ ...FOLDED, arrival_id: ARRIVAL_ID }));
+  expect(await screen.findByText(WAITING)).toBeTruthy();
+
+  // A failed turn releases what it never absorbed back to pending, so the message really is still
+  // waiting — but not on this turn, and a pulse under the bubble with nothing running says it is.
+  StreamFake.last().emit("terminal", { status: "failed", error_class: "ProviderTimeout" });
+
+  expect(await screen.findByText("(failed: ProviderTimeout)")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByText(WAITING)).toBeNull());
+  expect(screen.getByText("and again")).toBeTruthy();
+});
+
+test("a failed mid-turn send states the error and leaves the reply streaming", async () => {
+  let fail: () => void = () => {};
+  const failed = new Promise<Response>((resolve) => {
+    fail = () => resolve(new Response("nope", { status: 500 }));
+  });
+  await sendingMidTurn(() => failed);
+
+  StreamFake.last().emit("message", { text: "reading it" });
+  expect(await screen.findByText("reading it")).toBeTruthy();
+  fail();
+
+  // The failure is the POST's alone: the turn it never reached goes on streaming up the tail the
+  // page holds, so the reply stays standing and the next delta lands on it, not on a blank bubble.
+  expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();
+  expect(screen.getByText("reading it")).toBeTruthy();
+  expect(StreamFake.opened.length).toBe(1);
+
+  StreamFake.last().emit("message", { text: ", and reviewed" });
+  expect(await screen.findByText("reading it, and reviewed")).toBeTruthy();
+});
+
+test("a refused mid-turn message is tailed on the turn it founded, behind no live source", async () => {
+  // A fold refused for an unheld seat or a tripped cap founds a turn of the message's own, carrying
+  // its own terminal and naming no arrival. The page tails it to state the refusal, and the source
+  // it held cannot stay open behind that one: two on one chat double every delta between them.
+  await sendingMidTurn(() =>
+    json({ turn_id: REFUSED_TURN, conversation_id: CONVO_ID, title: "go", opened_run: false }),
+  );
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  expect(StreamFake.last().url).toBe("/surface/web/turns/" + REFUSED_TURN + "/stream");
+  expect(StreamFake.opened[0].closed).toBe(true);
+
+  StreamFake.last().emit("parked", { message: "Over the spend cap — raise it to carry on." });
+
+  expect(await screen.findByText("Over the spend cap — raise it to carry on.")).toBeTruthy();
+  expect(screen.queryByText(WAITING)).toBeNull();
+});
+
+test("a refusal states itself alone, never glued to the reply the page stopped tailing", async () => {
+  let serves = 0;
+  wire({
+    ...transcript(),
+    "/transcript": () => {
+      serves += 1;
+      return json(
+        serves === 1
+          ? { messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }
+          : {
+              messages: [
+                { role: "user", text: "Review PR 1268." },
+                { role: "assistant", text: "reading it, and reviewed." },
+              ],
+            },
+      );
+    },
+    "/chat": () =>
+      json({ turn_id: REFUSED_TURN, conversation_id: CONVO_ID, title: "go", opened_run: false }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "reading it" });
+  expect(await screen.findByText("reading it")).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  // The refused message founds a turn of its own, so the page leaves the running turn's tail for
+  // that one — and a tail draws the turn it opened on from that turn's own replay. Carrying the
+  // half-streamed answer over would record one bubble holding two turns, and the answer the page
+  // stopped tailing is the running turn's to state, on the next read of it.
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  StreamFake.last().emit("parked", { message: "Over the spend cap — raise it to carry on." });
+
+  expect(await screen.findByText("Over the spend cap — raise it to carry on.")).toBeTruthy();
+  expect(screen.queryByText(/reading it/)).toBeNull();
+
+  window.dispatchEvent(new Event("focus"));
+  expect(await screen.findByText("reading it, and reviewed.")).toBeTruthy();
+});
+
+test("a fold that resumes a parked turn is tailed again, because admission opened that run", async () => {
+  // A fold onto a parked turn requeues it, and admission says this delivery opened the run: the
+  // frames come from a fresh workflow on the same turn id, so the id matching what the page thinks
+  // it is tailing is no reason to leave that source in place.
+  await sendingMidTurn(() => json({ ...FOLDED, opened_run: true, arrival_id: ARRIVAL_ID }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  expect(StreamFake.opened[0].closed).toBe(true);
+  expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
+  expect(await screen.findByText(WAITING)).toBeTruthy();
+
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+
+  await waitFor(() => expect(screen.queryByText(WAITING)).toBeNull());
 });
 
 test("a settled conversation tails nothing", async () => {
@@ -845,15 +1009,29 @@ test("a slot URL opens a conversation absent from the chat rail", async () => {
   expect(await screen.findByText("/workspace/repo/child.py")).toBeTruthy();
 });
 
-test("the composer is disabled while a turn streams and re-enabled when it lands", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
+test("the composer is dead until the conversation loads, and open through the turn it sends", async () => {
+  let load: (payload: unknown) => void = () => {};
+  const held = new Promise<Response>((resolve) => {
+    load = (payload) => resolve(json(payload));
+  });
+  wire({
+    ...transcript(),
+    "/transcript": () => held,
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
   open();
-  await screen.findByText("No messages in this conversation yet.");
 
-  const send = screen.getByRole("button", { name: "Send" });
+  const send = await screen.findByRole("button", { name: "Send" });
+  expect((send as HTMLButtonElement).disabled).toBe(true);
+
+  load({ messages: [] });
+  await screen.findByText("No messages in this conversation yet.");
+  expect((send as HTMLButtonElement).disabled).toBe(false);
+
   await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
   await userEvent.click(send);
-  await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(true));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect((send as HTMLButtonElement).disabled).toBe(false);
 
   StreamFake.last().emit("terminal", {
     status: "done",

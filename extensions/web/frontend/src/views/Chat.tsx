@@ -7,7 +7,7 @@ import { SILENT, Toast } from "@/components/ui/toast";
 import { Files, MessageLog, Meta } from "@/kernel/messages";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
-import { clearDraft, installDraftFlush, readDraft, writeDraft } from "@/lib/drafts";
+import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
 import {
   answerQuestion,
   refreshTranscript,
@@ -39,6 +39,7 @@ export function Chat({
   onSettled,
 }: ChatProps) {
   const chatKey = conversationId ?? "new:" + agent.id;
+  const draftKey = member.id + "/" + chatKey;
   const state = useChat(chatKey);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -48,7 +49,10 @@ export function Chat({
     key: chatKey,
     agentId: agent.id,
     conversationId,
-    onCreated,
+    onCreated: (created, title) => {
+      moveDraft(draftKey, member.id + "/" + created);
+      onCreated?.(created, title);
+    },
     onAccepted: onActivity,
   };
   const live = useRef(target);
@@ -174,12 +178,7 @@ export function Chat({
           </div>
         ) : null}
       </div>
-      <Composer
-        target={target}
-        draftKey={member.id + "/" + chatKey}
-        input={composer}
-        onSend={repin}
-      />
+      <Composer target={target} draftKey={draftKey} input={composer} onSend={repin} />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
@@ -285,7 +284,10 @@ function Composer({
   const state = useChat(target.key);
   const [text, setText] = useState(() => readDraft(draftKey));
   const files = useRef<HTMLInputElement>(null);
-  const disabled = state.busy || state.messages === null;
+  // Live during a turn, so a correction reaches the agent mid-reply. The exception is the send that
+  // founds a conversation: until it answers there is no conversation for a second message to join,
+  // and these words stay in the box rather than opening a conversation of their own.
+  const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
   useEffect(() => {
     input.current?.focus();

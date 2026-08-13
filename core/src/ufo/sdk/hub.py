@@ -8,6 +8,9 @@ from ufo.activity import (
     tool_activity as tool_activity,
 )
 from ufo.hub import (
+    Absorbed as Absorbed,
+)
+from ufo.hub import (
     CostTick as CostTick,
 )
 from ufo.hub import (

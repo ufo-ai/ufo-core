@@ -52,6 +52,7 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import (
+    Absorbed,
     CostTick,
     LiveFrame,
     Parked,
@@ -83,6 +84,7 @@ from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectListQuery
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
+    MEMBER_ADMISSION,
     AgentSummary,
     ConnectRequestInvalid,
     CredentialRequest,
@@ -670,7 +672,17 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     """Admit one member message. The `conversation` query parameter continues that conversation —
     gated to the member's own chat with this agent — and the `new` sentinel opens a fresh one: the
     chat POST is the chat transport, so opening a conversation rides the first message rather than
-    a separate mutation, and the response names the conversation it landed in."""
+    a separate mutation, and the response names the conversation it landed in.
+
+    A message sent while a turn is still running joins that turn instead of founding one, and the
+    response says so by naming the `arrival_id` the turn's `absorbed` event will carry — the id the
+    page holds its wait against. `opened_run` is the other half, and the one the page decides on:
+    admission's own answer, taken under the conversation-row lock, to whether this delivery opened
+    the run the named turn belongs to. False beside an `arrival_id` is the single outcome whose live
+    frames a tail already carries, so the page leaves that tail alone rather than opening a second
+    stream on one turn. Every other outcome is the page's to tail, the refusals included: a
+    seat-refused or cap-refused message founds a turn of its own carrying its own terminal, and the
+    stream replays it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -721,11 +733,14 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         idempotency_key=key,
         speaker_member_id=member_id,
     )
-    payload: dict[str, str | None] = {
+    payload: dict[str, str | bool | None] = {
         "turn_id": str(admitted.turn_id),
         "conversation_id": str(conversation_id),
         "title": title,
+        "opened_run": admitted.opened_run,
     }
+    if admitted.arrival_id is not None:
+        payload["arrival_id"] = str(admitted.arrival_id)
     if key is not None:
         payload["body"] = await ctx.admitted_body(key)
     return JSONResponse(payload)
@@ -982,6 +997,18 @@ async def _conversation_messages(
     naming the child that answered — and one set decides it for the settled turns and the running
     one alike, so the live chat and a transcript read back never disagree about a message.
 
+    A message admitted while that turn runs is in neither store until the turn ends, so the
+    conversation's queue rows the transcript does not hold are appended after the turn's own
+    prompt — a reload anywhere between admission and the turn's end shows the message rather than
+    losing it. Only a row still waiting names the `arrival_id` a wait is drawn against, and only a
+    member's own on a turn about to take it up, since that wait clears on that turn's `absorbed`
+    event and on nothing else. The row's admission source is what says whose message it is — an
+    internal row is an agent's prompt into the conversation, which draws its bubble as the prompt
+    founding a turn does, because the reply answers it, and claims no wait of a member who sent
+    nothing. And a wait names a turn working on the message: a settled turn works on none, and a
+    run's turn claims only internally admitted rows, so an external row in a run's conversation is
+    one no live turn takes.
+
     A run answers its parent by calling finish, and the payload that call carried is what the
     transcript closes with — so a conversation whose turns ran a profile states its replies as the
     answer it wrote, whole. Only such a conversation: the same words from a main agent are a reply
@@ -1013,6 +1040,22 @@ async def _conversation_messages(
         return rendered, None
     if detail.turn.terminal is None and str(detail.turn.id) not in agent_origin:
         rendered.append({"role": "user", "text": member_message_text(detail.turn.inbound)})
+    draining = detail.turn.id if detail.turn.terminal is None else None
+    for arrival in await ctx.queued_arrivals(conversation_id, draining):
+        if str(arrival.id) in agent_origin:
+            continue
+        bubble: dict[str, object] = {
+            "role": "user",
+            "text": member_message_text(arrival.inbound),
+        }
+        if (
+            arrival.waiting
+            and arrival.admission_source == MEMBER_ADMISSION
+            and detail.turn.terminal is None
+            and detail.turn.subagent_profile is None
+        ):
+            bubble["arrival_id"] = str(arrival.id)
+        rendered.append(bubble)
     return rendered, detail.turn
 
 
@@ -2527,6 +2570,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case SkillLoad():
             return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case Absorbed():
+            return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case _:
             return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
 

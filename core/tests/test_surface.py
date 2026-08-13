@@ -3265,3 +3265,92 @@ async def test_agent_origin_refs_names_only_the_machine_envelopes(db: None, tmp_
     assert str(delivered) in refs
     assert str(spoke) not in refs
     assert str(invoked) not in refs
+
+
+async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bubble(
+    db: None, tmp_path
+) -> None:
+    """The queue holds two kinds of row and a projection must tell them apart: a member's own
+    words, folded in while a turn runs, and an agent's prompt an extension invoked into the same
+    live turn. Nothing in the id or the body says which, so the row's admission source rides along —
+    ordered by admission. A row another read's turn consumed stays out unless the caller names that
+    turn as the one still draining, since only then is the row's transcript unwritten — and such a
+    row arrives with its wait already over."""
+    workspace_id, agent_id, member_id = await _seed()
+    conversation_id = await _seed_conversation(
+        workspace_id, agent_id, queue_key="root", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    running = await _seed_conversation_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="find the flaky test"
+    )
+    spoke = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=1,
+        body="also check the tests",
+        admission_source="member",
+        speaker_member_id=member_id,
+    )
+    invoked = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=2,
+        body="[seat approval request] ask an admin to decide.",
+        admission_source="internal",
+    )
+    folded = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=3,
+        body="already folded in",
+        admission_source="member",
+        speaker_member_id=member_id,
+        consumed_turn_id=running,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path / "blobs"))
+
+    pending = await context.queued_arrivals(conversation_id, None)
+    draining = await context.queued_arrivals(conversation_id, running)
+
+    assert [(arrival.id, arrival.admission_source, arrival.waiting) for arrival in pending] == [
+        (spoke, "member", True),
+        (invoked, "internal", True),
+    ]
+    assert [(arrival.id, arrival.waiting) for arrival in draining] == [
+        (spoke, True),
+        (invoked, True),
+        (folded, False),
+    ]
+
+
+async def _seed_pending_arrival(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    turn_id: UUID,
+    *,
+    seq: int,
+    body: str,
+    admission_source: str,
+    speaker_member_id: UUID | None = None,
+    consumed_turn_id: UUID | None = None,
+) -> UUID:
+    arrival_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=arrival_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=seq,
+                body=body,
+                admission_source=admission_source,
+                speaker_member_id=speaker_member_id,
+                admitted_turn_id=turn_id,
+                consumed_turn_id=consumed_turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+    return arrival_id

@@ -123,9 +123,13 @@ export type SubagentRun = {
   subagents: SubagentRun[];
 };
 
+/** One message a conversation states. `arrival_id` names the inbound-queue row a message admitted
+ *  while a turn ran landed on, and it is carried only while that turn has not taken the message up
+ *  — the turn's `absorbed` event names the same id when it does. */
 export type Message = {
   role: string;
   text: string;
+  arrival_id?: string;
   events?: ActivityEvent[];
   subagents?: SubagentRun[];
 };

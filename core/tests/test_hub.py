@@ -7,6 +7,7 @@ from uuid import uuid4
 from ufo.activity import tool_activity
 from ufo.hub import (
     SUBSCRIBER_QUEUE_FRAMES,
+    Absorbed,
     InProcessHub,
     LiveFrame,
     SkillLoad,
@@ -129,6 +130,17 @@ async def test_publish_buffers_for_a_later_subscriber_and_does_not_leak_on_termi
     assert turn_id in hub._turns
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
     assert hub._turns == {}
+
+
+async def test_an_absorbed_frame_neither_ends_the_stream_nor_drops_the_ring():
+    hub = InProcessHub()
+    turn_id = uuid4()
+    absorbed = Absorbed(arrivals=(uuid4(), uuid4()))
+    await hub.publish(turn_id, absorbed)
+    assert turn_id in hub._turns
+    stream = hub.subscribe(turn_id)
+    assert (await anext(stream))[1] == absorbed
+    await stream.aclose()
 
 
 async def test_two_subscribers_both_receive():

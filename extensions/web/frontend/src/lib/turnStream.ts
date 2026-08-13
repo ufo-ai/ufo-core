@@ -6,6 +6,7 @@ import {
   migrateChat,
   updateChat,
   type ActivityEvent,
+  type Bubble,
   type LiveTurn,
 } from "@/lib/chatStore";
 import type { ChatFile, ChatQuestion, SubagentRun, Transcript } from "@/lib/types";
@@ -86,18 +87,43 @@ export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): st
   return event ? eventLabel(event, "done") : "";
 }
 
+/** Tail one turn, drawing its live bubble from what this tail replays. A source opens with no
+ *  cursor, so the turn's retained frames arrive from the first of them: whatever the chat had drawn
+ *  belongs to the tail this one replaces — the turn the page stopped following, or an earlier source
+ *  on this same turn — and holding it would glue two turns into one bubble, or stand the reply the
+ *  replay rebuilds behind a copy of itself. A turn the page leaves is still the transcript's to
+ *  state, on the next read of it. */
 export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
-    live: state.live ?? liveTurn(),
+    live: liveTurn(),
     turn: { id: turnId, answering },
   }));
   attach(chatKey, turnId, answering, false);
 }
 
+/** Whether this page already holds the tail of one turn. Its own bookkeeping about its own
+ *  connection — never the answer to who owns the run, which is admission's to give. */
+function tailed(chatKey: string, turnId: string): boolean {
+  return chatState(chatKey).turn?.id === turnId && SOURCES.has(chatKey);
+}
+
+function withoutWait(messages: Bubble[] | null): Bubble[] | null {
+  if (messages === null) return null;
+  return messages.map((message) =>
+    message.arrival_id === undefined ? message : { ...message, arrival_id: undefined },
+  );
+}
+
+/** One tail per chat, newest attach the writer: whatever source the chat held is closed and a
+ *  backoff reattach still pending is cleared before this one opens. Two sources on one chat double
+ *  every delta between them, and a reattach firing behind a live source opens a third. */
 function attach(chatKey: string, turnId: string, answering: boolean, reattach: boolean): void {
+  const pending = TIMERS.get(chatKey);
+  if (pending !== undefined) clearTimeout(pending);
   TIMERS.delete(chatKey);
+  SOURCES.get(chatKey)?.close();
   let redrawOnOpen = reattach;
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
   SOURCES.set(chatKey, source);
@@ -124,10 +150,24 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       };
     });
 
-  const close = () => {
+  const release = () => {
     source.close();
-    SOURCES.delete(chatKey);
-    updateChat(chatKey, (state) => ({ ...state, busy: false, live: null, turn: null }));
+    if (SOURCES.get(chatKey) === source) SOURCES.delete(chatKey);
+  };
+
+  /** The stream is over, so no message states a wait on it either. A row this turn never took up is
+   *  still admitted and still pending, and the next transcript read draws the wait back from
+   *  `queued_arrivals` — the projection that knows, rather than a pulse left standing under a
+   *  bubble by a stream that ended. */
+  const close = () => {
+    release();
+    updateChat(chatKey, (state) => ({
+      ...state,
+      busy: false,
+      live: null,
+      turn: null,
+      messages: withoutWait(state.messages),
+    }));
   };
 
   source.addEventListener("open", () => {
@@ -160,6 +200,19 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     updateChat(chatKey, (state) => ({
       ...state,
       handoffs: { ...state.handoffs, credentials },
+    }));
+  });
+
+  source.addEventListener("absorbed", (event) => {
+    const arrivals = JSON.parse((event as MessageEvent).data).arrivals as string[];
+    updateChat(chatKey, (state) => ({
+      ...state,
+      absorbed: state.absorbed.concat(arrivals.filter((id) => !state.absorbed.includes(id))),
+      messages: (state.messages ?? []).map((message) =>
+        message.arrival_id !== undefined && arrivals.includes(message.arrival_id)
+          ? { ...message, arrival_id: undefined }
+          : message,
+      ),
     }));
   });
 
@@ -256,8 +309,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       onLive((live) => ({ ...live, reconnecting: true }));
       return;
     }
-    source.close();
-    SOURCES.delete(chatKey);
+    release();
     const attempts = (REATTACHES.get(chatKey) ?? 0) + 1;
     if (attempts > REATTACH_DELAYS_MS.length) {
       record();
@@ -286,8 +338,6 @@ export function resyncChat(target: ChatTarget): void {
   if (state.turn) {
     const source = SOURCES.get(chatKey);
     if (source && source.readyState !== EventSource.CLOSED) return;
-    const timer = TIMERS.get(chatKey);
-    if (timer !== undefined) clearTimeout(timer);
     attach(chatKey, state.turn.id, state.turn.answering, true);
     return;
   }
@@ -359,17 +409,35 @@ export async function refreshTranscript(
   }
 }
 
+/** Admit one message and tail what it landed on.
+ *
+ *  Whether this delivery opened the run it names is admission's answer, taken under the
+ *  conversation-row lock and returned as `opened_run` — the same fact Slack gates its per-run
+ *  reporters on. `opened_run` false beside an `arrival_id` is the one outcome that joined a run
+ *  already open, and that run's frames arrive on the tail this page already holds; every other
+ *  outcome is this delivery's to tail, a refusal included, since a refused message founds a turn
+ *  whose own terminal the stream replays.
+ *
+ *  A message admitted while a turn runs also gets the queue row it joined: the bubble holds that id
+ *  until the turn's `absorbed` event names it back. The drain can beat this response — the row is
+ *  committed before the POST returns — so an id the stream has already named is never stamped on,
+ *  or the wait would stand under the bubble with nothing left to clear it. */
 export async function sendMessage(
   target: ChatTarget,
   body: string | FormData,
   shown: string,
 ): Promise<void> {
   const chatKey = target.key;
+  // The one send that cannot be repeated: the `new` sentinel opens a conversation per request, so a
+  // second send before the first answers founds a second conversation instead of joining the first,
+  // and the two halves are answered apart. The founding send holds the chat busy until it lands.
+  if (target.conversationId === null && chatState(chatKey).busy) return;
   bumpEpoch(chatKey);
+  const sent = (chatState(chatKey).messages ?? []).length;
   updateChat(chatKey, (state) => ({
     ...state,
     busy: true,
-    live: liveTurn(),
+    live: state.live ?? liveTurn(),
     messages: (state.messages ?? []).concat({ role: "user", text: shown }),
   }));
   let res: Response;
@@ -387,7 +455,13 @@ export async function sendMessage(
     failTurn(chatKey, "Error " + res.status + " — try again.");
     return;
   }
-  let accepted: { turn_id?: unknown; conversation_id?: unknown; title?: unknown };
+  let accepted: {
+    turn_id?: unknown;
+    conversation_id?: unknown;
+    title?: unknown;
+    arrival_id?: unknown;
+    opened_run?: unknown;
+  };
   try {
     accepted = await res.json();
   } catch {
@@ -410,6 +484,19 @@ export async function sendMessage(
     migrateChat(chatKey, streamKey);
     target.onCreated?.(accepted.conversation_id, accepted.title);
   }
+  const arrivalId = typeof accepted.arrival_id === "string" ? accepted.arrival_id : null;
+  if (arrivalId !== null) {
+    updateChat(streamKey, (state) => ({
+      ...state,
+      messages: (state.messages ?? []).map((message, index) =>
+        index === sent && !state.absorbed.includes(arrivalId)
+          ? { ...message, arrival_id: arrivalId }
+          : message,
+      ),
+    }));
+  }
+  const joined = arrivalId !== null && accepted.opened_run === false;
+  if (joined && tailed(streamKey, accepted.turn_id)) return;
   streamTurn(streamKey, accepted.turn_id, false);
 }
 
@@ -467,13 +554,19 @@ export async function answerQuestion(
   streamTurn(chatKey, turn, true);
 }
 
+/** A send that failed states its error in the log. Only a chat holding no live tail settles with
+ *  it: the failure is the POST's alone, and a turn already streaming goes on — taking its bubble
+ *  down would collapse the reply the member is reading under a send that never reached it. */
 function failTurn(chatKey: string, message: string): void {
-  updateChat(chatKey, (state) => ({
-    ...state,
-    busy: false,
-    live: null,
-    messages: (state.messages ?? []).concat({ role: "error", text: message }),
-  }));
+  updateChat(chatKey, (state) => {
+    const tailing = state.turn !== null && SOURCES.has(chatKey);
+    return {
+      ...state,
+      busy: tailing ? state.busy : false,
+      live: tailing ? state.live : null,
+      messages: (state.messages ?? []).concat({ role: "error", text: message }),
+    };
+  });
 }
 
 export function markAnswered(

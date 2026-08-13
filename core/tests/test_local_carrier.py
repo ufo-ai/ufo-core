@@ -635,7 +635,7 @@ async def test_background_descendant_keeps_its_authority_across_later_execs(
 
     launched = await first.bash(
         "nohup sh -c 'while [ ! -f release ]; do :; done; "
-        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > first.txt\' '
+        'printf "%s|%s" "$HTTPS_PROXY" "$GH_TOKEN" > first.tmp && mv first.tmp first.txt\' '
         ">/dev/null 2>&1 &"
     )
     assert launched.exit_code == 0

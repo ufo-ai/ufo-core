@@ -54,7 +54,7 @@ from ufo.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.grants import GrantStore
-from ufo.hub import CostTick, Hub, LiveFrame, Parked, Terminal
+from ufo.hub import Absorbed, CostTick, Hub, LiveFrame, Parked, Terminal
 from ufo.loop.compaction import (
     Compaction,
     is_context_overflow,
@@ -89,6 +89,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
     INTERNAL_ADMISSION,
+    MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
     ROUND_BUDGET_INCOMPLETE,
@@ -104,6 +105,7 @@ from ufo.schema.records import (
     TerminalStatus,
     ToolIntent,
     Turn,
+    TurnAdmissionSource,
     TurnContext,
     Usage,
 )
@@ -335,10 +337,14 @@ class Arrival(BaseModel):
     crash-recovery replay reads back exactly the batch the first run consumed. `rendered` is the
     message text exactly as the model sees it — user_prompt_submit fired once inside the step.
     A denied arrival carries only the hook's safe denial text, never the member body or authority
-    ref, so a workflow replay closes that arrival without re-firing hooks."""
+    ref, so a workflow replay closes that arrival without re-firing hooks. `admission_source` says
+    whether the row is a member's own message or an agent's prompt into the conversation, which is
+    what the drain's published frame is about — it defaults to a member's because a batch recorded
+    before the field existed replays as the reading the surfaces already acted on."""
 
     id: UUID
     speaker_member_id: UUID | None = None
+    admission_source: TurnAdmissionSource = MEMBER_ADMISSION
     rendered: str | None = None
     denial: str | None = None
 
@@ -1347,9 +1353,19 @@ class TurnEngine:
         it joins this one turn: multiple members talking to a running bot is one turn, and the
         model handles the mixed voices. A subagent turn folds only what its own children deliver:
         its conversation is the parent's private channel that no member speaks into, so the claim
-        leaves an external row there pending rather than rendering it as one of its own."""
+        leaves an external row there pending rather than rendering it as one of its own.
+
+        The drain publishes the member rows it folded once they are in the window, so a surface
+        holding a message it admitted into this turn learns the agent has it. A denied arrival is
+        absorbed like any other and rides that frame: the member's message reached the turn,
+        whatever the hook did with its content. An internally admitted row does not — it reaches the
+        window the same way, but the frame is what a surface answers a member's own message with,
+        and no member sent an extension's prompt or a child's result."""
+        drained: list[UUID] = []
         for arrival in await self._claim_arrivals(tuple(absorbed_ids)):
             absorbed_ids.append(arrival.id)
+            if arrival.admission_source == MEMBER_ADMISSION:
+                drained.append(arrival.id)
             if arrival.denial is not None:
                 denied = Message(
                     role="user",
@@ -1368,6 +1384,8 @@ class TurnEngine:
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
+        if drained:
+            await self._publish(Absorbed(arrivals=tuple(drained)))
         return messages
 
     async def _render_arrival(
@@ -1433,6 +1451,7 @@ class TurnEngine:
                         tables.inbound_message.c.body,
                         tables.inbound_message.c.context,
                         tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.admission_source,
                         tables.inbound_message.c.created_at,
                     )
                 )
@@ -1450,6 +1469,7 @@ class TurnEngine:
                 Arrival(
                     id=row.id,
                     speaker_member_id=row.speaker_member_id,
+                    admission_source=row.admission_source,
                     rendered=rendered,
                     denial=denial,
                 )

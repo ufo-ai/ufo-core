@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -158,6 +158,71 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
   const railRow = await screen.findByRole("button", { name: /hello there/ });
   expect(railRow.getAttribute("aria-current")).toBe("true");
   expect(within(screen.getByTestId("log")).getByText("hello there")).toBeTruthy();
+});
+
+test("a second message sent before the first is answered opens no second conversation", async () => {
+  const posts: string[] = [];
+  let found: (payload: unknown) => void = () => {};
+  const founding = new Promise<Response>((resolve) => {
+    found = (payload) => resolve(json(payload));
+  });
+  wire({
+    "/chat": (url) => {
+      posts.push(url);
+      return posts.length === 1
+        ? founding
+        : json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half" });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "first half");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  // Until that POST answers, nothing here knows which conversation it opened, and a second send to
+  // the `new` sentinel opens another one: the two halves would end up in separate conversations,
+  // each answered without the other. So the composer holds the words rather than founding again.
+  await userEvent.type(screen.getByLabelText("Message the agent"), "second half");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(posts.length).toBe(1);
+  expect((screen.getByLabelText("Message the agent") as HTMLInputElement).value).toBe("second half");
+
+  found({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half", opened_run: true });
+  await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
+
+  // The conversation exists now, so the second message joins it mid-turn instead of founding.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(posts.length).toBe(2));
+  expect(posts[1]).toContain("?conversation=" + CONVO_ID);
+  expect(within(screen.getByTestId("log")).getByText("second half")).toBeTruthy();
+});
+
+test("two submits the page could not re-render between still open one conversation", async () => {
+  const posts: string[] = [];
+  wire({
+    "/chat": (url) => {
+      posts.push(url);
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "one thought" });
+    },
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "one thought");
+  const form = screen.getByLabelText("Message the agent").closest("form");
+
+  // Both submits read the composer of one render, so a held form cannot be what keeps the second
+  // from founding — the send is, which is where the `new` sentinel is spent.
+  await act(async () => {
+    form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+
+  expect(posts.length).toBe(1);
+  expect(posts[0]).toContain("?conversation=new");
 });
 
 test("a first message sent before the rail resolves still lands, and the rail merge keeps it", async () => {

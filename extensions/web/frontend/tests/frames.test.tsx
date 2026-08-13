@@ -5,7 +5,18 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { tokens } from "@/lib/turnStream";
 
-import { AGENT, CONVO_ID, MEMBER, StreamFake, TURN_ID, json, useStreamFake, wire } from "./harness";
+import {
+  AGENT,
+  ARRIVAL_ID,
+  CHAT_ROW,
+  CONVO_ID,
+  MEMBER,
+  StreamFake,
+  TURN_ID,
+  json,
+  useStreamFake,
+  wire,
+} from "./harness";
 
 async function streaming() {
   wire({
@@ -149,6 +160,32 @@ test("a credentials frame arriving mid-stream renders the prompt it asks for", a
   });
   expect(await screen.findByText("notion authenticates with this value.")).toBeTruthy();
   expect(await screen.findByPlaceholderText("NOTION_TOKEN")).toBeTruthy();
+});
+
+test("an arrival the reload found undrained waits until an absorbed frame names it", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/transcript": () =>
+      json({
+        messages: [
+          { role: "user", text: "Review PR 1268." },
+          { role: "user", text: "and the tests", arrival_id: ARRIVAL_ID },
+        ],
+        turn: TURN_ID,
+      }),
+    "/slots": () => json({ slots: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Waiting for the agent to pick this up")).toBeTruthy();
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  await waitFor(() =>
+    expect(screen.queryByText("Waiting for the agent to pick this up")).toBeNull(),
+  );
+  expect(screen.getByText("and the tests")).toBeTruthy();
 });
 
 test("a terminal that is not done states the status and error class it carries", async () => {

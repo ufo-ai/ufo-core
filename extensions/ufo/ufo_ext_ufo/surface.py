@@ -27,7 +27,16 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
-from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
+from ufo.sdk.hub import (
+    Absorbed,
+    CostTick,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    Terminal,
+    TextDelta,
+    ToolCall,
+)
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     CredentialPrompt,
@@ -116,7 +125,9 @@ def directives_for(
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
     activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
     caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
-    names the credential prompts still awaiting values, `files` the ones it shared)."""
+    names the credential prompts still awaiting values, `files` the ones it shared). A drain of the
+    conversation's arrivals renders nothing: the shell prompts between turns, so it never holds a
+    message of its own waiting for the running turn to take it up."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
@@ -131,6 +142,8 @@ def directives_for(
             return _answer(frame, streamed, collect, connect_message, files)
         case Parked():
             return (directive("say", frame.message), directive("ask", PROMPT))
+        case Absorbed():
+            return ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 

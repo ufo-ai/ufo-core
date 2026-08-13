@@ -8,7 +8,7 @@ import asyncio
 import os
 import socket
 import threading
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_redis_hub.manifest as ext
@@ -18,7 +18,7 @@ from ufo_ext_redis_hub.stream_hub import (
     frame_payload,
 )
 
-from ufo.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import Absorbed, CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
@@ -43,6 +43,7 @@ FRAMES: tuple[LiveFrame, ...] = (
     CostTick(cost_micro_usd=110, tokens=10),
     ToolCall(tool="bash", preview='{"command":"ls"}'),
     SkillLoad(skill="memory"),
+    Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
 )
 
 

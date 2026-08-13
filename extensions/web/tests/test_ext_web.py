@@ -116,6 +116,7 @@ from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.scheduling import ScheduledTask, ScheduleStore, TaskInspection
 from ufo.schema import tables
 from ufo.schema.records import (
+    SUBAGENT_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     AskQuestion,
     AskUserInput,
@@ -834,6 +835,8 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     turn_id = admitted.json()["turn_id"]
     opened = admitted.json()["conversation_id"]
     assert admitted.json()["title"] == "hello"
+    assert admitted.json()["opened_run"] is True
+    assert "arrival_id" not in admitted.json()
     streamed, terminal = await _consume(client, token, turn_id)
     assert streamed == "echo:1"
     assert terminal["status"] == "done"
@@ -1126,6 +1129,312 @@ async def test_transcript_carries_a_running_turns_prompt_and_names_the_turn(
     assert mid.status_code == 200
     assert mid.json() == {
         "messages": [*history, {"role": "user", "text": "Review PR 1268."}],
+        "turn": str(running),
+    }
+
+
+async def test_a_message_sent_while_a_turn_runs_joins_it_and_the_reload_still_shows_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The composer may send while a turn streams: the message joins the running turn rather than
+    founding one, and the route says so twice over — `opened_run` false, because admission opened no
+    run for this delivery, and the arrival the turn's `absorbed` event will carry. The page reads
+    the first to leave the tail it holds alone, and holds its wait against the second. Until the
+    turn ends the message is in no written transcript, so the read projects it as the member bubble
+    it is — still waiting before the drain, and after it as a bubble with nothing left to wait on,
+    since the turn that took it up has yet to write it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="Review PR 1268.",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    folded = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Also check the tests.",
+        headers=cookie,
+    )
+
+    assert folded.status_code == 200
+    body = folded.json()
+    assert body["turn_id"] == str(running)
+    assert body["opened_run"] is False
+    arrival_id = UUID(body["arrival_id"])
+    async with workspace_tx() as connection:
+        queued = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.body,
+                    tables.inbound_message.c.admitted_turn_id,
+                ).where(tables.inbound_message.c.id == arrival_id)
+            )
+        ).one()
+    assert (queued.body, queued.admitted_turn_id) == ("Also check the tests.", running)
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    assert reloaded.json() == {
+        "messages": [
+            {"role": "user", "text": "Review PR 1268."},
+            {
+                "role": "user",
+                "text": "Also check the tests.",
+                "arrival_id": str(arrival_id),
+            },
+        ],
+        "turn": str(running),
+    }
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.inbound_message)
+            .values(consumed_turn_id=running)
+            .where(tables.inbound_message.c.id == arrival_id)
+        )
+    drained = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert drained.status_code == 200
+    assert drained.json() == {
+        "messages": [
+            {"role": "user", "text": "Review PR 1268."},
+            {"role": "user", "text": "Also check the tests."},
+        ],
+        "turn": str(running),
+    }
+
+
+async def _seed_arrival(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    turn_id: UUID,
+    *,
+    seq: int,
+    body: str,
+    admission_source: str,
+    speaker_member_id: UUID | None = None,
+) -> UUID:
+    arrival_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=arrival_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=seq,
+                body=body,
+                admission_source=admission_source,
+                speaker_member_id=speaker_member_id,
+                admitted_turn_id=turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+    return arrival_id
+
+
+async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_the_members(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An undrained row is not always the member's: an extension folding a job prompt into a live
+    turn queues one the same way. Its prose is the turn's to answer, so it draws the bubble the
+    prompt that founds a turn draws — but the wait under a bubble says the member's own message is
+    waiting to be picked up, and the row's admission source is what decides that."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="Review PR 1268.",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    mine = await _seed_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=1,
+        body="Also check the tests.",
+        admission_source="member",
+        speaker_member_id=member_id,
+    )
+    await _seed_arrival(
+        workspace_id,
+        conversation_id,
+        running,
+        seq=2,
+        body="[seat approval request] ask an admin to decide.",
+        admission_source="internal",
+    )
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    assert reloaded.json() == {
+        "messages": [
+            {"role": "user", "text": "Review PR 1268."},
+            {"role": "user", "text": "Also check the tests.", "arrival_id": str(mine)},
+            {"role": "user", "text": "[seat approval request] ask an admin to decide."},
+        ],
+        "turn": str(running),
+    }
+
+
+async def test_an_undrained_row_under_a_settled_turn_waits_on_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A wait names a turn working on the message. A row admitted after the last drain of a turn
+    that then committed is still pending, and the turn that will take it up is not admitted yet — so
+    the read states the message and no wait, rather than a pulse pointing at a turn that ended."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, settled = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    await _seed_arrival(
+        workspace_id,
+        conversation_id,
+        settled,
+        seq=1,
+        body="Also check the tests.",
+        admission_source="member",
+        speaker_member_id=member_id,
+    )
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    assert reloaded.json()["messages"] == [{"role": "user", "text": "Also check the tests."}]
+
+
+async def test_a_pending_subagent_result_is_no_member_bubble(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A background child's result folds onto the running turn's queue like any arrival, so between
+    the fold and the drain it is pending beside the member's own message. It is a machine envelope,
+    not words a member said: the projection skips it by its queue-row id — the id space
+    `agent_origin_refs` answers for a drained arrival answers for an undrained one too — and renders
+    the member's row alone."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    running = uuid4()
+    delivered = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="Review PR 1268.",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=delivered,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="<subagent_result>the child answered</subagent_result>",
+                admission_source="internal",
+                idempotency_key=f"{SUBAGENT_RESULT_KEY_PREFIX}{uuid4()}",
+                admitted_turn_id=running,
+                created_at=sa.func.now(),
+            )
+        )
+
+    folded = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Also check the tests.",
+        headers=cookie,
+    )
+    assert folded.status_code == 200
+    arrival_id = folded.json()["arrival_id"]
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    assert reloaded.json() == {
+        "messages": [
+            {"role": "user", "text": "Review PR 1268."},
+            {
+                "role": "user",
+                "text": "Also check the tests.",
+                "arrival_id": arrival_id,
+            },
+        ],
         "turn": str(running),
     }
 
@@ -8153,6 +8462,62 @@ async def test_a_run_page_states_an_answer_that_wrote_no_prose(
                 "**Impact** — production outage, deadlock, or permanently unfinished work"
             ),
         }
+    ]
+
+
+async def test_a_runs_page_claims_no_wait_on_a_row_its_turn_cannot_take_up(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A run's conversation is its parent's private channel: the turn drains only what its own
+    children deliver and leaves an external row pending, deliberately. The page states such a row
+    as the message it is, with no wait under it — the run's turn will never take it up, so nothing
+    it publishes could clear one."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    run = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="run",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    running = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=run,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound='{"task": "find the deadline"}',
+                admission_source="internal",
+                subagent_profile="deep_research",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _seed_arrival(
+        workspace_id,
+        run,
+        running,
+        seq=1,
+        body="Stop and summarize.",
+        admission_source="member",
+        speaker_member_id=member_id,
+    )
+
+    read = await client.get(
+        f"/surface/web/subagents/deep_research/conversations/{run}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert read.status_code == 200
+    assert read.json()["messages"] == [
+        {"role": "user", "text": '{"task": "find the deadline"}'},
+        {"role": "user", "text": "Stop and summarize."},
     ]
 
 

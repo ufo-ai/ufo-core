@@ -64,6 +64,7 @@ from ufo.ext.surface import (
 )
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
 from ufo.hub import (
+    Absorbed,
     CostTick,
     InProcessHub,
     LiveFrame,
@@ -4846,6 +4847,56 @@ async def test_a_channel_status_follows_the_turn_pins_the_text_and_clears_at_ter
     assert working in written
     assert slack.STATUS_GENERATING_TEXT in written
     assert written[-1] == slack.STATUS_CLEAR_TEXT
+
+
+async def test_a_message_the_turn_takes_up_restamps_the_status_and_posts_no_progress(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A Slack member who types into a running turn gets no acknowledgement of their own: the thread
+    holds their message and the status keeps narrating the message before it. The drain now says
+    which queue rows it folded, so the status states that the agent has this one — thread state, so
+    the next tool frame overwrites it within a second or two, which is all "did it land?" needs. It
+    is not work, so the progress reporter goes on ignoring it: a checkpoint whose only frame was a
+    drain has nothing to report and posts nothing."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> hi"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    status_task = slack._STATUS_TASKS[turn_id]
+    progress_task = slack._PROGRESS_TASKS[turn_id]
+
+    def _sent() -> list[str]:
+        return [
+            json.loads(r.content)["status"]
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ]
+
+    deadline = time.monotonic() + 5
+    while slack.STATUS_PICKED_UP_TEXT not in _sent():
+        assert time.monotonic() < deadline, "the picked-up status never reached Slack"
+        await hub.publish(turn_id, Absorbed(arrivals=(uuid4(),)))
+        await asyncio.sleep(0.01)
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await asyncio.gather(status_task, progress_task)
+
+    assert len(slack.STATUS_PICKED_UP_TEXT) <= SLACK_LOADING_MESSAGE_LIMIT
+    assert _sent()[-1] == slack.STATUS_CLEAR_TEXT
+    assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
 
 
 async def test_the_status_holds_whatever_prose_the_model_gave_it(

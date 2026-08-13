@@ -26,7 +26,16 @@ from ufo.sdk.http import (
     Response,
     StreamingResponse,
 )
-from ufo.sdk.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, TextDelta, ToolCall
+from ufo.sdk.hub import (
+    Absorbed,
+    CostTick,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    Terminal,
+    TextDelta,
+    ToolCall,
+)
 from ufo.sdk.operator import bind_operator_session
 from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
 
@@ -164,6 +173,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             kind, payload = b"tool", frame.model_dump_json()
         case SkillLoad():
             kind, payload = b"skill", frame.model_dump_json()
+        case Absorbed():
+            kind, payload = b"absorbed", frame.model_dump_json()
         case TextDelta():
             kind, payload = b"text", frame.model_dump_json()
         case _:

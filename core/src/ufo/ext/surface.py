@@ -123,6 +123,7 @@ from ufo.schema.records import (
     TerminalStatus,
     ToolIntent,
     Turn,
+    TurnAdmissionSource,
     TurnContext,
 )
 from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
@@ -259,10 +260,16 @@ class Admitted:
     deduped to a turn already admitted, joins a run another admission opened. The call is made under
     the conversation-row lock, so exactly one admission opens any run however many deliveries and
     replicas race for it — the line a surface starts a per-turn reporter on, since a reporter posts
-    messages and a second one doubles the member's updates for the turn's whole life."""
+    messages and a second one doubles the member's updates for the turn's whole life.
+
+    `arrival_id` names the `inbound_message` row when the message joined a turn already live rather
+    than founding one — the id the turn's `Absorbed` frame carries when it folds that row in, so a
+    surface tailing the turn knows which of its own messages the agent has taken up, and its absence
+    says the returned turn is the message's own."""
 
     turn_id: UUID
     opened_run: bool
+    arrival_id: UUID | None = None
 
 
 class MemberAdmitter(Protocol):
@@ -835,6 +842,24 @@ class TurnDetail(BaseModel):
     turn: Turn
     ledger: tuple[LedgerEntry, ...]
     children: tuple[Turn, ...]
+
+
+class QueuedArrival(BaseModel):
+    """One message admitted to a conversation that its written transcript does not hold yet: the
+    queue row a member admission returns as its `arrival_id`, and the inbound it carries. A
+    projection reads these so a conversation reloaded mid-turn still shows the message, drained or
+    not — it is admitted and durable, and only the written transcript is still without it.
+
+    `waiting` is whether a turn has yet to take it up — the state the turn's `Absorbed` frame ends.
+    `admission_source` is the only fact that says whose message it is: the queue holds a member's
+    own words folded into a running turn and an agent's prompt invoked into that same turn, and
+    neither the id nor the body tells them apart. A projection stating a wait of the member's reads
+    both — an agent-origin row is nothing the member sent and nothing they are waiting on."""
+
+    id: UUID
+    inbound: str
+    waiting: bool
+    admission_source: TurnAdmissionSource
 
 
 def _fulfilled_marker_key(workspace_id: UUID, sealed: str, slot: str) -> str:
@@ -3032,6 +3057,49 @@ class SurfaceContext:
                 for entry in ledger
             ),
             children=tuple(self._turn_record(child) for child in children),
+        )
+
+    async def queued_arrivals(
+        self, conversation_id: UUID, draining_turn_id: UUID | None
+    ) -> tuple[QueuedArrival, ...]:
+        """The conversation's admitted messages its written transcript does not hold, in admission
+        order: the rows no turn has drained, and — given the live turn as `draining_turn_id` — the
+        rows that turn folded in, since it writes the transcript only when it ends. A settled
+        turn's rows are already written, which is why the caller names the turn rather than this
+        read taking any consumer: the projection appends these after the running turn's own
+        inbound, so a reload between admission and the turn's end still shows the message."""
+        if not await self._owned_conversation(conversation_id):
+            return ()
+        taken = (
+            sa.false()
+            if draining_turn_id is None
+            else tables.inbound_message.c.consumed_turn_id == draining_turn_id
+        )
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.inbound_message.c.id,
+                        tables.inbound_message.c.body,
+                        tables.inbound_message.c.consumed_turn_id,
+                        tables.inbound_message.c.admission_source,
+                    )
+                    .where(
+                        tables.inbound_message.c.workspace_id == self.workspace_id,
+                        tables.inbound_message.c.conversation_id == conversation_id,
+                        sa.or_(tables.inbound_message.c.consumed_turn_id.is_(None), taken),
+                    )
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            ).all()
+        return tuple(
+            QueuedArrival(
+                id=row.id,
+                inbound=row.body,
+                waiting=row.consumed_turn_id is None,
+                admission_source=row.admission_source,
+            )
+            for row in rows
         )
 
     async def read_transcript(self, conversation_id: UUID) -> Conversation | None:

@@ -1,12 +1,13 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { setReattachTimer } from "@/lib/turnStream";
 
 import {
   AGENT,
+  ARRIVAL_ID,
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
@@ -21,6 +22,7 @@ import {
 const OTHER_ID = "66666666-6666-4666-8666-666666666666";
 const OTHER_ROW = { ...CHAT_ROW, conversation_id: OTHER_ID, title: "The other thread" };
 const RAIL = { chats: [CHAT_ROW, OTHER_ROW] };
+const LATER_TURN = "77777777-7777-4777-8777-777777777777";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -76,6 +78,74 @@ test("a dropped stream reattaches and the replay rebuilds the reply without dupl
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
   );
+});
+
+test("a reattach the backoff still holds opens nothing behind the source that replaced it", async () => {
+  const pending = new Map<number, () => void>();
+  let handed = 0;
+  setReattachTimer((fn) => {
+    handed += 1;
+    pending.set(handed, fn);
+    return handed as unknown as ReturnType<typeof setTimeout>;
+  });
+  const native = clearTimeout;
+  vi.stubGlobal("clearTimeout", (timer: unknown) => {
+    if (typeof timer === "number" && pending.delete(timer)) return;
+    native(timer as Parameters<typeof clearTimeout>[0]);
+  });
+  const first = await streaming({
+    "/chat": () => json({ turn_id: LATER_TURN, conversation_id: CONVO_ID, title: "go" }),
+  });
+  fatal(first);
+  await screen.findByText("Reconnecting…");
+  expect(pending.size).toBe(1);
+
+  // Sending again attaches now rather than waiting the backoff out. The reattach it overtook has to
+  // be cancelled, not merely forgotten: firing later, it would open a source behind the live one.
+  await userEvent.type(screen.getByLabelText("Message the agent"), "again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+
+  expect(pending.size).toBe(0);
+  for (const fire of [...pending.values()]) fire();
+  expect(StreamFake.opened.length).toBe(2);
+  expect(StreamFake.last().url).toBe("/surface/web/turns/" + LATER_TURN + "/stream");
+});
+
+test("a send during the backoff rebuilds the reply from the replay it reattached to", async () => {
+  const pending: (() => void)[] = [];
+  setReattachTimer((fn) => {
+    pending.push(fn);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  });
+  const first = await streaming({
+    "/chat": () =>
+      json({
+        turn_id: TURN_ID,
+        conversation_id: CONVO_ID,
+        title: "go",
+        opened_run: false,
+        arrival_id: ARRIVAL_ID,
+      }),
+  });
+  first.emit("message", { text: "one " });
+  await screen.findByText("one");
+  fatal(first);
+  await screen.findByText("Reconnecting…");
+
+  // The fold joins the turn whose tail just dropped, so the send reattaches now rather than waiting
+  // the backoff out — and the source it opens replays the turn from its first frame. What that
+  // rebuilds is the reply, not a second copy of it behind the text the dropped source drew.
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+
+  const second = StreamFake.last();
+  second.emit("open", {});
+  second.emit("message", { text: "one " });
+  second.emit("message", { text: "two" });
+  expect(await screen.findByText("one two")).toBeTruthy();
+  expect(screen.queryByText("one one two")).toBeNull();
 });
 
 test("a native retry shows a quiet reconnecting state and the stream carries on", async () => {

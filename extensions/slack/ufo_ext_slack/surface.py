@@ -97,7 +97,7 @@ from ufo.sdk.audience import (
 )
 from ufo.sdk.context import JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.hub import CostTick, Parked, SkillLoad, Terminal, TextDelta, ToolCall
+from ufo.sdk.hub import Absorbed, CostTick, Parked, SkillLoad, Terminal, TextDelta, ToolCall
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
@@ -680,6 +680,7 @@ STATUS_DESCRIBED_TEXT = "{description}…"
 STATUS_WORKING_TEXT = "Working… ({tool})"
 STATUS_SKILL_TEXT = "Loading skill {skill}…"
 STATUS_GENERATING_TEXT = "Generating…"
+STATUS_PICKED_UP_TEXT = "Picked up your message…"
 STATUS_CLEAR_TEXT = ""
 STATUS_TEXT_LIMIT = 50
 """Slack's own ceiling on `assistant.threads.setStatus`, not a display choice: an entry of
@@ -2179,6 +2180,14 @@ class ThreadStatus:
     none, streamed text as "Generating…". That prose is the model's and unbounded, so it is cut with
     room kept for the trailing ellipsis rather than losing it to the STATUS_TEXT_LIMIT slice — that
     ellipsis is the only mark a cut line gets.
+    A drain of the turn's arrivals says "Picked up your message…", which is the only answer a member
+    who typed into a running turn gets: nothing acknowledges their message per message, and this is
+    thread state, so the next tool frame overwrites it within a second or two. It answers "did it
+    land?" and nothing more, and it says it only where a member's message landed — the frame carries
+    the member rows a drain folded, never an extension's prompt or a child's delivered result, which
+    would tell a member their message was taken up when they had sent none. Like every line here it
+    is written at most once per STATUS_UPDATE_MIN_SECONDS, so a turn that re-drains an arrival after
+    a park costs one restamp rather than a burst.
     Slack's agent UI renders its own canned phrases over a bare `status` string, so every non-clear
     write pins the display through a one-element `loading_messages` rotation — the field the client
     shows verbatim, and the field Slack measures against STATUS_TEXT_LIMIT: over it the whole call
@@ -2301,6 +2310,8 @@ class ThreadStatus:
                             )
                         case SkillLoad(skill=skill):
                             text = STATUS_SKILL_TEXT.format(skill=skill)
+                        case Absorbed():
+                            text = STATUS_PICKED_UP_TEXT
                         case TextDelta():
                             text = STATUS_GENERATING_TEXT
                         case _:

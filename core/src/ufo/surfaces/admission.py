@@ -15,7 +15,9 @@ turn at each round boundary as separate <context>-tagged messages, and the termi
 refuses to close over a non-empty queue, so one reply answers everything that arrived. Each
 queue row carries its own idempotency key, so a redelivery joins the turn that consumed it.
 Member admission returns which of the two it did, so a surface's per-turn side channel starts once
-per run rather than once per delivery.
+per run rather than once per delivery, and it names the queue row a fold landed on — the id the
+turn's `Absorbed` frame carries when the drain takes that row up, so a surface already tailing the
+turn can tell a message waiting for it from one that founded a turn of its own.
 
 Delivery is derived here too: a turn entering a conversation whose surface is durable registers a
 writeback row atomically with its turn row, so the poller delivers the reply no matter who admitted
@@ -221,6 +223,7 @@ class Admission:
         dispatch_now = False
         opened_run = False
         folded_parked_turn: UUID | None = None
+        arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
         admitted_at = None
         async with workspace_tx() as connection:
@@ -343,7 +346,11 @@ class Admission:
                             )
                         ).scalar_one()
                         if target_live:
-                            return Admitted(queued_message.admitted_turn_id, opened_run=False)
+                            return Admitted(
+                                queued_message.admitted_turn_id,
+                                opened_run=False,
+                                arrival_id=queued_message.id,
+                            )
                         await connection.execute(
                             sa.delete(tables.inbound_message).where(
                                 tables.inbound_message.c.id == queued_message.id
@@ -518,9 +525,10 @@ class Admission:
                             ).where(tables.inbound_message.c.conversation_id == conversation_id)
                         )
                     ).scalar_one()
+                    arrival_id = uuid4()
                     await connection.execute(
                         sa.insert(tables.inbound_message).values(
-                            id=uuid4(),
+                            id=arrival_id,
                             workspace_id=workspace_id,
                             conversation_id=conversation_id,
                             seq=message_seq,
@@ -556,7 +564,7 @@ class Admission:
                             )
                         )
                     if live_turn.status != PARKED:
-                        return Admitted(live_turn.id, opened_run=False)
+                        return Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id)
                     await connection.execute(
                         sa.update(tables.turn)
                         .values(
@@ -745,7 +753,7 @@ class Admission:
             await self._enqueue(
                 workspace_id, conversation_id, folded_parked_turn, workflow_id=uuid4().hex
             )
-            return Admitted(folded_parked_turn, opened_run=True)
+            return Admitted(folded_parked_turn, opened_run=True, arrival_id=arrival_id)
         if status != QUEUED:
             return Admitted(turn_id, opened_run=False)
         if dispatch_now:

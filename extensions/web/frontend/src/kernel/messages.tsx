@@ -10,6 +10,7 @@ import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
 import type { ChatFile, SubagentRun } from "@/lib/types";
 
 const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
+const WAITING = "Waiting for the agent to pick this up";
 
 /** One conversation's messages, drawn the one way this portal draws them — the member's words in
  *  a bubble, the agent's as markdown, and under each reply what it did: the subagents it spawned,
@@ -17,6 +18,9 @@ const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate
  *  live chat hands it the turn it is streaming and puts a composer under it; a transcript read
  *  back — an agent's conversations, a subagent's runs — hands it none and shows what landed. A
  *  conversation the member cannot reply to still reads exactly like the one they can.
+ *
+ *  A member message a running turn has not taken up yet states that under itself: a turn absorbs
+ *  what arrived at its round boundaries, so the wait lasts as long as the call it is inside.
  *
  *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
  *  under it: a run is opened through the conversation that spawned it, which is the route by which
@@ -38,6 +42,7 @@ export function MessageLog({
         ) : (
           <Speech key={index} mine={message.role === "user"}>
             {message.role === "user" ? message.text : <Markdown text={message.text} />}
+            {message.arrival_id ? <Working>{WAITING}</Working> : null}
             {message.role === "user" ? null : (
               <Activity
                 events={message.events ?? []}

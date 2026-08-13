@@ -108,6 +108,22 @@ async def _queued_bodies(conversation_id: UUID) -> list[str]:
         )
 
 
+async def _queued_ids(conversation_id: UUID) -> list[UUID]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.id)
+                    .where(
+                        tables.inbound_message.c.conversation_id == conversation_id,
+                        tables.inbound_message.c.consumed_turn_id.is_(None),
+                    )
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            ).scalars()
+        )
+
+
 async def _finish(turn_id: UUID) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
@@ -166,7 +182,9 @@ async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) 
         TurnContext(sender="Pat Doe", timezone="UTC"),
     )
     assert first.opened_run
-    assert second == Admitted(first.turn_id, opened_run=False)
+    assert second == Admitted(
+        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["second message"]
     async with workspace_tx() as connection:
@@ -201,12 +219,16 @@ async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> No
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     assert await _claim_turn(first.turn_id, str(first.turn_id))
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == Admitted(first.turn_id, opened_run=False)
+    assert second == Admitted(
+        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
 
 async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
+    """A redelivery lands on the row the first delivery queued and says so: the same turn and the
+    same arrival, so a surface holding that message keeps holding the one arrival it admitted."""
     workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
@@ -214,8 +236,11 @@ async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
     redelivered = await admission.admit_member(
         workspace_id, conversation_id, "two", member_id, "C:2"
     )
-    assert second == Admitted(first.turn_id, opened_run=False)
-    assert redelivered == Admitted(first.turn_id, opened_run=False)
+    folded = Admitted(
+        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
+    assert second == folded
+    assert redelivered == folded
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
@@ -226,7 +251,9 @@ async def test_every_admission_source_joins_the_live_turn(db: None) -> None:
     first = await admission.invoke(workspace_id, conversation_id, agent_id, "job prompt", "job:1")
     second = await admission.admit_member(workspace_id, conversation_id, "hello", member_id, "C:2")
     third = await admission.invoke(workspace_id, conversation_id, agent_id, "another job")
-    assert second == Admitted(first, opened_run=False)
+    assert second == Admitted(
+        first, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
     assert third == first
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["hello", "another job"]
@@ -330,7 +357,9 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == Admitted(first.turn_id, opened_run=False)
+    assert second == Admitted(
+        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -382,7 +411,9 @@ async def test_fold_onto_a_parked_turn_dispatches_its_resume(db: None) -> None:
             .where(tables.turn.c.id == first.turn_id)
         )
     second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    assert second == Admitted(first.turn_id, opened_run=True)
+    assert second == Admitted(
+        first.turn_id, opened_run=True, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
     assert await _queued_bodies(conversation_id) == ["two"]
     async with workspace_tx() as connection:
         resumed_status = (

@@ -60,7 +60,7 @@ from ufo.grants import (
     OAuthAccount,
     install_connect_flow,
 )
-from ufo.hub import InProcessHub, LiveFrame, SkillLoad, ToolCall
+from ufo.hub import Absorbed, InProcessHub, LiveFrame, SkillLoad, ToolCall
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
@@ -1301,6 +1301,36 @@ async def test_absorbed_arrivals_from_any_speaker_fold_into_the_one_turn(
     assert [requester.member_id for requester in requesters.values()] == [None, foreign_member_id]
 
 
+async def test_absorbing_arrivals_publishes_the_ids_the_window_took(
+    db: None, tmp_path: Path
+) -> None:
+    """The consumption signal states the fact, not the attempt: one frame per drain naming exactly
+    the member rows that reached the window, and no frame at all for a round that drained none of
+    them. An internally admitted row reaches the window like any other, and is not in the frame: a
+    surface reads that frame to answer a member about the message they sent, and no member sent an
+    extension's prompt or a child's result."""
+    turn = await _seed_turn("running", None)
+    hub = RecordingHub()
+    with ws(turn.workspace_id):
+        engine = replace(_engine(turn, object(), tmp_path), hub=hub)
+        first = await _queue_arrival(turn, "one")
+        second = await _queue_arrival(turn, "two")
+        invoked = await _queue_arrival(turn, "three", admission_source="internal")
+        absorbed_ids: list[UUID] = []
+        messages = await engine._absorb_arrivals((), [], absorbed_ids, {})
+        drained = await engine._absorb_arrivals(messages, [], absorbed_ids, {})
+    assert [frame for frame in hub.frames if isinstance(frame, Absorbed)] == [
+        Absorbed(arrivals=(first, second))
+    ]
+    assert drained == messages
+    assert [
+        ref
+        for ref in (first, second, invoked)
+        for message in messages
+        if isinstance(message.content, str) and f"message_ref: {ref}" in message.content
+    ] == [first, second, invoked]
+
+
 async def test_denied_arrival_keeps_only_the_safe_denial_in_the_aggregate(
     db: None, tmp_path: Path
 ) -> None:
@@ -1314,7 +1344,8 @@ async def test_denied_arrival_keeps_only_the_safe_denial_in_the_aggregate(
         return None
 
     model = CapturingModel()
-    engine = _engine(turn, model, tmp_path)
+    hub = RecordingHub()
+    engine = replace(_engine(turn, model, tmp_path), hub=hub)
     engine = replace(
         engine,
         hooks=HookChain(
@@ -1340,6 +1371,9 @@ async def test_denied_arrival_keeps_only_the_safe_denial_in_the_aggregate(
     assert blocked not in rendered
     assert str(blocked_ref) not in rendered
     assert denial in rendered
+    assert [frame for frame in hub.frames if isinstance(frame, Absorbed)] == [
+        Absorbed(arrivals=(blocked_ref,))
+    ]
     stored = await engine.transcript.read()
     assert stored is not None
     assert [message.role for message in stored.messages] == ["user", "user", "assistant"]
