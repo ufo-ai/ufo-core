@@ -555,6 +555,85 @@ test("a conversation row names what it is about and whose it is, and the keyboar
   ).toBeTruthy();
 });
 
+test("a Slack row names its channel on its meta line, and those words are the way out", async () => {
+  const thread = "6b3f2a11-0000-4000-8000-000000000007";
+  const portal = "2d9c4e88-0000-4000-8000-000000000008";
+  const permalink = "https://acme.slack.com/archives/C1/p1700000000000100";
+  wire({
+    ["/conversations/" + thread + "/transcript"]: () => json({ messages: [] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          {
+            id: thread,
+            surface: "slack",
+            surface_label: "#ops",
+            audience: "shared",
+            member_email: null,
+            description: "take a look at the failing deploy",
+            source: permalink,
+            speakers: [],
+            turn_count: 4,
+            created_at: "2026-07-30T10:00:00",
+            last_turn_at: "2026-08-07T11:00:00",
+            readable: true,
+            disclosable: false,
+          },
+          {
+            id: portal,
+            surface: "web",
+            surface_label: null,
+            audience: "member:m1",
+            member_email: "member@example.com",
+            description: "Rename the deploy job",
+            source: "ufo web (member@example.com)",
+            speakers: ["member@example.com"],
+            turn_count: 2,
+            created_at: "2026-07-30T10:00:00",
+            last_turn_at: "2026-07-30T10:00:01",
+            readable: true,
+            disclosable: false,
+          },
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const said = await screen.findByText("take a look at the failing deploy", {
+    selector: "[data-part='primary']",
+  });
+  const row = said.closest("li") as HTMLElement;
+  const meta = row.querySelector("[data-part='meta']") as HTMLElement;
+  expect(meta.textContent).toBe("#ops ↗ · 4 turns · Workspace");
+  const out = within(row).getByRole("link", { name: "#ops ↗" });
+  expect(out.getAttribute("href")).toBe(permalink);
+  expect(out.getAttribute("target")).toBe("_blank");
+  expect(meta.contains(out)).toBe(true);
+  expect(within(row).getAllByRole("link")).toHaveLength(1);
+  const drawn = out.className.split(" ");
+  expect(drawn).toContain("text-inherit");
+  expect(drawn).toContain("no-underline");
+  expect(drawn).toContain("hover:underline");
+  expect(drawn).toContain("focus-visible:underline");
+  expect(drawn).not.toContain("underline");
+  expect(drawn).not.toContain("text-link");
+  expect(within(out).getByText("↗").className).toContain("opacity-(--opacity-muted)");
+  const own = screen.getByText("Rename the deploy job", { selector: "[data-part='primary']" });
+  const mine = own.closest("li") as HTMLElement;
+  expect(within(mine).queryByRole("link")).toBeNull();
+  expect(mine.querySelector("[data-part='meta']")!.textContent).toBe(
+    "You · Portal · member · 2 turns",
+  );
+
+  await userEvent.click(out);
+  expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
+
+  await userEvent.click(said);
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+});
+
 test("a conversation opened here reads as chat, with the reply's whole activity behind it", async () => {
   const held = "7c4a1e90-0000-4000-8000-000000000005";
   const child = "9d2b7f31-0000-4000-8000-000000000006";
@@ -616,6 +695,81 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
     screen.getByRole("link", { name: /Subagent · research/ }).getAttribute("href"),
   ).toBe("#/subagents/research/conversations/" + child + "?root=" + held);
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
+});
+
+test("a Slack transcript heads itself with its channel, and those words are the way back", async () => {
+  const thread = "4f8e1c22-0000-4000-8000-000000000009";
+  const portal = "5a7d3b44-0000-4000-8000-00000000000a";
+  const root = "https://acme.slack.com/archives/C1/p1700000000000100";
+  const rows = (id: string, surface: string, description: string) => ({
+    id,
+    surface,
+    surface_label: null,
+    audience: "shared",
+    member_email: null,
+    description,
+    source: root,
+    speakers: [],
+    turn_count: 2,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T10:00:01",
+    readable: true,
+    disclosable: false,
+  });
+  wire({
+    ["/conversations/" + thread + "/transcript"]: () =>
+      json({
+        messages: [
+          { role: "user", text: "take a look at the failing deploy" },
+          { role: "assistant", text: "Looking." },
+          { role: "user", text: "and the flaky test" },
+        ],
+      }),
+    ["/conversations/" + portal + "/transcript"]: () =>
+      json({ messages: [{ role: "user", text: "Rename the deploy job" }] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          rows(thread, "slack", "take a look at the failing deploy"),
+          rows(portal, "web", "Rename the deploy job"),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  await userEvent.click(
+    await screen.findByText("take a look at the failing deploy", {
+      selector: "[data-part='primary']",
+    }),
+  );
+
+  const heading = await screen.findByRole("heading", {
+    name: "Slack ↗ · take a look at the failing deploy",
+  });
+  const out = screen.getAllByRole("link", { name: "Slack ↗" });
+  expect(out).toHaveLength(1);
+  expect(out[0].getAttribute("href")).toBe(root);
+  expect(out[0].getAttribute("target")).toBe("_blank");
+  expect(out[0].getAttribute("rel")).toBe("noopener noreferrer");
+  expect(heading.contains(out[0])).toBe(true);
+  const drawn = out[0].className.split(" ");
+  expect(drawn).toContain("text-inherit");
+  expect(drawn).toContain("no-underline");
+  expect(drawn).not.toContain("underline");
+  expect(drawn).not.toContain("text-link");
+  for (const bubble of document.querySelectorAll("[data-role=me]")) {
+    expect(within(bubble as HTMLElement).queryByRole("link")).toBeNull();
+  }
+
+  await userEvent.click(screen.getByRole("button", { name: "All conversations" }));
+  await userEvent.click(
+    await screen.findByText("Rename the deploy job", { selector: "[data-part='primary']" }),
+  );
+
+  expect(await screen.findByText("Rename the deploy job")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Portal · Rename the deploy job" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /↗/ })).toBeNull();
 });
 
 test("a conversation nobody shared offers no opener", async () => {

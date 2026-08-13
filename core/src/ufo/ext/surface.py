@@ -778,19 +778,23 @@ class ListedConversation(BaseModel):
     """One conversation as the portal's per-agent conversations view lists it: `ConversationSummary`
     plus whether this viewer may read its content now and whether they may disclose it to
     themselves by acknowledging (an admin, another member's private conversation — never a
-    room's), the words that opened it, and who has spoken in it. Disclosures recorded against it
-    are not here and no portal read lists them: the record is the operator's, kept in
-    `transcript_access` and reported by `surface.transcript_disclosed`.
+    room's), the words that opened it, where they were said, and who has spoken in it. Disclosures
+    recorded against it are not here and no portal read lists them: the record is the operator's,
+    kept in `transcript_access` and reported by `surface.transcript_disclosed`.
 
     `audience` and `surface_label` travel as the conversation row stores them — the portal maps
     them to member words.
 
     `opening_message` is the member's own words out of the first turn's inbound — the ambient
     digest a channel surface renders around them is not what the conversation is about — capped at
-    `OPENING_MESSAGE_CHARS`, and empty for a conversation no member opened. `speakers` runs in
-    order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
+    `OPENING_MESSAGE_CHARS`, and empty for a conversation no member opened. `source` is that same
+    turn's `TurnContext.source`: the link the admitting surface reported for the message that
+    opened the conversation, which for Slack is the permalink of its first message, so a screen
+    reading the conversation leads back to the thread it came in on. It is None where the surface
+    reported none and surface-defined where it did — a portal chat's own source is not a link out.
+    `speakers` runs in order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
 
-    Both are content of the conversation and both answer empty unless `readable`: a row listed to
+    All are content of the conversation and all answer empty unless `readable`: a row listed to
     an admin as administration metadata states whose it is and how busy, never a word of it and
     never who else is in it. Reading it is the acknowledgement's act, and the acknowledgement is
     what `record_transcript_access` audits — so the gate is here, where `readable` is decided, and
@@ -802,7 +806,20 @@ class ListedConversation(BaseModel):
     readable: bool
     disclosable: bool
     opening_message: str
+    source: str | None
     speakers: tuple[ConversationSpeaker, ...]
+
+
+@dataclass(frozen=True)
+class ConversationOpening:
+    """The first turn of a conversation as a listing row reads it: the member's own opening words
+    and the source the admitting surface reported for them, off the one row that holds both."""
+
+    message: str
+    source: str | None
+
+
+UNOPENED = ConversationOpening(message="", source=None)
 
 
 class SubagentRun(BaseModel):
@@ -2555,7 +2572,8 @@ class SurfaceContext:
                 disclosable=admin
                 and row.audience != mine
                 and audience_member(parse_audience(row.audience)) is not None,
-                opening_message=openings.get(row.id, ""),
+                opening_message=openings.get(row.id, UNOPENED).message,
+                source=openings.get(row.id, UNOPENED).source,
                 speakers=speakers.get(row.id, ()),
             )
             for row in rows
@@ -2608,7 +2626,9 @@ class SurfaceContext:
             self._spoken(None),
         )
 
-    async def _conversation_openings(self, listed: Sequence[UUID]) -> dict[UUID, str]:
+    async def _conversation_openings(
+        self, listed: Sequence[UUID]
+    ) -> dict[UUID, ConversationOpening]:
         if not listed:
             return {}
         opening = (
@@ -2624,7 +2644,7 @@ class SurfaceContext:
             .subquery()
         )
         query = (
-            sa.select(tables.turn.c.conversation_id, tables.turn.c.inbound)
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.inbound, tables.turn.c.context)
             .select_from(
                 tables.turn.join(
                     opening,
@@ -2639,7 +2659,12 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
-            row.conversation_id: member_message_text(row.inbound)[:OPENING_MESSAGE_CHARS]
+            row.conversation_id: ConversationOpening(
+                message=member_message_text(row.inbound)[:OPENING_MESSAGE_CHARS],
+                source=(
+                    None if row.context is None else TurnContext.model_validate(row.context).source
+                ),
+            )
             for row in rows
         }
 
@@ -2836,7 +2861,8 @@ class SurfaceContext:
                     surface_label=row.surface_label,
                     readable=row.audience in readable,
                     disclosable=False,
-                    opening_message=openings.get(row.id, ""),
+                    opening_message=openings.get(row.id, UNOPENED).message,
+                    source=openings.get(row.id, UNOPENED).source,
                     speakers=speakers.get(row.id, ()),
                 ),
                 agent_id=row.agent_id,
@@ -2955,7 +2981,8 @@ class SurfaceContext:
                 surface_label=found.surface_label,
                 readable=True,
                 disclosable=False,
-                opening_message=openings.get(conversation_id, ""),
+                opening_message=openings.get(conversation_id, UNOPENED).message,
+                source=openings.get(conversation_id, UNOPENED).source,
                 speakers=speakers.get(conversation_id, ()),
             ),
             agent_id=found.agent_id,

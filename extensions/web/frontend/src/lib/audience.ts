@@ -7,6 +7,8 @@ export function useViewer(): string | null {
   return useContext(Viewer);
 }
 
+const SLACK_SURFACE = "slack";
+
 const SURFACE_WORDS: Record<string, string> = { web: "Portal", slack: "Slack", cli: "CLI" };
 
 /** The member's word for a surface. A surface the map does not name reads as its own word rather
@@ -18,6 +20,19 @@ export function surfaceWord(surface: string): string {
 /** Where a conversation came in: the name the surface gave it (`#ops`), else the surface itself. */
 export function origin(entry: { surface: string; surface_label: string | null }): string {
   return entry.surface_label || surfaceWord(entry.surface);
+}
+
+/** Where a conversation leads back out to in Slack: the source the surface reported for the message
+ *  it opened with, which for Slack is that message's permalink. The surface is the gate and never
+ *  the string: every surface defines its own source, and the portal's names the portal while the
+ *  CLI's is no URL at all. A conversation a surface reported no source for leads nowhere and draws
+ *  no link. */
+export function slackLink(
+  surface: string | null | undefined,
+  source: string | null | undefined,
+): string | null {
+  if (surface !== SLACK_SURFACE) return null;
+  return source || null;
 }
 
 /** Whether a wire audience names one member rather than a room, the workspace, or another org. */

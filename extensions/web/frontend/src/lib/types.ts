@@ -31,6 +31,7 @@ export type Conversation = {
   audience: string;
   member_email: string | null;
   description: string;
+  source: string | null;
   speakers: string[];
   turn_count: number;
   created_at: string;

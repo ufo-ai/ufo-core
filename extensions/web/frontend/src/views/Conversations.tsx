@@ -22,6 +22,7 @@ import {
   isMemberAudience,
   origin as surfaceOrigin,
   ownerLabel,
+  slackLink,
   speakerName,
   useViewer,
 } from "@/lib/audience";
@@ -133,17 +134,39 @@ function origin(conversation: Conversation): string {
 }
 
 /** One conversation names itself the same way on every screen that opens it — where it came from,
- *  then what it is about. A row states its origin in its own meta line; a heading standing alone
- *  above a transcript has nowhere else to put it. */
-export function conversationTitle(conversation: Conversation, viewer: string | null): string {
-  return origin(conversation) + " · " + subject(conversation, viewer);
+ *  then what it is about — and the words naming where it came from are the way back out where one
+ *  leads there (`originParts`). */
+export function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
+  const parts: ReactNode[] = [...originParts(conversation), subject(conversation, viewer)];
+  return parts.flatMap((part, index) => (index ? [" · ", part] : part));
+}
+
+/** Where a conversation leads back out to, and what that way out says — null where it draws none, so
+ *  the words that name where it came in know whether they lead anywhere. */
+function wayOut(conversation: Conversation): { href: string; channel: string } | null {
+  const href = slackLink(conversation.surface, conversation.source);
+  return href === null ? null : { href, channel: surfaceOrigin(conversation) };
+}
+
+/** Where a conversation came from, as the parts a heading and a row's meta line each state it in:
+ *  the words `origin` names, and the way out where one is drawn. Where those words name the channel
+ *  the way out lands in they are that way out, so the origin is stated once and nothing is drawn
+ *  beside them; where they name the agent that ran the conversation the way out follows them as its
+ *  own part, because the agent and the channel it came in on are two facts. Where no way out is
+ *  drawn the words stand alone. */
+function originParts(conversation: Conversation): ReactNode[] {
+  const out = wayOut(conversation);
+  const stated = origin(conversation);
+  if (out === null) return [stated];
+  const away = <WayOut key="way-out" out={out} />;
+  return out.channel === stated ? [away] : [stated, away];
 }
 
 /** The meta line: whose the row is, where it came in, who spoke, how busy it is, and who may read
  *  it. The viewer's own private row carries no audience label — the exception is labelled, never
  *  the default — and a label the origin or the subject already states does not repeat. Another
  *  member's private row states owner and audience as the one part `Private to <email>`. */
-function metaParts(entry: Conversation, viewer: string | null): string[] {
+function metaParts(entry: Conversation, viewer: string | null): ReactNode[] {
   const mine = entry.member_email !== null && entry.member_email === viewer;
   const theirs = isMemberAudience(entry.audience) && !mine;
   const shown = subject(entry, viewer);
@@ -151,7 +174,7 @@ function metaParts(entry: Conversation, viewer: string | null): string[] {
   const named = entry.member_email === null || theirs ? "" : ownerLabel(entry.member_email, viewer);
   const parts = [
     named,
-    origin(entry),
+    ...originParts(entry),
     entry.speakers.map(speakerName).join(", "),
     turns(entry.turn_count),
     reach === origin(entry) ? "" : reach,
@@ -163,6 +186,38 @@ function turns(count: number): string {
   return count === 1 ? "1 turn" : count + " turns";
 }
 
+/** The way out of a conversation Slack holds, drawn the same wherever it appears: the channel it is
+ *  in, named the way Slack names it, on the permalink of the message it opened with. The channel
+ *  name is the whole label — a member reading `#ops-warehouse` knows both that the link leaves for
+ *  Slack and which room it lands in, where `Open in Slack` says only the half they already knew —
+ *  and the arrow is the portal's one glyph for an act that leaves it. A conversation the surface
+ *  named no channel for reads as the surface itself, because a way out still has to say where it
+ *  goes.
+ *
+ *  It is the words that name where the conversation came in rather than a control beside them, so a
+ *  heading and a row state where a conversation is happening once and the row's title gives up no
+ *  width for it. Those words are drawn the way the portal draws every other act that leaves it: they
+ *  keep the colour and weight of the line they sit in and carry no resting underline, so the way out
+ *  never outshouts the title beside it nor breaks a muted meta line. The underline arrives on hover
+ *  and focus where the member is already asking what the words do, and it is what a way out inside a
+ *  line answers with: `Source ↗` brightens from muted, which a word on a line the meta already mutes
+ *  cannot do without first drawing itself fainter than the words beside it. The arrow is muted against
+ *  them, because it marks the act and does not name it. On a listing row the link is the row's second
+ *  target — `rowControl` hands a press that lands on it to the link, so leaving for Slack never rides
+ *  along with opening the transcript. */
+function WayOut({ out }: { out: { href: string; channel: string } }) {
+  return (
+    <a
+      href={out.href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="whitespace-nowrap text-inherit no-underline hover:underline focus-visible:underline"
+    >
+      {out.channel} <span className="opacity-(--opacity-muted)">↗</span>
+    </a>
+  );
+}
+
 function matches(entry: Conversation, query: string, viewer: string | null): boolean {
   const stated = [subject(entry, viewer), who(entry, viewer), origin(entry), ...entry.speakers];
   return stated.join(" ").toLowerCase().includes(query.toLowerCase());
@@ -172,7 +227,10 @@ function matches(entry: Conversation, query: string, viewer: string | null): boo
  *  runs alike — so a row reads the same wherever the member met it: the search on the bar, one
  *  row line per conversation, and the row itself as the control that opens it. The
  *  rows decide the rest: one carrying an agent states that agent where one read in a single
- *  agent's namespace states the surface, and a row nobody may open says which of the two it is. */
+ *  agent's namespace states the surface, and a row nobody may open says which of the two it is. The
+ *  channel a row's meta line already names is the way back to Slack, so the member chooses between
+ *  reading the conversation here and answering it where it is happening without the row's title
+ *  giving up any width for a second control. */
 export function ConversationList({
   rows,
   blank,
@@ -290,14 +348,15 @@ export function unreadable(message: string): ReactNode {
 /** One conversation read rather than continued: the same message log the chat draws, headed the
  *  way the row that opened it named it, and no composer under it. The section carries no act — a
  *  transcript has no diff state to read, so a Changes link here would be drawn over conversations
- *  that changed no file. */
+ *  that changed no file, and the one way out of the conversation is the channel its heading names
+ *  rather than a control beside that heading. */
 export function ConversationTranscript({
   conversationId,
   title,
   messages,
 }: {
   conversationId: string;
-  title: string;
+  title: ReactNode;
   messages: Message[];
 }) {
   return (

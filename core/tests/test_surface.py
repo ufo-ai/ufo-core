@@ -106,6 +106,9 @@ from ufo.transcript import (
 from ufo.workspace import ws
 
 SURFACE = "test_surface"
+OPENING_PERMALINK = (
+    "https://acme.slack.com/archives/C7/p1700000000000100?thread_ts=1700000000.000100&cid=C7"
+)
 WRITEBACK_READ_INTERVAL_SECONDS = 0.01
 WEDGE_WATCHDOG_SECONDS = 30
 
@@ -2781,11 +2784,13 @@ async def test_agent_conversations_others_hold_a_shared_row_bound_to_nobody(
 async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
     db: None, tmp_path
 ) -> None:
-    """What a conversation is about and who is in it, off the page's turns. The opening words are
-    the member's own out of the first turn — the ambient digest a channel surface renders around
-    them is not what the conversation is about — capped, and empty where no turn has landed.
-    Speakers run in order of first appearance, once each however often they speak, carrying the
-    display line the surface reported and the address where it reported none."""
+    """What a conversation is about, where it was opened, and who is in it, off the page's turns.
+    The opening words are the member's own out of the first turn — the ambient digest a channel
+    surface renders around them is not what the conversation is about — capped, and empty where no
+    turn has landed. The source is that same turn's, so a row leads back to the message the
+    conversation opened with rather than to a later one, and it is None where the surface reported
+    none. Speakers run in order of first appearance, once each however often they speak, carrying
+    the display line the surface reported and the address where it reported none."""
     workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
     assert member_id is not None
     peer_id = await _seed_member_row(workspace_id, "peer@example.com")
@@ -2805,7 +2810,7 @@ async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
             "",
         ),
         speaker_member_id=member_id,
-        context=TurnContext(sender="Mel Okafor (m@example.com)"),
+        context=TurnContext(sender="Mel Okafor (m@example.com)", source=OPENING_PERMALINK),
     )
     await _seed_conversation_turn(
         workspace_id,
@@ -2814,7 +2819,10 @@ async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
         seq=2,
         inbound="thanks",
         speaker_member_id=peer_id,
-        context=TurnContext(sender="Pat Reyes (peer@example.com)"),
+        context=TurnContext(
+            sender="Pat Reyes (peer@example.com)",
+            source="https://acme.slack.com/archives/C7/p1700000000000900",
+        ),
     )
     await _seed_conversation_turn(
         workspace_id, channel, agent_id, seq=3, inbound="anything else?", speaker_member_id=peer_id
@@ -2843,8 +2851,11 @@ async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
         ("m@example.com", "Mel Okafor (m@example.com)"),
         ("peer@example.com", "Pat Reyes (peer@example.com)"),
     ]
+    assert by_id[channel].source == OPENING_PERMALINK
     assert by_id[long_open].opening_message == "w" * OPENING_MESSAGE_CHARS
+    assert by_id[long_open].source is None
     assert by_id[turnless].opening_message == ""
+    assert by_id[turnless].source is None
     assert by_id[turnless].speakers == ()
 
 
@@ -2852,10 +2863,11 @@ async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
     db: None, tmp_path
 ) -> None:
     """A row an admin lists but may not read is administration metadata and nothing more: it states
-    whose it is and how busy, and carries neither the words that opened it nor who else is in it.
-    Reading it is the acknowledgement's act, audited by `record_transcript_access` — a listing that
-    quoted the first message would hand an admin the content the acknowledgement exists to record.
-    A room stays walled on the same read for the same admin."""
+    whose it is and how busy, and carries neither the words that opened it, nor the link that opens
+    it where it was said, nor who else is in it. Reading it is the acknowledgement's act, audited by
+    `record_transcript_access` — a listing that quoted the first message, or handed over the
+    permalink that reads it in Slack, would give an admin the content the acknowledgement exists to
+    record. A room stays walled on the same read for the same admin."""
     workspace_id, agent_id, admin_id = await _seed(member_email="boss@example.com")
     assert admin_id is not None
     owner_id = await _seed_member_row(workspace_id, "owner@example.com")
@@ -2881,7 +2893,7 @@ async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
             seq=1,
             inbound="the salary review spreadsheet",
             speaker_member_id=owner_id,
-            context=TurnContext(sender="Robin Vale (owner@example.com)"),
+            context=TurnContext(sender="Robin Vale (owner@example.com)", source=OPENING_PERMALINK),
         )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
@@ -2893,6 +2905,7 @@ async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
     for conversation_id in (theirs, room):
         assert by_id[conversation_id].readable is False
         assert by_id[conversation_id].opening_message == ""
+        assert by_id[conversation_id].source is None
         assert by_id[conversation_id].speakers == ()
 
 

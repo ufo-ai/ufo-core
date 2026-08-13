@@ -440,6 +440,47 @@ out, so no markup a surface wrote reaches a reader. A bubble somebody other than
 is headed by their name (`speakerName`, the same cut a conversation row takes) — the viewer's own
 bubbles stay unlabelled, because the exception is what gets labelled.
 
+A conversation Slack holds states the way back to it wherever the portal names that conversation —
+the transcript's heading, and a listing row's meta line — and it states it as the words that name
+where the conversation came in: the channel as Slack names it, carrying the arrow that marks an act
+leaving the portal — `#ops-warehouse ↗` — on the permalink of the message the conversation opened
+with. Where a conversation is happening is a fact about the conversation and not about any message
+in it, so it is stated where the conversation is named rather than under every bubble; and the
+channel is the label because `Open in Slack` states only the half a member reading a Slack
+transcript already knows, where the name says which room the arrow lands in. A conversation whose
+channel the surface never named reads as the surface itself, since a way out still has to say where
+it goes.
+
+The origin every screen already states is the anchor (`originParts`), and no control is drawn beside
+it. A heading and a row name where a conversation came from either way, so a second copy of the
+channel in a trailing column states one fact twice in the place with the least width to spare: at
+390px that column left the Slack row's title 102px of the 378 it asks for and cut it to
+`Cycle-coun…`, where the same row anchored in its own words has the 269px every other row on that
+listing has, and the arrow costs 14px of a meta line that truncates by design. Where the words name
+the agent that ran the conversation rather than the channel it came in on, the way out follows them
+as its own part — the agent and the channel are two facts, and dropping either would leave a screen
+naming a place it cannot lead to. Where no way out is drawn the words are plain text: a portal
+transcript and a portal row, a Slack conversation the surface reported no source for.
+
+The link is a word in the sentence the screen already reads rather than an act at the edge of one, so
+it is drawn the way the portal draws its other ways out (`Source ↗`) and not the way it draws a link
+inside prose: it keeps the colour and the weight of the line it sits in, and it carries no resting
+underline — the underline arrives on hover and focus. Default link blue and a standing underline drew
+a channel name louder than the heading title beside it and foreign to the muted meta line under it,
+which states the way out as the loudest fact on a row about something else. `Source ↗` answers the
+pointer with opacity — muted at rest, full when the pointer reaches it — which a way out standing in
+a line cannot borrow: a meta line already spends `opacity-(--opacity-muted)`, so a second opacity
+under it would draw the channel fainter than the words it stands among and brighten it only back to
+them. The underline is the same answer at no cost to the line's colour or its width. The arrow is
+muted against the words (`opacity-(--opacity-muted)`), because it marks the act where the name states
+it. On a listing row the link is the row's second target, and the row stays one target for the act the
+member came for: `rowControl` hands a press that lands on the link to the link, so leaving for Slack
+never rides along with opening the transcript.
+
+The gate is the conversation's surface and never the source string (`slackLink`) — every surface
+reports where a conversation was opened and the portal's own names the portal — so a portal chat
+draws none, and a conversation opened before its surface reported a source draws none either.
+
 The composer stays live while a turn runs, because a message sent then joins that running turn
 rather than queueing behind it. The member's bubble states the wait in its own words — the message
 text set italic and muted (`opacity-(--opacity-muted)`), no copy added beneath it — and the words take their

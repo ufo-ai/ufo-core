@@ -379,7 +379,19 @@ test("a section stacks heading, action bar, then records, and the bar runs from 
   const action = screen.getByRole("button", { name: "Add member" });
   expect(search.parentElement).toBe(action.parentElement);
   expect(search.parentElement?.className).not.toContain("justify-between");
-  expect(heading.parentElement?.nextElementSibling).toBe(search.parentElement);
+  expect(heading.parentElement?.parentElement?.nextElementSibling).toBe(search.parentElement);
+});
+
+test("a section's action stands on the heading line, over the bar and the records", () => {
+  render(
+    <Section title="Members" action={<a href="https://example.test">Elsewhere</a>} bar={<button type="button">Add member</button>}>
+      roster
+    </Section>,
+  );
+  const heading = screen.getByRole("heading", { name: "Members" });
+  const out = screen.getByRole("link", { name: "Elsewhere" });
+  expect(heading.nextElementSibling).toBe(out);
+  expect(out.parentElement).toBe(heading.parentElement);
 });
 
 test("a section's note stands under its heading, not under the bar", () => {
@@ -390,8 +402,8 @@ test("a section's note stands under its heading, not under the bar", () => {
   );
   const heading = screen.getByRole("heading", { name: "Credentials" });
   const note = screen.getByText("A slot is filled in chat.");
-  expect(heading.nextElementSibling).toBe(note);
-  expect(note.parentElement).toBe(heading.parentElement);
+  expect(heading.parentElement?.nextElementSibling).toBe(note);
+  expect(note.parentElement).toBe(heading.parentElement?.parentElement);
 });
 
 test("a table is a bordered card, and its last row meets the card edge alone", () => {

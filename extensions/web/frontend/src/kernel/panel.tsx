@@ -195,16 +195,22 @@ export function Notice({
 /** The one owner of vertical rhythm on a settings screen: `gap-lg` between the heading, the bar,
  *  and the records, `mb-6xl` to the next section. Nothing inside carries a bottom margin — a block
  *  that spaced itself would add to the gap rather than sit in it, and a screen of six sections
- *  would drift wider apart with every band it happens to hold. */
+ *  would drift wider apart with every band it happens to hold.
+ *
+ *  `action` is one act on what the heading names, drawn beside it rather than under it: a fact about
+ *  the whole section belongs on the heading line, where `bar` is for the controls that narrow the
+ *  records under it. */
 export function Section({
   title,
   note,
   bar,
+  action,
   children,
 }: {
-  title?: string;
+  title?: ReactNode;
   note?: string;
   bar?: ReactNode;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -212,7 +218,10 @@ export function Section({
       {title || note ? (
         <div className="flex flex-col gap-xs">
           {title ? (
-            <h2 className="m-0 text-body font-strong opacity-(--opacity-muted-soft)">{title}</h2>
+            <div className="flex items-baseline gap-md">
+              <h2 className="m-0 text-body font-strong opacity-(--opacity-muted-soft)">{title}</h2>
+              {action}
+            </div>
           ) : null}
           {note ? <p className="m-0 text-small opacity-(--opacity-muted-soft)">{note}</p> : null}
         </div>

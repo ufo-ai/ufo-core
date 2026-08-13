@@ -1710,7 +1710,13 @@ def _conversation_row(
     the content, and the title of a chat it did not open is that content by another route.
 
     `agent` names the owner of a row read across every agent, and is null for a read taken inside
-    one agent's namespace, where the pane names it once instead of every row naming it again."""
+    one agent's namespace, where the pane names it once instead of every row naming it again.
+
+    `source` is where the conversation was opened, as the admitting surface reported it — the
+    permalink of a Slack thread's first message, so a row leads back out to the thread as well as
+    into the transcript, and the transcript itself states the one way back. Every surface defines
+    its own, and a portal chat's names the portal, so the row states it and the screen decides which
+    surface's is a link worth drawing."""
     return {
         "id": str(entry.summary.id),
         "agent": agent,
@@ -1719,6 +1725,7 @@ def _conversation_row(
         "audience": entry.audience,
         "member_email": entry.summary.member_email,
         "description": (title or _chat_title(entry.opening_message, ())) if entry.readable else "",
+        "source": entry.source,
         "speakers": [who.sender or who.email for who in entry.speakers],
         "turn_count": entry.summary.turn_count,
         "created_at": _iso(entry.summary.created_at),

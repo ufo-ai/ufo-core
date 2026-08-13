@@ -205,6 +205,9 @@ PORTAL_SUBAGENTS = SubagentRegistry(
     (_profile("general_purpose", None, 12), _profile("deep_research", "claude-opus-4-8", 40))
 )
 TOKEN_SECRET = "web-token-secret"
+SLACK_THREAD_PERMALINK = (
+    "https://acme.slack.com/archives/C1/p1700000000000100?thread_ts=1700000000.000100&cid=C1"
+)
 STREAM_TIMEOUT_SECONDS = 30
 STREAM_GATE = StreamGate()
 CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
@@ -3750,7 +3753,7 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         seq=1,
         inbound="from Slack",
         speaker_member_id=member_id,
-        context=TurnContext(sender="Robin Vale (owner@example.com)"),
+        context=TurnContext(sender="Robin Vale (owner@example.com)", source=SLACK_THREAD_PERMALINK),
     )
 
     resolved = await client.get(
@@ -3769,6 +3772,7 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         "audience": "shared",
         "member_email": None,
         "description": "from Slack",
+        "source": SLACK_THREAD_PERMALINK,
         "speakers": ["Robin Vale (owner@example.com)"],
         "turn_count": 1,
         "created_at": target["created_at"],
@@ -4432,6 +4436,7 @@ async def _seed_web_turn(
     email: str,
     terminal: TerminalFrame,
     title: str = "a seeded conversation",
+    context: TurnContext | None = None,
 ) -> tuple[UUID, UUID]:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -4467,6 +4472,7 @@ async def _seed_web_turn(
                 status="done",
                 inbound="ask",
                 speaker_member_id=member_id,
+                context=None if context is None else context.model_dump(mode="json"),
                 terminal=terminal.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -7229,6 +7235,69 @@ async def test_a_conversation_describes_itself_and_names_who_spoke(
     assert row["speakers"] == ["Mel Okafor (m@example.com)", "peer@example.com"]
 
 
+async def test_a_slack_conversation_row_states_the_thread_it_came_in_on(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A listed conversation states where it was opened, as the admitting surface reported it, so a
+    row leads back out to the Slack thread as well as into the transcript here, and the transcript
+    leads out to the same place. The link is the opening message's permalink — the thread's own
+    root, never a later message's, since one conversation has one way back to it. A portal chat
+    states its source too, and it names the portal the reader is already in, which is why the
+    surface and not the string decides what is drawn."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    thread = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1700000000.000100",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        thread,
+        agent_id,
+        seq=1,
+        inbound="take a look at the failing deploy",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)", source=SLACK_THREAD_PERMALINK),
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        thread,
+        agent_id,
+        seq=2,
+        inbound="any luck?",
+        speaker_member_id=member_id,
+        context=TurnContext(
+            sender="Mel Okafor (m@example.com)",
+            source="https://acme.slack.com/archives/C1/p1700000000000900",
+        ),
+    )
+    portal, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="done"),
+        title="Rename the deploy job",
+        context=TurnContext(sender="m@example.com", source="ufo web (m@example.com)"),
+    )
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert listed.status_code == 200
+    rows = {row["id"]: row for row in listed.json()["conversations"]}
+    assert rows[str(thread)]["source"] == SLACK_THREAD_PERMALINK
+    assert rows[str(portal)]["surface"] == "web"
+    assert rows[str(portal)]["source"] is not None
+    assert "slack.com" not in rows[str(portal)]["source"]
+
+
 async def test_a_web_conversation_is_described_by_the_title_the_rail_shows(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -7261,9 +7330,10 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """A row an admin may list but not read stays administration metadata: whose it is and how
-    busy, never a word of it and never who else is in it. Opening it is the acknowledgement's act
-    and that act is what gets audited, so a listing that quoted the first message would hand over
-    the content the acknowledgement exists to record."""
+    busy, never a word of it, never where it was said, and never who else is in it. Opening it is
+    the acknowledgement's act and that act is what gets audited, so a listing that quoted the first
+    message — or handed over the link that opens it in Slack — would give away the content the
+    acknowledgement exists to record."""
     client, workspace_id, agent_id = web
     owner_id, _owner_token = await _seed_member(workspace_id, "owner@example.com")
     _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -7282,7 +7352,7 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
         seq=1,
         inbound="the salary review spreadsheet",
         speaker_member_id=owner_id,
-        context=TurnContext(sender="Robin Vale (owner@example.com)"),
+        context=TurnContext(sender="Robin Vale (owner@example.com)", source=SLACK_THREAD_PERMALINK),
     )
 
     listed = await client.get(
@@ -7295,6 +7365,7 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     assert row["disclosable"] is True
     assert row["member_email"] == "owner@example.com"
     assert row["description"] == ""
+    assert row["source"] is None
     assert row["speakers"] == []
 
 
@@ -8678,6 +8749,7 @@ async def test_subagent_conversations_follow_the_spawning_conversation_audience(
         "surface_label": None,
         "audience": rows[0]["audience"],
         "description": "find it",
+        "source": None,
         "speakers": [],
         "turn_count": 2,
         "created_at": None,

@@ -460,9 +460,10 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
               id: CONVO_ID,
               agent: { id: AGENT_ID, name: AGENT.name },
               surface: "slack",
-              surface_label: null,
+              surface_label: "#ops-warehouse",
               audience: "shared",
               member_email: null,
+              source: "https://acme.slack.com/archives/C1/p1700000000000100",
               turn_count: 1,
               created_at: "2026-08-01T08:00:00Z",
               last_turn_at: "2026-08-01T08:01:00Z",
@@ -488,7 +489,17 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
     screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
   ).toBeTruthy();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
-  expect(screen.getByRole("heading", { name: AGENT.name + " · Workspace" })).toBeTruthy();
+  const out = screen.getByRole("link", { name: "#ops-warehouse ↗" });
+  expect(out.getAttribute("href")).toBe("https://acme.slack.com/archives/C1/p1700000000000100");
+  const heading = screen.getByRole("heading", {
+    name: AGENT.name + " · #ops-warehouse ↗ · Workspace",
+  });
+  expect(heading.contains(out)).toBe(true);
+  const drawn = out.className.split(" ");
+  expect(drawn).toContain("text-inherit");
+  expect(drawn).toContain("no-underline");
+  expect(drawn).not.toContain("underline");
+  expect(within(out).getByText("↗").className).toContain("opacity-(--opacity-muted)");
 });
 
 test("the new-conversation control targets the main agent, or picks among several", async () => {
