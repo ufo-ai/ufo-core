@@ -380,6 +380,7 @@ class Compaction:
             messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
             reasoning="off",
+            prompt_cache_ttl="5m" if self.turn and self.turn.subagent_profile else "1h",
         )
         parts: list[str] = []
         usage: Usage | None = None

@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort, Usage
 
+PromptCacheTtl = Literal["5m", "1h"]
+
 
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
@@ -127,7 +129,9 @@ class ModelRequest(BaseModel):
     `auto` renders as the same parameter-free request `off` does — the provider's own default.
     `off` omits the thinking parameters entirely. `tool_choice` compels the named tool as the
     round's single act — it must name an offered tool, and the request runs with reasoning off
-    (Anthropic rejects a forced tool choice under extended thinking)."""
+    (Anthropic rejects a forced tool choice under extended thinking). `prompt_cache_ttl` is how long
+    the breakpoints this request writes stay warm; a client whose provider caches on its own (the
+    OpenAI-wire clients) ignores it."""
 
     model: str
     system: str
@@ -136,6 +140,7 @@ class ModelRequest(BaseModel):
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    prompt_cache_ttl: PromptCacheTtl = "1h"
 
     @model_validator(mode="after")
     def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> "ModelRequest":

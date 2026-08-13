@@ -109,6 +109,7 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    PromptCacheTtl,
     ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
@@ -179,10 +180,12 @@ class CapturingModel:
 
     seen: list[tuple[Message, ...]] = field(default_factory=list)
     seen_system: list[str] = field(default_factory=list)
+    seen_cache_ttl: list[PromptCacheTtl] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
         self.seen_system.append(request.system)
+        self.seen_cache_ttl.append(request.prompt_cache_ttl)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -4571,6 +4574,19 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
     child_model = CapturingModel()
     await _engine(child, child_model, tmp_path).run()
     assert child_model.seen[0][-1].content == "hi"
+
+
+async def test_a_subagent_turn_requests_the_5m_prompt_cache_ttl(db: None, tmp_path: Path) -> None:
+    """A subagent turn's rounds ask for the 5m cache TTL where the main agent's keep 1h: nothing
+    reads the child's prefix once the child ends, so it pays the cheaper write."""
+    main_model = CapturingModel()
+    await _engine(await _seed_turn("queued", None), main_model, tmp_path).run()
+    assert main_model.seen_cache_ttl == ["1h"]
+
+    child = (await _seed_turn("queued", None)).model_copy(update={"subagent_profile": "probe"})
+    child_model = CapturingModel()
+    await _engine(child, child_model, tmp_path).run()
+    assert child_model.seen_cache_ttl == ["5m"]
 
 
 async def test_done_turn_persists_the_system_string_and_injected_context(

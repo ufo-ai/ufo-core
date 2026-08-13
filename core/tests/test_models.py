@@ -323,33 +323,31 @@ async def test_anthropic_request_carries_image_and_tool_result_images() -> None:
     ]
 
 
-async def test_anthropic_caches_tools_system_and_growing_conversation() -> None:
+@pytest.mark.parametrize("ttl", ["1h", "5m"])
+async def test_anthropic_caches_tools_system_and_growing_conversation(ttl: str) -> None:
+    """Every breakpoint carries the request's TTL, so one turn never writes two cache premiums."""
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
     )
     request = REQUEST.model_copy(
         update={
+            "prompt_cache_ttl": ttl,
             "tools": (
                 ToolSchema(name="first", description="one", input_schema={"type": "object"}),
                 ToolSchema(name="last", description="two", input_schema={"type": "object"}),
-            )
+            ),
         }
     )
     async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
         request
     ):
         pass
-    assert create.kwargs["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-    assert create.kwargs["system"] == [
-        {
-            "type": "text",
-            "text": "be terse",
-            "cache_control": {"type": "ephemeral", "ttl": "1h"},
-        }
-    ]
+    cache = {"type": "ephemeral", "ttl": ttl}
+    assert create.kwargs["cache_control"] == cache
+    assert create.kwargs["system"] == [{"type": "text", "text": "be terse", "cache_control": cache}]
     tools = create.kwargs["tools"]
     assert "cache_control" not in tools[0]
-    assert tools[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert tools[1]["cache_control"] == cache
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:

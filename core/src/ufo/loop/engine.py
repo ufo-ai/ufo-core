@@ -70,6 +70,7 @@ from ufo.models.interface import (
     ModelClient,
     ModelRequest,
     ModelResponseTruncated,
+    PromptCacheTtl,
     ReasoningBlock,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -816,6 +817,14 @@ class TurnEngine:
         """This turn's `profile` telemetry dimension — its subagent profile, or `main`."""
         return turn_profile(self.turn.subagent_profile)
 
+    @property
+    def cache_ttl(self) -> PromptCacheTtl:
+        """The TTL every model call this turn writes its cache breakpoints at. A subagent turn ends
+        with its conversation, so nothing reads the prefix an hour later and it pays the cheaper 5m
+        write; the main agent's conversation spans bursty gaps between member messages, where a 5m
+        entry expires before the next turn reads it."""
+        return "1h" if self.turn.subagent_profile is None else "5m"
+
     async def run(self) -> TerminalFrame | None:
         with turn_span(
             self.turn.id,
@@ -849,6 +858,7 @@ class TurnEngine:
                     messages=(Message(role="user", content=user),),
                     max_tokens=FIND_MAX_TOKENS,
                     reasoning="off",
+                    prompt_cache_ttl=self.cache_ttl,
                 )
                 parts: list[str] = []
                 async for event in self.model.complete(request):
@@ -1698,6 +1708,7 @@ class TurnEngine:
             tools=tools,
             tool_choice=FINISH_TOOL if force_finish else None,
             reasoning="off" if force_finish else self.agent.reasoning,
+            prompt_cache_ttl=self.cache_ttl,
         )
         parts: list[str] = []
         buffer: list[str] = []

@@ -44,8 +44,6 @@ STREAM_TRANSPORT_ERRORS = (
 )
 STREAM_STATUS_ERRORS = (anthropic.APIStatusError,)
 
-CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
-
 
 def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic:
     """SDK client with its own retries disabled: the retry policy lives in AnthropicClient."""
@@ -158,13 +156,14 @@ class AnthropicClient:
             cache_write_tokens = 0
             output_tokens: int | None = None
             stop_reason: str | None = None
+            breakpoint_cache = {"type": "ephemeral", "ttl": request.prompt_cache_ttl}
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "system": [
                     {
                         "type": "text",
                         "text": request.system,
-                        "cache_control": CACHE_CONTROL,
+                        "cache_control": breakpoint_cache,
                     }
                 ],
                 "messages": [
@@ -173,7 +172,7 @@ class AnthropicClient:
                 ],
                 "max_tokens": request.max_tokens,
                 "stream": True,
-                "cache_control": CACHE_CONTROL,
+                "cache_control": breakpoint_cache,
             }
             effort = self.spec.default_reasoning(request.reasoning, request.tools)
             if effort != "off":
@@ -185,7 +184,7 @@ class AnthropicClient:
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                     for t in request.tools
                 ]
-                create_kwargs["tools"][-1]["cache_control"] = CACHE_CONTROL
+                create_kwargs["tools"][-1]["cache_control"] = breakpoint_cache
                 create_kwargs["tool_choice"] = (
                     {"type": "auto", "disable_parallel_tool_use": False}
                     if request.tool_choice is None
