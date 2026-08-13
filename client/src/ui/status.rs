@@ -1,0 +1,374 @@
+//! The activity row and footer: spinner with elapsed time, the transient status, reconnect
+//! countdowns, and the terminal-integration signals (title, progress, bell) around a turn.
+
+use std::time::{Duration, Instant};
+
+use ratatui::text::{Line, Span};
+
+use crate::ui::theme::Theme;
+use crate::ui::wrap;
+
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+const SEPARATOR: &str = " · ";
+const CHANNEL_COLS: usize = 8;
+const TITLE_COLS: usize = 128;
+const KEEPALIVE: Duration = Duration::from_secs(1);
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
+
+/// What the activity row is doing right now.
+#[derive(Debug, Clone)]
+pub enum Activity {
+    Idle,
+    WaitingInput,
+    Working {
+        since: Instant,
+        status: String,
+    },
+    Reconnecting {
+        attempt: u32,
+        of: u32,
+        retry_in_s: u64,
+    },
+}
+
+/// The activity row state: what is happening and for how long.
+pub struct StatusRow {
+    pub activity: Activity,
+    tick: usize,
+}
+
+impl StatusRow {
+    pub fn new() -> StatusRow {
+        StatusRow {
+            activity: Activity::Idle,
+            tick: 0,
+        }
+    }
+
+    /// Advance the spinner one frame.
+    pub fn on_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// The animation phase, for anything else that throbs on the same clock.
+    pub fn phase(&self) -> usize {
+        self.tick
+    }
+
+    /// Render the activity row: the spinner over what the turn is doing and how long it has been
+    /// doing it, or the reconnect countdown. The status is what gives when the row is too wide.
+    pub fn render(&self, theme: &Theme, width: u16) -> Line<'static> {
+        match &self.activity {
+            Activity::Idle | Activity::WaitingInput => Line::raw(""),
+            Activity::Working { since, status } => {
+                let frame = SPINNER_FRAMES[self.tick % SPINNER_FRAMES.len()];
+                let ran = elapsed(since.elapsed());
+                let fixed = 2 + wrap::width(frame) + wrap::width(SEPARATOR) + wrap::width(&ran);
+                let status = wrap::clip(status, (width as usize).saturating_sub(fixed));
+                let said = if status.is_empty() {
+                    format!(" {ran}")
+                } else {
+                    format!(" {status}{SEPARATOR}{ran}")
+                };
+                Line::from(vec![
+                    Span::styled(format!(" {frame}"), theme.accent),
+                    Span::styled(said, theme.muted),
+                ])
+            }
+            Activity::Reconnecting {
+                attempt,
+                of,
+                retry_in_s,
+            } => Line::styled(
+                format!(" Retrying ({attempt}/{of}) in {retry_in_s}s"),
+                theme.warning,
+            ),
+        }
+    }
+}
+
+impl Default for StatusRow {
+    fn default() -> StatusRow {
+        StatusRow::new()
+    }
+}
+
+/// How long a turn has run, at the coarsest unit that still states the wait: `3s`, `1m12s`,
+/// `1h02m`. The trailing unit is zero-padded so the row does not shift under its own clock.
+pub fn elapsed(ran: Duration) -> String {
+    let secs = ran.as_secs();
+    match secs {
+        s if s < MINUTE => format!("{s}s"),
+        s if s < HOUR => format!("{}m{:02}s", s / MINUTE, s % MINUTE),
+        s => format!("{}h{:02}m", s / HOUR, (s % HOUR) / MINUTE),
+    }
+}
+
+/// The dock's last line: the workspace this client is talking to and the channel the conversation
+/// sits in, padded across `width`. Nothing where there is no host to state.
+pub fn footer(theme: &Theme, width: u16, workspace_host: &str, channel: &str) -> Line<'static> {
+    if workspace_host.is_empty() {
+        return Line::raw("");
+    }
+    let channel = wrap::clip(channel, CHANNEL_COLS);
+    let stated = if channel.is_empty() {
+        workspace_host.to_string()
+    } else {
+        format!("{workspace_host}{SEPARATOR}{channel}")
+    };
+    let text = wrap::clip(&stated, width as usize);
+    let pad = (width as usize).saturating_sub(wrap::width(text));
+    Line::styled(format!("{text}{}", " ".repeat(pad)), theme.muted)
+}
+
+/// Terminal-integration escape emissions around a turn. Every function answers the bytes to
+/// write, or empty when the capability is off; callers write them, so tests read them.
+pub struct Signals {
+    pub enabled: bool,
+}
+
+impl Signals {
+    /// OSC 0: the terminal title while this conversation runs. The title comes off the wire, so
+    /// control characters — the BEL that would end the sequence early — are dropped.
+    pub fn title(&self, title: &str) -> String {
+        if !self.enabled {
+            return String::new();
+        }
+        let stated: String = title.chars().filter(|ch| !ch.is_control()).collect();
+        format!("\x1b]0;{}\x07", wrap::clip(&stated, TITLE_COLS))
+    }
+
+    /// OSC 9;4: indeterminate progress on, cleared with `progress_off`.
+    pub fn progress_on(&self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
+        "\x1b]9;4;3\x07".to_string()
+    }
+
+    pub fn progress_off(&self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
+        "\x1b]9;4;0\x07".to_string()
+    }
+
+    /// The bell when a turn ends waiting on input.
+    pub fn bell(&self) -> String {
+        if !self.enabled {
+            return String::new();
+        }
+        "\x07".to_string()
+    }
+}
+
+/// The progress state a running turn holds. Terminals drop a progress they have not heard about,
+/// so the state is said again every second until the turn ends.
+pub struct Progress {
+    last_emit: Option<Instant>,
+}
+
+impl Progress {
+    pub fn new() -> Progress {
+        Progress { last_emit: None }
+    }
+
+    /// The bytes to write at `now`: the progress state on the first tick and once a second from
+    /// then, nothing in between.
+    pub fn tick(&mut self, signals: &Signals, now: Instant) -> String {
+        if !signals.enabled {
+            return String::new();
+        }
+        if self
+            .last_emit
+            .is_some_and(|last| now.saturating_duration_since(last) < KEEPALIVE)
+        {
+            return String::new();
+        }
+        self.last_emit = Some(now);
+        signals.progress_on()
+    }
+
+    /// Clear the progress state, and only where this set one.
+    pub fn off(&mut self, signals: &Signals) -> String {
+        match self.last_emit.take() {
+            Some(_) => signals.progress_off(),
+            None => String::new(),
+        }
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Progress {
+        Progress::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::{ColorMode, Scheme, Theme};
+
+    fn theme() -> Theme {
+        Theme::for_mode(ColorMode::Plain, Scheme::Dark)
+    }
+
+    fn working(status: &str, ran: Duration) -> StatusRow {
+        let since = Instant::now()
+            .checked_sub(ran)
+            .expect("the monotonic clock is older than the test duration");
+        StatusRow {
+            activity: Activity::Working {
+                since,
+                status: status.to_string(),
+            },
+            tick: 0,
+        }
+    }
+
+    #[test]
+    fn elapsed_states_the_coarsest_unit() {
+        assert_eq!(elapsed(Duration::from_secs(0)), "0s");
+        assert_eq!(elapsed(Duration::from_secs(59)), "59s");
+        assert_eq!(elapsed(Duration::from_secs(60)), "1m00s");
+        assert_eq!(elapsed(Duration::from_secs(72)), "1m12s");
+        assert_eq!(elapsed(Duration::from_secs(3599)), "59m59s");
+        assert_eq!(elapsed(Duration::from_secs(3600)), "1h00m");
+        assert_eq!(elapsed(Duration::from_secs(3720)), "1h02m");
+    }
+
+    #[test]
+    fn working_row_states_the_status_and_the_wait() {
+        let row = working("reading files", Duration::from_secs(72));
+        let text = row.render(&theme(), 80).to_string();
+        assert_eq!(text, " ⠋ reading files · 1m12s");
+    }
+
+    #[test]
+    fn working_row_without_a_status_is_the_spinner_and_the_wait() {
+        let row = working("", Duration::from_secs(3));
+        assert_eq!(row.render(&theme(), 80).to_string(), " ⠋ 3s");
+    }
+
+    #[test]
+    fn working_row_clips_the_status_to_the_width() {
+        let row = working(
+            "reading every file in the repository",
+            Duration::from_secs(3),
+        );
+        let line = row.render(&theme(), 20);
+        assert_eq!(line.to_string(), " ⠋ reading ever · 3s");
+        assert_eq!(line.width(), 20);
+    }
+
+    #[test]
+    fn narrow_row_drops_the_status_before_the_wait() {
+        let row = working("reading files", Duration::from_secs(3));
+        assert_eq!(row.render(&theme(), 8).to_string(), " ⠋ 3s");
+    }
+
+    #[test]
+    fn a_tick_advances_the_spinner() {
+        let mut row = working("", Duration::from_secs(1));
+        let first = row.render(&theme(), 80).to_string();
+        row.on_tick();
+        assert_ne!(row.render(&theme(), 80).to_string(), first);
+    }
+
+    #[test]
+    fn idle_and_waiting_rows_are_empty() {
+        let mut row = StatusRow::new();
+        assert!(row.render(&theme(), 80).to_string().is_empty());
+        row.activity = Activity::WaitingInput;
+        assert!(row.render(&theme(), 80).to_string().is_empty());
+    }
+
+    #[test]
+    fn reconnect_row_states_the_countdown() {
+        let mut row = StatusRow::new();
+        row.activity = Activity::Reconnecting {
+            attempt: 2,
+            of: 3,
+            retry_in_s: 1,
+        };
+        assert_eq!(
+            row.render(&theme(), 80).to_string(),
+            " Retrying (2/3) in 1s"
+        );
+    }
+
+    #[test]
+    fn footer_states_the_host_and_the_clipped_channel() {
+        let line = footer(&theme(), 40, "acme.ufo.dev", "engineering-standup");
+        assert_eq!(
+            line.to_string(),
+            format!("{:<40}", "acme.ufo.dev · engineer")
+        );
+        assert_eq!(line.width(), 40);
+    }
+
+    #[test]
+    fn footer_without_a_channel_is_the_host_alone() {
+        let line = footer(&theme(), 20, "acme.ufo.dev", "");
+        assert_eq!(line.to_string(), format!("{:<20}", "acme.ufo.dev"));
+    }
+
+    #[test]
+    fn footer_clips_to_the_width() {
+        let line = footer(&theme(), 10, "acme.ufo.dev", "general");
+        assert_eq!(line.to_string(), "acme.ufo.d");
+    }
+
+    #[test]
+    fn footer_without_a_host_is_nothing() {
+        assert!(footer(&theme(), 40, "", "general").to_string().is_empty());
+    }
+
+    #[test]
+    fn progress_repeats_once_a_second() {
+        let signals = Signals { enabled: true };
+        let mut progress = Progress::new();
+        let start = Instant::now();
+        assert_eq!(progress.tick(&signals, start), signals.progress_on());
+        assert!(progress
+            .tick(&signals, start + Duration::from_millis(999))
+            .is_empty());
+        assert_eq!(
+            progress.tick(&signals, start + Duration::from_secs(1)),
+            signals.progress_on()
+        );
+        assert!(progress
+            .tick(&signals, start + Duration::from_millis(1500))
+            .is_empty());
+    }
+
+    #[test]
+    fn progress_off_clears_once_and_only_after_on() {
+        let signals = Signals { enabled: true };
+        let mut progress = Progress::new();
+        assert!(progress.off(&signals).is_empty());
+        progress.tick(&signals, Instant::now());
+        assert_eq!(progress.off(&signals), signals.progress_off());
+        assert!(progress.off(&signals).is_empty());
+    }
+
+    #[test]
+    fn signals_are_silent_when_disabled() {
+        let signals = Signals { enabled: false };
+        assert!(signals.title("t").is_empty());
+        assert!(signals.progress_on().is_empty());
+        assert!(signals.progress_off().is_empty());
+        assert!(signals.bell().is_empty());
+        let mut progress = Progress::new();
+        assert!(progress.tick(&signals, Instant::now()).is_empty());
+        assert!(progress.off(&signals).is_empty());
+    }
+
+    #[test]
+    fn title_drops_control_characters() {
+        let signals = Signals { enabled: true };
+        assert_eq!(signals.title("ship\x07 it\n"), "\x1b]0;ship it\x07");
+    }
+}

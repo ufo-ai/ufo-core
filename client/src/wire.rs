@@ -25,6 +25,7 @@ pub struct OpRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
     Say(String),
+    You(String),
     Note(String),
     Txt(String),
     Status(String),
@@ -92,6 +93,7 @@ pub fn parse_line(line: &str) -> Directive {
     let fields: Vec<String> = parts.map(unescape).collect();
     match verb {
         "say" => Directive::Say(field(&fields, 0)),
+        "you" => Directive::You(field(&fields, 0)),
         "note" => Directive::Note(field(&fields, 0)),
         "txt" => Directive::Txt(field(&fields, 0)),
         "status" => Directive::Status(field(&fields, 0)),
@@ -445,6 +447,10 @@ mod tests {
             Directive::Say("hello\nworld".into())
         );
         assert_eq!(parse_line("note\tdim"), Directive::Note("dim".into()));
+        assert_eq!(
+            parse_line("you\tmy words"),
+            Directive::You("my words".into())
+        );
         assert_eq!(parse_line("txt\tchunk"), Directive::Txt("chunk".into()));
         assert_eq!(
             parse_line("status\t12 tok"),

@@ -16,6 +16,7 @@ const BIN_NAME: &str = "ufo.exe";
 #[cfg(not(windows))]
 const BIN_NAME: &str = "ufo";
 
+#[derive(Clone)]
 pub struct Home {
     pub root: PathBuf,
 }

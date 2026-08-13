@@ -488,6 +488,8 @@ class _ChatStream:
                         self.display.text(fields[0] if fields else "")
                     case "say":
                         self.display.line(fields[0] if fields else "")
+                    case "you":
+                        self.display.line(f"\u203a {fields[0] if fields else ''}")
                     case "note":
                         self.display.activity(fields[0] if fields else "")
                     case "status":

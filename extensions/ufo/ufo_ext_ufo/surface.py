@@ -40,6 +40,7 @@ from ufo.sdk.hub import (
 )
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
+    Conversation,
     CredentialPrompt,
     CredentialRequestInvalid,
     SurfaceAuth,
@@ -48,6 +49,7 @@ from ufo.sdk.surfaces import (
     TerminalGone,
     TerminalOp,
     TurnContext,
+    member_message_text,
 )
 
 SURFACE_UFO = "ufo"
@@ -117,6 +119,40 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None
     if scheme.lower() != "bearer" or not token.strip():
         return None
     return workspace_claim(token.strip())
+
+
+HISTORY_CHAR_BUDGET = 20_000
+
+
+def history_directives(conversation: Conversation) -> tuple[bytes, ...]:
+    """The conversation so far, rendered for a fresh resume: the member's messages as `you`, the
+    agent's replies as `say`. Trailing replies are left off — the tail replays the latest turn's
+    frames, and a reply said here too would print twice. The newest messages win the budget."""
+    said: list[tuple[str, str]] = []
+    for message in conversation.messages:
+        text = _history_text(message)
+        if not text.strip():
+            continue
+        said.append(("you" if message.role == "user" else "say", text))
+    while said and said[-1][0] == "say":
+        said.pop()
+    kept: list[tuple[str, str]] = []
+    budget = HISTORY_CHAR_BUDGET
+    for verb, text in reversed(said):
+        budget -= len(text)
+        if budget < 0 and kept:
+            break
+        kept.append((verb, text))
+    kept.reverse()
+    return tuple(directive(verb, text) for verb, text in kept)
+
+
+def _history_text(message) -> str:
+    if isinstance(message.content, str):
+        raw = message.content
+    else:
+        raw = "\n\n".join(block.text for block in message.content if block.type == "text")
+    return member_message_text(raw) if message.role == "user" else raw
 
 
 def directives_for(
@@ -406,6 +442,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
     note: bytes | None = None
+    resumed = False
     update = b""
     op_id = request.headers.get(OP_HEADER, "").strip()
     if op_id:
@@ -425,6 +462,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
             update = directive("install")
         body = (await request.body()).decode("utf-8", "replace").strip()
         if not body:
+            resumed = True
             turn_id = await ctx.latest_turn(conversation_id)
             if turn_id is None:
                 return PlainTextResponse(update + directive("ask", PROMPT))
@@ -443,6 +481,11 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
             ).turn_id
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
     since = _resumed_from(request, turn_id)
+    history: tuple[bytes, ...] = ()
+    if resumed and request.headers.get(SINCE_HEADER) is None:
+        transcript = await ctx.read_transcript(conversation_id)
+        if transcript is not None:
+            history = history_directives(transcript)
     directives = stream_directives(
         ctx.tail(turn_id, since),
         HOLD_SECONDS,
@@ -460,6 +503,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         try:
             if update:
                 yield update
+            for line in history:
+                yield line
             if note is not None:
                 yield note
             async for line in directives:

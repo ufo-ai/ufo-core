@@ -1,21 +1,32 @@
 mod config;
+mod jsonio;
 mod ops;
 mod ui;
 mod wire;
 
+use std::collections::VecDeque;
 use std::env;
-use std::io::IsTerminal;
+use std::io::{BufRead, IsTerminal};
 use std::process;
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crossterm::event::{Event as TermEvent, KeyEventKind};
+
 use crate::ops::OpRuntime;
+use crate::ui::history::{list_conversations, record_conversation, PastConversation};
+use crate::ui::picker::{PickOutcome, Picker};
+use crate::ui::plain::Plain;
+use crate::ui::{App, Reply};
 use crate::wire::{Directive, OpRequest, PostBody, Session};
 
 const GATEWAY_URL_DEFAULT: &str = "https://flyingobject.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
 const RECONNECT_ATTEMPTS: u32 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
+const TICK: Duration = Duration::from_millis(80);
+const RESUME_ROWS: usize = 12;
 
 fn main() {
     #[cfg(unix)]
@@ -25,25 +36,35 @@ fn main() {
     let mut rest: &[String] = &args;
     let mut resumed: Option<String> = None;
     let mut login = false;
-    match args.first().map(String::as_str) {
-        Some("logout") => {
-            home.clear_signin();
-            println!("Signed out.");
-            return;
+    let mut json = false;
+    loop {
+        match rest.first().map(String::as_str) {
+            Some("logout") => {
+                home.clear_signin();
+                println!("Signed out.");
+                return;
+            }
+            Some("login") => {
+                login = true;
+                home.clear_signin();
+                rest = &rest[1..];
+            }
+            Some("--json") => {
+                json = true;
+                rest = &rest[1..];
+            }
+            Some("--resume") => match rest.get(1) {
+                Some(id) if !id.starts_with("--") => {
+                    resumed = Some(id.clone());
+                    rest = &rest[2..];
+                }
+                _ => {
+                    resumed = Some(pick_resume(&home));
+                    rest = &rest[1..];
+                }
+            },
+            _ => break,
         }
-        Some("login") => {
-            login = true;
-            home.clear_signin();
-            rest = &args[1..];
-        }
-        Some("--resume") => {
-            let Some(id) = args.get(1) else {
-                die("--resume needs a conversation id.")
-            };
-            resumed = Some(id.clone());
-            rest = &args[2..];
-        }
-        _ => {}
     }
     let message = rest.join(" ");
     let workspace_url = if login {
@@ -57,7 +78,7 @@ fn main() {
         home.store_session(&minted);
         minted
     });
-    let channel = env_nonempty("UFO_CHANNEL").or(resumed).unwrap_or_else(|| {
+    let channel_name = env_nonempty("UFO_CHANNEL").or(resumed).unwrap_or_else(|| {
         if workspace_url.is_some() {
             random_channel()
         } else {
@@ -77,30 +98,30 @@ fn main() {
     let session = Session::new(
         resolve_gateway(env_nonempty("UFO_URL"), home.gateway()),
         workspace_url,
-        channel,
+        channel_name,
         token,
         session_id,
         cwd_header,
         installed,
-        tty,
+        tty && !json,
     );
     #[cfg(unix)]
     interrupt::install();
-    update_resume(&session, tty);
+    update_resume(&session, tty && !json);
     config::sweep_retired(&home);
-    let mut client = Client {
-        home,
-        runtime: OpRuntime {
-            workdir,
-            cwd: launch_dir,
-        },
-        ui: ui::Ui::new(),
-        session,
-        tty,
-        opened: false,
-        installed_this_run: false,
+    let scratch = workdir.clone();
+    let runtime = OpRuntime {
+        workdir,
+        cwd: launch_dir,
     };
-    let code = client.run(message);
+    let code = if json {
+        run_json(session, runtime, home, message)
+    } else if tty && ui::wants_fx() {
+        run_tty(session, runtime, home, message)
+    } else {
+        run_plain(session, runtime, home, message)
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
     process::exit(code);
 }
 
@@ -225,9 +246,9 @@ fn resolve_gateway(env: Option<String>, stored: Option<String>) -> String {
         .unwrap_or_else(|| GATEWAY_URL_DEFAULT.to_string())
 }
 
-fn resume_command(session: &Session) -> Option<String> {
-    session.workspace_url.as_ref()?;
-    Some(format!("ufo --resume {}", session.channel))
+fn resume_command(workspace_url: Option<&str>, channel: &str) -> Option<String> {
+    workspace_url?;
+    Some(format!("ufo --resume {channel}"))
 }
 
 fn wants_style(tty: bool) -> bool {
@@ -245,7 +266,7 @@ fn update_resume(session: &Session, tty: bool) {
             interrupt::set_resume("");
             return;
         }
-        match resume_command(session) {
+        match resume_command(session.workspace_url.as_deref(), &session.channel) {
             Some(command) if wants_style(tty) => interrupt::set_resume(&format!(
                 "\x1b[2mResume this conversation: \x1b[0m\x1b[1m{command}\x1b[0m"
             )),
@@ -257,6 +278,938 @@ fn update_resume(session: &Session, tty: bool) {
     {
         let _ = (session, tty);
     }
+}
+
+fn print_resume(workspace_url: Option<&str>, channel: &str, tty: bool) {
+    if !tty {
+        return;
+    }
+    let Some(command) = resume_command(workspace_url, channel) else {
+        return;
+    };
+    println!();
+    if wants_style(tty) {
+        println!("\x1b[2mResume this conversation: \x1b[0m\x1b[1m{command}\x1b[0m");
+    } else {
+        println!("Resume this conversation: {command}");
+    }
+}
+
+/// Bare `--resume`: pick from the conversations this machine opened.
+fn pick_resume(home: &config::Home) -> String {
+    if !std::io::stdout().is_terminal() || !ui::wants_fx() {
+        die("--resume needs a conversation id when there is no terminal to pick in.");
+    }
+    let items = list_conversations(&home.root);
+    if items.is_empty() {
+        die("No conversation on this machine to resume.");
+    }
+    let rows = ui::history::conversation_rows(&items);
+    let theme = ui::theme::Theme::detect(false);
+    let raw = ui::RawGuard::new();
+    let mut dock = ui::term::DockTerm::new(std::io::stdout(), theme.mode);
+    let mut picker = Picker::new(rows);
+    picker.set_page(RESUME_ROWS);
+    let picked = loop {
+        let mut lines = vec![ratatui::text::Line::styled(
+            "Resume a conversation".to_string(),
+            theme.heading,
+        )];
+        lines.extend(picker.render(&theme, 80, RESUME_ROWS));
+        let _ = dock.frame(&[], &lines, None);
+        let event = match crossterm::event::read() {
+            Ok(event) => event,
+            Err(_) => break None,
+        };
+        let TermEvent::Key(key) = event else { continue };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let Some(pick) = ui::pick_key(key) else {
+            continue;
+        };
+        match picker.apply_key(pick) {
+            PickOutcome::Picked(_) => break picker.current_index(),
+            PickOutcome::Cancelled => break None,
+            PickOutcome::Continue => {}
+        }
+    };
+    let _ = dock.close();
+    drop(raw);
+    match picked {
+        Some(index) => items[index].channel.clone(),
+        None => process::exit(0),
+    }
+}
+
+// ── wire thread ─────────────────────────────────────────────────────────────────────────────────
+
+enum WireEvent {
+    Dir(Directive),
+    OpStarted(OpRequest),
+    OpFinished(OpRequest, Result<Vec<u8>, String>),
+    MemberEcho(String),
+    Reconnecting { attempt: u32, retry_in_s: u64 },
+    WorkspaceChanged { url: String, channel: String },
+    StreamEnd { continues: bool },
+    Fatal(String),
+}
+
+enum WireCmd {
+    Say(String),
+    SecretValue {
+        sealed: String,
+        slot: String,
+        value: String,
+    },
+    Detach,
+    Shutdown,
+}
+
+struct Wire {
+    session: Session,
+    runtime: OpRuntime,
+    home: config::Home,
+    evt: Sender<WireEvent>,
+    cmd: Receiver<WireCmd>,
+    queue: VecDeque<String>,
+    op_reply: Option<PostBody>,
+    poll: Option<f64>,
+    detached: bool,
+    recorded: bool,
+    opened: bool,
+    install: bool,
+    installed_this_run: bool,
+}
+
+impl Wire {
+    fn run(mut self, first: String) {
+        let mut body = if first.is_empty() {
+            Some(PostBody::Empty)
+        } else {
+            self.queue.push_back(first);
+            self.next_body()
+        };
+        let mut attempts = 0u32;
+        loop {
+            let Some(post) = body.take() else { return };
+            let stream = match self.session.post(post.clone()) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    if !self.reconnect(&mut attempts, &error) {
+                        return;
+                    }
+                    body = Some(post);
+                    continue;
+                }
+            };
+            let mut got = false;
+            let mut severed = None;
+            for item in stream {
+                match item {
+                    Ok(directive) => {
+                        got = true;
+                        self.opened = true;
+                        if self.handle(directive) {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        severed = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = severed {
+                let resend = if got { None } else { Some(post) };
+                if !self.reconnect(&mut attempts, &error) {
+                    return;
+                }
+                body = resend.or(Some(PostBody::Empty));
+                continue;
+            }
+            attempts = 0;
+            if self.install {
+                self.ensure_installed();
+            }
+            if !got && !self.opened {
+                let _ = self.evt.send(WireEvent::Fatal(format!(
+                    "No response from {}",
+                    self.session.base()
+                )));
+                return;
+            }
+            let continues =
+                self.op_reply.is_some() || self.poll.is_some() || !self.queue.is_empty();
+            if self.evt.send(WireEvent::StreamEnd { continues }).is_err() {
+                return;
+            }
+            body = self.next_body();
+        }
+    }
+
+    /// True when the directive ends this stream (an op rendezvous).
+    fn handle(&mut self, directive: Directive) -> bool {
+        match directive {
+            Directive::Run(op) => {
+                let _ = self.evt.send(WireEvent::OpStarted(op.clone()));
+                let reply = ops::run_op(&self.runtime, &self.session, &op);
+                let _ = self
+                    .evt
+                    .send(WireEvent::OpFinished(op.clone(), reply.clone()));
+                self.op_reply = Some(PostBody::OpReply {
+                    op_id: op.op_id,
+                    reply,
+                });
+                true
+            }
+            Directive::Since(cursor) => {
+                self.session.since = Some(cursor);
+                false
+            }
+            Directive::Poll(seconds) => {
+                self.poll = Some(seconds);
+                false
+            }
+            Directive::Token(token) => {
+                self.home.store_credentials(&token);
+                self.session.token = Some(token);
+                false
+            }
+            Directive::Workspace(url) => {
+                self.home.store_workspace(&url);
+                self.home.store_gateway(&self.session.gateway_url);
+                self.session.workspace_url = Some(url.clone());
+                if self.session.channel == ONBOARDING_CHANNEL {
+                    self.session.channel = random_channel();
+                }
+                update_resume(&self.session, self.session.tty);
+                let _ = self.evt.send(WireEvent::WorkspaceChanged {
+                    url,
+                    channel: self.session.channel.clone(),
+                });
+                false
+            }
+            Directive::Install => {
+                self.install = true;
+                false
+            }
+            Directive::Logout => {
+                self.home.clear_signin();
+                self.session.token = None;
+                self.session.workspace_url = None;
+                false
+            }
+            Directive::Unknown => false,
+            other => {
+                let _ = self.evt.send(WireEvent::Dir(other));
+                false
+            }
+        }
+    }
+
+    fn ensure_installed(&mut self) {
+        if self.installed_this_run {
+            return;
+        }
+        self.installed_this_run = true;
+        self.install = false;
+        let session = &self.session;
+        let outcome = config::install_self(&self.home, |target, dest| {
+            session.fetch_client_binary(target, dest)
+        });
+        match outcome {
+            Ok(installed) => {
+                for line in installed.lines() {
+                    let _ = self
+                        .evt
+                        .send(WireEvent::Dir(Directive::Note(line.to_string())));
+                }
+                self.session.installed = true;
+            }
+            Err(error) => {
+                let _ = self.evt.send(WireEvent::Dir(Directive::Note(format!(
+                    "Install failed: {error}"
+                ))));
+            }
+        }
+    }
+
+    fn reconnect(&mut self, attempts: &mut u32, error: &str) -> bool {
+        *attempts += 1;
+        if !self.opened || *attempts > RECONNECT_ATTEMPTS {
+            let said = if self.opened {
+                error.to_string()
+            } else {
+                format!("No response from {} ({error})", self.session.base())
+            };
+            let _ = self.evt.send(WireEvent::Fatal(said));
+            return false;
+        }
+        let _ = self.evt.send(WireEvent::Reconnecting {
+            attempt: *attempts,
+            retry_in_s: RECONNECT_PAUSE.as_secs(),
+        });
+        thread::sleep(RECONNECT_PAUSE);
+        true
+    }
+
+    fn next_body(&mut self) -> Option<PostBody> {
+        loop {
+            self.drain_cmds();
+            if let Some(reply) = self.op_reply.take() {
+                self.poll = None;
+                return Some(reply);
+            }
+            if !self.queue.is_empty() {
+                let joined: Vec<String> = self.queue.drain(..).collect();
+                for message in &joined {
+                    self.record(message);
+                    let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
+                }
+                self.detached = false;
+                self.poll = None;
+                return Some(PostBody::Message(joined.join("\n\n")));
+            }
+            if let Some(seconds) = self.poll.take() {
+                if !self.detached {
+                    thread::sleep(Duration::from_secs_f64(seconds.max(0.0)));
+                    if self.queue.is_empty() {
+                        return Some(PostBody::Empty);
+                    }
+                    continue;
+                }
+            }
+            match self.cmd.recv() {
+                Ok(command) => self.apply_cmd(command),
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn drain_cmds(&mut self) {
+        while let Ok(command) = self.cmd.try_recv() {
+            self.apply_cmd(command);
+        }
+    }
+
+    fn apply_cmd(&mut self, command: WireCmd) {
+        match command {
+            WireCmd::Say(text) => self.queue.push_back(text),
+            WireCmd::SecretValue {
+                sealed,
+                slot,
+                value,
+            } => self.fulfill_secret(&sealed, &slot, &value),
+            WireCmd::Detach => self.detached = true,
+            WireCmd::Shutdown => {
+                self.queue.clear();
+                self.op_reply = None;
+                self.poll = None;
+            }
+        }
+    }
+
+    fn fulfill_secret(&mut self, sealed: &str, slot: &str, value: &str) {
+        if value.is_empty() {
+            let _ = self
+                .evt
+                .send(WireEvent::Dir(Directive::Note(format!("Skipped {slot}"))));
+            return;
+        }
+        let outcome = self.session.post_secret(sealed, slot, value);
+        let note = match outcome {
+            Ok(lines) if !lines.is_empty() => {
+                for line in lines {
+                    let _ = self.evt.send(WireEvent::Dir(Directive::Note(line)));
+                }
+                return;
+            }
+            Ok(_) => "No confirmation — ask the assistant to check.".to_string(),
+            Err(error) => format!("No confirmation ({error}) — ask the assistant to check."),
+        };
+        let _ = self.evt.send(WireEvent::Dir(Directive::Note(note)));
+    }
+
+    fn record(&mut self, first_message: &str) {
+        if self.recorded || self.session.workspace_url.is_none() {
+            return;
+        }
+        self.recorded = true;
+        record_conversation(
+            &self.home.root,
+            &PastConversation {
+                channel: self.session.channel.clone(),
+                opened_epoch: epoch_seconds(),
+                first_message: first_message.to_string(),
+            },
+        );
+    }
+}
+
+// ── tty mode ────────────────────────────────────────────────────────────────────────────────────
+
+enum LoopEvent {
+    Term(TermEvent),
+    Wire(WireEvent),
+    StdinClosed,
+}
+
+#[derive(Default)]
+struct Gate {
+    prompt: String,
+    questions: VecDeque<(String, Vec<String>)>,
+    answers: Vec<String>,
+    many: bool,
+    secrets: VecDeque<(String, String, String)>,
+    asked: bool,
+    exit: Option<i32>,
+}
+
+fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
+    let host = session
+        .workspace_url
+        .clone()
+        .unwrap_or_else(|| session.gateway_url.clone());
+    let host = host
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let channel_name = session.channel.clone();
+    let cwd = runtime.cwd.clone();
+    let workspace_url = session.workspace_url.clone();
+
+    let raw = ui::RawGuard::new();
+    let mut app = App::new(&home.root, host, channel_name.clone(), cwd);
+    let (evt_tx, evt_rx) = channel::<LoopEvent>();
+    let (cmd_tx, cmd_rx) = channel::<WireCmd>();
+
+    let term_tx = evt_tx.clone();
+    thread::spawn(move || loop {
+        match crossterm::event::read() {
+            Ok(event) => {
+                if term_tx.send(LoopEvent::Term(event)).is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    });
+
+    let wire_evt = evt_tx;
+    let wire = Wire {
+        session,
+        runtime,
+        home,
+        evt: wire_sender(wire_evt),
+        cmd: cmd_rx,
+        queue: VecDeque::new(),
+        op_reply: None,
+        poll: None,
+        detached: false,
+        recorded: false,
+        opened: false,
+        install: false,
+        installed_this_run: false,
+    };
+    let first_for_wire = first.clone();
+    thread::spawn(move || wire.run(first_for_wire));
+
+    if !first.is_empty() {
+        app.begin_turn();
+    }
+    let mut gate = Gate::default();
+    let mut latest_workspace = workspace_url;
+    let mut latest_channel = channel_name;
+    let code = loop {
+        let event = match evt_rx.recv_timeout(TICK) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => {
+                app.tick();
+                app.paint();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break 0,
+        };
+        match event {
+            LoopEvent::Term(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => {
+                match app.on_key(key) {
+                    Reply::None => {}
+                    Reply::Send(text) => {
+                        if app.is_working() {
+                            app.push_queued(&text);
+                        } else {
+                            app.begin_turn();
+                        }
+                        let _ = cmd_tx.send(WireCmd::Say(text));
+                    }
+                    Reply::Choice(choice) => {
+                        let Some((prompt, _)) = gate.questions.pop_front() else {
+                            continue;
+                        };
+                        gate.answers.push(if gate.many {
+                            format!("{prompt}: {choice}")
+                        } else {
+                            choice
+                        });
+                        if let Some((next_prompt, options)) = gate.questions.front() {
+                            if options.is_empty() {
+                                app.ask_prompt(&next_prompt.clone());
+                            } else {
+                                app.choose(&next_prompt.clone(), &options.clone());
+                            }
+                        } else {
+                            let reply = gate.answers.join("\n");
+                            gate.answers.clear();
+                            app.begin_turn();
+                            let _ = cmd_tx.send(WireCmd::Say(reply));
+                        }
+                    }
+                    Reply::ChoiceCancelled => break 0,
+                    Reply::Secret(value) => {
+                        if let Some((sealed, slot, _)) = gate.secrets.pop_front() {
+                            let _ = cmd_tx.send(WireCmd::SecretValue {
+                                sealed,
+                                slot,
+                                value,
+                            });
+                        }
+                        if let Some((_, _, prompt)) = gate.secrets.front() {
+                            app.secret_begin(&prompt.clone());
+                        } else {
+                            settle(&mut app, &mut gate);
+                        }
+                    }
+                    Reply::Detach => {
+                        let _ = cmd_tx.send(WireCmd::Detach);
+                        app.end_turn(false);
+                        app.note("Detached; the turn continues, and a new message rejoins it.");
+                        app.ask_prompt("");
+                    }
+                    Reply::Exit => break 0,
+                }
+                app.paint();
+            }
+            LoopEvent::Term(TermEvent::Paste(text)) => {
+                app.on_paste(text);
+                app.paint();
+            }
+            LoopEvent::Term(TermEvent::Resize(..)) => {
+                app.resize();
+                app.paint();
+            }
+            LoopEvent::Term(TermEvent::Mouse(mouse)) => {
+                app.on_mouse(mouse);
+                app.paint();
+            }
+            LoopEvent::Term(_) => {}
+            LoopEvent::StdinClosed => {}
+            LoopEvent::Wire(wire_event) => match wire_event {
+                WireEvent::Dir(directive) => {
+                    apply_directive(&mut app, &mut gate, directive);
+                    app.paint();
+                }
+                WireEvent::OpStarted(op) => {
+                    app.op_started(&op);
+                    app.paint();
+                }
+                WireEvent::OpFinished(op, result) => {
+                    app.op_finished(&op, &result);
+                    app.paint();
+                }
+                WireEvent::MemberEcho(text) => {
+                    if !app.is_working() {
+                        app.begin_turn();
+                    }
+                    app.queued_sent(&text);
+                    app.paint();
+                }
+                WireEvent::Reconnecting {
+                    attempt,
+                    retry_in_s,
+                } => {
+                    app.reconnecting(attempt, RECONNECT_ATTEMPTS, retry_in_s);
+                    app.paint();
+                }
+                WireEvent::WorkspaceChanged { url, channel } => {
+                    latest_workspace = Some(url.clone());
+                    latest_channel = channel.clone();
+                    let host = url
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_end_matches('/')
+                        .to_string();
+                    app.set_endpoint(host, channel);
+                }
+                WireEvent::StreamEnd { continues } => {
+                    if let Some(code) = gate.exit.take() {
+                        break code;
+                    }
+                    if continues {
+                        app.paint();
+                        continue;
+                    }
+                    if !gate.secrets.is_empty() {
+                        app.end_turn(false);
+                        let prompt = gate.secrets.front().map(|(_, _, p)| p.clone());
+                        if let Some(prompt) = prompt {
+                            app.secret_begin(&prompt);
+                        }
+                    } else if !settle(&mut app, &mut gate) {
+                        break 0;
+                    }
+                    app.paint();
+                }
+                WireEvent::Fatal(message) => {
+                    app.close();
+                    drop(raw);
+                    die(&message);
+                }
+            },
+        }
+    };
+    let _ = cmd_tx.send(WireCmd::Shutdown);
+    app.close();
+    drop(raw);
+    print_resume(latest_workspace.as_deref(), &latest_channel, true);
+    code
+}
+
+/// End-of-stream disposition once secrets are done: the next question, the prompt, or — with
+/// nothing left to do — the session's end (`false`).
+fn settle(app: &mut App, gate: &mut Gate) -> bool {
+    if let Some((prompt, options)) = gate.questions.front() {
+        app.end_turn(true);
+        if options.is_empty() {
+            app.ask_prompt(&prompt.clone());
+        } else {
+            app.choose(&prompt.clone(), &options.clone());
+        }
+        return true;
+    }
+    if gate.asked {
+        gate.asked = false;
+        app.end_turn(true);
+        let prompt = std::mem::take(&mut gate.prompt);
+        app.ask_prompt(&prompt);
+        return true;
+    }
+    app.end_turn(false);
+    false
+}
+
+fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
+    match directive {
+        Directive::Say(text) => app.say(&text),
+        Directive::You(text) => app.member_replay(&text),
+        Directive::Note(text) => app.note(&text),
+        Directive::Txt(chunk) => app.txt(&chunk),
+        Directive::Status(text) => app.status_text(&text),
+        Directive::File { name, size, url } => app.file(&name, &size, &url),
+        Directive::Ufo { width, frame } => app.set_craft(width, &frame),
+        Directive::Ask(prompt) => {
+            gate.asked = true;
+            gate.prompt = prompt;
+        }
+        Directive::Choose { prompt, options } => {
+            gate.questions.push_back((prompt, options));
+            gate.many = gate.questions.len() > 1;
+        }
+        Directive::Secret {
+            sealed,
+            slot,
+            prompt,
+        } => gate.secrets.push_back((sealed, slot, prompt)),
+        Directive::Exit(code) => gate.exit = Some(code),
+        _ => {}
+    }
+}
+
+fn wire_sender(tx: Sender<LoopEvent>) -> Sender<WireEvent> {
+    let (wire_tx, wire_rx) = channel::<WireEvent>();
+    thread::spawn(move || {
+        for event in wire_rx {
+            if tx.send(LoopEvent::Wire(event)).is_err() {
+                return;
+            }
+        }
+    });
+    wire_tx
+}
+
+// ── plain mode ──────────────────────────────────────────────────────────────────────────────────
+
+fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
+    let tty = std::io::stdout().is_terminal();
+    let (evt_tx, evt_rx) = channel::<LoopEvent>();
+    let (cmd_tx, cmd_rx) = channel::<WireCmd>();
+    let workspace_url = session.workspace_url.clone();
+    let mut latest_channel = session.channel.clone();
+    let wire = Wire {
+        session,
+        runtime,
+        home,
+        evt: wire_sender(evt_tx),
+        cmd: cmd_rx,
+        queue: VecDeque::new(),
+        op_reply: None,
+        poll: None,
+        detached: false,
+        recorded: false,
+        opened: false,
+        install: false,
+        installed_this_run: false,
+    };
+    thread::spawn(move || wire.run(first));
+
+    let mut out = Plain::new();
+    let mut gate = Gate::default();
+    let mut latest_workspace = workspace_url;
+    let code = loop {
+        let event = match evt_rx.recv() {
+            Ok(LoopEvent::Wire(event)) => event,
+            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::StdinClosed) => continue,
+            Err(_) => break 0,
+        };
+        match event {
+            WireEvent::Dir(directive) => match directive {
+                Directive::Say(text) => out.say(&text),
+                Directive::You(text) => out.member(&text),
+                Directive::Note(text) => out.note(&text),
+                Directive::Txt(chunk) => out.txt(&chunk),
+                Directive::Status(text) => out.status(&text),
+                Directive::File { name, size, url } => out.file(&name, &size, &url),
+                Directive::Ufo { .. } => {}
+                Directive::Ask(prompt) => {
+                    gate.asked = true;
+                    gate.prompt = prompt;
+                }
+                Directive::Choose { prompt, options } => {
+                    gate.questions.push_back((prompt, options));
+                    gate.many = gate.questions.len() > 1;
+                }
+                Directive::Secret {
+                    sealed,
+                    slot,
+                    prompt,
+                } => gate.secrets.push_back((sealed, slot, prompt)),
+                Directive::Exit(code) => gate.exit = Some(code),
+                _ => {}
+            },
+            WireEvent::OpStarted(_) | WireEvent::OpFinished(..) => {}
+            WireEvent::MemberEcho(_) => {}
+            WireEvent::Reconnecting { .. } => {}
+            WireEvent::WorkspaceChanged { url, channel } => {
+                latest_workspace = Some(url);
+                latest_channel = channel;
+            }
+            WireEvent::StreamEnd { continues } => {
+                if let Some(code) = gate.exit.take() {
+                    break code;
+                }
+                if continues {
+                    continue;
+                }
+                out.end_stream();
+                while let Some((sealed, slot, prompt)) = gate.secrets.pop_front() {
+                    let value = out.secret(&prompt).unwrap_or_default();
+                    let _ = cmd_tx.send(WireCmd::SecretValue {
+                        sealed,
+                        slot,
+                        value,
+                    });
+                }
+                if !gate.questions.is_empty() {
+                    let mut collected = Vec::new();
+                    let mut cancelled = false;
+                    while let Some((prompt, options)) = gate.questions.pop_front() {
+                        let answer = if options.is_empty() {
+                            out.ask(&prompt)
+                        } else {
+                            out.menu(&prompt, &options)
+                        };
+                        let Some(answer) = answer else {
+                            cancelled = true;
+                            break;
+                        };
+                        collected.push(if gate.many {
+                            format!("{prompt}: {answer}")
+                        } else {
+                            answer
+                        });
+                    }
+                    if cancelled {
+                        break 0;
+                    }
+                    let _ = cmd_tx.send(WireCmd::Say(collected.join("\n")));
+                } else if gate.asked {
+                    gate.asked = false;
+                    match out.ask(&std::mem::take(&mut gate.prompt)) {
+                        Some(reply) => {
+                            let _ = cmd_tx.send(WireCmd::Say(reply));
+                        }
+                        None => break 0,
+                    }
+                } else {
+                    break 0;
+                }
+            }
+            WireEvent::Fatal(message) => {
+                die(&message);
+            }
+        }
+    };
+    let _ = cmd_tx.send(WireCmd::Shutdown);
+    print_resume(latest_workspace.as_deref(), &latest_channel, tty);
+    code
+}
+
+// ── json mode ───────────────────────────────────────────────────────────────────────────────────
+
+fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
+    let channel_name = session.channel.clone();
+    let workspace_url = session.workspace_url.clone();
+    let (evt_tx, evt_rx) = channel::<LoopEvent>();
+    let (cmd_tx, cmd_rx) = channel::<WireCmd>();
+
+    let stdin_tx = evt_tx.clone();
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { break };
+            if stdin_tx
+                .send(LoopEvent::Term(TermEvent::Paste(line)))
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = stdin_tx.send(LoopEvent::StdinClosed);
+    });
+
+    let wire = Wire {
+        session,
+        runtime,
+        home,
+        evt: wire_sender(evt_tx),
+        cmd: cmd_rx,
+        queue: VecDeque::new(),
+        op_reply: None,
+        poll: None,
+        detached: false,
+        recorded: false,
+        opened: false,
+        install: false,
+        installed_this_run: false,
+    };
+    let first_nonempty = !first.is_empty();
+    thread::spawn(move || wire.run(first));
+
+    let mut driver = jsonio::Driver::new();
+    let mut exit_code: Option<i32> = None;
+    let mut in_turn = false;
+    let mut stdin_open = true;
+    emit_json(&driver.session_start(&channel_name, workspace_url.as_deref()));
+    if first_nonempty {
+        emit_json(&driver.on_turn_start());
+        in_turn = true;
+    }
+    loop {
+        let event = match evt_rx.recv() {
+            Ok(event) => event,
+            Err(_) => return exit_code.unwrap_or(0),
+        };
+        match event {
+            LoopEvent::Term(TermEvent::Paste(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match jsonio::parse_command(&line) {
+                    Ok(command) => match driver.answer_body(command) {
+                        Ok(jsonio::AnswerRouting::Post(text)) => {
+                            if !in_turn {
+                                emit_json(&driver.on_turn_start());
+                                in_turn = true;
+                            }
+                            let _ = cmd_tx.send(WireCmd::Say(text));
+                        }
+                        Ok(jsonio::AnswerRouting::Secret {
+                            sealed,
+                            slot,
+                            value,
+                        }) => {
+                            let _ = cmd_tx.send(WireCmd::SecretValue {
+                                sealed,
+                                slot,
+                                value,
+                            });
+                        }
+                        Ok(jsonio::AnswerRouting::Detach) => {
+                            let _ = cmd_tx.send(WireCmd::Detach);
+                            return exit_code.unwrap_or(0);
+                        }
+                        Ok(jsonio::AnswerRouting::Shutdown) => {
+                            let _ = cmd_tx.send(WireCmd::Shutdown);
+                            return exit_code.unwrap_or(0);
+                        }
+                        Err(error_event) => emit_json(&error_event),
+                    },
+                    Err(event) => emit_json(&event),
+                }
+            }
+            LoopEvent::Term(_) => {}
+            LoopEvent::StdinClosed => {
+                stdin_open = false;
+                if !in_turn {
+                    return exit_code.unwrap_or(0);
+                }
+            }
+            LoopEvent::Wire(wire_event) => match wire_event {
+                WireEvent::Dir(directive) => {
+                    if let Directive::Exit(code) = &directive {
+                        exit_code = Some(*code);
+                    }
+                    for out in driver.on_directive(&directive) {
+                        emit_json(&out);
+                    }
+                }
+                WireEvent::OpStarted(op) => emit_json(&driver.on_op_started(&op)),
+                WireEvent::OpFinished(op, result) => {
+                    emit_json(&driver.on_op_finished(&op.op_id, &result));
+                }
+                WireEvent::MemberEcho(_) => {}
+                WireEvent::Reconnecting { .. } => {}
+                WireEvent::WorkspaceChanged { .. } => {}
+                WireEvent::StreamEnd { continues } => {
+                    if continues {
+                        continue;
+                    }
+                    if in_turn {
+                        emit_json(&driver.on_turn_end());
+                        in_turn = false;
+                    }
+                    if let Some(code) = exit_code {
+                        return code;
+                    }
+                    if !stdin_open {
+                        return 0;
+                    }
+                }
+                WireEvent::Fatal(message) => {
+                    emit_json(&driver.on_stream_error(&message, true));
+                    return 1;
+                }
+            },
+        }
+    }
+}
+
+fn emit_json(event: &jsonio::Event) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(jsonio::emit(event).as_bytes());
+    let _ = out.flush();
 }
 
 #[cfg(unix)]
@@ -298,311 +1251,6 @@ mod interrupt {
     }
 }
 
-#[derive(Default)]
-enum Next {
-    #[default]
-    End,
-    Ask,
-    Choose,
-    Poll,
-    Run,
-    Exit,
-}
-
-struct DrainFailure {
-    rendered: bool,
-    error: String,
-}
-
-struct Turn {
-    next: Next,
-    got: bool,
-    prompt: String,
-    questions: Vec<(String, Vec<String>)>,
-    secrets: Vec<(String, String, String)>,
-    poll_seconds: f64,
-    op: Option<OpRequest>,
-    exit_code: i32,
-    install: bool,
-}
-
-impl Default for Turn {
-    fn default() -> Turn {
-        Turn {
-            next: Next::End,
-            got: false,
-            prompt: String::new(),
-            questions: Vec::new(),
-            secrets: Vec::new(),
-            poll_seconds: 1.0,
-            op: None,
-            exit_code: 0,
-            install: false,
-        }
-    }
-}
-
-struct Client {
-    home: config::Home,
-    runtime: OpRuntime,
-    ui: ui::Ui,
-    session: Session,
-    tty: bool,
-    opened: bool,
-    installed_this_run: bool,
-}
-
-impl Client {
-    fn run(&mut self, first: String) -> i32 {
-        let mut body = if first.is_empty() {
-            PostBody::Empty
-        } else {
-            PostBody::Message(first)
-        };
-        let mut attempts = 0u32;
-        loop {
-            let turn = match self.drain(body.clone()) {
-                Ok(turn) => turn,
-                Err(failure) => {
-                    if !self.opened {
-                        self.ui.close();
-                        die(&format!(
-                            "No response from {} ({})",
-                            self.session.base(),
-                            failure.error
-                        ));
-                    }
-                    attempts += 1;
-                    if attempts > RECONNECT_ATTEMPTS {
-                        self.ui.close();
-                        die(&failure.error);
-                    }
-                    thread::sleep(RECONNECT_PAUSE);
-                    if failure.rendered {
-                        body = PostBody::Empty;
-                    }
-                    continue;
-                }
-            };
-            if !turn.got {
-                self.ui.close();
-                die(&format!("No response from {}", self.session.base()));
-            }
-            attempts = 0;
-            self.fulfill_secrets(&turn.secrets);
-            if turn.install {
-                self.ensure_installed();
-            }
-            body = match turn.next {
-                Next::End => return self.finish(0),
-                Next::Exit => return self.finish(turn.exit_code),
-                Next::Ask => match self.ui.ask(&turn.prompt) {
-                    Some(reply) => PostBody::Message(reply),
-                    None => return self.finish(0),
-                },
-                Next::Choose => match self.answers(&turn.questions) {
-                    Some(reply) => PostBody::Message(reply),
-                    None => return self.finish(0),
-                },
-                Next::Poll => {
-                    thread::sleep(Duration::from_secs_f64(turn.poll_seconds.max(0.0)));
-                    PostBody::Empty
-                }
-                Next::Run => {
-                    let op = turn.op.expect("a run directive carries its op");
-                    let reply = ops::run_op(&self.runtime, &self.session, &op);
-                    PostBody::OpReply {
-                        op_id: op.op_id,
-                        reply,
-                    }
-                }
-            };
-        }
-    }
-
-    fn drain(&mut self, body: PostBody) -> Result<Turn, DrainFailure> {
-        self.ui.spinner_start();
-        let stream = match self.session.post(body) {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.ui.spinner_stop();
-                return Err(DrainFailure {
-                    rendered: false,
-                    error,
-                });
-            }
-        };
-        let mut turn = Turn::default();
-        let mut waiting = true;
-        for item in stream {
-            let directive = match item {
-                Ok(directive) => directive,
-                Err(error) => {
-                    if waiting {
-                        self.ui.spinner_stop();
-                    }
-                    self.ui.end_stream();
-                    return Err(DrainFailure {
-                        rendered: turn.got,
-                        error,
-                    });
-                }
-            };
-            if waiting {
-                self.ui.spinner_stop();
-                waiting = false;
-            }
-            turn.got = true;
-            self.opened = true;
-            self.render(directive, &mut turn);
-        }
-        if waiting {
-            self.ui.spinner_stop();
-        }
-        self.ui.end_stream();
-        Ok(turn)
-    }
-
-    fn render(&mut self, directive: Directive, turn: &mut Turn) {
-        match directive {
-            Directive::Say(text) => self.ui.say(&text),
-            Directive::Note(text) => self.ui.note(&text),
-            Directive::Txt(chunk) => self.ui.txt(&chunk),
-            Directive::Status(text) => self.ui.status(&text),
-            Directive::File { name, size, url } => self.ui.file(&name, &size, &url),
-            Directive::Ufo { width, frame } => self.ui.set_craft(width, &frame),
-            Directive::Ask(prompt) => {
-                turn.next = Next::Ask;
-                turn.prompt = prompt;
-            }
-            Directive::Choose { prompt, options } => {
-                turn.next = Next::Choose;
-                turn.questions.push((prompt, options));
-            }
-            Directive::Secret {
-                sealed,
-                slot,
-                prompt,
-            } => turn.secrets.push((sealed, slot, prompt)),
-            Directive::Since(cursor) => self.session.since = Some(cursor),
-            Directive::Poll(seconds) => {
-                turn.next = Next::Poll;
-                turn.poll_seconds = seconds;
-            }
-            Directive::Run(op) => {
-                turn.next = Next::Run;
-                turn.op = Some(op);
-            }
-            Directive::Token(token) => {
-                self.home.store_credentials(&token);
-                self.session.token = Some(token);
-            }
-            Directive::Workspace(url) => {
-                self.home.store_workspace(&url);
-                self.home.store_gateway(&self.session.gateway_url);
-                self.session.workspace_url = Some(url);
-                if self.session.channel == ONBOARDING_CHANNEL {
-                    self.session.channel = random_channel();
-                }
-                update_resume(&self.session, self.tty);
-            }
-            Directive::Install => turn.install = true,
-            Directive::Logout => {
-                self.home.clear_signin();
-                self.session.token = None;
-                self.session.workspace_url = None;
-            }
-            Directive::Exit(code) => {
-                turn.next = Next::Exit;
-                turn.exit_code = code;
-            }
-            Directive::Unknown => {}
-        }
-    }
-
-    fn ensure_installed(&mut self) {
-        if self.installed_this_run {
-            return;
-        }
-        self.installed_this_run = true;
-        let session = &self.session;
-        let outcome = config::install_self(&self.home, |target, dest| {
-            session.fetch_client_binary(target, dest)
-        });
-        match outcome {
-            Ok(installed) => {
-                for line in installed.lines() {
-                    self.ui.note(line);
-                }
-                self.session.installed = true;
-            }
-            Err(error) => self.ui.note(&format!("Install failed: {error}")),
-        }
-    }
-
-    fn fulfill_secrets(&mut self, secrets: &[(String, String, String)]) {
-        for (sealed, slot, prompt) in secrets {
-            let value = self.ui.secret(prompt).unwrap_or_default();
-            if value.is_empty() {
-                self.ui.note(&format!("Skipped {slot}"));
-                continue;
-            }
-            match self.session.post_secret(sealed, slot, &value) {
-                Ok(lines) if !lines.is_empty() => {
-                    for line in lines {
-                        self.ui.note(&line);
-                    }
-                }
-                Ok(_) => self
-                    .ui
-                    .note("No confirmation — ask the assistant to check."),
-                Err(error) => self.ui.note(&format!(
-                    "No confirmation ({error}) — ask the assistant to check."
-                )),
-            }
-        }
-    }
-
-    fn answers(&mut self, questions: &[(String, Vec<String>)]) -> Option<String> {
-        let mut collected = Vec::new();
-        for (prompt, options) in questions {
-            let answer = if options.is_empty() {
-                self.ui.ask(prompt)?
-            } else {
-                self.ui.menu(prompt, options)?
-            };
-            collected.push(if questions.len() > 1 {
-                format!("{prompt}: {answer}")
-            } else {
-                answer
-            });
-        }
-        Some(collected.join("\n"))
-    }
-
-    fn finish(&mut self, code: i32) -> i32 {
-        self.ui.close();
-        self.print_resume();
-        let _ = std::fs::remove_dir_all(&self.runtime.workdir);
-        code
-    }
-
-    fn print_resume(&self) {
-        if !self.tty {
-            return;
-        }
-        let Some(command) = resume_command(&self.session) else {
-            return;
-        };
-        println!();
-        if wants_style(self.tty) {
-            println!("\x1b[2mResume this conversation: \x1b[0m\x1b[1m{command}\x1b[0m");
-        } else {
-            println!("Resume this conversation: {command}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +1287,14 @@ mod tests {
         let taken = private_workdir().unwrap();
         assert!(std::fs::DirBuilder::new().create(&taken).is_err());
         let _ = std::fs::remove_dir_all(&taken);
+    }
+
+    #[test]
+    fn resume_command_needs_a_workspace() {
+        assert_eq!(resume_command(None, "abc"), None);
+        assert_eq!(
+            resume_command(Some("https://w"), "abc").as_deref(),
+            Some("ufo --resume abc")
+        );
     }
 }

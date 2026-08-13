@@ -29,6 +29,7 @@ from ufo_ext_ufo.surface import (
     _utf8_header,
     directive,
     directives_for,
+    history_directives,
     resolve_workspace,
     stream_directives,
 )
@@ -1354,3 +1355,108 @@ async def test_an_op_error_reply_fails_the_op_with_the_terminals_words(
             await sending
     finally:
         terminals.disconnect(conversation_id)
+
+
+def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> None:
+    from ufo.models.interface import Message, TextBlock
+    from ufo.transcript import Conversation
+
+    marker = "00aabbcc"
+    fenced = f"<member_message_{marker}>\nwhat is up\n</member_message_{marker}>"
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content=fenced),
+            Message(role="assistant", content=(TextBlock(text="not much"),)),
+            Message(role="user", content=(TextBlock(text="tell me more"),)),
+            Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
+        ),
+    )
+    lines = history_directives(conversation)
+    assert lines == (
+        b"you\twhat is up\n",
+        b"say\tnot much\n",
+        b"you\ttell me more\n",
+    )
+
+
+def test_history_budget_keeps_the_newest_messages() -> None:
+    from ufo.models.interface import Message
+    from ufo.transcript import Conversation
+
+    old = Message(role="user", content="a" * 30_000)
+    new = Message(role="user", content="the recent one")
+    conversation = Conversation(seq=1, messages=(old, new))
+    lines = history_directives(conversation)
+    assert lines == (b"you\tthe recent one\n",)
+
+
+async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    from ufo.models.interface import Message, TextBlock
+    from ufo.transcript import Conversation, encode, transcript_key
+
+    client, workspace_id = ufo
+    _config, _hub, blob, _sandboxes = runtime
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    assert await _post(client, "main", token, b"") == [["ask", ">"]]
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.surface == "ufo",
+                )
+            )
+        ).scalar_one()
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="what is up",
+                admission_source="member",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(status="done", text="the reply").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="what is up"),
+            Message(role="assistant", content=(TextBlock(text="the reply"),)),
+        ),
+    )
+    await blob.put(transcript_key(conversation_id), encode(conversation))
+
+    fresh = await _post(client, "main", token, b"")
+    assert ["you", "what is up"] in fresh
+    said = [line for line in fresh if line[0] == "say" and line[1] == "the reply"]
+    assert len(said) == 1, f"the tail says the reply once, history never doubles it: {fresh}"
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        response = await client.post(
+            "/surface/ufo/main",
+            content=b"",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-since": f"{turn_id}:",
+            },
+        )
+    assert response.status_code == 200
+    polled = _lines(response.content)
+    assert ["you", "what is up"] not in polled, f"a poll must not replay history: {polled}"

@@ -1,201 +1,320 @@
-//! Terminal rendering: finalized transcript lines scroll natively; a repainted dynamic region
-//! sits at the bottom — [activity row] [rule] [entry rows, craft at the right] [rule].
+//! The terminal app: a scrollback transcript over a repainted dock — activity row, rule, queued
+//! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer —
+//! with the craft at the right. Every member-visible string renders through the theme's roles.
 
 mod editor;
+pub mod history;
+pub mod markdown;
+pub mod osc;
+pub mod picker;
+pub mod plain;
+pub mod status;
+pub mod term;
+pub mod theme;
+pub mod toolrender;
 mod wrap;
 
-use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::time::Instant;
 
 use crossterm::event::{
-    read, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyCode,
+    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal;
-use crossterm::tty::IsTty;
+use crossterm::tty::IsTty as _;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
-use editor::{AskState, Key, Outcome};
+use crate::ui::editor::{AskState, Key, Outcome};
+use crate::ui::history::History;
+use crate::ui::osc::{Caps, ImageProtocol};
+use crate::ui::picker::{PickKey, PickOutcome, Picker};
+use crate::ui::status::{Activity, Progress, Signals, StatusRow};
+use crate::ui::term::AltScreen;
+use crate::ui::theme::{ColorMode, Theme};
+use crate::ui::toolrender::OpView;
+use crate::wire::OpRequest;
 
-const PROMPT_IDLE: &str = "›";
-const MARKER: &str = "❯";
-const CRAFT_WIDTH_DEFAULT: usize = 15;
+pub const PROMPT_IDLE: &str = "›";
 const CRAFT_ROWS: usize = 4;
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_TICK: Duration = Duration::from_millis(80);
-const MIN_ROWS: u16 = 14;
+const CRAFT_WIDTH_DEFAULT: usize = 15;
 const MIN_COLS: u16 = 48;
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
-const CYAN: &str = "\x1b[36m";
-const MAGENTA: &str = "\x1b[35m";
-const CYAN_256: &str = "\x1b[38;5;87m";
-const MAGENTA_256: &str = "\x1b[38;5;213m";
+const QUEUE_SHOWN: usize = 3;
+const ENTRY_ROWS_MAX: usize = 8;
+const PICKER_ROWS: usize = 8;
+const OP_LOG_ROWS: usize = 6;
+const TRANSCRIPT_MAX: usize = 5000;
+const ECHO_INDENT: &str = "  ";
+const IMAGE_COLS_MAX: u16 = 60;
+const IMAGE_BYTES_MAX: usize = 2 * 1024 * 1024;
+const KEY_COL: usize = 26;
+const FLASH_SECONDS: u64 = 2;
 
-#[derive(Clone)]
-struct Palette {
-    bold: &'static str,
-    dim: &'static str,
-    cyan: &'static str,
-    magenta: &'static str,
-    reset: &'static str,
+/// Whether the fancy renderer runs: a TTY, a real TERM, and no `UFO_PLAIN`.
+pub fn wants_fx() -> bool {
+    let term = std::env::var("TERM").unwrap_or_default();
+    io::stdout().is_tty()
+        && !term.is_empty()
+        && term != "dumb"
+        && std::env::var_os("UFO_PLAIN").is_none()
 }
 
-impl Palette {
-    fn for_term(term: &str) -> Palette {
-        let colorterm = std::env::var("COLORTERM").unwrap_or_default();
-        let rich = colorterm.contains("truecolor") || term.contains("256color");
-        Palette {
-            bold: BOLD,
-            dim: DIM,
-            cyan: if rich { CYAN_256 } else { CYAN },
-            magenta: if rich { MAGENTA_256 } else { MAGENTA },
-            reset: RESET,
-        }
-    }
-
-    fn empty() -> Palette {
-        Palette {
-            bold: "",
-            dim: "",
-            cyan: "",
-            magenta: "",
-            reset: "",
-        }
-    }
+/// Raw mode plus bracketed paste and, where the terminal takes them, the kitty keyboard flags —
+/// entered once for the whole session, before the input thread starts reading.
+pub struct RawGuard {
+    kitty: bool,
 }
-
-struct Spinner {
-    running: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
-}
-
-struct RawGuard;
 
 impl RawGuard {
-    fn new() -> RawGuard {
+    pub fn new() -> RawGuard {
+        let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
         let _ = terminal::enable_raw_mode();
-        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste);
-        RawGuard
+        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+        if kitty {
+            let _ = crossterm::execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            );
+        }
+        RawGuard { kitty }
     }
 }
 
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
+        if self.kitty {
+            let _ = crossterm::execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = crossterm::execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
         let _ = terminal::disable_raw_mode();
     }
 }
 
-/// The renderer. Falls back to plain line output when stdout is not a TTY, `TERM=dumb`, or
-/// `UFO_PLAIN` is set.
-pub struct Ui {
-    fx: bool,
-    p: Palette,
-    craft_w: usize,
-    craft: Vec<String>,
-    open: String,
-    status: String,
-    dyn_rows: u16,
-    history: Vec<String>,
-    spinner: Option<Spinner>,
-    plain_open: bool,
+/// What a key did, for the loop to route.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reply {
+    None,
+    Send(String),
+    Choice(String),
+    ChoiceCancelled,
+    Secret(String),
+    Detach,
+    Exit,
 }
 
-impl Ui {
-    pub fn new() -> Ui {
-        let tty = io::stdout().is_tty();
-        let term = std::env::var("TERM").unwrap_or_default();
-        let plain = std::env::var_os("UFO_PLAIN").is_some();
-        let fx = tty && !term.is_empty() && term != "dumb" && !plain;
-        #[cfg(windows)]
-        let fx = fx && crossterm::ansi_support::supports_ansi();
-        let colored = fx && std::env::var_os("NO_COLOR").is_none();
-        Ui {
-            fx,
-            p: if colored {
-                Palette::for_term(&term)
-            } else {
-                Palette::empty()
-            },
-            craft_w: CRAFT_WIDTH_DEFAULT,
-            craft: Vec::new(),
-            open: String::new(),
-            status: String::new(),
-            dyn_rows: 0,
-            history: Vec::new(),
-            spinner: None,
-            plain_open: false,
+enum Focus {
+    Compose,
+    Choose,
+    Secret,
+    Path,
+    Keys,
+}
+
+struct Chooser {
+    prompt: String,
+    picker: Picker,
+}
+
+struct SecretEntry {
+    prompt: String,
+    value: String,
+}
+
+struct PathPick {
+    picker: Picker,
+    token_start: usize,
+}
+
+/// A mouse selection over the visible frame, anchored where the drag began.
+struct Selection {
+    anchor: (u16, u16),
+    head: (u16, u16),
+    dragged: bool,
+}
+
+impl Selection {
+    /// The selected span of `row`, as display columns, or None when the row is outside.
+    fn cols_for(&self, row: u16, width: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.ordered();
+        if row < start.0 || row > end.0 {
+            return None;
         }
-    }
-
-    /// A finalized transcript line.
-    pub fn say(&mut self, text: &str) {
-        self.transcript_line(&format!("{text}\n"));
-    }
-
-    /// A dim activity line.
-    pub fn note(&mut self, text: &str) {
-        let p = self.p.clone();
-        self.transcript_line(&format!("{}{text}{}\n", p.dim, p.reset));
-    }
-
-    /// A streamed text delta: completed lines flow into the transcript, the open tail shows in
-    /// the activity row.
-    pub fn txt(&mut self, chunk: &str) {
-        self.status.clear();
-        if !self.fx {
-            self.emit(chunk);
-            if !chunk.is_empty() {
-                self.plain_open = !chunk.ends_with('\n');
-            }
-            return;
-        }
-        self.open.push_str(chunk);
-        let Some((cols, _)) = self.fx_size() else {
-            let tail = std::mem::take(&mut self.open);
-            self.plain_open = !tail.is_empty() && !tail.ends_with('\n');
-            self.emit(&tail);
-            return;
-        };
-        let wrap_at = cols.saturating_sub(2);
-        if self.open.contains('\n') || wrap::width(&self.open) >= wrap_at {
-            self.erase_region();
-            self.drain_open(wrap_at);
-            self.paint_region(None);
+        let from = if row == start.0 { start.1 as usize } else { 0 };
+        let to = if row == end.0 {
+            (end.1 as usize).saturating_add(1)
         } else {
-            self.preview_paint();
-        }
-    }
-
-    /// A transient status shown in the activity row until the next transcript line.
-    pub fn status(&mut self, text: &str) {
-        if !self.fx {
-            self.emit(&format!("  {text}\n"));
-            return;
-        }
-        let Some((cols, _)) = self.fx_size() else {
-            self.emit(&format!("  {text}\n"));
-            return;
+            width
         };
-        self.status = wrap::clip(text, cols.saturating_sub(4)).to_string();
-        self.preview_paint();
+        (from < to).then_some((from, to))
     }
 
-    /// A shared-file line.
+    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if (self.anchor.0, self.anchor.1) <= (self.head.0, self.head.1) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
+/// The dock and everything drawn in it.
+pub struct App {
+    pub theme: Theme,
+    pub caps: Caps,
+    signals: Signals,
+    progress: Progress,
+    screen: AltScreen<io::Stdout>,
+    status: StatusRow,
+    stream: markdown::StreamRenderer,
+    ask: AskState,
+    prompt: String,
+    history: History,
+    craft: Vec<String>,
+    craft_w: usize,
+    queued: VecDeque<String>,
+    focus: Focus,
+    chooser: Option<Chooser>,
+    secret: Option<SecretEntry>,
+    path_pick: Option<PathPick>,
+    transcript: Vec<Line<'static>>,
+    scroll_back: usize,
+    view_rows: usize,
+    exit_images: Vec<String>,
+    selection: Option<Selection>,
+    frame_rows: Vec<Line<'static>>,
+    flash: Option<(String, Instant)>,
+    last_line_blank: bool,
+    op_log: Vec<Line<'static>>,
+    running_op: Option<OpView>,
+    running_desc: Option<String>,
+    narration: Option<(String, String)>,
+    last_reply: String,
+    host: String,
+    channel: String,
+    cwd: PathBuf,
+    working: bool,
+    cols: u16,
+    rows: u16,
+}
+
+impl App {
+    pub fn new(home_root: &std::path::Path, host: String, channel: String, cwd: PathBuf) -> App {
+        let theme = Theme::detect(false);
+        let caps = Caps::detect();
+        let (cols, rows) = sane_size();
+        let mut screen = AltScreen::new(io::stdout(), theme.mode);
+        let _ = screen.enter();
+        App {
+            signals: Signals {
+                enabled: theme.mode != ColorMode::Plain,
+            },
+            progress: Progress::new(),
+            screen,
+            status: StatusRow::new(),
+            stream: markdown::StreamRenderer::new(),
+            ask: AskState::new(),
+            prompt: PROMPT_IDLE.to_string(),
+            history: History::load(home_root),
+            craft: Vec::new(),
+            craft_w: CRAFT_WIDTH_DEFAULT,
+            queued: VecDeque::new(),
+            focus: Focus::Compose,
+            chooser: None,
+            secret: None,
+            path_pick: None,
+            transcript: Vec::new(),
+            scroll_back: 0,
+            view_rows: 1,
+            exit_images: Vec::new(),
+            selection: None,
+            frame_rows: Vec::new(),
+            flash: None,
+            last_line_blank: true,
+            op_log: Vec::new(),
+            running_op: None,
+            running_desc: None,
+            narration: None,
+            last_reply: String::new(),
+            host,
+            channel,
+            cwd,
+            working: false,
+            cols,
+            rows,
+            theme,
+            caps,
+        }
+    }
+
+    pub fn set_endpoint(&mut self, host: String, channel: String) {
+        self.host = host;
+        self.channel = channel;
+    }
+
+    // ── directives ────────────────────────────────────────────────────────────────────────────
+
+    pub fn say(&mut self, text: &str) {
+        self.flush_stream();
+        self.op_log.clear();
+        self.last_reply = text.to_string();
+        let lines = markdown::render(text, &self.theme, self.transcript_width());
+        self.extend_pending(lines);
+    }
+
+    pub fn txt(&mut self, chunk: &str) {
+        self.last_reply.push_str(chunk);
+        let lines = self
+            .stream
+            .push(chunk, &self.theme, self.transcript_width());
+        if !lines.is_empty() {
+            self.op_log.clear();
+        }
+        self.extend_pending(lines);
+    }
+
+    /// A server note. Tool narration — the activity the client also states for its own ops —
+    /// stays in the activity row; everything else joins the transcript.
+    pub fn note(&mut self, text: &str) {
+        if let Some(rest) = text.strip_prefix("running ") {
+            if let Some((tool, detail)) = rest.split_once(": ") {
+                self.narration = Some((tool.to_string(), detail.to_string()));
+            }
+            self.status_text(text);
+            return;
+        }
+        if text.starts_with("loading skill") {
+            self.status_text(text);
+            return;
+        }
+        self.flush_stream();
+        let note = Line::styled(text.to_string(), self.theme.muted);
+        self.extend_pending(vec![note]);
+    }
+
+    pub fn status_text(&mut self, text: &str) {
+        if let Activity::Working { since, .. } = self.status.activity {
+            self.status.activity = Activity::Working {
+                since,
+                status: text.to_string(),
+            };
+        }
+    }
+
     pub fn file(&mut self, name: &str, size: &str, url: &str) {
-        let line = if url.is_empty() {
-            format!("shared {name} ({size} bytes)")
+        self.flush_stream();
+        let said = osc::hyperlink(self.caps, url, name);
+        let line = if url.is_empty() || said != name {
+            format!("shared {said} ({size} bytes)")
         } else {
             format!("shared {name} ({size} bytes) {url}")
         };
-        self.note(&line);
+        self.extend_pending(vec![Line::styled(line, self.theme.muted)]);
     }
 
-    /// The craft frame drawn at the right of the dynamic region.
     pub fn set_craft(&mut self, width: usize, frame: &str) {
         self.craft_w = width.max(1);
         self.craft = frame
@@ -203,503 +322,898 @@ impl Ui {
             .take(CRAFT_ROWS)
             .map(str::to_string)
             .collect();
-        if self.fx {
-            self.paint_region(None);
+    }
+
+    /// The op's header throbs in the activity row while it runs; it joins the dock's op log
+    /// when it answers, and the log clears the moment the reply starts streaming — tool activity
+    /// is read while it happens and never crowds the transcript.
+    pub fn op_started(&mut self, op: &OpRequest) {
+        self.running_desc = match self.narration.take() {
+            Some((tool, detail)) if tool == op.name || tool == op.kind => Some(detail),
+            _ => None,
+        };
+        self.running_op = Some(OpView::from_request(op));
+    }
+
+    pub fn op_finished(&mut self, op: &OpRequest, result: &Result<Vec<u8>, String>) {
+        self.running_op = None;
+        let description = self.running_desc.take();
+        let view = OpView::from_request(op);
+        let reply = match result {
+            Ok(bytes) => Ok(bytes.as_slice()),
+            Err(failure) => Err(failure.as_str()),
+        };
+        let width = (self.cols as usize).saturating_sub(self.craft_cols()) as u16;
+        self.op_log
+            .push(view.header(description.as_deref(), &self.theme, width));
+        self.op_log.extend(view.body(reply, &self.theme, width));
+        let overflow = self.op_log.len().saturating_sub(OP_LOG_ROWS);
+        if overflow > 0 {
+            self.op_log.drain(..overflow);
+        }
+        if let Ok(bytes) = result {
+            self.inline_read_image(op, bytes);
         }
     }
 
-    /// Spinner while a request is in flight and nothing has arrived yet.
-    pub fn spinner_start(&mut self) {
-        if !self.fx || self.spinner.is_some() {
+    fn inline_read_image(&mut self, op: &OpRequest, bytes: &[u8]) {
+        if op.kind != crate::ops::OP_READ
+            || self.caps.images == ImageProtocol::None
+            || bytes.len() > IMAGE_BYTES_MAX
+        {
             return;
         }
-        self.emit("\x1b[?25l");
-        let running = Arc::new(AtomicBool::new(true));
-        let flag = running.clone();
-        let rows = self.dyn_rows;
-        let cyan = self.p.cyan;
-        let reset = self.p.reset;
-        let handle = thread::spawn(move || {
-            let mut at = 0;
-            while flag.load(Ordering::Relaxed) {
-                let frame = SPINNER_FRAMES[at % SPINNER_FRAMES.len()];
-                at += 1;
-                let paint = if rows > 1 {
-                    format!("\x1b7\r\x1b[{}A\x1b[2K {cyan}{frame}{reset}\x1b8", rows - 1)
-                } else {
-                    format!("\r\x1b[K {cyan}{frame}{reset}")
-                };
-                let mut out = io::stdout();
-                let _ = out.write_all(paint.as_bytes());
-                let _ = out.flush();
-                thread::sleep(SPINNER_TICK);
-            }
+        let (mime, size) = match (osc::png_dimensions(bytes), osc::jpeg_dimensions(bytes)) {
+            (Some(size), _) => ("image/png", size),
+            (None, Some(size)) => ("image/jpeg", size),
+            (None, None) => return,
+        };
+        let blob = osc::inline_image(self.caps, bytes, mime, IMAGE_COLS_MAX);
+        if blob.is_empty() {
+            return;
+        }
+        self.exit_images.push(blob);
+        let said = format!(
+            "read image {} ({}×{} px, printed when this session ends)",
+            op.arg, size.0, size.1
+        );
+        self.extend_pending(vec![Line::styled(said, self.theme.muted)]);
+    }
+
+    // ── turn state ────────────────────────────────────────────────────────────────────────────
+
+    pub fn begin_turn(&mut self) {
+        self.working = true;
+        self.last_reply.clear();
+        self.status.activity = Activity::Working {
+            since: Instant::now(),
+            status: String::new(),
+        };
+        self.splice_raw(&self.signals.title(&format!("ufo — {}", self.channel)));
+    }
+
+    pub fn end_turn(&mut self, waiting: bool) {
+        self.working = false;
+        self.op_log.clear();
+        self.running_op = None;
+        let tail = self.stream.finish(&self.theme, self.transcript_width());
+        self.extend_pending(tail);
+        self.status.activity = if waiting {
+            Activity::WaitingInput
+        } else {
+            Activity::Idle
+        };
+        let off = self.progress.off(&self.signals);
+        self.splice_raw(&off);
+        if waiting {
+            self.splice_raw(&self.signals.bell());
+        }
+    }
+
+    pub fn reconnecting(&mut self, attempt: u32, of: u32, retry_in_s: u64) {
+        self.status.activity = Activity::Reconnecting {
+            attempt,
+            of,
+            retry_in_s,
+        };
+    }
+
+    pub fn is_working(&self) -> bool {
+        self.working
+    }
+
+    pub fn tick(&mut self) {
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed().as_secs() >= FLASH_SECONDS)
+        {
+            self.flash = None;
+        }
+        self.status.on_tick();
+        if self.working {
+            let keepalive = self.progress.tick(&self.signals, Instant::now());
+            self.splice_raw(&keepalive);
+        }
+    }
+
+    // ── member input states ───────────────────────────────────────────────────────────────────
+
+    pub fn ask_prompt(&mut self, prompt: &str) {
+        self.prompt = if prompt.is_empty() {
+            PROMPT_IDLE.to_string()
+        } else {
+            prompt.to_string()
+        };
+        self.focus = Focus::Compose;
+    }
+
+    pub fn choose(&mut self, prompt: &str, options: &[String]) {
+        let mut picker = Picker::new(options.to_vec());
+        picker.set_page(PICKER_ROWS);
+        self.chooser = Some(Chooser {
+            prompt: prompt.to_string(),
+            picker,
         });
-        self.spinner = Some(Spinner { running, handle });
+        self.focus = Focus::Choose;
     }
 
-    pub fn spinner_stop(&mut self) {
-        let Some(spinner) = self.spinner.take() else {
-            return;
+    pub fn secret_begin(&mut self, prompt: &str) {
+        self.secret = Some(SecretEntry {
+            prompt: prompt.to_string(),
+            value: String::new(),
+        });
+        self.focus = Focus::Secret;
+    }
+
+    pub fn push_queued(&mut self, text: &str) {
+        self.queued.push_back(text.to_string());
+    }
+
+    /// A queued message the wire has now posted: it leaves the queue and joins the transcript.
+    pub fn queued_sent(&mut self, text: &str) {
+        if let Some(at) = self.queued.iter().position(|held| held == text) {
+            self.queued.remove(at);
+        }
+        self.member_echo(text);
+    }
+
+    /// A member message replayed from the durable transcript: drawn as the member's own, but
+    /// never re-entered into the input history — it was typed once.
+    pub fn member_replay(&mut self, text: &str) {
+        self.draw_member(text);
+    }
+
+    pub fn member_echo(&mut self, text: &str) {
+        self.draw_member(text);
+        self.history.push(text);
+    }
+
+    fn draw_member(&mut self, text: &str) {
+        self.flush_stream();
+        self.gap();
+        let mut rows = text.lines();
+        let first = rows.next().unwrap_or("").to_string();
+        let mut lines = vec![Line::from(vec![
+            Span::styled(format!("{PROMPT_IDLE} "), self.theme.prompt),
+            Span::styled(first, self.theme.member),
+        ])];
+        for row in rows {
+            lines.push(Line::from(Span::styled(
+                format!("{ECHO_INDENT}{row}"),
+                self.theme.member,
+            )));
+        }
+        self.extend_pending(lines);
+        self.gap();
+    }
+
+    // ── keys ──────────────────────────────────────────────────────────────────────────────────
+
+    pub fn on_key(&mut self, key: KeyEvent) -> Reply {
+        match key.code {
+            KeyCode::PageUp => {
+                self.scroll(self.page());
+                return Reply::None;
+            }
+            KeyCode::PageDown => {
+                self.scroll(-self.page());
+                return Reply::None;
+            }
+            _ => {}
+        }
+        match self.focus {
+            Focus::Compose => self.compose_key(key),
+            Focus::Choose => self.choose_key(key),
+            Focus::Secret => self.secret_key(key),
+            Focus::Path => self.path_key(key),
+            Focus::Keys => {
+                self.focus = Focus::Compose;
+                Reply::None
+            }
+        }
+    }
+
+    pub fn on_paste(&mut self, text: String) -> Reply {
+        if matches!(self.focus, Focus::Compose) {
+            let width = self.entry_width();
+            self.ask
+                .apply(Key::Paste(text), &self.history.entries, width);
+        }
+        Reply::None
+    }
+
+    fn compose_key(&mut self, key: KeyEvent) -> Reply {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('c') if ctrl => return Reply::Exit,
+            KeyCode::Char('o') if ctrl => {
+                self.copy_last_reply();
+                return Reply::None;
+            }
+            KeyCode::Char('?') if self.ask.text.is_empty() => {
+                self.focus = Focus::Keys;
+                return Reply::None;
+            }
+            KeyCode::Char('@') if !ctrl => {
+                let width = self.entry_width();
+                self.ask.apply(Key::Char('@'), &self.history.entries, width);
+                self.open_path_pick();
+                return Reply::None;
+            }
+            KeyCode::Esc => {
+                if self.working && self.ask.text.is_empty() {
+                    return Reply::Detach;
+                }
+                self.ask = AskState::new();
+                return Reply::None;
+            }
+            _ => {}
+        }
+        let Some(decoded) = decode_key(key) else {
+            return Reply::None;
         };
-        spinner.running.store(false, Ordering::Relaxed);
-        let _ = spinner.handle.join();
-        if self.dyn_rows > 1 {
-            self.emit(&format!("\x1b7\r\x1b[{}A\x1b[2K\x1b8", self.dyn_rows - 1));
-        } else {
-            self.emit("\r\x1b[K");
+        let width = self.entry_width();
+        match self.ask.apply(decoded, &self.history.entries, width) {
+            Outcome::Continue => Reply::None,
+            Outcome::Cancel => Reply::Exit,
+            Outcome::Submit => {
+                let text = self.ask.expand();
+                self.ask = AskState::new();
+                if text.trim().is_empty() {
+                    return Reply::None;
+                }
+                Reply::Send(text)
+            }
         }
     }
 
-    /// Read one line of member input under `prompt` with full line editing; `None` on EOF/cancel.
-    pub fn ask(&mut self, prompt: &str) -> Option<String> {
-        if !self.fx {
-            return self.ask_plain(prompt);
-        }
-        self.status.clear();
-        let raw = RawGuard::new();
-        self.emit("\x1b[?25h");
-        let mut state = AskState::new();
-        self.paint_ask(prompt, &state, true);
-        let submitted = loop {
-            let event = match read() {
-                Ok(event) => event,
-                Err(_) => break None,
-            };
-            match event {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    let Some(key) = decode_key(key) else { continue };
-                    match state.apply(key, &self.history) {
-                        Outcome::Continue => self.paint_ask(prompt, &state, false),
-                        Outcome::Submit => break Some(std::mem::take(&mut state.text)),
-                        Outcome::Cancel => break None,
-                    }
-                }
-                Event::Paste(text) => {
-                    state.apply(Key::Paste(text), &self.history);
-                    self.paint_ask(prompt, &state, false);
-                }
-                Event::Resize(..) => self.paint_ask(prompt, &state, false),
-                _ => {}
-            }
+    fn choose_key(&mut self, key: KeyEvent) -> Reply {
+        let Some(chooser) = self.chooser.as_mut() else {
+            self.focus = Focus::Compose;
+            return Reply::None;
         };
-        self.emit("\x1b8");
-        drop(raw);
-        self.erase_region();
-        let text = submitted?;
-        let p = self.p.clone();
-        self.emit(&format!("{}{PROMPT_IDLE}{} {text}\n", p.magenta, p.reset));
-        if !text.is_empty() && self.history.last() != Some(&text) {
-            self.history.push(text.clone());
-        }
-        self.paint_region(None);
-        Some(text)
-    }
-
-    /// Pick one option with arrow keys (numbered read in plain mode); `None` on cancel.
-    pub fn menu(&mut self, prompt: &str, options: &[String]) -> Option<String> {
-        if options.is_empty() {
-            return None;
-        }
-        if !self.fx {
-            return self.menu_plain(prompt, options);
-        }
-        self.erase_region();
-        let raw = RawGuard::new();
-        self.emit("\x1b[?25l");
-        let mut selected = 0;
-        self.paint_menu(prompt, options, selected, true);
-        let picked = loop {
-            let event = match read() {
-                Ok(event) => event,
-                Err(_) => break None,
-            };
-            let Event::Key(key) = event else {
-                if let Event::Resize(..) = event {
-                    self.paint_menu(prompt, options, selected, false);
-                }
-                continue;
-            };
-            if key.kind == KeyEventKind::Release {
-                continue;
-            }
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') if !ctrl => {
-                    selected = (selected + options.len() - 1) % options.len();
-                    self.paint_menu(prompt, options, selected, false);
-                }
-                KeyCode::Down | KeyCode::Char('j') if !ctrl => {
-                    selected = (selected + 1) % options.len();
-                    self.paint_menu(prompt, options, selected, false);
-                }
-                KeyCode::Enter => break Some(options[selected].clone()),
-                KeyCode::Esc => break None,
-                KeyCode::Char('c') | KeyCode::Char('d') if ctrl => break None,
-                _ => {}
-            }
+        let Some(pick) = pick_key(key) else {
+            return Reply::None;
         };
-        self.emit("\x1b[?25h");
-        drop(raw);
-        picked
+        match chooser.picker.apply_key(pick) {
+            PickOutcome::Continue => Reply::None,
+            PickOutcome::Picked(choice) => {
+                self.chooser = None;
+                self.focus = Focus::Compose;
+                Reply::Choice(choice)
+            }
+            PickOutcome::Cancelled => {
+                self.chooser = None;
+                self.focus = Focus::Compose;
+                Reply::ChoiceCancelled
+            }
+        }
     }
 
-    /// Read one secret without echo; `None` on EOF, `Some("")` when skipped. Any reachable
-    /// terminal goes through the raw-mode reader — crossterm falls back to the tty when stdin is
-    /// a pipe, which is what a `curl | sh` install leaves behind — so the typed value never
-    /// echoes; only a fully headless run reads a line from stdin, where no terminal echoes.
-    pub fn secret(&mut self, prompt: &str) -> Option<String> {
-        if !io::stdin().is_tty() && !io::stderr().is_tty() {
-            let mut line = String::new();
-            eprint!("{prompt} (hidden): ");
-            let _ = io::stderr().flush();
-            return match io::stdin().lock().read_line(&mut line) {
-                Ok(0) | Err(_) => None,
-                Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
-            };
-        }
-        let raw = RawGuard::new();
-        let p = self.p.clone();
-        let to_stderr = !io::stdout().is_tty();
-        let shown = format!("\r{}{prompt}{} (hidden): ", p.magenta, p.reset);
-        if to_stderr {
-            eprint!("{shown}");
-            let _ = io::stderr().flush();
-        } else {
-            self.emit(&shown);
-        }
-        let mut value = String::new();
-        let entered = loop {
-            let event = match read() {
-                Ok(event) => event,
-                Err(_) => break None,
-            };
-            let Event::Key(key) = event else { continue };
-            if key.kind == KeyEventKind::Release {
-                continue;
-            }
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Enter => break Some(std::mem::take(&mut value)),
-                KeyCode::Backspace => {
-                    value.pop();
-                }
-                KeyCode::Char('u') if ctrl => value.clear(),
-                KeyCode::Char('c') | KeyCode::Char('d') if ctrl => break None,
-                KeyCode::Char(ch) if !ctrl => value.push(ch),
-                _ => {}
-            }
+    fn secret_key(&mut self, key: KeyEvent) -> Reply {
+        let Some(entry) = self.secret.as_mut() else {
+            self.focus = Focus::Compose;
+            return Reply::None;
         };
-        if to_stderr {
-            eprint!("\r\n");
-            let _ = io::stderr().flush();
-        } else {
-            self.emit("\r\n");
-        }
-        drop(raw);
-        entered
-    }
-
-    /// Flush any open streamed text into the transcript at end of stream.
-    pub fn end_stream(&mut self) {
-        self.status.clear();
-        if !self.fx {
-            self.line_break();
-            return;
-        }
-        if !self.open.is_empty() {
-            self.erase_region();
-            self.flush_open();
-        }
-        self.paint_region(None);
-    }
-
-    /// Erase the dynamic region and restore the terminal.
-    pub fn close(&mut self) {
-        if let Some(spinner) = self.spinner.take() {
-            spinner.running.store(false, Ordering::Relaxed);
-            let _ = spinner.handle.join();
-        }
-        if self.fx {
-            self.erase_region();
-            self.emit("\x1b[?25h");
-        } else {
-            self.line_break();
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => {
+                let value = std::mem::take(&mut entry.value);
+                self.secret = None;
+                self.focus = Focus::Compose;
+                Reply::Secret(value)
+            }
+            KeyCode::Esc => {
+                self.secret = None;
+                self.focus = Focus::Compose;
+                Reply::Secret(String::new())
+            }
+            KeyCode::Backspace => {
+                entry.value.pop();
+                Reply::None
+            }
+            KeyCode::Char('u') if ctrl => {
+                entry.value.clear();
+                Reply::None
+            }
+            KeyCode::Char('c') if ctrl => Reply::Exit,
+            KeyCode::Char(ch) if !ctrl => {
+                entry.value.push(ch);
+                Reply::None
+            }
+            _ => Reply::None,
         }
     }
 
-    fn transcript_line(&mut self, rendered: &str) {
-        self.status.clear();
-        if self.fx {
-            self.erase_region();
-            self.flush_open();
-            self.emit(rendered);
-            self.paint_region(None);
-        } else {
-            self.line_break();
-            self.emit(rendered);
-        }
-    }
-
-    fn flush_open(&mut self) {
-        if self.open.is_empty() {
+    fn open_path_pick(&mut self) {
+        let candidates = picker::path_candidates(&self.cwd, "", 200);
+        if candidates.is_empty() {
             return;
         }
-        let tail = std::mem::take(&mut self.open);
-        self.emit(&format!("{tail}\n"));
+        let mut picker = Picker::new(candidates);
+        picker.set_page(PICKER_ROWS);
+        self.path_pick = Some(PathPick {
+            picker,
+            token_start: self.ask.cursor,
+        });
+        self.focus = Focus::Path;
     }
 
-    fn drain_open(&mut self, wrap_at: usize) {
-        loop {
-            let newline = self.open.find('\n');
-            let line = match newline {
-                Some(at) => &self.open[..at],
-                None => self.open.as_str(),
-            };
-            if wrap::width(line) < wrap_at {
-                match newline {
-                    Some(at) => {
-                        let line = self.open[..at].to_string();
-                        self.emit(&format!("{line}\n"));
-                        self.open.replace_range(..=at, "");
-                        continue;
-                    }
-                    None => break,
+    fn path_key(&mut self, key: KeyEvent) -> Reply {
+        let width = self.entry_width();
+        let Some(pick) = self.path_pick.as_mut() else {
+            self.focus = Focus::Compose;
+            return Reply::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.path_pick = None;
+                self.focus = Focus::Compose;
+            }
+            KeyCode::Up => {
+                pick.picker.step(-1);
+            }
+            KeyCode::Down => {
+                pick.picker.step(1);
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let token_start = pick.token_start;
+                let picked = pick.picker.current().map(str::to_string);
+                self.path_pick = None;
+                self.focus = Focus::Compose;
+                if let Some(path) = picked {
+                    let end = self.ask.cursor;
+                    self.ask.text.replace_range(token_start..end, &path);
+                    self.ask.cursor = token_start + path.len();
                 }
             }
-            let (head, rest) = wrap::wrap_head(&self.open, wrap_at);
-            let line = self.open[..head].to_string();
-            self.emit(&format!("{line}\n"));
-            self.open.replace_range(..rest, "");
+            KeyCode::Backspace => {
+                if self.ask.cursor <= pick.token_start {
+                    self.path_pick = None;
+                    self.focus = Focus::Compose;
+                    return Reply::None;
+                }
+                self.ask.apply(Key::Backspace, &self.history.entries, width);
+                self.refilter_paths();
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.ask.apply(Key::Char(ch), &self.history.entries, width);
+                self.refilter_paths();
+            }
+            _ => {}
         }
+        Reply::None
     }
 
-    fn size(&self) -> (usize, usize) {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        (cols as usize, rows as usize)
+    fn refilter_paths(&mut self) {
+        let Some(pick) = self.path_pick.as_mut() else {
+            return;
+        };
+        let token = self.ask.text[pick.token_start..self.ask.cursor].to_string();
+        pick.picker.set_filter(&token);
     }
 
-    fn fx_size(&mut self) -> Option<(usize, usize)> {
-        let (cols, rows) = self.size();
-        if rows >= MIN_ROWS as usize && cols >= MIN_COLS as usize {
-            return Some((cols, rows));
+    fn copy_last_reply(&mut self) {
+        if !self.caps.osc52 || self.last_reply.is_empty() {
+            return;
         }
-        self.erase_region();
-        self.fx = false;
-        None
+        let escape = osc::copy_to_clipboard(self.caps, &self.last_reply);
+        self.splice_raw(&escape);
+        self.note("Copied the last reply.");
     }
 
-    fn region_top(&self, buffer: &mut String) {
-        if self.dyn_rows > 1 {
-            buffer.push_str(&format!("\r\x1b[{}A", self.dyn_rows - 1));
-        } else {
-            buffer.push('\r');
-        }
+    // ── painting ──────────────────────────────────────────────────────────────────────────────
+
+    /// The alternate screen owns every row, so a resize is one clean repaint at the new size.
+    pub fn resize(&mut self) {
+        let (cols, rows) = sane_size();
+        self.cols = cols;
+        self.rows = rows;
+        self.screen.invalidate();
     }
 
-    fn activity_row(&self, buffer: &mut String, cols: usize) {
-        buffer.push_str("\x1b[2K");
-        if !self.open.is_empty() {
-            buffer.push_str(wrap::clip(&self.open, cols.saturating_sub(1)));
-        } else if !self.status.is_empty() {
-            buffer.push_str(&format!("  {}{}{}", self.p.dim, self.status, self.p.reset));
-        }
-    }
-
-    fn ship_suffix(&self, buffer: &mut String, cols: usize, at: &mut usize) {
-        if !self.craft.is_empty() && *at <= CRAFT_ROWS {
-            let line = self.craft.get(*at - 1).map(String::as_str).unwrap_or("");
-            buffer.push_str(&format!("\x1b[{}G{line}\x1b[0m", cols - self.craft_w + 1));
-        }
-        *at += 1;
-    }
-
-    fn paint_region(&mut self, edit: Option<(&str, &AskState)>) -> Option<(usize, usize, usize)> {
-        if !self.fx {
-            return None;
-        }
-        if self.craft.is_empty() && edit.is_none() {
-            return None;
-        }
-        let (cols, rows) = self.size();
-        if rows < MIN_ROWS as usize || cols < MIN_COLS as usize {
-            self.erase_region();
-            return None;
-        }
-        let prompt = edit.map(|(prompt, _)| prompt).unwrap_or(PROMPT_IDLE);
-        let prompt_w = wrap::width(prompt);
-        let rule = "─".repeat(cols.saturating_sub(self.craft_w + 1));
-        let cap1 = cols.saturating_sub(self.craft_w + 3 + prompt_w);
-        let cap = cols.saturating_sub(self.craft_w + 3);
-        let text = edit.map(|(_, state)| state.text.as_str()).unwrap_or("");
-        let entry_rows = wrap::hard_rows(text, cap1, cap);
-        let mut buffer = String::new();
-        self.region_top(&mut buffer);
-        self.activity_row(&mut buffer, cols);
-        let mut ship = 1;
-        buffer.push_str(&format!("\r\n\x1b[2K{}{rule}{}", self.p.dim, self.p.reset));
-        self.ship_suffix(&mut buffer, cols, &mut ship);
-        for (index, (start, end)) in entry_rows.iter().enumerate() {
-            buffer.push_str("\r\n\x1b[2K");
-            let part = &text[*start..*end];
-            if index == 0 {
-                if edit.is_some() {
-                    buffer.push_str(&format!(
-                        "{}{prompt}{} {part}",
-                        self.p.magenta, self.p.reset
-                    ));
+    /// Every mouse event: the wheel scrolls, a drag selects, releasing a drag copies the
+    /// selection, and a plain click clears it.
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll(3),
+            MouseEventKind::ScrollDown => self.scroll(-3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = Some(Selection {
+                    anchor: (mouse.row, mouse.column),
+                    head: (mouse.row, mouse.column),
+                    dragged: false,
+                });
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.head = (mouse.row, mouse.column);
+                    selection.dragged = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let dragged = self.selection.as_ref().is_some_and(|s| s.dragged);
+                if dragged {
+                    self.copy_selection();
                 } else {
-                    buffer.push_str(&format!("{}{PROMPT_IDLE}{}", self.p.dim, self.p.reset));
+                    self.selection = None;
                 }
-            } else if !part.is_empty() {
-                buffer.push_str(&format!("  {part}"));
             }
-            self.ship_suffix(&mut buffer, cols, &mut ship);
-        }
-        buffer.push_str(&format!("\r\n\x1b[2K{}{rule}{}", self.p.dim, self.p.reset));
-        self.ship_suffix(&mut buffer, cols, &mut ship);
-        buffer.push_str("\r\n\x1b[2K");
-        self.ship_suffix(&mut buffer, cols, &mut ship);
-        buffer.push_str("\x1b[J\r");
-        self.dyn_rows = (entry_rows.len() + 4) as u16;
-        self.emit(&buffer);
-        edit.map(|(_, state)| {
-            let (row, col) = wrap::cursor_pos(text, &entry_rows, state.cursor);
-            (
-                entry_rows.len(),
-                row,
-                if row == 0 {
-                    prompt_w + 2 + col
-                } else {
-                    3 + col
-                },
-            )
-        })
-    }
-
-    fn paint_ask(&mut self, prompt: &str, state: &AskState, first: bool) {
-        if !first {
-            self.emit("\x1b8");
-        }
-        if let Some((total, row, col)) = self.paint_region(Some((prompt, state))) {
-            let up = 2 + (total - 1 - row);
-            self.emit(&format!("\x1b7\x1b[{up}A\x1b[{col}G"));
+            _ => {}
         }
     }
 
-    fn preview_paint(&mut self) {
-        if !self.fx {
+    fn copy_selection(&mut self) {
+        let Some(selection) = self.selection.as_ref() else {
+            return;
+        };
+        let width = self.cols as usize;
+        let mut parts: Vec<String> = Vec::new();
+        for (index, line) in self.frame_rows.iter().enumerate() {
+            let Some((from, to)) = selection.cols_for(index as u16, width) else {
+                continue;
+            };
+            parts.push(slice_columns(line, from, to).trim_end().to_string());
+        }
+        let text = parts.join("\n");
+        if text.trim().is_empty() {
             return;
         }
-        if self.dyn_rows == 0 {
-            self.paint_region(None);
+        let escape = osc::copy_to_clipboard(self.caps, &text);
+        if escape.is_empty() {
             return;
         }
-        let (cols, _) = self.size();
-        let mut buffer = String::new();
-        self.region_top(&mut buffer);
-        self.activity_row(&mut buffer, cols);
-        buffer.push_str(&format!("\x1b[{}B\r", self.dyn_rows - 1));
-        self.emit(&buffer);
+        self.splice_raw(&escape);
+        self.flash = Some(("Copied.".to_string(), Instant::now()));
     }
 
-    fn erase_region(&mut self) {
-        if self.dyn_rows == 0 {
-            return;
-        }
-        let mut buffer = String::new();
-        self.region_top(&mut buffer);
-        buffer.push_str("\x1b[J");
-        self.dyn_rows = 0;
-        self.emit(&buffer);
+    /// Scroll the transcript: positive is up into history, negative back toward the live end.
+    /// Reaching the end resumes following.
+    pub fn scroll(&mut self, up: isize) {
+        let max = self.transcript.len().saturating_sub(1) as isize;
+        self.scroll_back = (self.scroll_back as isize + up).clamp(0, max) as usize;
     }
 
-    fn paint_menu(&mut self, prompt: &str, options: &[String], selected: usize, first: bool) {
-        let mut buffer = String::new();
-        if !first {
-            buffer.push_str(&format!("\x1b[{}A", options.len() + 1));
+    pub fn page(&self) -> isize {
+        self.view_rows.saturating_sub(1).max(1) as isize
+    }
+
+    fn transcript_width(&self) -> u16 {
+        self.cols
+    }
+
+    fn craft_cols(&self) -> usize {
+        if self.craft.is_empty() || self.cols < MIN_COLS {
+            0
+        } else {
+            self.craft_w + 1
         }
-        buffer.push_str(&format!(
-            "\r\x1b[2K{}{prompt}{}\r\n",
-            self.p.bold, self.p.reset
+    }
+
+    fn entry_width(&self) -> usize {
+        (self.cols as usize)
+            .saturating_sub(self.craft_cols() + 3 + wrap::width(&self.prompt))
+            .max(8)
+    }
+
+    pub fn paint(&mut self) {
+        let cols = self.cols as usize;
+        let body = cols.saturating_sub(self.craft_cols());
+        let mut dock: Vec<Line> = Vec::new();
+        dock.push(self.activity_line(body));
+        dock.extend(self.op_log.iter().cloned());
+        let rule_at = dock.len();
+        let rule = || Line::styled("─".repeat(body.saturating_sub(1)), self.theme.prompt);
+        dock.push(rule());
+        self.queued_rows(&mut dock, body);
+        let (entry, cursor_in_entry) = self.entry_rows(body);
+        let entry_at = dock.len();
+        dock.extend(entry);
+        dock.push(rule());
+        dock.push(status::footer(
+            &self.theme,
+            body as u16,
+            &self.host,
+            &self.channel,
         ));
-        for (index, option) in options.iter().enumerate() {
-            if index == selected {
-                buffer.push_str(&format!(
-                    "\r\x1b[2K{}{MARKER} {option}{}\r\n",
-                    self.p.magenta, self.p.reset
-                ));
+        self.with_craft(&mut dock, rule_at);
+
+        let avail = (self.rows as usize).saturating_sub(dock.len()).max(1);
+        self.view_rows = avail;
+        let live = self.live_tail();
+        let shown = self
+            .transcript
+            .len()
+            .saturating_sub(self.scroll_back.min(self.transcript.len()));
+        let mut window: Vec<Line> = Vec::with_capacity(avail + dock.len());
+        let held: Vec<&Line> = self.transcript[..shown].iter().chain(live.iter()).collect();
+        let start = held.len().saturating_sub(avail);
+        for line in &held[start..] {
+            window.push((*line).clone());
+        }
+        while window.len() < avail {
+            window.push(Line::raw(""));
+        }
+        window.extend(dock);
+        self.frame_rows = window.clone();
+        if let Some(selection) = self.selection.as_ref() {
+            for (index, line) in window.iter_mut().enumerate() {
+                if let Some((from, to)) = selection.cols_for(index as u16, cols) {
+                    *line = highlight_columns(line.clone(), from, to);
+                }
+            }
+        }
+        let cursor =
+            cursor_in_entry.map(|(row, col)| ((avail + entry_at + row) as u16, col as u16));
+        let _ = self.screen.frame(&window, cursor);
+    }
+
+    /// The reply as it stands, rendered live while it streams — a block does not wait for its
+    /// close to be readable. Scrolled away from the end, the live tail yields to history.
+    fn live_tail(&self) -> Vec<Line<'static>> {
+        let tail = self.stream.open_tail();
+        if tail.trim().is_empty() || self.scroll_back > 0 {
+            return Vec::new();
+        }
+        markdown::render(
+            tail.trim_end_matches('\n'),
+            &self.theme,
+            self.transcript_width(),
+        )
+    }
+
+    fn activity_line(&self, width: usize) -> Line<'static> {
+        if let Some((said, at)) = self.flash.as_ref() {
+            if at.elapsed().as_secs() < FLASH_SECONDS {
+                return Line::styled(format!(" {said}"), self.theme.muted);
+            }
+        }
+        if let Some(view) = self.running_op.as_ref() {
+            let dot = if self.status.phase().is_multiple_of(2) {
+                self.theme.accent
             } else {
-                buffer.push_str(&format!("\r\x1b[2K  {option}\r\n"));
+                self.theme.muted
+            };
+            let said = view.title(self.running_desc.as_deref());
+            let title = wrap::clip(&said, width.saturating_sub(4)).to_string();
+            return Line::from(vec![
+                Span::styled("  ⏺ ".to_string(), dot),
+                Span::styled(title, self.theme.tool_title),
+            ]);
+        }
+        self.status.render(&self.theme, width as u16)
+    }
+
+    fn queued_rows(&self, dock: &mut Vec<Line<'static>>, width: usize) {
+        for held in self.queued.iter().take(QUEUE_SHOWN) {
+            let first = held.lines().next().unwrap_or("");
+            let row = format!(
+                "{PROMPT_IDLE} {}",
+                wrap::clip(first, width.saturating_sub(4))
+            );
+            dock.push(Line::styled(row, self.theme.queued));
+        }
+        let hidden = self.queued.len().saturating_sub(QUEUE_SHOWN);
+        if hidden > 0 {
+            dock.push(Line::styled(
+                format!("… +{hidden} queued"),
+                self.theme.queued,
+            ));
+        }
+    }
+
+    fn entry_rows(&self, width: usize) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        match self.focus {
+            Focus::Compose => self.compose_rows(),
+            Focus::Choose => (self.choose_rows(width), None),
+            Focus::Secret => self.secret_rows(width),
+            Focus::Path => self.path_rows(width),
+            Focus::Keys => (self.keys_rows(width), None),
+        }
+    }
+
+    fn compose_rows(&self) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        let width = self.entry_width();
+        let layout = self.ask.render(width);
+        let prompt_w = wrap::width(&self.prompt);
+        let total = layout.rows.len();
+        let window = ENTRY_ROWS_MAX.min(total.max(1));
+        let first = layout
+            .cursor_row
+            .saturating_sub(window - 1)
+            .min(total.saturating_sub(window));
+        let mut rows = Vec::new();
+        let mut cursor = None;
+        for (index, row) in layout.rows.iter().enumerate().skip(first).take(window) {
+            let lead = if index == 0 {
+                Span::styled(format!("{} ", self.prompt), self.theme.prompt)
+            } else {
+                Span::raw(ECHO_INDENT.to_string())
+            };
+            let shown = rows.len();
+            if index == layout.cursor_row {
+                let lead_w = if index == 0 { prompt_w + 1 } else { 2 };
+                cursor = Some((shown, lead_w + layout.cursor_col));
             }
+            rows.push(Line::from(vec![lead, Span::raw(row.clone())]));
         }
-        self.emit(&buffer);
+        if rows.is_empty() {
+            rows.push(Line::from(Span::styled(
+                self.prompt.clone(),
+                self.theme.prompt,
+            )));
+            cursor = Some((0, prompt_w + 1));
+        }
+        (rows, cursor)
     }
 
-    fn ask_plain(&mut self, prompt: &str) -> Option<String> {
-        eprint!("{prompt} ");
-        let _ = io::stderr().flush();
-        let mut line = String::new();
-        match io::stdin().lock().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
+    fn choose_rows(&self, width: usize) -> Vec<Line<'static>> {
+        let Some(chooser) = self.chooser.as_ref() else {
+            return Vec::new();
+        };
+        let mut rows = vec![Line::styled(
+            wrap::clip(&chooser.prompt, width).to_string(),
+            self.theme.heading,
+        )];
+        if chooser.picker.visible_len() == 0 && !chooser.picker.filter.is_empty() {
+            rows.push(Line::styled(
+                "Nothing matches.".to_string(),
+                self.theme.muted,
+            ));
+        } else {
+            rows.extend(
+                chooser
+                    .picker
+                    .render(&self.theme, width as u16, PICKER_ROWS),
+            );
+        }
+        rows
+    }
+
+    fn secret_rows(&self, width: usize) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        let Some(entry) = self.secret.as_ref() else {
+            return (Vec::new(), None);
+        };
+        let label = format!("{} (hidden): ", wrap::clip(&entry.prompt, width / 2));
+        let mask = "•".repeat(entry.value.chars().count());
+        let col = wrap::width(&label) + mask.chars().count();
+        let row = Line::from(vec![
+            Span::styled(label, self.theme.prompt),
+            Span::raw(mask),
+        ]);
+        (vec![row], Some((0, col)))
+    }
+
+    fn path_rows(&self, width: usize) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        let (mut rows, cursor) = self.compose_rows();
+        if let Some(pick) = self.path_pick.as_ref() {
+            rows.extend(pick.picker.render(&self.theme, width as u16, PICKER_ROWS));
+        }
+        (rows, cursor)
+    }
+
+    fn keys_rows(&self, width: usize) -> Vec<Line<'static>> {
+        let mut pairs = history::hotkeys();
+        if self.caps.osc52 {
+            pairs.push(("Ctrl+O", "Copy last reply"));
+        }
+        let mut rows = Vec::new();
+        for (key, action) in pairs {
+            let pad = " ".repeat(KEY_COL.saturating_sub(wrap::width(key)));
+            rows.push(Line::from(vec![
+                Span::styled(format!("{key}{pad}"), self.theme.accent),
+                Span::styled(
+                    wrap::clip(action, width.saturating_sub(KEY_COL)).to_string(),
+                    self.theme.muted,
+                ),
+            ]));
+        }
+        rows
+    }
+
+    fn with_craft(&self, dock: &mut [Line<'static>], first_row: usize) {
+        let craft_cols = self.craft_cols();
+        if craft_cols == 0 {
+            return;
+        }
+        let body = (self.cols as usize).saturating_sub(craft_cols);
+        for (offset, art) in self.craft.iter().enumerate() {
+            let Some(line) = dock.get_mut(first_row + offset) else {
+                break;
+            };
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let used = wrap::width(&text);
+            let pad = " ".repeat(body.saturating_sub(used) + 1);
+            line.spans.push(Span::raw(pad));
+            line.spans.push(Span::styled(art.clone(), self.theme.craft));
         }
     }
 
-    fn menu_plain(&mut self, prompt: &str, options: &[String]) -> Option<String> {
-        self.emit(&format!("{prompt}\n"));
-        for (index, option) in options.iter().enumerate() {
-            self.emit(&format!("  {}) {option}\n", index + 1));
-        }
-        let answer = self.ask_plain("›")?;
-        if answer.is_empty() {
-            return None;
-        }
-        match answer.parse::<usize>() {
-            Ok(number) if (1..=options.len()).contains(&number) => {
-                Some(options[number - 1].clone())
+    /// Anything the stream still holds commits now: a transcript element that is not part of the
+    /// reply is about to land, and the held block stands before it.
+    fn flush_stream(&mut self) {
+        let width = self.transcript_width();
+        let lines = self.stream.finish(&self.theme, width);
+        self.extend_pending(lines);
+    }
+
+    /// The one door to the transcript: consecutive blank lines collapse here, and a reader
+    /// scrolled into history keeps their place while new lines arrive under them.
+    fn extend_pending(&mut self, lines: Vec<Line<'static>>) {
+        let mut appended = 0usize;
+        for line in lines {
+            let blank = line.spans.iter().all(|span| span.content.trim().is_empty());
+            if blank && self.last_line_blank {
+                continue;
             }
-            _ => Some(answer),
+            self.last_line_blank = blank;
+            self.transcript.push(line);
+            appended += 1;
+        }
+        if self.scroll_back > 0 {
+            self.scroll_back += appended;
+        }
+        let overflow = self.transcript.len().saturating_sub(TRANSCRIPT_MAX);
+        if overflow > 0 {
+            self.transcript.drain(..overflow);
         }
     }
 
-    fn line_break(&mut self) {
-        if self.plain_open {
-            self.emit("\n");
-            self.plain_open = false;
-        }
+    fn gap(&mut self) {
+        self.extend_pending(vec![Line::raw("")]);
     }
 
-    fn emit(&self, text: &str) {
+    fn splice_raw(&mut self, bytes: &str) {
+        if bytes.is_empty() {
+            return;
+        }
         let mut out = io::stdout();
-        let _ = out.write_all(text.as_bytes());
+        let _ = out.write_all(bytes.as_bytes());
         let _ = out.flush();
     }
-}
 
-impl Default for Ui {
-    fn default() -> Ui {
-        Ui::new()
-    }
-}
-
-impl Drop for Ui {
-    fn drop(&mut self) {
-        if let Some(spinner) = self.spinner.take() {
-            spinner.running.store(false, Ordering::Relaxed);
-            let _ = spinner.handle.join();
-        }
-        if self.fx {
-            let _ = terminal::disable_raw_mode();
-            self.emit("\x1b[?25h");
+    /// Leave the alternate screen and print the whole conversation into the terminal's own
+    /// scrollback, images last — the session ends, the transcript stays.
+    pub fn close(&mut self) {
+        self.flush_stream();
+        let _ = self.screen.leave();
+        let _ = self.screen.print_document(&self.transcript);
+        for blob in std::mem::take(&mut self.exit_images) {
+            self.splice_raw(&blob);
+            self.splice_raw("\r\n");
         }
     }
 }
 
-fn decode_key(key: KeyEvent) -> Option<Key> {
+/// The text of `line` between two display columns.
+fn slice_columns(line: &Line, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut at = 0usize;
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            let step = wrap::width(&ch.to_string()).max(1);
+            if at >= to {
+                return out;
+            }
+            if at >= from {
+                out.push(ch);
+            }
+            at += step;
+        }
+    }
+    out
+}
+
+/// `line` with the span between two display columns drawn in reverse video.
+fn highlight_columns(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
+    let base = line.style;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut at = 0usize;
+    for span in line.spans {
+        let mut plain = String::new();
+        let mut lit = false;
+        let flush = |spans: &mut Vec<Span<'static>>, text: &mut String, lit: bool, style: Style| {
+            if text.is_empty() {
+                return;
+            }
+            let style = if lit {
+                style.add_modifier(Modifier::REVERSED)
+            } else {
+                style
+            };
+            spans.push(Span::styled(std::mem::take(text), style));
+        };
+        let style = base.patch(span.style);
+        for ch in span.content.chars() {
+            let step = wrap::width(&ch.to_string()).max(1);
+            let inside = at >= from && at < to;
+            if inside != lit {
+                flush(&mut spans, &mut plain, lit, style);
+                lit = inside;
+            }
+            plain.push(ch);
+            at += step;
+        }
+        flush(&mut spans, &mut plain, lit, style);
+    }
+    let mut width: usize = spans.iter().map(|span| wrap::width(&span.content)).sum();
+    if width < to {
+        let pad_from = width.max(from);
+        if to > pad_from {
+            while width < pad_from {
+                spans.push(Span::raw(" "));
+                width += 1;
+            }
+            spans.push(Span::styled(
+                " ".repeat(to.min(pad_from + 200) - pad_from),
+                Style::new().add_modifier(Modifier::REVERSED),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// The terminal's size, floored to something drawable — a pty that reports no size gets the
+/// classic 80×24.
+fn sane_size() -> (u16, u16) {
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    (
+        if cols >= 20 { cols } else { 80 },
+        if rows >= 5 { rows } else { 24 },
+    )
+}
+
+/// Decode one key event to a picker key.
+pub fn pick_key(key: KeyEvent) -> Option<PickKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    Some(match key.code {
+        KeyCode::Up => PickKey::Up,
+        KeyCode::Down => PickKey::Down,
+        KeyCode::PageUp => PickKey::PageUp,
+        KeyCode::PageDown => PickKey::PageDown,
+        KeyCode::Enter => PickKey::Enter,
+        KeyCode::Esc => PickKey::Esc,
+        KeyCode::Backspace => PickKey::Backspace,
+        KeyCode::Char('c') | KeyCode::Char('d') if ctrl => PickKey::Esc,
+        KeyCode::Char('k') if ctrl => PickKey::Up,
+        KeyCode::Char('j') if ctrl => PickKey::Down,
+        KeyCode::Char(ch) if !ctrl => PickKey::Char(ch),
+        _ => return None,
+    })
+}
+
+/// Decode one key event to an editor key.
+pub fn decode_key(key: KeyEvent) -> Option<Key> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     Some(match key.code {
+        KeyCode::Enter if shift => Key::ShiftEnter,
         KeyCode::Enter if alt => Key::InsertNewline,
         KeyCode::Enter => Key::Enter,
         KeyCode::Backspace if alt => Key::KillWord,
@@ -709,16 +1223,22 @@ fn decode_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Left => Key::Left,
         KeyCode::Right if ctrl || alt => Key::WordRight,
         KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::CursorUp,
+        KeyCode::Down => Key::CursorDown,
+        KeyCode::Home if ctrl => Key::BufferHome,
+        KeyCode::End if ctrl => Key::BufferEnd,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
-        KeyCode::Up => Key::HistPrev,
-        KeyCode::Down => Key::HistNext,
         KeyCode::Char('a') if ctrl => Key::Home,
         KeyCode::Char('e') if ctrl => Key::End,
         KeyCode::Char('u') if ctrl => Key::KillLine,
+        KeyCode::Char('k') if ctrl => Key::KillToEnd,
         KeyCode::Char('w') if ctrl => Key::KillWord,
+        KeyCode::Char('y') if ctrl => Key::Yank,
+        KeyCode::Char('z') if ctrl => Key::Undo,
         KeyCode::Char('j') if ctrl => Key::InsertNewline,
-        KeyCode::Char('c') if ctrl => Key::Cancel,
+        KeyCode::Char('p') if ctrl => Key::HistPrev,
+        KeyCode::Char('n') if ctrl => Key::HistNext,
         KeyCode::Char('d') if ctrl => Key::Eof,
         KeyCode::Char('b') if alt => Key::WordLeft,
         KeyCode::Char('f') if alt => Key::WordRight,
