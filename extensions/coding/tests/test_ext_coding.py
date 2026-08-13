@@ -92,6 +92,16 @@ def test_coding_prompt_uses_the_shared_delivery_contract() -> None:
     assert "# Returning to the parent" not in coding.CODING_PROMPT
 
 
+def test_coding_prompt_writes_member_prose_in_simplified_technical_english() -> None:
+    assert "ASD-STE100 Simplified Technical English" in coding.CODING_PROMPT
+    assert "a plan, a finish result, a PR or issue body, a review finding" in coding.CODING_PROMPT
+    assert "one instruction per sentence, active voice, present tense" in coding.CODING_PROMPT
+    assert (
+        "Code, identifiers, paths, commands, and quoted diff lines are quotations"
+        in coding.CODING_PROMPT
+    )
+
+
 def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_ones() -> None:
     profile = coding.CODING_PROFILE
     builtin_names = {tool.name for tool in BUILTIN_TOOLS}

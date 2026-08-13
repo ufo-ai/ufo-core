@@ -339,6 +339,15 @@ def test_review_prompt_admits_only_severe_merge_blocking_defects() -> None:
     assert "P3" not in prompt
 
 
+def test_review_prompt_writes_findings_in_simplified_technical_english() -> None:
+    prompt = CODE_REVIEW_PROFILE.prompt
+
+    assert "ASD-STE100 Simplified Technical English" in prompt
+    assert "Write `title`, `trigger`, and `failure`" in prompt
+    assert "one statement per sentence, active voice, present tense" in prompt
+    assert "Reproduce paths, identifiers, and quoted diff lines exactly" in prompt
+
+
 async def test_review_file_tools_are_text_only_and_bound_to_this_turn(
     tmp_path: Path,
 ) -> None:

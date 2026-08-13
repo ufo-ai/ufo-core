@@ -115,7 +115,11 @@ class ReviewTarget:
             "end the turn without publishing. Its validated result arrives on this conversation "
             f"as a later message: call `publish_code_review` with review run {run_id} and the "
             "subagent id named by that message, even when its status is not done, then end that "
-            "turn. Do not copy the review into the tool call or ask the user a question."
+            "turn. Do not copy the review into the tool call or ask the user a question.\n"
+            "Write any prose of your own — a review note, a status line, a reply — in ASD-STE100 "
+            "Simplified Technical English: one statement per sentence, active voice, present "
+            "tense, one meaning per word. Reproduce code, identifiers, and quoted diff lines "
+            "exactly."
         )
 
     @property

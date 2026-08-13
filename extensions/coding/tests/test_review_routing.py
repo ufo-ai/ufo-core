@@ -314,6 +314,8 @@ async def test_activation_baselines_existing_pages_and_wakes_exact_inbox(db: Non
     assert "end the turn without publishing" in turn["inbound"]
     assert "call `publish_code_review`" in turn["inbound"]
     assert "subagent id named by that message" in turn["inbound"]
+    assert "ASD-STE100 Simplified Technical English" in turn["inbound"]
+    assert "Reproduce code, identifiers, and quoted diff lines exactly" in turn["inbound"]
     async with workspace_tx() as connection:
         inbox = (
             (

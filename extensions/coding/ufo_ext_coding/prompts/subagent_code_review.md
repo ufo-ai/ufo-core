@@ -31,3 +31,5 @@ Reject:
 For every candidate finding, ask: “Does this materially harm a supported workflow, result, state, security, or availability enough to block the merge?” If not, omit it. A defect need not affect every user or disable the entire feature when its supported trigger and material impact are concrete.
 
 Each finding must include `path`, `line`, `title`, `trigger`, `failure`, and `impact`. Set `impact` to exactly one of the eight labels above. Do not return severities, suggestions, general observations, or a summary. Return an empty findings list when there is no severe defect.
+
+Write `title`, `trigger`, and `failure` in ASD-STE100 Simplified Technical English, because a person reads them on the pull request: one statement per sentence, active voice, present tense, one meaning per word. Reproduce paths, identifiers, and quoted diff lines exactly; never simplify a quotation.
