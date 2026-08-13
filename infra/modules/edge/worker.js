@@ -8,6 +8,8 @@ const MAX_FLEET = 100;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
 const LANDING_HTML = "__LANDING_HTML__";
+const PRIVACY_HTML = "__PRIVACY_HTML__";
+const TERMS_HTML = "__TERMS_HTML__";
 
 const SCHEMA =
   "create table if not exists waitlist (" +
@@ -75,6 +77,19 @@ function text(body, status = 200) {
   });
 }
 
+function secure(url) {
+  if (url.protocol !== "http:") return null;
+  const https = new URL(url);
+  https.protocol = "https:";
+  return Response.redirect(https.href, 301);
+}
+
+function page(html) {
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
 async function ensureWaitlist(db) {
   await db.prepare(SCHEMA).run();
   const { numbered } = await db.prepare(NUMBERED).first();
@@ -110,14 +125,10 @@ async function fleetCount(originBase) {
 
 async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
-    if (url.protocol === "http:") {
-      url.protocol = "https:";
-      return Response.redirect(url.href, 301);
-    }
+    const bounce = secure(url);
+    if (bounce) return bounce;
     const count = await fleetCount(env.ORIGIN_BASE);
-    return new Response(LANDING_HTML.replace("__FLEET_N__", String(Math.min(MAX_FLEET, count))), {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    });
+    return page(LANDING_HTML.replace("__FLEET_N__", String(Math.min(MAX_FLEET, count))));
   }
   const [total, workspaces] = await Promise.all([
     waitlistCount(env.DB),
@@ -173,6 +184,10 @@ export default {
         return landing(request, env, url);
       case "/waitlist":
         return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
+      case "/privacy":
+        return secure(url) ?? page(PRIVACY_HTML);
+      case "/terms":
+        return secure(url) ?? page(TERMS_HTML);
       case "/ufo":
         return fetch(`${env.ORIGIN_BASE}/ufo`);
       case "/fleet":

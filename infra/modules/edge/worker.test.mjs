@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { LANDING_PAGE, d1, importWorker, landingPage } from "./harness.mjs";
+import {
+  LANDING_PAGE,
+  PRIVACY_PAGE,
+  TERMS_PAGE,
+  d1,
+  importWorker,
+  landingPage,
+} from "./harness.mjs";
 
 const worker = await importWorker("shared");
 
@@ -464,6 +471,86 @@ test("/ufo serves byte-identical content to every user agent", async () => {
     await request("https://flyingobject.ai/ufo", { ua: "Mozilla/5.0" })
   ).text();
   assert.equal(cli, browser);
+});
+
+const LEGAL = [
+  {
+    path: "/privacy",
+    document: PRIVACY_PAGE,
+    title: "Privacy Policy",
+    headings: [
+      "1. Information We Collect",
+      "2. How We Use Information",
+      "3. Google API Services User Data Policy",
+      "4. Data Sharing",
+      "5. Data Retention",
+      "6. Children's Privacy",
+      "7. Changes to This Policy",
+      "8. Contact Us",
+    ],
+  },
+  {
+    path: "/terms",
+    document: TERMS_PAGE,
+    title: "Terms of Service",
+    headings: [
+      "1. Use of the Service",
+      "2. Accounts",
+      "3. Acceptable Use",
+      "4. Intellectual Property",
+      "5. Termination",
+      "6. Disclaimer of Warranties",
+      "7. Limitation of Liability",
+      "8. Changes to These Terms",
+      "9. Governing Law",
+      "10. Contact Us",
+    ],
+  },
+];
+
+test("each legal page is served whole, headed by its own title", async () => {
+  for (const legal of LEGAL) {
+    const reply = await request(`https://flyingobject.ai${legal.path}`, { ua: "Mozilla/5.0" });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+    const served = await reply.text();
+    assert.equal(served, legal.document);
+    assert.doesNotMatch(served, /__[A-Z_]+__/);
+    assert.match(served, new RegExp(`<title>${legal.title}</title>`));
+    assert.match(served, new RegExp(`<h1>${legal.title}</h1>`));
+    assert.deepEqual(
+      [...served.matchAll(/<h2>([^<]+)<\/h2>/g)].map(([, heading]) => heading),
+      legal.headings,
+    );
+    assert.match(served, /founders@metalcraft\.ai/);
+  }
+});
+
+test("a legal page reads the same for every user agent", async () => {
+  for (const { path } of LEGAL) {
+    const cli = await (await request(`https://flyingobject.ai${path}`)).text();
+    const browser = await (
+      await request(`https://flyingobject.ai${path}`, { ua: "Mozilla/5.0" })
+    ).text();
+    assert.equal(cli, browser);
+  }
+});
+
+test("a legal page over plain http is bounced to https with its query intact", async () => {
+  for (const { path } of LEGAL) {
+    const reply = await request(`http://flyingobject.ai${path}?ref=x`, { ua: "Mozilla/5.0" });
+    assert.equal(reply.status, 301);
+    assert.equal(reply.headers.get("location"), `https://flyingobject.ai${path}?ref=x`);
+  }
+});
+
+// Google's consent screen reads these pages by URL. Nothing the member sees leads to them.
+test("no public surface links to a legal page", async () => {
+  const card = await (await request("https://flyingobject.ai/")).text();
+  for (const { path } of LEGAL) {
+    assert.doesNotMatch(LANDING_PAGE, new RegExp(path));
+    assert.doesNotMatch(card, new RegExp(path));
+  }
 });
 
 test("an unnumbered waitlist is renumbered once, in insertion order, permanently", async () => {

@@ -8,6 +8,14 @@ const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
 export const landingPage = (hostname) => landingTemplate.replaceAll("__HOSTNAME__", hostname);
 export const LANDING_PAGE = landingPage("flyingobject.ai");
 
+const legalShell = await readFile(new URL("legal.html", moduleDir), "utf8");
+const legalPage = async (title, body) =>
+  legalShell
+    .replaceAll("__TITLE__", title)
+    .replace("__BODY__", await readFile(new URL(body, moduleDir), "utf8"));
+export const PRIVACY_PAGE = await legalPage("Privacy Policy", "privacy.html");
+export const TERMS_PAGE = await legalPage("Terms of Service", "terms.html");
+
 // Each tag is a distinct module, so a test gets its own isolate-level caches.
 export async function importWorker(tag, hostname = "flyingobject.ai") {
   const source = sourceTemplate
@@ -15,6 +23,8 @@ export async function importWorker(tag, hostname = "flyingobject.ai") {
       '"__LANDING_HTML__"',
       JSON.stringify(landingPage(hostname)),
     )
+    .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))
+    .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE))
     .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
   const tagged = `${source}\n// ${tag}`;
   return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))

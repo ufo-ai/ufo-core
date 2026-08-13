@@ -3486,12 +3486,20 @@ def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
         'landing_html    = replace(file("${path.module}/landing.html"), '
         '"__HOSTNAME__", var.hostname)' in terraform
     )
-    assert '"\\"__LANDING_HTML__\\"",\n      jsonencode(local.landing_html)' in terraform
-    assert '"\\"__WAITLIST_SENDER__\\"",\n    jsonencode(local.waitlist_sender)' in terraform
     assert (module / "landing.html").read_text().count("__HOSTNAME__") == 5
     worker = (module / "worker.js").read_text()
-    assert worker.count('"__LANDING_HTML__"') == 1
-    assert worker.count('"__WAITLIST_SENDER__"') == 1
+    harness = (module / "harness.mjs").read_text()
+    substituted = {
+        "__LANDING_HTML__": "local.landing_html",
+        "__PRIVACY_HTML__": "local.privacy_html",
+        "__TERMS_HTML__": "local.terms_html",
+        "__WAITLIST_SENDER__": "local.waitlist_sender",
+    }
+    assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) - {"__FLEET_N__"} == set(substituted)
+    for placeholder, value in substituted.items():
+        assert worker.count(f'"{placeholder}"') == 1
+        assert re.search(rf'"\\"{placeholder}\\"",\n\s+jsonencode\({re.escape(value)}\)', terraform)
+        assert harness.count(f"'\"{placeholder}\"'") == 1
 
 
 def test_the_client_target_set_is_one_set_everywhere() -> None:

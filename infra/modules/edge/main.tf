@@ -11,6 +11,15 @@ terraform {
 locals {
   waitlist_sender = "no-reply@flyingobject.ai"
   landing_html    = replace(file("${path.module}/landing.html"), "__HOSTNAME__", var.hostname)
+  legal_shell     = file("${path.module}/legal.html")
+  privacy_html = replace(
+    replace(local.legal_shell, "__TITLE__", "Privacy Policy"),
+    "__BODY__", file("${path.module}/privacy.html"),
+  )
+  terms_html = replace(
+    replace(local.legal_shell, "__TITLE__", "Terms of Service"),
+    "__BODY__", file("${path.module}/terms.html"),
+  )
 }
 
 resource "cloudflare_d1_database" "waitlist" {
@@ -37,9 +46,17 @@ resource "cloudflare_workers_script" "edge" {
   script_name = var.name
   content = replace(
     replace(
-      file("${path.module}/worker.js"),
-      "\"__LANDING_HTML__\"",
-      jsonencode(local.landing_html),
+      replace(
+        replace(
+          file("${path.module}/worker.js"),
+          "\"__LANDING_HTML__\"",
+          jsonencode(local.landing_html),
+        ),
+        "\"__PRIVACY_HTML__\"",
+        jsonencode(local.privacy_html),
+      ),
+      "\"__TERMS_HTML__\"",
+      jsonencode(local.terms_html),
     ),
     "\"__WAITLIST_SENDER__\"",
     jsonencode(local.waitlist_sender),
