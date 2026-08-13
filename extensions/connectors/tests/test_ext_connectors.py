@@ -1687,7 +1687,7 @@ def _code_search(hits: int, spread: bool = False) -> dict[str, object]:
         "items": [
             {
                 "name": f"stage-{index}.md",
-                "path": f"docs/reference/stage-{index}.md",
+                "path": f"docs/handbook/stage-{index}.md",
                 "sha": f"{index:040x}",
                 "url": f"https://api.github.com/repositories/1292760912/contents/{index}",
                 "git_url": f"https://api.github.com/repositories/1292760912/git/blobs/{index}",

@@ -8,6 +8,7 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 - `DESIGN.md` — the member portal's visual and structural system.
 - `docs/contracts.md` — core contracts per unit (sections delete as code lands).
 - `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
+- `docs/handbook/` — generated stage-by-stage reference to the harness (start at `overview.md`).
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
 ## Run it
