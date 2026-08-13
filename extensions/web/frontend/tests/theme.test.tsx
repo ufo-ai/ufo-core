@@ -306,6 +306,15 @@ test("the wordmark is the drawn ufo mark in the sidebar", async () => {
   expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
 });
 
+test("the favicon contains only the square brand mark", () => {
+  const page = readFileSync(join(STATIC, "index.html"), "utf8");
+  const asset = /rel="icon" href="\/surface\/web\/static\/(assets\/ufo-mark-[^"]+\.svg)"/.exec(page);
+  if (!asset) throw new Error("the built page references no brand mark favicon");
+  const favicon = readFileSync(join(STATIC, asset[1]), "utf8");
+  expect(favicon).toContain('viewBox="0 0 46 46"');
+  expect(favicon.match(/<path /g)).toHaveLength(3);
+});
+
 test("a field shows the member that it is disabled, or that they left it invalid", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain("disabled\\:cursor-not-allowed:disabled{cursor:not-allowed}");
