@@ -1,0 +1,50 @@
+[
+  {
+    "event": "message",
+    "data": "{\"text\":\"Looking at the workspace…\"}"
+  },
+  {
+    "event": "tool",
+    "data": "{\"tool\":\"bash\",\"preview\":\"ls -la\",\"description\":\"Listing the workspace\"}"
+  },
+  {
+    "event": "skill",
+    "data": "{\"skill\":\"calendar-triage\"}"
+  },
+  {
+    "event": "cost",
+    "data": "{\"cost_micro_usd\":110,\"tokens\":12}"
+  },
+  {
+    "event": "absorbed",
+    "data": "{\"arrivals\":[\"88888888-8888-4888-8888-888888888888\"]}"
+  },
+  {
+    "event": "subagent",
+    "data": "{\"profile\": \"deep_research\", \"conversation_id\": \"55555555-5555-4555-8555-555555555555\", \"events\": [{\"kind\": \"note\", \"text\": \"checking the calendar\"}], \"output\": \"found it\", \"subagents\": []}"
+  },
+  {
+    "event": "connect_error",
+    "data": "{\"message\": \"Connection request unavailable; ask me to connect again.\"}"
+  },
+  {
+    "event": "connect",
+    "data": "{\"url\": \"https://connect.example/authorize?state=abc\"}"
+  },
+  {
+    "event": "credentials",
+    "data": "{\"reason\": \"Exa search needs a key\", \"sealed\": \"sealed-blob\", \"prompts\": [{\"slot\": \"exa_api_key\", \"prompt\": \"Paste your Exa key\"}]}"
+  },
+  {
+    "event": "files",
+    "data": "{\"files\": [{\"filename\": \"quarterly report.pdf\", \"subject\": \"report\", \"size_bytes\": 2048, \"url\": \"https://ws.example/artifacts/a?exp=1&sig=2\"}]}"
+  },
+  {
+    "event": "terminal",
+    "data": "{\"status\":\"done\",\"text\":\"Looked it over.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":40,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null}"
+  },
+  {
+    "event": "parked",
+    "data": "{\"message\":\"Spend cap reached; the turn resumes when the cap is raised.\"}"
+  }
+]

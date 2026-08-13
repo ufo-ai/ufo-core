@@ -1,0 +1,21 @@
+{"wire": "workspace", "verb": "ask", "fields": [">"], "line": "ask\t>"}
+{"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
+{"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
+{"wire": "workspace", "verb": "install", "fields": [], "line": "install"}
+{"wire": "workspace", "verb": "note", "fields": ["running bash: ls"], "line": "note\trunning bash: ls"}
+{"wire": "workspace", "verb": "poll", "fields": ["1"], "line": "poll\t1"}
+{"wire": "workspace", "verb": "run", "fields": ["op-1", "exec", "exec", "120", "", "{\"argv\":[\"ls\"]}"], "line": "run\top-1\texec\texec\t120\t\t{\"argv\":[\"ls\"]}"}
+{"wire": "workspace", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
+{"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "exa_api_key", "Paste your Exa key"], "line": "secret\tsealed-blob\texa_api_key\tPaste your Exa key"}
+{"wire": "workspace", "verb": "since", "fields": ["turn-1", "cursor-9"], "line": "since\tturn-1\tcursor-9"}
+{"wire": "workspace", "verb": "status", "fields": ["12 tok - $0.000110"], "line": "status\t12 tok - $0.000110"}
+{"wire": "workspace", "verb": "txt", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "txt\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
+{"wire": "workspace", "verb": "you", "fields": ["what I said"], "line": "you\twhat I said"}
+{"wire": "onboard", "verb": "ask", "fields": ["Enter your work email:"], "line": "ask\tEnter your work email:"}
+{"wire": "onboard", "verb": "choose", "fields": ["Which workspace?", "acme", "beta LLC"], "line": "choose\tWhich workspace?\tacme\tbeta LLC"}
+{"wire": "onboard", "verb": "debugger", "fields": ["https://ws.example/surface/debug"], "line": "debugger\thttps://ws.example/surface/debug"}
+{"wire": "onboard", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
+{"wire": "onboard", "verb": "install", "fields": [], "line": "install"}
+{"wire": "onboard", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
+{"wire": "onboard", "verb": "token", "fields": ["bearer.value"], "line": "token\tbearer.value"}
+{"wire": "onboard", "verb": "workspace", "fields": ["https://ws.example"], "line": "workspace\thttps://ws.example"}

@@ -45,26 +45,6 @@ PORTAL_CLASS_REFUSALS = (
 RAW_CSS_VALUE = re.compile(
     r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
 )
-WORKSPACE_WIRE = frozenset(
-    {
-        "txt",
-        "note",
-        "status",
-        "say",
-        "you",
-        "ask",
-        "exit",
-        "file",
-        "secret",
-        "since",
-        "poll",
-        "run",
-        "install",
-    }
-)
-ONBOARD_WIRE = frozenset(
-    {"say", "ask", "choose", "exit", "token", "workspace", "debugger", "install"}
-)
 UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
 GATEWAY_DIRECTIVES_MODULE = Path("control/src/ufo_control/gateway_directives.py")
 GATEWAY_MODULES = (Path("control/src/ufo_control/gateway.py"), GATEWAY_DIRECTIVES_MODULE)
@@ -828,7 +808,11 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
     emits is in its wire's table, every table verb is emitted, and every client of a wire handles
     its whole vocabulary minus the drops it declares. The two `directive()` codecs — the ufo
     surface's and the gateway's, one per package — must stay byte-for-byte the same shape, since a
-    field escaped by one and not the other splits the line framing every client parses."""
+    field escaped by one and not the other splits the line framing every client parses. The verb
+    tables live in `ufo_testsupport.wire_fixture`, the same home the golden fixture every client
+    replays is generated from."""
+    from ufo_testsupport.wire_fixture import ONBOARD_WIRE, WORKSPACE_WIRE
+
     failures: list[str] = []
     surface = trees.get(UFO_SURFACE_MODULE)
     if surface is None:

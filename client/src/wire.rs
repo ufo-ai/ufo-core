@@ -558,6 +558,92 @@ mod tests {
         assert_eq!(parse_line("mystery"), Directive::Unknown);
     }
 
+    #[derive(serde::Deserialize)]
+    struct FixtureRow {
+        verb: String,
+        fields: Vec<String>,
+        line: String,
+    }
+
+    /// The parsed directive mapped back to its wire spelling. Exhaustive on purpose: a new
+    /// variant fails to compile here until the fixture row that proves it exists.
+    fn canonical(directive: &Directive) -> Option<(&'static str, Vec<String>)> {
+        match directive {
+            Directive::Say(text) => Some(("say", vec![text.clone()])),
+            Directive::You(text) => Some(("you", vec![text.clone()])),
+            Directive::Note(text) => Some(("note", vec![text.clone()])),
+            Directive::Txt(text) => Some(("txt", vec![text.clone()])),
+            Directive::Status(text) => Some(("status", vec![text.clone()])),
+            Directive::Ask(prompt) => Some(("ask", vec![prompt.clone()])),
+            Directive::Choose { prompt, options } => {
+                let mut fields = vec![prompt.clone()];
+                fields.extend(options.iter().cloned());
+                Some(("choose", fields))
+            }
+            Directive::Secret {
+                sealed,
+                slot,
+                prompt,
+            } => Some(("secret", vec![sealed.clone(), slot.clone(), prompt.clone()])),
+            Directive::Poll(seconds) => Some(("poll", vec![format!("{seconds}")])),
+            Directive::Since(cursor) => {
+                Some(("since", cursor.splitn(2, ':').map(str::to_string).collect()))
+            }
+            Directive::Run(op) => Some((
+                "run",
+                vec![
+                    op.op_id.clone(),
+                    op.kind.clone(),
+                    op.name.clone(),
+                    op.timeout_s.to_string(),
+                    op.arg.clone(),
+                    op.params.clone(),
+                ],
+            )),
+            Directive::Token(token) => Some(("token", vec![token.clone()])),
+            Directive::Workspace(url) => Some(("workspace", vec![url.clone()])),
+            Directive::Install => Some(("install", vec![])),
+            Directive::File { name, size, url } => {
+                Some(("file", vec![name.clone(), size.clone(), url.clone()]))
+            }
+            Directive::Exit(code) => Some(("exit", vec![code.to_string()])),
+            Directive::Unknown => None,
+        }
+    }
+
+    #[test]
+    fn replays_the_wire_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/directives.jsonl"
+        );
+        let raw = std::fs::read_to_string(path).expect("wire fixture missing");
+        let mut replayed = 0;
+        let mut dropped = 0;
+        for line in raw.lines() {
+            let row: FixtureRow = serde_json::from_str(line).expect("fixture row");
+            let parsed = parse_line(&row.line);
+            match canonical(&parsed) {
+                Some((verb, fields)) => {
+                    assert_eq!(verb, row.verb, "line {:?}", row.line);
+                    assert_eq!(fields, row.fields, "verb {:?}", row.verb);
+                    replayed += 1;
+                }
+                None => {
+                    assert_eq!(
+                        row.verb, "debugger",
+                        "verb {:?} parsed to Unknown",
+                        row.verb
+                    );
+                    dropped += 1;
+                }
+            }
+        }
+        assert_eq!(replayed + dropped, raw.lines().count());
+        assert_eq!(dropped, 1);
+        assert!(replayed > 0);
+    }
+
     #[test]
     fn endpoint_switches_on_workspace() {
         let mut session = Session::new(
