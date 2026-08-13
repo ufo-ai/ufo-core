@@ -59,7 +59,9 @@ from ufo_control.gateway_workos import (
     AuthCarry,
     VerificationError,
     console_signin_page,
+    open_session,
     pack_state,
+    seal_session,
     unpack_state,
     workos_console_mode,
     workos_verifier_from_env,
@@ -116,19 +118,24 @@ class Onboarding:
     invite_required: bool
 
     async def advance(self, channel: str, session: str, body: str, install: bytes) -> bytes:
-        """The browser never types its email: a page with no claim behind it is sent through
-        AuthKit, which is where the address and the proof of it come from. Every other channel
-        collects the address and confirms the code WorkOS mailed for it."""
+        """One machine for every surface. A session with no claim collects the work email and the
+        code WorkOS mailed for it — the browser on our own `/login` page, exactly as the terminal
+        does — a verified claim resolves a workspace and mints the bearer. The browser reaches a
+        verified claim either that way or from the Google hop the callback stamps; nothing outside
+        this machine ever collects the address, so the work-email policy runs before any code."""
         claim = await self.store.live_claim(channel, session)
         if claim is None:
-            if channel == WEB_CHANNEL:
-                return render(install, directive("auth", AUTH_START_PATH))
             return await self._collect_email(channel, session, body, install)
         if claim.verified_at is None:
             return await self._verify_code(claim, body, install)
         return await self._resolve(claim, body, install)
 
     async def _collect_email(self, channel: str, session: str, body: str, install: bytes) -> bytes:
+        """The email step both surfaces share: an empty turn asks for the address, a submitted one
+        validates the work-email policy through `ClaimWorkflow.start` and, only once it passes, has
+        WorkOS mail the code — so a denylisted address is refused with no code sent. Home-realm SSO
+        discovery (routing a domain that has a WorkOS connection to its organization's authorize
+        instead of Magic Auth) branches here, before the code is sent; it is not built yet."""
         if not body:
             return render(
                 install,
@@ -314,6 +321,21 @@ async def _request_body(request: Request) -> str:
     return bytes(body).decode("utf-8", "replace").strip()
 
 
+def _onboard_session(request: Request, secret: str) -> str | None:
+    """The sealed `__Host-ufo_onboard` session the request carries. The `__Host-` prefix makes the
+    cookie host-only and un-plantable across hosts, so the browser holds at most one; reading every
+    cookie of that name and honoring the one that opens under our signature is belt against a
+    forged or duplicate value. The sealed value is the id the claim is keyed by, returned as-is;
+    only a value that opens under our signature is trusted, and a request carrying none is answered
+    with a freshly minted session instead."""
+    header = request.headers.get("cookie", "")
+    for part in header.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == ONBOARD_SESSION_COOKIE and open_session(value, secret) is not None:
+            return value
+    return None
+
+
 def gateway_app() -> FastAPI:
     state: GatewayState | None = None
 
@@ -396,15 +418,17 @@ def gateway_app() -> FastAPI:
 
     @app.get(AUTH_START_PATH)
     async def auth_start(request: Request) -> Response:
-        """The page's first act. The onboarding session is minted here and bound to this browser as
-        the cookie the page cannot read, never taken from the query: the id that keys the claim the
-        callback verifies reaches nothing but the browser that signed in, so no one else can name a
-        session to have a verified email written under. Packing the carry and unpacking it again is
-        the validation: a conversation or artifact the query invented is dropped here, under the
-        same rules the callback reads it back by, so the state carries only what will be honored."""
+        """The `Continue with Google` button's target: it mints the onboarding session, binds it to
+        this browser as the cookie the page cannot read (never taken from the query), and 302s to
+        WorkOS with `provider=GoogleOAuth`, so WorkOS goes straight to Google with no hosted page.
+        The id that keys the claim the callback verifies reaches nothing but the browser that signed
+        in, so no one else can name a session to have a verified email written under. Packing the
+        carry and unpacking it again is the validation: a conversation or artifact the query
+        invented is dropped here, under the same rules the callback reads it back by, so the state
+        carries only what will be honored."""
         assert state is not None
         secret = state.onboarding.token_secret
-        session = secrets.token_urlsafe(ONBOARD_SESSION_BYTES)
+        session = seal_session(secrets.token_urlsafe(ONBOARD_SESSION_BYTES), secret)
         carry = unpack_state(
             pack_state(
                 AuthCarry(
@@ -426,21 +450,21 @@ def gateway_app() -> FastAPI:
 
         @app.get(AUTH_CONSOLE_PATH)
         async def auth_console(request: Request) -> Response:
-            """The local stand-in for AuthKit, mounted only under `WORKOS_MODE=console`: the dev
-            enters a work email that the callback reads as the code. The cookie the start path set
-            still binds the return, so the walk past this page is the one a real return takes."""
+            """The local stand-in for the Google hop, mounted only under `WORKOS_MODE=console`: the
+            dev enters a work email that the callback reads as the code. The cookie the start path
+            set still binds the return, so the walk past this page is a real return's own."""
             return HTMLResponse(console_signin_page(request.query_params.get("state", "")))
 
     @app.get(AUTH_CALLBACK_PATH)
     async def auth_callback(request: Request) -> Response:
-        """AuthKit's return, honored only in the browser that left: the state has to be one this
-        gateway signed, and the session it names has to be the one the start path bound as the
+        """The Google hop's return, honored only in the browser that left: the state has to be one
+        this gateway signed, and the session it names has to be the one the start path bound as the
         cookie, so a state a caller wrote — or one of ours replayed anywhere else — verifies nothing
-        and writes no claim under a session someone chose. The email WorkOS verified
-        passes the same work-email policy a typed address does, and a refusal rides back to the page
-        as a sentence rather than a status: the page is where the member reads it. A callback for a
-        session that already holds a claim resolves that claim, so a repeated return signs the same
-        member in."""
+        and writes no claim under a session someone chose. The email the Google account carries
+        passes the same work-email policy a typed address does, so a personal `@gmail.com` Google
+        account is refused; the refusal rides back to the page as a sentence rather than a status,
+        the page where the member reads it. A callback for a session that already holds a claim
+        resolves that claim, so a repeated return signs the same member in."""
         assert state is not None
         code = request.query_params.get("code", "")
         try:
@@ -454,9 +478,13 @@ def gateway_app() -> FastAPI:
             query.append(("c", carry.conversation))
         if carry.artifact:
             query.append(("a", carry.artifact))
-        bound = request.cookies.get(ONBOARD_SESSION_COOKIE, "").encode()
+        bound = _onboard_session(request, state.onboarding.token_secret)
         try:
-            if not code or not secrets.compare_digest(bound, carry.session.encode()):
+            if (
+                not code
+                or bound is None
+                or not secrets.compare_digest(bound.encode(), carry.session.encode())
+            ):
                 raise VerificationError(SIGN_IN_FAILED)
             email = await state.onboarding.verifier.exchange(code)
             await state.onboarding.claims.admit_verified(email, WEB_CHANNEL, carry.session)
@@ -467,12 +495,26 @@ def gateway_app() -> FastAPI:
 
     @app.post("/v1/onboard/web")
     async def onboard_web(request: Request) -> Response:
-        """The page's session is the cookie sign-in bound, never a value the caller names, so the
-        claim behind a verified email advances for that browser alone. A request arriving without
-        the cookie carries no session, no claim stands behind it — one is only ever written under a
-        minted id — and the machine answers with the hop that mints one."""
+        """The page's session is the `__Host-ufo_onboard` cookie the gateway mints and seals
+        server-side. Two things keep a verified email bound to the browser that earned it, so a
+        planted value can never key its claim. The `__Host-` prefix is host-only by the cookie
+        the browser enforces: it refuses to set such a cookie with a `Domain`, and no sibling
+        `<label>.flyingobject.ai` can write the app host's copy — so the value cannot be planted
+        across hosts at all. And a presented cookie is trusted only to *continue* a claim it already
+        keys: a claim is only ever started under a session freshly minted here, so even a validly
+        sealed value a caller obtained by asking (the `Set-Cookie` of a bare turn) is discarded and
+        re-minted unless it already stands behind a live claim. The cookie is `HttpOnly`, `Secure`,
+        `SameSite=lax`, `Path=/`, no `max_age`; a Google return has already bound its claim at the
+        start path. Nothing a client sends can name the session a verified email is written
+        under."""
         assert state is not None
-        session = request.cookies.get(ONBOARD_SESSION_COOKIE, "")
+        secret = state.onboarding.token_secret
+        store = state.onboarding.store
+        session = _onboard_session(request, secret)
+        minted = ""
+        if session is None or await store.live_claim(WEB_CHANNEL, session) is None:
+            session = seal_session(secrets.token_urlsafe(ONBOARD_SESSION_BYTES), secret)
+            minted = session
         try:
             body = await _request_body(request)
             payload = await state.onboarding.advance(WEB_CHANNEL, session, body, b"")
@@ -481,7 +523,10 @@ def gateway_app() -> FastAPI:
         except Exception:
             logger.exception("onboard.failed channel=%s", WEB_CHANNEL)
             payload = render(directive("say", "Onboarding failed."), directive("exit", "1"))
-        return JSONResponse({"directives": parse_directives(payload)})
+        response = JSONResponse({"directives": parse_directives(payload)})
+        if minted:
+            set_session_cookie(response, ONBOARD_SESSION_COOKIE, minted, samesite="lax")
+        return response
 
     @app.post("/v1/onboard/{channel}")
     async def onboard(channel: str, request: Request) -> Response:

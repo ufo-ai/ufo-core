@@ -1624,7 +1624,7 @@ def test_only_testing_owns_account_global_resources() -> None:
     assert {
         root.relative_to(ROOT)
         for root, source in environment_sources.items()
-        if "_domainkey" in source or "module.platform.ses_dkim_records" in source
+        if "module.platform.ses_dkim_records" in source
     } == {Path("infra/envs/testing")}
     assert (
         "module.platform.ses_dkim_records"

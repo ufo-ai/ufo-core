@@ -20,7 +20,7 @@ browser ------>|  waitlist -> D1 + mail queue               |
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
 browser ------>|  GET /login -> sign-in page (app host)     |
-               |  GET /v1/onboard/auth/* -> WorkOS AuthKit  |
+               |  GET /v1/onboard/auth/* -> WorkOS (Google) |
                |  POST /v1/onboard/{channel} (web = JSON)   |
                |       |                                    |
                |       v                                    |
@@ -86,8 +86,9 @@ Onboarding.advance(channel, session, body, install)
 WorkOS answers one question: does this person control this address. The terminal channel applies the
 work-email denylist, then posts the address to Magic Auth, which emails the six-digit code and owns
 its expiry and attempt count — a wrong code leaves the prompt standing, and a code WorkOS will not
-redeem again ends the claim, so the member starts over. The browser channel collects neither the
-email nor the code (see "Web login"). The gateway reads `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, and
+redeem again ends the claim, so the member starts over. The browser channel collects the same email
+and code on its own page, or takes the `Continue with Google` hop (see "Web login") — either way the
+denylist runs before anything is sent. The gateway reads `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, and
 `WORKOS_REDIRECT_URI` at startup and refuses to start without all three. Everything past the
 verified address is the gateway's own: the claim, the resolution below, the invite gate, and the
 bearer.
@@ -230,44 +231,52 @@ Same route, same act, same cookie as the hosted card — the deploy differs, the
 `ufoctl serve` names the portal and that verb at startup.
 
 `GET /login` serves a self-contained sign-in page — a second renderer of the identical
-`Onboarding` machine, never a second machine. The page names no session at all: sign-in mints one
-and binds it as the `ufo_onboard` cookie, so the page sends each answer to the same-origin
-`POST /v1/onboard/web` (that cookie, channel `web` — the claim index isolates it from a terminal
-session with the same ref), and receives the directive lines as JSON
+`Onboarding` machine, never a second machine. The page names no session at all:
+`POST /v1/onboard/web` mints the `__Host-ufo_onboard` cookie server-side (host-only by the
+`__Host-` prefix the browser enforces, so no sibling host can plant it — `HttpOnly`, `Secure`,
+`SameSite=lax`, `Path=/`, no `max_age`) whenever the presented cookie stands behind no live claim,
+so a claim is only started under a session minted here and keyed by it, and every answer the page
+sends rides that same-origin POST under that cookie (channel `web` — the claim index isolates
+it from a terminal session with the same ref) and comes back as JSON directives
 (`gateway_web.parse_directives` inverts the wire escaping exactly). It renders `say`/`ask`/`exit`
 and, on `token` + `workspace`, a signed-in home card: the member's email, the workspace URL, and
 the terminal install one-liner. No `install` preamble is sent on the web channel, and the token
 never appears in a human-visible line.
 
-A web session with no claim gets one directive, `auth`, naming `GET /v1/onboard/auth/start`. The
-page navigates top-level there with its `?c=`/`?a=` carry, and `start` mints the onboarding session,
-binds it to that browser as the `ufo_onboard` cookie, and 302s to AuthKit's authorization URL with
-the session and the carry packed into the OAuth `state` under an HMAC signature — a conversation id
-that is not a uuid and a target that is not an artifact path are dropped before they ride it. The
-member authenticates on the WorkOS-hosted page. `GET /v1/onboard/auth/callback` requires the state's
-signature and requires the session it names to be the one that browser holds in the cookie,
-exchanges the returned code for the verified email, applies the work-email denylist to it, inserts
-the claim already verified, and 303s to `/login` with the carry — or with `?error=` and the sentence
-that refused, which the page states over a `Sign in again` link. The page resumes the machine under
-the same cookie, `advance` finds a verified claim, and resolution continues as the terminal's does.
-A second callback on the same session returns the claim already there, so a replayed link signs the
+A web session with no claim is asked for its work email, exactly as the terminal is: the address
+runs `WorkEmailPolicy` and only then does Magic Auth mail the code — a denylisted address is refused
+with no code sent — the code confirms, and resolution continues. `Continue with Google` is the one
+act that leaves the page: it navigates top-level to `GET /v1/onboard/auth/start` with the
+`?c=`/`?a=` carry, and `start` mints and binds that same `__Host-ufo_onboard` cookie and 302s to WorkOS
+with `provider=GoogleOAuth`, the session and carry packed into the OAuth `state` under an HMAC
+signature — a conversation id that is not a uuid and a target that is not an artifact path are
+dropped before they ride it. WorkOS goes straight to Google, with no hosted page in between.
+`GET /v1/onboard/auth/callback` requires the state's signature and requires the session it names to
+be the one that browser holds in the cookie, exchanges the returned code for the account's email,
+applies the same work-email denylist — so a personal Google account is refused — inserts the claim
+already verified, and 303s to `/login` with the carry, or with `?error=` and the sentence that
+refused, which the page states over a `Sign in again` link. The page resumes the machine under the
+same cookie, `advance` finds a verified claim, and resolution continues as the terminal's does. A
+second callback on the same session returns the claim already there, so a replayed link signs the
 same member in rather than starting over.
 
-The session id is the whole of what stands behind a verified email, so it is minted server-side and
-reaches only the browser that signed in: no query states it, the page cannot read it, only a state
-this gateway signed can name it, and the callback writes a claim for no session but the one the
-cookie names. A session another party chose therefore keys nothing — the bearer it would otherwise
-hand out is the workspace credential itself.
-Both routes sit under `/v1/onboard`, so the reserved prefixes and the nginx map already reach them,
-and `WORKOS_REDIRECT_URI` names the app-host callback the rest of the flow is already on.
+The session id is the whole of what stands behind a verified email, so it is minted server-side —
+by the web POST on the first email turn, or by `start` on the Google hop — and reaches only the
+browser that signed in: no query states it, the page cannot read it, the callback honors only a
+session a state this gateway signed names and the cookie holds, and no email claim is keyed by a
+value the caller sends. A session another party chose therefore keys nothing — the bearer it would
+otherwise hand out is the workspace credential itself. The email POST and both auth routes sit under
+`/v1/onboard`, so the reserved prefixes and the nginx map already reach them, and
+`WORKOS_REDIRECT_URI` names the app-host callback the rest of the flow is already on.
 
 `WORKOS_MODE=console` runs a credential-free dev verifier, so `docker compose up` needs no WorkOS
-keys — the default for the local stack. `start` then 302s to `/v1/onboard/auth/console`, a plain
-email form the gateway serves in place of AuthKit, whose GET reaches the same callback carrying the
-typed address as the code; the cookie binding, the signed state, and every step past the identity
-proof are the deploy's own. Terminal sign-in in console mode logs its code (`000000`) rather than
-emailing it. The route is mounted only under `WORKOS_MODE=console`; the default `workos` mode
-requires the three `WORKOS_*` values at boot and serves no such door.
+keys — the default for the local stack. The inline email step logs its code (`000000`) through the
+console verifier rather than mailing it, and `Continue with Google` 302s to
+`/v1/onboard/auth/console`, a plain email form the gateway serves in place of the WorkOS hop, whose
+GET reaches the same callback carrying the typed address as the code; the cookie binding, the signed
+state, and every step past the identity proof are the deploy's own. Terminal sign-in in console mode
+logs its code the same way. The route is mounted only under `WORKOS_MODE=console`; the default
+`workos` mode requires the three `WORKOS_*` values at boot and serves no such door.
 
 When the claim's channel-verified email domain equals `OPERATOR_EMAIL_DOMAIN`, `_signed_in` adds
 one extra machine-consumed directive — `debugger <workspace-url>/surface/debug` — and the card
@@ -438,7 +447,7 @@ control/src/ufo_control/
   gateway_directives.py   the directive wire the client renders
   gateway_web.py          the /login page + JSON rendering of the same wire
   gateway_claim.py        the claim under its TTL: start, verify, admit verified
-  gateway_workos.py       WorkOS custody: the AuthKit hop and Magic Auth codes
+  gateway_workos.py       WorkOS custody: the Google hop and Magic Auth codes
   gateway_invite.py       one-time domain grants gating workspace creation
   gateway_slack_connect.py
                           the signup Slack Connect delivery: table, client, leased workflow

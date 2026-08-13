@@ -112,8 +112,9 @@ spec:
             - name: UFO_CONTROL_SERVE_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-serve, key: UFO_CONTROL_SERVE_DSN}
-            # WorkOS verifies the member's email — AuthKit for the browser, Magic Auth for the
-            # terminal. The gateway refuses to start without all three. The redirect URI is the app
+            # WorkOS verifies the member's email — Magic Auth for the email step both surfaces
+            # collect, a Google OAuth hop for the browser's Continue-with-Google. The gateway
+            # refuses to start without all three. The redirect URI is the app
             # host's own callback, where the ingress routes /v1/onboard to this pod, and the same
             # string is registered in this deploy's WorkOS environment.
             - {name: WORKOS_REDIRECT_URI, value: "https://${shared_host}/v1/onboard/auth/callback"}

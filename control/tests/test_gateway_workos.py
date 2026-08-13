@@ -1,8 +1,9 @@
-"""The verifier's two halves: the state codec that carries an onboarding session through AuthKit,
-and how WorkOS's own answers are graded. The grading runs against the real SDK — its request
+"""The verifier's two halves: the state codec that carries an onboarding session through the Google
+hop, and how WorkOS's own answers are graded. The grading runs against the real SDK — its request
 builder, its status-to-exception mapping, its models — with only the network scripted, because the
 distinction the flow turns on (a code the member may retype versus a refusal) is read off the
-error payload WorkOS actually sends."""
+error payload WorkOS actually sends, and the Google hop's provider string is the one the SDK builds
+into the authorization URL WorkOS receives."""
 
 import re
 import subprocess
@@ -27,7 +28,9 @@ from ufo_control.gateway_workos import (
     VerificationError,
     WorkosVerifier,
     console_signin_page,
+    open_session,
     pack_state,
+    seal_session,
     unpack_state,
     workos_console_mode,
     workos_verifier_from_env,
@@ -134,6 +137,18 @@ def test_state_refuses_a_carry_this_gateway_did_not_sign() -> None:
     assert unpack_state(packed, STATE_SECRET) == carry
 
 
+def test_a_sealed_cookie_opens_only_under_our_signature() -> None:
+    """The `__Host-ufo_onboard` cookie carries the minted session under a signature, so a value the
+    gateway did not seal opens to nothing and keys no claim: the sealed value round-trips, but a
+    raw id a caller chose, a session swapped under a signature that was ours, and a seal from
+    another secret each open to None."""
+    sealed = seal_session("minted", STATE_SECRET)
+    assert open_session(sealed, STATE_SECRET) == "minted"
+    swapped = f"chosen{STATE_SEPARATOR}{sealed.partition(STATE_SEPARATOR)[2]}"
+    for value in ("chosen", swapped, seal_session("minted", "another-secret")):
+        assert open_session(value, STATE_SECRET) is None
+
+
 def test_verifier_from_env_fails_loud_without_each_of_the_three(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -189,9 +204,12 @@ def test_an_unknown_workos_mode_fails_loud(monkeypatch: pytest.MonkeyPatch) -> N
         workos_verifier_from_env()
 
 
-def test_the_authorization_url_names_authkit_the_callback_and_the_state() -> None:
+def test_the_authorization_url_names_google_the_callback_and_the_state() -> None:
+    """The `Continue with Google` hop names `provider=GoogleOAuth`, so WorkOS routes straight to
+    Google with no hosted page in between. The real SDK builds the URL, so the provider string is
+    the one WorkOS actually receives."""
     url = _verifier(200, AUTHENTICATED_BODY).authorization_url("packed-state")
-    assert "provider=authkit" in url
+    assert "provider=GoogleOAuth" in url
     assert "state=packed-state" in url
     assert f"client_id={CLIENT_ID}" in url
     assert "response_type=code" in url

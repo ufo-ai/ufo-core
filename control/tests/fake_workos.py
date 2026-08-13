@@ -21,7 +21,7 @@ class FakeVerifier:
     begin_fails: bool = False
 
     def authorization_url(self, state: str) -> str:
-        return f"/authkit-test?state={state}"
+        return f"/workos-google?state={state}"
 
     async def exchange(self, code: str) -> str:
         try:

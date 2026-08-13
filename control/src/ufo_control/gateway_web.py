@@ -2,11 +2,20 @@
 
 `GET /login` serves a self-contained sign-in page; `POST /v1/onboard/web` advances the identical
 `Onboarding` state machine (the claim row keyed by the onboarding session) and returns the directive
-lines as JSON — a second renderer, never a second machine. Sign-in opens on the machine's `auth`
-directive: the page leaves for the start path the directive names, which mints the session, binds it
-to that browser as the `ufo_onboard` cookie, redirects through AuthKit and returns to `/login`. The
-session id is never typed, named, or read by the page, so nothing outside the browser that signed in
-can name the session the verified claim is keyed to; the page's POSTs carry the cookie same-origin.
+lines as JSON — a second renderer, never a second machine. The browser collects the work email and
+the code inline, exactly as the terminal does: the machine's `say`/`ask` directives render as the
+transcript and the next input, so the page reads and answers them and never leaves for a hosted
+sign-in page. The session is the `__Host-ufo_onboard` cookie the gateway mints and seals
+server-side — `__Host-`, so the browser keeps it host-only and refuses to let a sibling host plant
+it. `POST /v1/onboard/web` mints a fresh one whenever the presented cookie stands behind no live
+claim, so a claim is only ever started under a session minted here and bound to this browser from
+the submit that starts it; the id is never typed, named, or read by the page, so nothing outside
+that browser can name the session the verified claim is keyed to, and the page's POSTs carry the
+cookie same-origin. `Continue with Google` navigates top-level to
+`GET /v1/onboard/auth/start`, which mints the same cookie, signs the carry into the OAuth state, and
+302s to WorkOS with `provider=GoogleOAuth` — WorkOS goes straight to Google, no hosted page — and
+the callback stamps the claim verified and 303s back here, where the machine resumes.
+
 The page renders `/login?error=<sentence>` as the refusal above a `Sign in again`
 link. It renders `say` as transcript lines — reading the member's email off the machine's own
 `Signed in: ` line — `ask` as the next input, and `token`+`workspace` as the signed-in home card:
@@ -15,11 +24,12 @@ directive arrived (an operator-domain email only), a form that POSTs the token t
 session debugger, which exchanges it for its session cookie — the bearer never rides a URL.
 
 A conversation the portal redirected here with (`/login?c=<uuid>`) is carried onto the card's
-portal action, so the member lands on the conversation they clicked rather than a new chat. Only a
-uuid shape is carried, and it rides the hop's query out and back, so it survives the sign-in."""
+portal action and onto the Google hop, so the member lands on the conversation they clicked rather
+than a new chat. Only a uuid shape is carried, and it rides the hop's query out and back, so it
+survives the sign-in."""
 
 WEB_CHANNEL = "web"
-ONBOARD_SESSION_COOKIE = "ufo_onboard"
+ONBOARD_SESSION_COOKIE = "__Host-ufo_onboard"
 
 
 def parse_directives(payload: bytes) -> list[dict[str, object]]:
@@ -82,6 +92,11 @@ LOGIN_PAGE = r"""<!doctype html>
   button:disabled { opacity: 0.4; cursor: default; }
   a.button { display: inline-block; padding: 10px 18px; border-radius: 8px; background: CanvasText;
              color: Canvas; font-weight: 600; text-decoration: none; }
+  a.button.secondary { display: block; text-align: center; background: transparent;
+                       color: CanvasText;
+                       border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  #google-group { margin-top: 14px; }
+  .divider { text-align: center; font-size: 13px; opacity: 0.6; margin: 0 0 10px; }
   #home { display: none; }
   #portal-row { margin-top: 14px; }
   #debugger-row { display: none; margin-top: 14px; }
@@ -107,6 +122,10 @@ LOGIN_PAGE = r"""<!doctype html>
         <button type="submit" id="go">Continue</button>
       </div>
     </form>
+    <div id="google-group">
+      <div class="divider">or</div>
+      <a class="button secondary" id="google">Continue with Google</a>
+    </div>
   </section>
 
   <section class="card" id="home">
@@ -126,6 +145,7 @@ LOGIN_PAGE = r"""<!doctype html>
 </main>
 <script>
 const SIGNED_IN = 'Signed in: ';
+const START = '/v1/onboard/auth/start';
 const params = new URLSearchParams(location.search);
 const fault = params.get('error');
 const log = document.getElementById('log');
@@ -134,6 +154,7 @@ const promptLabel = document.getElementById('prompt-label');
 const answer = document.getElementById('answer');
 const choice = document.getElementById('choice');
 const go = document.getElementById('go');
+const googleGroup = document.getElementById('google-group');
 const target = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(
   new URLSearchParams(location.search).get('c') || '');
 const artifactRaw = new URLSearchParams(location.search).get('a') || '';
@@ -166,6 +187,7 @@ function prompt(text, options) {
   answer.style.display = choosing ? 'none' : 'block';
   choice.style.display = choosing ? 'block' : 'none';
   choice.replaceChildren(...(options || []).map((option) => new Option(option, option)));
+  googleGroup.style.display = !choosing && text.includes('email') ? 'block' : 'none';
   go.disabled = false;
   (choosing ? choice : answer).focus();
 }
@@ -173,6 +195,7 @@ function prompt(text, options) {
 function complete() {
   finished = true;
   promptRow.style.display = 'none';
+  googleGroup.style.display = 'none';
   document.getElementById('member-email').textContent = email || '';
   document.getElementById('workspace-url').textContent = workspace;
   const portal = document.getElementById('portal-row');
@@ -201,12 +224,6 @@ function handle(directive) {
   else if (directive.verb === 'token') token = arg;
   else if (directive.verb === 'workspace') workspace = arg;
   else if (directive.verb === 'debugger') debuggerUrl = arg;
-  else if (directive.verb === 'auth') {
-    const q = new URLSearchParams();
-    if (target) q.set('c', target[0]);
-    if (artifact) q.set('a', artifact);
-    location.assign(arg + (q.size ? '?' + q : ''));
-  }
   else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');
     finished = true;
@@ -243,6 +260,11 @@ promptRow.addEventListener('submit', (event) => {
   promptRow.style.display = 'none';
   advance(value);
 });
+
+const gq = new URLSearchParams();
+if (target) gq.set('c', target[0]);
+if (artifact) gq.set('a', artifact);
+document.getElementById('google').href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {
   line(fault, 'error');

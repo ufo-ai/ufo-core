@@ -1,7 +1,9 @@
-"""The browser's sign-in: the machine sends a claimless page through AuthKit, and the callback is
-the only thing that writes the claim behind it. The walk runs over the real `onboard_claim` table
-with WorkOS behind `FakeVerifier`, so what is asserted is the redirect, the carry, the cookie the
-session is bound by, and the row."""
+"""The browser's `Continue with Google` hop: the start path mints and binds the session and 302s to
+WorkOS with `provider=GoogleOAuth`, and the callback is the only thing that writes the verified
+claim behind it. The walk runs over the real `onboard_claim` table with WorkOS behind
+`FakeVerifier`, so what is asserted is the redirect, the carry, the cookie the session is bound by,
+and the row — a Google account whose email is a personal address is refused by the same work-email
+policy a typed address is."""
 
 import asyncio
 import base64
@@ -46,8 +48,8 @@ TOKEN_SECRET = "auth-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 CONVERSATION = "123e4567-e89b-12d3-a456-426614174000"
 ARTIFACT = "/artifacts/abc/report.html"
-GOOD_CODE = "authkit-code"
-OTHER_CODE = "authkit-code-2"
+GOOD_CODE = "google-code"
+OTHER_CODE = "google-code-2"
 PLANTED_SESSION = "attacker-chosen-session"
 
 
@@ -109,25 +111,12 @@ def _web_claim(dsn: str, session: str) -> asyncpg.Record | None:
     return asyncio.run(_read())
 
 
-def test_a_page_with_no_claim_is_sent_through_authkit(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The web channel never asks for an email: the one directive it answers with is the hop, so a
-    page that renders it cannot also be prompting for something the member would have to type."""
-    _configure(monkeypatch, tmp_path, gateway_postgres)
-    _verify_through(monkeypatch)
-    with _client() as client:
-        response = client.post("/v1/onboard/web", content="")
-    assert response.status_code == 200
-    assert response.json()["directives"] == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
-
-
 def test_start_mints_the_session_it_binds_and_carries_the_click(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The session in the state is the one the response binds as the cookie, and the cookie is
-    host-only, `HttpOnly`, `Secure`, and `SameSite=lax` — lax is load-bearing, since AuthKit returns
-    the member by a cross-site redirect a strict cookie would not ride."""
+    host-only, `HttpOnly`, `Secure`, and `SameSite=lax` — lax is load-bearing, since the Google hop
+    returns the member by a cross-site redirect a strict cookie would not ride."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     verifier = _verify_through(monkeypatch)
     with _client() as client:
@@ -142,9 +131,11 @@ def test_start_mints_the_session_it_binds_and_carries_the_click(
     )
     crumb = response.headers["set-cookie"]
     assert crumb.startswith(f"{ONBOARD_SESSION_COOKIE}={bound};")
+    assert crumb.startswith("__Host-")
     assert "; HttpOnly" in crumb
     assert "; Secure" in crumb
     assert "; SameSite=lax" in crumb
+    assert "; Path=/" in crumb
     assert "Domain=" not in crumb
 
 
@@ -182,7 +173,7 @@ def test_the_callback_writes_a_verified_claim_and_returns_the_carry(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure(monkeypatch, tmp_path, gateway_postgres)
-    email = "member@authkitco.io"
+    email = "member@googauthco.io"
     verifier = _verify_through(monkeypatch, **{GOOD_CODE: email})
     with _client() as client:
         start = client.get(AUTH_START_PATH, params={"c": CONVERSATION, "a": ARTIFACT})
@@ -204,7 +195,8 @@ def test_the_callback_writes_a_verified_claim_and_returns_the_carry(
 def test_the_callback_refuses_an_email_the_policy_denies(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """WorkOS proves the address; whether it is a work address is still ours to answer, and the
+    """Google proves the account's address; whether it is a work address is still ours to answer, so
+    a personal `@gmail.com` Google account is refused by the same policy a typed address is, and the
     refusal rides back as the sentence the page prints."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     _verify_through(monkeypatch, **{GOOD_CODE: "someone@gmail.com"})
@@ -292,7 +284,8 @@ def test_a_session_an_attacker_chose_never_carries_the_members_bearer(
     """The fixation the flow is closed against: the attacker picks a session, gets the member to
     open the start path with it, and then posts as that session from their own machine. The member
     signs in under the session the gateway minted and bound to their browser, so the planted id keys
-    no claim and the attacker's post is answered with the hop instead of the member's token."""
+    no claim, and the attacker's post — a cookie they set to the planted id — finds no claim and is
+    answered with the email prompt, never the member's token."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
     email = "member@fixationco.io"
@@ -306,16 +299,19 @@ def test_a_session_an_attacker_chose_never_carries_the_members_bearer(
     assert [entry["verb"] for entry in signed_in if entry["verb"] == "token"] == ["token"]
     with _client() as attacker:
         attacker.cookies.set(ONBOARD_SESSION_COOKIE, PLANTED_SESSION)
-        posted = attacker.post("/v1/onboard/web", content="")
-    assert posted.json()["directives"] == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
+        posted = attacker.post("/v1/onboard/web", content="").json()["directives"]
+    assert [entry["verb"] for entry in posted if entry["verb"] == "token"] == []
+    assert [entry["fields"][0] for entry in posted if entry["verb"] == "ask"] == [
+        "Enter your work email:"
+    ]
     assert _web_claim(gateway_postgres, PLANTED_SESSION) is None
 
 
 def test_a_repeated_callback_keeps_the_first_email(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """AuthKit returning twice for one session must not reopen the claim under a second address:
-    the session already holds a live one, so the second return resolves it."""
+    """The Google hop returning twice for one session must not reopen the claim under a second
+    address: the session already holds a live one, so the second return resolves it."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     first = "first@repeatco.io"
     _verify_through(monkeypatch, **{GOOD_CODE: first, OTHER_CODE: "second@repeatco.io"})
@@ -356,7 +352,8 @@ def test_the_page_resumes_the_machine_in_workspace_resolution(
 def test_console_mode_signs_in_through_the_local_page_without_workos(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Local dev with no WorkOS keys: the browser hop lands on the gateway's own email form, the
+    """Local dev with no WorkOS keys: the page asks for the email inline as everywhere, and the
+    `Continue with Google` hop lands on the gateway's own email form standing in for WorkOS, the
     address the dev types returns as the code, and the walk past it is the one a real return takes —
     claim written, workspace resolved, token minted."""
     monkeypatch.setenv(
@@ -371,7 +368,9 @@ def test_console_mode_signs_in_through_the_local_page_without_workos(
     email = "founder@localdev.io"
     with _client() as client:
         opening = client.post("/v1/onboard/web", content="")
-        assert opening.json()["directives"] == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
+        assert [f["fields"][0] for f in opening.json()["directives"] if f["verb"] == "ask"] == [
+            "Enter your work email:"
+        ]
         start = client.get(AUTH_START_PATH)
         assert start.status_code == 302
         console = start.headers["location"]
@@ -393,7 +392,7 @@ def test_the_console_page_is_not_mounted_under_the_workos_mode(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The dev stand-in exists only in console mode: a real deploy serves no such route, so the one
-    door to a signed claim is AuthKit's return."""
+    door to a signed claim through the Google hop is WorkOS's own return."""
     _configure(monkeypatch, tmp_path, gateway_postgres)
     _verify_through(monkeypatch)
     with _client() as client:

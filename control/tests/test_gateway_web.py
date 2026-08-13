@@ -1,15 +1,17 @@
 """The web renderer of the onboarding machine: the JSON directive wire, the sign-in page's
-self-containment, and the full walk from the `auth` hop through the callback to a signed-in card,
-over the real `onboard_claim` table and `SharedWorkspaces`. Both terminal shapes are asserted, since
-the page can only end on one of them: the signed-in card and a gate refusal that ends on `exit`. The
-`debugger` directive is asserted at both poles: emitted with the exact URL for an operator-domain
-email, absent for everyone else. Workspace resolution is asserted at all three of its poles too: a
-domain that creates a workspace, an exact membership at another domain, and a verified member
-choosing among multiple workspaces."""
+self-containment, and the full inline email/code walk to a signed-in card, over the real
+`onboard_claim` table and `SharedWorkspaces`. The browser collects the address and the code on our
+own page exactly as the terminal does, so the work-email policy runs before WorkOS is asked to mail
+anything: a denylisted address is refused with no code sent, which the gmail walk pins hard. The
+claim is keyed by the `__Host-ufo_onboard` cookie the gateway mints server-side, never a value the
+caller names or obtains by asking. Both terminal shapes the page can end on are asserted — the
+signed-in card and a gate refusal that ends on `exit` — as is the `debugger` directive at both
+poles, and workspace resolution at all
+three of its poles: a domain that creates a workspace, an exact membership at another domain, and a
+verified member choosing among multiple workspaces."""
 
 import asyncio
 import uuid
-from urllib.parse import parse_qs, urlparse
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import asyncpg
@@ -32,11 +34,13 @@ from ufo_control.gateway_directives import PROMPT, directive, render
 from ufo_control.gateway_invite import InviteCodes
 from ufo_control.gateway_shared import SERVE_DSN_ENV
 from ufo_control.gateway_web import LOGIN_PAGE, ONBOARD_SESSION_COOKIE, parse_directives
-from ufo_control.gateway_workos import AUTH_CALLBACK_PATH, AUTH_START_PATH
+from ufo_control.gateway_workos import AUTH_START_PATH, seal_session
 
 TOKEN_SECRET = "web-token-secret"
 WORKSPACE_URL = "https://app.testing.flyingobject.ai"
 SIGNED_IN = "Signed in: "
+EMAIL_PROMPT = "Enter your work email:"
+CODE_PROMPT = "Enter the code:"
 
 EXIT_IS_TERMINAL = """  else if (directive.verb === 'exit') {
     if (arg !== '0') line('Failed — reload to retry.', 'error');
@@ -54,9 +58,8 @@ REFUSAL_REPLACES_THE_WALK = """  log.appendChild(again);
   advance('');
 }"""
 """A refusal arrives as a page load, so it is the boot that must branch. Advancing the machine
-alongside the sentence takes the `auth` directive back — the page leaves for the sign-in again and
-the member never reads why they were refused, which is a bounce rather than a screen. The `else`
-is what keeps the two exclusive."""
+alongside the sentence would put an email field under the refusal the member came here to read; the
+`else` is what keeps the two exclusive."""
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, gateway_postgres: str) -> None:
@@ -109,6 +112,7 @@ def test_login_page_member_copy_is_the_fixed_copy() -> None:
         "<header>ufo</header>",
         "<h1>Sign in</h1>",
         ">Continue</button>",
+        ">Continue with Google</a>",
         "<h1>Signed in</h1>",
         ">Open your workspace</button>",
         "From your terminal:",
@@ -127,17 +131,19 @@ def test_login_page_asks_for_the_email_once() -> None:
     assert "work email" not in LOGIN_PAGE
 
 
-def test_login_page_leaves_for_the_start_path_the_auth_directive_names() -> None:
-    """Sign-in is a hop the page never spells: the `auth` directive carries the start path, so the
-    route can move without the page changing. The page names no session on the way out or back — the
-    start path mints it and binds it as the cookie every POST carries, so neither the page nor a URL
-    can decide which session a verified email lands under. The conversation and artifact carry ride
-    the hop's query."""
-    assert "directive.verb === 'auth'" in LOGIN_PAGE
-    assert "location.assign(arg + (q.size ? '?' + q : ''))" in LOGIN_PAGE
-    assert "if (target) q.set('c', target[0]);" in LOGIN_PAGE
-    assert "if (artifact) q.set('a', artifact);" in LOGIN_PAGE
-    assert AUTH_START_PATH not in LOGIN_PAGE
+def test_login_page_google_button_leaves_for_the_start_path() -> None:
+    """`Continue with Google` is a top-level navigation to the start path, carrying the conversation
+    and artifact the page loaded with so they survive the Google hop. The page still names no
+    session — the start path mints and binds it — so no query, storage, or header carries one, and
+    the retired `auth` directive is gone since the email step is inline now."""
+    assert AUTH_START_PATH in LOGIN_PAGE
+    assert 'id="google"' in LOGIN_PAGE
+    assert ">Continue with Google</a>" in LOGIN_PAGE
+    assert "const START = '/v1/onboard/auth/start';" in LOGIN_PAGE
+    assert "if (target) gq.set('c', target[0]);" in LOGIN_PAGE
+    assert "if (artifact) gq.set('a', artifact);" in LOGIN_PAGE
+    assert "google').href = START + (gq.size ? '?' + gq : '')" in LOGIN_PAGE
+    assert "directive.verb === 'auth'" not in LOGIN_PAGE
     assert "sessionStorage" not in LOGIN_PAGE
     assert "crypto.randomUUID" not in LOGIN_PAGE
     assert "x-ufo-session" not in LOGIN_PAGE
@@ -155,9 +161,9 @@ def test_login_page_states_a_refusal_and_offers_the_walk_again() -> None:
 
 
 def test_login_page_reads_the_signed_in_email_off_the_machines_own_line() -> None:
-    """The web member types no email — WorkOS holds the address — so the card's email is the
-    machine's own `Signed in:` line, the one
-    test_web_channel_walks_the_auth_hop_to_the_signed_in_card asserts it emits."""
+    """The card's email is the machine's own `Signed in:` line — the one
+    test_web_channel_walks_the_email_code_to_the_signed_in_card asserts it emits — so a Google
+    sign-in, where the member typed no address here, still names the right one."""
     assert f"const SIGNED_IN = '{SIGNED_IN}';" in LOGIN_PAGE
     assert "if (arg.startsWith(SIGNED_IN)) email = arg.slice(SIGNED_IN.length);" in LOGIN_PAGE
 
@@ -234,25 +240,34 @@ def _workspace_exists(dsn: str, workspace_id: UUID) -> bool:
     return asyncio.run(_read())
 
 
-def _sign_in(client: TestClient, code: str, carry: dict[str, str] | None = None) -> str:
-    """The hop the `auth` directive sends the page on, driven the way a browser drives it: the start
-    path, which mints the session and binds it to this client's jar, the state the hosted page hands
-    back, and the callback that stamps the claim verified. The returned `location` is the URL the
-    page reloads itself with."""
-    start = client.get(AUTH_START_PATH, params=carry or {}, follow_redirects=False)
-    assert start.status_code == 302
-    (packed,) = parse_qs(urlparse(start.headers["location"]).query)["state"]
-    landed = client.get(
-        AUTH_CALLBACK_PATH, params={"code": code, "state": packed}, follow_redirects=False
-    )
-    assert landed.status_code == 303
-    return landed.headers["location"]
+def _web_claim(dsn: str, session: str) -> asyncpg.Record | None:
+    async def _read() -> asyncpg.Record | None:
+        connection = await asyncpg.connect(dsn)
+        try:
+            return await connection.fetchrow(
+                "select email, verified_at from ufo_control.onboard_claim"
+                " where surface = 'web' and surface_ref = $1",
+                session,
+            )
+        finally:
+            await connection.close()
+
+    return asyncio.run(_read())
 
 
 def _advance(client: TestClient, body: str) -> list[dict[str, object]]:
     response = client.post("/v1/onboard/web", content=body)
     assert response.status_code == 200
     return response.json()["directives"]
+
+
+def _walk(client: TestClient, verifier: FakeVerifier, email: str) -> list[dict[str, object]]:
+    """The inline email/code walk a browser drives over `POST /v1/onboard/web`: the first turn mints
+    the cookie and asks for the email, the email turn has WorkOS mail the code, and the code turn
+    verifies. Returns the resolve turn's directives — a signed-in card or a workspace choice."""
+    _advance(client, "")
+    _advance(client, email)
+    return _advance(client, verifier.codes[email])
 
 
 def _fields(directives: list[dict[str, object]], verb: str) -> list[str]:
@@ -275,27 +290,27 @@ def _directive_fields(directives: list[dict[str, object]], verb: str) -> list[st
     return [str(field) for field in fields]
 
 
-def test_web_channel_walks_the_auth_hop_to_the_signed_in_card(
+def test_web_channel_walks_the_email_code_to_the_signed_in_card(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The page's whole walk: a claimless session is answered with `auth` and nothing else, the hop
-    lands the verified claim, and the reload the callback names resolves the workspace and caps the
-    card. The conversation the member was redirected here with rides out on the hop's query and
-    comes back on the return, so the card the page builds can still carry it."""
+    """The page's whole walk: a claimless session is asked for its email, the address has WorkOS
+    mail a code, the code lands the verified claim, and resolution caps the card. The browser types
+    the same two things the terminal does, so the machine, not a hosted page, is where the email is
+    read."""
     _configure(monkeypatch, gateway_postgres)
     email = "boss@webco.io"
-    conversation = str(uuid.uuid4())
     _grant(gateway_postgres, 71, email)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"landed": email}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
         opening = _advance(client, "")
-        assert opening == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
+        assert _fields(opening, "ask") == [EMAIL_PROMPT]
+        assert not _fields(opening, "token")
 
-        returned = _sign_in(client, "landed", {"c": conversation})
-        assert returned == f"/login?c={conversation}"
-        assert client.cookies[ONBOARD_SESSION_COOKIE] not in returned
+        coded = _advance(client, email)
+        assert _fields(coded, "ask") == [CODE_PROMPT]
+        assert verifier.begun == [email]
 
-        signed_in = _advance(client, "")
+        signed_in = _advance(client, verifier.codes[email])
 
     assert _fields(signed_in, "say") == [f"{SIGNED_IN}{email}"]
     (token,) = _fields(signed_in, "token")
@@ -309,6 +324,130 @@ def test_web_channel_walks_the_auth_hop_to_the_signed_in_card(
     assert _fields(signed_in, "ask") == [PROMPT]
 
 
+def test_web_channel_rejects_gmail_with_no_code_sent(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole reason the gateway owns the email step: the work-email policy runs before WorkOS is
+    asked to mail anything, so a personal address is refused with its own sentence and no code ever
+    leaves — the leak the hosted-page flow allowed, where a code reached gmail before the denylist
+    ran. `begun` staying empty is that guarantee, pinned hard."""
+    _configure(monkeypatch, gateway_postgres)
+    verifier = _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
+        opening = _advance(client, "")
+        rejected = _advance(client, "someone@gmail.com")
+    assert _fields(opening, "ask") == [EMAIL_PROMPT]
+    assert "gmail.com is not a work email domain." in _fields(rejected, "say")
+    assert _fields(rejected, "ask") == [EMAIL_PROMPT]
+    assert not _fields(rejected, "token")
+    assert verifier.begun == []
+
+
+def test_web_channel_rejects_a_trailing_dot_consumer_domain_with_no_code_sent(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trailing-dot FQDN is the same mailbox as its bare domain (`gmail.com.` delivers to
+    `gmail.com`), so the policy normalizes the root dot off before the denylist test — else the code
+    would reach the real consumer inbox, the very leak this flow closes. `begun` staying empty pins
+    that the refused address never reached WorkOS."""
+    _configure(monkeypatch, gateway_postgres)
+    verifier = _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
+        _advance(client, "")
+        rejected = _advance(client, "someone@GMAIL.COM.")
+    assert "gmail.com is not a work email domain." in _fields(rejected, "say")
+    assert _fields(rejected, "ask") == [EMAIL_PROMPT]
+    assert not _fields(rejected, "token")
+    assert verifier.begun == []
+
+
+def test_web_channel_ignores_a_planted_cookie_and_binds_a_fresh_session(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inline path's fixation pin, for the exact planting the review named. The gateway hands a
+    valid sealed `__Host-ufo_onboard` to anyone who posts a bare turn, so an attacker can hold one
+    and plant it. The server-side guarantee this pins: a presented cookie is trusted only to
+    continue a claim it already keys, and a claim is started only under a session freshly minted
+    here. So the member's email submit under the planted value mints a new sealed session and keys
+    the claim to it; the planted id — which stands behind no claim — keys nothing, and a post under
+    it is answered with the email prompt, never the member's bearer. (The `__Host-` prefix stops the
+    cross-host planting itself, browser-side; this pins the server-side guarantee that does not
+    lean on it.)"""
+    _configure(monkeypatch, gateway_postgres)
+    email = "founder@plantedco.io"
+    _verifies(monkeypatch, FakeVerifier())
+    planted = seal_session("attacker-obtained-session", TOKEN_SECRET)
+    with _client() as member:
+        member.cookies.set(ONBOARD_SESSION_COOKIE, planted)
+        first = member.post("/v1/onboard/web", content=email)
+    assert first.status_code == 200
+    minted = first.cookies[ONBOARD_SESSION_COOKIE]
+    assert minted != planted
+    assert _web_claim(gateway_postgres, planted) is None
+    assert _web_claim(gateway_postgres, minted) is not None
+    with _client() as attacker:
+        attacker.cookies.set(ONBOARD_SESSION_COOKIE, planted)
+        posted = _advance(attacker, "")
+    assert not _fields(posted, "token")
+    assert _fields(posted, "ask") == [EMAIL_PROMPT]
+    assert _web_claim(gateway_postgres, planted) is None
+
+
+def test_web_channel_mints_the_session_and_binds_the_claim(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page names no session. The turn that starts the claim mints one server-side and binds it
+    host-only, `HttpOnly`, `Secure`, `SameSite=lax`, `Path=/`, no `max_age` — the `__Host-` prefix
+    the browser enforces as un-plantable across hosts — and keys the claim by that minted id, so a
+    verified email is browser-bound from the submit that starts it, never keyed by a value the
+    caller named."""
+    _configure(monkeypatch, gateway_postgres)
+    verifier = _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
+        page = client.get("/login")
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("text/html")
+        assert page.text == LOGIN_PAGE
+
+        first = client.post("/v1/onboard/web", content="founder@boundco.io")
+        assert first.status_code == 200
+        session = client.cookies[ONBOARD_SESSION_COOKIE]
+        crumb = first.headers["set-cookie"]
+        assert crumb.startswith(f"{ONBOARD_SESSION_COOKIE}={session};")
+        assert crumb.startswith("__Host-")
+        assert "; HttpOnly" in crumb
+        assert "; Secure" in crumb
+        assert "; SameSite=lax" in crumb
+        assert "; Path=/" in crumb
+        assert "Domain=" not in crumb
+        assert "Max-Age=" not in crumb
+
+        claim = _web_claim(gateway_postgres, session)
+    assert claim is not None
+    assert claim["email"] == "founder@boundco.io"
+    assert verifier.begun == ["founder@boundco.io"]
+
+
+def test_web_channel_reuses_the_bound_cookie_across_turns(
+    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn that starts the claim mints its session; every turn after carries it, so the code
+    turn finds the claim the email turn wrote and mints no second session mid-walk."""
+    _configure(monkeypatch, gateway_postgres)
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
+    email = "founder@reuseco.io"
+    verifier = _verifies(monkeypatch, FakeVerifier())
+    with _client() as client:
+        client.post("/v1/onboard/web", content=email)
+        session = client.cookies[ONBOARD_SESSION_COOKIE]
+        code_turn = client.post("/v1/onboard/web", content=verifier.codes[email])
+        assert "set-cookie" not in code_turn.headers
+        assert client.cookies[ONBOARD_SESSION_COOKIE] == session
+        signed_in = code_turn.json()["directives"]
+    (token,) = _fields(signed_in, "token")
+    assert verify_token(token, UUID(str(uuid5(NAMESPACE_DNS, "reuseco.io")))) == email
+
+
 def test_web_channel_lets_a_member_choose_between_an_exact_membership_and_their_domain(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -318,23 +457,17 @@ def test_web_channel_lets_a_member_choose_between_an_exact_membership_and_their_
     alice = "alice@bigco.io"
     _grant(gateway_postgres, 74, host_founder)
     _grant(gateway_postgres, 75, own_founder)
-    _verifies(
-        monkeypatch,
-        FakeVerifier(exchanges={"host": host_founder, "own": own_founder, "alice": alice}),
-    )
+    verifier = _verifies(monkeypatch, FakeVerifier())
     host_id = UUID(str(uuid5(NAMESPACE_DNS, "addedco.io")))
     own_id = UUID(str(uuid5(NAMESPACE_DNS, "bigco.io")))
     with _client() as client:
-        _sign_in(client, "host")
-        _advance(client, "")
+        _walk(client, verifier, host_founder)
 
         _add_member(gateway_postgres, host_id, alice)
 
-        _sign_in(client, "own")
-        _advance(client, "")
+        _walk(client, verifier, own_founder)
 
-        _sign_in(client, "alice")
-        offered = _advance(client, "")
+        offered = _walk(client, verifier, alice)
         signed_in = _advance(client, "bigco.io")
 
     assert _directive_fields(offered, "choose") == [
@@ -355,16 +488,14 @@ def test_web_channel_signs_in_an_exact_member_without_a_grant_for_their_domain(
     founder = "boss@gatedco.io"
     advisor = "advisor@outsideco.dev"
     _grant(gateway_postgres, 76, founder)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"founder": founder, "advisor": advisor}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "gatedco.io")))
     with _client() as client:
-        _sign_in(client, "founder")
-        _advance(client, "")
+        _walk(client, verifier, founder)
 
         _add_member(gateway_postgres, workspace_id, advisor)
 
-        _sign_in(client, "advisor")
-        signed_in = _advance(client, "")
+        signed_in = _walk(client, verifier, advisor)
 
     (token,) = _fields(signed_in, "token")
     assert verify_token(token, workspace_id) == advisor
@@ -380,17 +511,15 @@ def test_web_channel_lets_an_added_member_use_a_grant_to_create_their_domain_wor
     advisor = "advisor@openadvisor.dev"
     _grant(gateway_postgres, 77, founder)
     _grant(gateway_postgres, 78, advisor)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"founder": founder, "advisor": advisor}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     workspace_id = UUID(str(uuid5(NAMESPACE_DNS, "opengateco.io")))
     own_id = UUID(str(uuid5(NAMESPACE_DNS, "openadvisor.dev")))
     with _client() as client:
-        _sign_in(client, "founder")
-        _advance(client, "")
+        _walk(client, verifier, founder)
 
         _add_member(gateway_postgres, workspace_id, advisor)
 
-        _sign_in(client, "advisor")
-        offered = _advance(client, "")
+        offered = _walk(client, verifier, advisor)
         signed_in = _advance(client, "Create openadvisor.dev workspace")
 
     assert _directive_fields(offered, "choose") == [
@@ -414,10 +543,9 @@ def test_web_channel_refusal_ends_the_page_instead_of_stranding_it(
     above a dead form that looks exactly like a hang."""
     _configure(monkeypatch, gateway_postgres)
     email = "founder@ungrantedweb.io"
-    _verifies(monkeypatch, FakeVerifier(exchanges={"ungranted": email}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
-        _sign_in(client, "ungranted")
-        refused = _advance(client, "")
+        refused = _walk(client, verifier, email)
 
     assert "ungrantedweb.io has no invite." in _fields(refused, "say")
     assert _fields(refused, "exit") == ["0"]
@@ -432,10 +560,9 @@ def test_disabled_invite_gate_opens_a_new_workspace_without_a_grant(
     _configure(monkeypatch, gateway_postgres)
     monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
     email = "founder@nogate.io"
-    _verifies(monkeypatch, FakeVerifier(exchanges={"opened": email}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
-        _sign_in(client, "opened")
-        signed_in = _advance(client, "")
+        signed_in = _walk(client, verifier, email)
     assert not any("invite" in text for text in _fields(signed_in, "say"))
     (token,) = _fields(signed_in, "token")
     assert verify_token(token, UUID(str(uuid5(NAMESPACE_DNS, "nogate.io")))) == email
@@ -444,20 +571,21 @@ def test_disabled_invite_gate_opens_a_new_workspace_without_a_grant(
 def test_web_and_terminal_sessions_never_share_a_claim(
     gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One id, two channels: the claim the callback stamps is keyed by the web channel, so a
-    terminal handed the same id starts its own walk at the email prompt rather than inheriting a
-    verified address."""
+    """One id, two channels: the web claim is keyed by the web channel, so a terminal handed the
+    same id as its session starts its own walk at the email prompt rather than inheriting a verified
+    address."""
     _configure(monkeypatch, gateway_postgres)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"landed": "pilot@twochannel.io"}))
+    monkeypatch.setenv(INVITE_REQUIRED_ENV, "false")
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
-        _sign_in(client, "landed")
+        _walk(client, verifier, "pilot@twochannel.io")
         session = client.cookies[ONBOARD_SESSION_COOKIE]
         terminal = client.post(
             "/v1/onboard/ufo",
             headers={"x-ufo-session": session, "x-ufo-installed": "1"},
             content="",
         )
-        assert "Enter your work email:" in terminal.text
+        assert EMAIL_PROMPT in terminal.text
 
 
 def test_terminal_expired_code_returns_to_email_prompt(
@@ -530,10 +658,9 @@ def test_debugger_directive_lands_only_for_the_operator_domain(
     _configure(monkeypatch, gateway_postgres)
     email = f"alex@{OPERATOR_EMAIL_DOMAIN}"
     _grant(gateway_postgres, 72, email)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"operator": email}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
-        _sign_in(client, "operator")
-        signed_in = _advance(client, "")
+        signed_in = _walk(client, verifier, email)
     assert _fields(signed_in, "debugger") == [f"{WORKSPACE_URL}/surface/debug"]
 
 
@@ -543,29 +670,11 @@ def test_debugger_directive_never_lands_outside_the_operator_domain(
     _configure(monkeypatch, gateway_postgres)
     email = "pilot@customerco.io"
     _grant(gateway_postgres, 73, email)
-    _verifies(monkeypatch, FakeVerifier(exchanges={"customer": email}))
+    verifier = _verifies(monkeypatch, FakeVerifier())
     with _client() as client:
-        _sign_in(client, "customer")
-        signed_in = _advance(client, "")
+        signed_in = _walk(client, verifier, email)
     assert _fields(signed_in, "token")
     assert not _fields(signed_in, "debugger")
-
-
-def test_login_page_serves_itself_and_a_post_with_no_cookie_gets_the_hop(
-    gateway_postgres: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A page that holds no onboarding cookie holds no session, so the machine finds no claim behind
-    it and answers with the hop that mints one — the same answer a fresh page gets."""
-    _configure(monkeypatch, gateway_postgres)
-    _verifies(monkeypatch, FakeVerifier())
-    with _client() as client:
-        page = client.get("/login")
-        assert page.status_code == 200
-        assert page.headers["content-type"].startswith("text/html")
-        assert page.text == LOGIN_PAGE
-        cookieless = client.post("/v1/onboard/web", content="")
-        assert cookieless.status_code == 200
-        assert cookieless.json()["directives"] == [{"verb": "auth", "fields": [AUTH_START_PATH]}]
 
 
 def test_gateway_serves_every_reserved_host_prefix() -> None:

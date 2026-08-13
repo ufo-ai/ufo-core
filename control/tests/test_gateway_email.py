@@ -18,10 +18,13 @@ from ufo_control.gateway_email import (
     ConsoleEmailSender,
     SesCredentials,
     SesEmailSender,
+    WorkEmailError,
+    WorkEmailPolicy,
     _parse_assume_role_credentials,
     _sigv4_headers,
     email_sender_from_env,
     invite_email,
+    normalize_email,
     public_apex_host,
 )
 
@@ -245,3 +248,53 @@ def test_email_sender_from_env_rejects_an_unknown_mode(monkeypatch: pytest.Monke
     monkeypatch.setenv(EMAIL_MODE_ENV, "carrier-pigeon")
     with pytest.raises(RuntimeError, match=EMAIL_MODE_ENV):
         email_sender_from_env()
+
+
+POLICY = WorkEmailPolicy()
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "someone@gmail.com",
+        "Someone@GMAIL.com",
+        "someone@gmail.com.",  # a trailing FQDN root dot — the same mailbox as gmail.com
+        "someone@GMAIL.COM.",
+        "founder@mailinator.com.",  # disposable, trailing dot
+        "someone+tag@gmail.com",
+    ],
+)
+def test_a_denylisted_domain_is_refused_however_it_is_dressed(email: str) -> None:
+    with pytest.raises(WorkEmailError, match="not a work email domain"):
+        POLICY.validate(email)
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "someone@gmail.com..",  # an empty label
+        "<someone@gmail.com>",  # a stray bracket in the domain
+        "someone@gmаil.com",  # noqa: RUF001  (a cyrillic homograph, not an LDH label)
+        "someone@ gmail.com",  # a space in the domain
+        "someone@@gmail.com",  # two @
+        "@gmail.com",  # an empty local part
+        "someone@localhost",  # no dot
+    ],
+)
+def test_a_malformed_address_is_refused_before_any_send(email: str) -> None:
+    with pytest.raises(WorkEmailError, match="malformed"):
+        POLICY.validate(email)
+
+
+@pytest.mark.parametrize(
+    ("email", "domain"),
+    [
+        ("founder@acme.io", "acme.io"),
+        ("founder@sub.acme.io", "sub.acme.io"),
+        ("founder@acme.io.", "acme.io"),  # root dot dropped, still a work domain
+        ("founder@xn--80ak6aa92e.com", "xn--80ak6aa92e.com"),  # punycode is a valid LDH label
+    ],
+)
+def test_a_work_domain_passes_with_its_root_dot_normalized(email: str, domain: str) -> None:
+    assert POLICY.validate(email) == domain
+    assert normalize_email(email)[1] == domain

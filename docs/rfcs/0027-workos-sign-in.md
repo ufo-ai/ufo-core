@@ -1,17 +1,20 @@
 ---
 rfc: 0027
-title: "WorkOS sign-in — AuthKit verifies the email, everything downstream stays"
+title: "WorkOS sign-in — the gateway owns the email step, WorkOS verifies"
 status: implemented
 date: 2026-08-12
 ---
 
 # WorkOS sign-in
 
-> Replace the hosted gateway's hand-rolled email-code verifier with WorkOS: AuthKit's hosted page
-> for the browser, the Magic Auth API for the terminal. WorkOS answers exactly one question — does
-> this person control this email — and everything downstream of the answer (workspace resolution,
-> invite gate, HMAC bearer, cookie, seats, roles) is untouched. Motive: Google sign-in and managed
-> code delivery at launch, enterprise SSO after it, without owning an auth stack.
+> Replace the hosted gateway's hand-rolled email-code verifier with WorkOS: the gateway collects the
+> work email on its own `/login` page and Magic Auth mails the code, with a `Continue with Google`
+> button that hops to WorkOS with `provider=GoogleOAuth` and lands straight on Google. No hosted
+> WorkOS page collects the address, so the work-email policy runs before any code is sent. WorkOS
+> answers exactly one question — does this person control this email — and everything downstream of
+> the answer (workspace resolution, invite gate, HMAC bearer, cookie, seats, roles) is untouched.
+> Motive: Google sign-in and managed code delivery at launch, enterprise SSO after it, without
+> owning an auth stack.
 
 ## Current state
 
@@ -46,11 +49,11 @@ read only at gateway boot; `ufoctl serve` boots without them and never notices.
 
 | # | Step |
 |---|---|
-| 1 | `GET /login` serves the card page as today; its first act navigates top-level to `GET /v1/onboard/auth/start` with the `?c=`/`?a=` carry |
-| 2 | `start` mints the onboarding session, binds it to that browser as the `ufo_onboard` cookie (`HttpOnly`, `Secure`, `SameSite=lax`, host-only), and 302s to AuthKit's authorization URL (`provider="authkit"`; Google and Magic Auth enabled in the dashboard), `state` carrying that session and the carry params under an HMAC signature |
-| 3 | The member authenticates on the WorkOS-hosted page |
-| 4 | `GET /v1/onboard/auth/callback?code&state`: require the signature and require the session the state names to equal the cookie, exchange via `AsyncWorkOSClient.user_management.authenticate_with_code`, apply `WorkEmailPolicy` to the returned email (fails closed), stamp the claim verified, 303 back to `/login` with the carry |
-| 5 | The page resumes the machine over `POST /v1/onboard/web`, whose session is that same cookie; `advance` sees a verified claim and continues as today — resolve, choose, invite gate, mint bearer, signed-in card POSTs the token to `/surface/web` |
+| 1 | `GET /login` serves the card page; the browser collects the work email and the code inline over `POST /v1/onboard/web` — the same machine the terminal drives — and `Continue with Google` navigates top-level to `GET /v1/onboard/auth/start` with the `?c=`/`?a=` carry |
+| 2 | The email step is `ClaimWorkflow.start`: it validates `WorkEmailPolicy` and, only then, calls `create_magic_auth` — so a denylisted address is refused with no code sent — and the code confirms through `authenticate_with_magic_auth` |
+| 3 | `POST /v1/onboard/web` mints and seals the `__Host-ufo_onboard` cookie server-side (`HttpOnly`, `Secure`, `SameSite=lax`, `Path=/`, host-only by the `__Host-` prefix the browser keeps un-plantable across hosts, no `max_age`) whenever the presented cookie stands behind no live claim, so a claim is only started under a session minted here and keyed by it — bound to that browser from the submit that starts it, never keyed by a value the caller names or obtained by asking |
+| 4 | `Continue with Google`: `start` mints and binds that same cookie, signs the session and carry into the OAuth `state` under an HMAC signature, and 302s to WorkOS with `provider=GoogleOAuth` — WorkOS goes straight to Google, no hosted page |
+| 5 | `GET /v1/onboard/auth/callback?code&state`: require the signature and require the session the state names to equal the cookie, exchange via `AsyncWorkOSClient.user_management.authenticate_with_code`, apply `WorkEmailPolicy` to the returned email (fails closed, so a personal Google account is refused), stamp the claim verified, 303 back to `/login` with the carry; the page resumes `advance`, which sees a verified claim and continues — resolve, choose, invite gate, mint bearer, signed-in card POSTs the token to `/surface/web` |
 
 `start` mints the session id and it never leaves the cookie — no query names it and no page reads
 it — so nothing outside the browser that signed in can name the session a verified email is written
@@ -106,12 +109,15 @@ misconfigured deploy still fails loud rather than silently faking sign-in.
 
 ### SSO, after launch
 
-The reason WorkOS rather than another code sender: enterprise SSO arrives as AuthKit organization
-policy. A workspace's domain — today derived as the first member's email domain
-(`core/src/ufo/seats.py:340`) — maps to a WorkOS Organization with a verified domain, and AuthKit
-then routes that domain to the customer's IdP with no change to the callback or anything
-downstream. Nothing of it lands now: no `workos_user_id` column, no organization sync — a column
-without a reader fails both-ends.
+The reason WorkOS rather than another code sender: enterprise SSO arrives as home-realm discovery
+on the email step. Because the gateway now owns that step (`Onboarding._collect_email`), the branch
+has one home: a submitted address whose domain has a WorkOS SSO connection redirects to that
+organization's `authorize` with `organization_id` instead of calling Magic Auth, and the callback
+and everything downstream are unchanged. A workspace's domain — today derived as the first member's
+email domain (`core/src/ufo/seats.py:340`) — maps to a WorkOS Organization with a verified domain.
+Nothing of it lands now: no discovery call, no `workos_user_id` column, no organization sync — a
+column without a reader fails both-ends — but the email-submit path is structured so the branch
+slots in ahead of the code send.
 
 ## Doctrine fit / implications
 
@@ -120,8 +126,9 @@ without a reader fails both-ends.
 - The callback is the sanctioned third-party plumbing carve-out; no new member-facing endpoint.
 - Async-native via `AsyncWorkOSClient`; the gateway's one event loop never blocks on WorkOS.
 - Fail loud: boot refuses to start half-configured, a denylisted email refuses at the callback.
-- Tests: a fake WorkOS client stands in as the dependency, never the thing asserted. The `/login`
-  page stays self-contained — the AuthKit hop is an HTTP redirect, never page content, so
+- Tests: a fake WorkOS client stands in as the dependency, never the thing asserted; the gmail walk
+  pins that a denylisted address is refused with WorkOS's `begin` never called (no code sent). The
+  `/login` page stays self-contained — the Google hop is an HTTP redirect, never page content, so
   `test_login_page_is_self_contained_and_targets_the_web_wire` holds; the fixed-copy pins and the
   metaphor lexicon sweep govern the new strings.
 
@@ -142,6 +149,6 @@ without a reader fails both-ends.
   over our SES path and keep one sender — but that keeps the verification-email machinery this
   RFC deletes. Recommended: WorkOS sends, from a custom domain, with templates rewritten to the
   copy doctrine.
-- **The web page's first act.** Auto-redirect to AuthKit on load (fewest presses; the member never
-  sees an intermediate page) versus a `Continue` press (the page can state where the member is
-  going). Recommended: auto-redirect; the AuthKit page is the sign-in.
+- **The web page's first act.** Resolved: the page is the sign-in. It asks for the work email inline
+  and offers `Continue with Google` beside it, so the member never leaves for a hosted page and the
+  work-email policy runs before any code is sent.

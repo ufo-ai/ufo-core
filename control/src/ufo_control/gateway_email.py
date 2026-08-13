@@ -30,7 +30,8 @@ from xml.etree import ElementTree
 
 import httpx
 
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@([^@\s]+\.[^@\s]+)$")
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+EMAIL_PATTERN = re.compile(rf"^[^@\s]+@({_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+)\.?$")
 
 FREE_EMAIL_DOMAINS = frozenset(
     {
@@ -115,7 +116,9 @@ class WorkEmailError(ValueError):
 
 
 def normalize_email(email: str) -> tuple[str, str]:
-    """Lowercased (address, domain). Raises WorkEmailError on a malformed address."""
+    """Lowercased (address, domain), the domain a strict hostname with its FQDN root dot dropped —
+    so a trailing-dot or otherwise malformed domain cannot carry a denylisted address (`gmail.com.`)
+    past the policy. Raises WorkEmailError on a malformed address."""
     candidate = email.strip().lower()
     match = EMAIL_PATTERN.match(candidate)
     if match is None:

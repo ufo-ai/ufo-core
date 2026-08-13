@@ -77,9 +77,11 @@ services:
       UFO_PUBLIC_BASE_URL: http://localhost:8080
       UFO_WORKSPACE_BASE_URL: http://localhost:8710
       # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
-      # `docker compose up` needs nothing. Browser sign-in lands on a local email form instead of
-      # AuthKit, and terminal codes are logged to `docker compose logs gateway` (the dev code is
-      # 000000). To exercise the real AuthKit/Magic Auth path, set WORKOS_MODE=workos and export a
+      # `docker compose up` needs nothing. Browser and terminal both collect the email on the
+      # gateway's own pages; in console mode the Continue-with-Google hop lands on a local form
+      # standing in for the WorkOS page, and codes are logged to `docker compose logs gateway` (the
+      # dev code is 000000). To exercise the real path (Magic Auth + Google OAuth), set
+      # WORKOS_MODE=workos and export a
       # staging key and its client id; the redirect is the gateway's own origin, since locally
       # nothing routes /v1/onboard from serve's port to this container.
       WORKOS_MODE: ${WORKOS_MODE:-console}

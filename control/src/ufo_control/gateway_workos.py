@@ -1,4 +1,8 @@
-"""WorkOS custody of email verification: AuthKit for the browser, Magic Auth for the terminal.
+"""WorkOS custody of email verification: Magic Auth for the email and code both the browser and the
+terminal collect on our own pages, and a Google OAuth hop (`provider=GoogleOAuth`) for the browser's
+`Continue with Google`. WorkOS answers one question — does this person control this email — and no
+hosted WorkOS page collects the address: our gateway does, so the work-email policy runs before any
+code is mailed.
 
 The client is the SDK's own async client, so every call is bounded and retried by it — external
 uncertainty, the one legitimate case. `confirm` grades the member's code: WorkOS answers a code it
@@ -19,6 +23,7 @@ from html import escape
 from urllib.parse import quote
 
 from workos import AsyncWorkOSClient, AuthenticationError, BadRequestError, WorkOSError
+from workos.user_management import UserManagementAuthenticationProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +37,13 @@ AUTH_START_PATH = "/v1/onboard/auth/start"
 AUTH_CALLBACK_PATH = "/v1/onboard/auth/callback"
 AUTH_CONSOLE_PATH = "/v1/onboard/auth/console"
 CONSOLE_CODE = "000000"
-AUTHKIT_PROVIDER = "authkit"
+GOOGLE_PROVIDER = UserManagementAuthenticationProvider.GOOGLE_OAUTH
 GRANT_REFUSED = "invalid_grant"
 SIGN_IN_FAILED = "Sign-in failed. Try again."
 MAX_STATE_SESSION_BYTES = 128
 STATE_SEPARATOR = "."
 STATE_KEY_LABEL = b"onboard-auth-state"
+COOKIE_KEY_LABEL = b"onboard-session-cookie"
 ARTIFACT_CARRY_PREFIX = "/artifacts/"
 CONVERSATION_SHAPE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -98,6 +104,33 @@ def _state_signature(body: str, secret: str) -> str:
     return hmac.new(key, body.encode(), hashlib.sha256).hexdigest()
 
 
+def seal_session(session: str, secret: str) -> str:
+    """The `__Host-ufo_onboard` cookie value: a minted session under a signature, so only a value
+    this gateway sealed can key a claim. The sealed string is the session everywhere it is compared
+    — cookie, state, and claim — never the raw id, and a value carrying no signature of ours opens
+    to nothing."""
+    return f"{session}{STATE_SEPARATOR}{_cookie_signature(session, secret)}"
+
+
+def open_session(value: str, secret: str) -> str | None:
+    """The minted id a sealed cookie names, or None when the value carries no signature of ours — so
+    a planted or forged cookie is read as absent and a fresh session minted in its place, never
+    trusted to key a claim."""
+    session, _, signature = value.partition(STATE_SEPARATOR)
+    if not session or not hmac.compare_digest(
+        signature.encode(), _cookie_signature(session, secret).encode()
+    ):
+        return None
+    return session
+
+
+def _cookie_signature(session: str, secret: str) -> str:
+    """Under a different subkey than the state signature, so the cookie seal and the state seal
+    never come out of one key."""
+    key = hmac.new(secret.encode(), COOKIE_KEY_LABEL, hashlib.sha256).digest()
+    return hmac.new(key, session.encode(), hashlib.sha256).hexdigest()
+
+
 @dataclass(frozen=True)
 class WorkosVerifier:
     """The one question WorkOS answers: does this person control this email."""
@@ -106,8 +139,10 @@ class WorkosVerifier:
     redirect_uri: str
 
     def authorization_url(self, state: str) -> str:
+        """The `Continue with Google` hop: WorkOS routes `provider=GoogleOAuth` straight to Google,
+        with no hosted WorkOS page in between, and returns to the callback with the code."""
         return self.client.user_management.get_authorization_url(
-            provider=AUTHKIT_PROVIDER, redirect_uri=self.redirect_uri, state=state
+            provider=GOOGLE_PROVIDER, redirect_uri=self.redirect_uri, state=state
         )
 
     async def exchange(self, code: str) -> str:
@@ -138,11 +173,12 @@ class WorkosVerifier:
 @dataclass(frozen=True)
 class ConsoleVerifier:
     """The local-dev verifier: no WorkOS, no credentials, selected by `WORKOS_MODE=console` and
-    never inferred from missing keys. The browser hop lands on a local stand-in for the AuthKit
-    page (`AUTH_CONSOLE_PATH`) that takes any work email, and the terminal code is logged rather
-    than emailed — so `docker compose up` signs a member in without leaving localhost. The claim,
-    the cookie binding, and the signed state are the deploy's own; only the identity proof is faked,
-    so the code paths a member reaches are the same ones a real sign-in exercises."""
+    never inferred from missing keys. The `Continue with Google` hop lands on a local stand-in for
+    the WorkOS page (`AUTH_CONSOLE_PATH`) that takes any work email, and the code the email step
+    would mail is logged rather than emailed — so `docker compose up` signs a member in without
+    leaving localhost. The claim, the cookie binding, and the signed state are the deploy's own;
+    only the identity proof is faked, so the code paths a member reaches are the same ones a real
+    sign-in exercises."""
 
     def authorization_url(self, state: str) -> str:
         return f"{AUTH_CONSOLE_PATH}?state={quote(state)}"
@@ -158,9 +194,9 @@ class ConsoleVerifier:
 
 
 def console_signin_page(state: str) -> str:
-    """The stand-in AuthKit renders in `WORKOS_MODE=console`: a plain email form whose GET reaches
-    the same callback a real return does, carrying the state it was handed and the typed address as
-    the code the console verifier reads straight back."""
+    """The stand-in the Google hop lands on in `WORKOS_MODE=console`: a plain email form whose GET
+    reaches the same callback a real return does, carrying the state it was handed and the typed
+    address as the code the console verifier reads straight back."""
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8"><title>ufo — dev sign-in</title></head>\n'
