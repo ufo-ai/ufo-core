@@ -93,13 +93,23 @@ answers once, at sign-in; the bearer's ~8 verify sites, the sites CSRF derivatio
 
 ### Config and infra
 
-`WORKOS_API_KEY` + `WORKOS_CLIENT_ID` land as gateway-only secrets in
-`infra/modules/platform/secrets.tf`, and `WORKOS_REDIRECT_URI` rides beside them as a plain value —
+`WORKOS_API_KEY` + `WORKOS_CLIENT_ID` are a gateway-only secret,
+`ufo/<env>/gateway-workos`, created and seeded out-of-band once per environment before its first
+deploy; `infra/modules/platform/secrets.tf` reads it through a `data` source rather than owning it,
+so terraform never writes a placeholder the gateway would boot on and the seed always precedes the
+rollout. `WORKOS_REDIRECT_URI` rides beside them as a plain value —
 stated per deploy rather than derived from a host, because the callback's origin is the app host
 hosted and the gateway's own port under compose. The WorkOS dashboard registers that same URI per
 environment, staging keys (`sk_test_`) to testing and production keys to prod. Dashboard setup — Google + Magic Auth as the only methods, a custom
 sending domain, and email templates rewritten to the copy doctrine — ships with the unit that
 needs it. WorkOS calls get bounded retry: external uncertainty, the legitimate case.
+
+Seed the secret once, before the environment's first deploy (`<env>` is `ufo-testing` or `prod`):
+
+```
+aws secretsmanager create-secret --region us-east-1 --name ufo/<env>/gateway-workos \
+  --secret-string '{"api-key":"<workos key>","client-id":"<workos client id>"}'
+```
 
 `WORKOS_MODE` selects the verifier: the default `workos` requires the three values at boot, and
 `console` (the compose default) runs a credential-free dev verifier so `docker compose up` needs no

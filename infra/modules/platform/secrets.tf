@@ -203,21 +203,28 @@ moved {
   to   = aws_secretsmanager_secret_version.gateway_slack_connect[0]
 }
 
-resource "aws_secretsmanager_secret" "gateway_workos" {
+# The gateway's WorkOS credentials are a standing prerequisite, created and seeded out-of-band once
+# per environment before its first deploy (docs/onboarding.md). Terraform reads the secret rather
+# than owning it: an empty placeholder version would boot the gateway with blank WORKOS_API_KEY /
+# WORKOS_CLIENT_ID, which fails its startup check, so the seed must precede the rollout and can never
+# be produced by the same apply that rolls the gateway.
+data "aws_secretsmanager_secret" "gateway_workos" {
   name = "${local.secret_prefix}/gateway-workos"
-  tags = local.tags
 }
 
-resource "aws_secretsmanager_secret_version" "gateway_workos" {
-  count = var.manage_runtime_secret_versions ? 1 : 0
-
-  secret_id = aws_secretsmanager_secret.gateway_workos.id
-  secret_string = jsonencode({
-    "api-key"   = ""
-    "client-id" = ""
-  })
-
+# Testing already holds this secret and its placeholder version in terraform state from when they
+# were managed resources; drop both from state without deleting the live seeded secret in AWS. Prod
+# never applied them, so both are a no-op there.
+removed {
+  from = aws_secretsmanager_secret.gateway_workos
   lifecycle {
-    ignore_changes = [secret_string]
+    destroy = false
+  }
+}
+
+removed {
+  from = aws_secretsmanager_secret_version.gateway_workos
+  lifecycle {
+    destroy = false
   }
 }

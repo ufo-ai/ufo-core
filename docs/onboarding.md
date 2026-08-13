@@ -428,7 +428,16 @@ the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifes
   fails startup. The redirect is whichever origin reaches the gateway: the app host's
   `https://app.<env>/v1/onboard/auth/callback` on a deploy, `http://localhost:8080` + that path
   under compose. One WorkOS environment answers one deploy, and the redirect it accepts is
-  registered there; the two secret values land before the gateway rolls.
+  registered there. The two secret values are a standing prerequisite, not a deploy artifact:
+  `ufo/<env>/gateway-workos` (`<env>` is `ufo-testing` or `prod`) is created and seeded out-of-band
+  once, before the environment's first deploy, and terraform reads it through a `data` source. An
+  empty placeholder would fail the gateway's startup check, so the seed precedes the rollout that
+  reads it.
+
+  ```
+  aws secretsmanager create-secret --region us-east-1 --name ufo/<env>/gateway-workos \
+    --secret-string '{"api-key":"<workos key>","client-id":"<workos client id>"}'
+  ```
 - Only a workspace admin can mint the "Add to Slack" link or derive a
   bring-your-own-app identity; the OAuth callback installs into the workspace the sealed state names.
   A teammate may call `slack_connect` to read the install status but never installs.
