@@ -1,35 +1,165 @@
 @import "tailwindcss" source(".");
 
+@font-face {
+  font-family: "Roboto Mono";
+  src: url("./assets/fonts/RobotoMono-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 100 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Roboto Mono";
+  src: url("./assets/fonts/RobotoMono-Italic-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 100 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* The brand palette: six ramps on one matched-lightness ladder, so contrast is a function of step
+ * distance, not hue — distance >= 6 is AA body text, >= 5 is AA large text and UI. Every colour
+ * the portal paints is one of these steps or a composite of two; nothing else names a colour. */
+:root {
+  --void-25: #F7FBFD;
+  --void-50: #E9EEF0;
+  --void-100: #D4DADD;
+  --void-200: #BAC1C4;
+  --void-300: #9EA7AB;
+  --void-400: #879195;
+  --void-500: #717C81;
+  --void-600: #5B656A;
+  --void-700: #454F53;
+  --void-800: #2E373B;
+  --void-900: #0D1418;
+  --void-950: #050C0F;
+
+  --signal-25: #F6FBFE;
+  --signal-50: #DBF0FE;
+  --signal-100: #B3E0FE;
+  --signal-200: #91C7EC;
+  --signal-300: #6EADD8;
+  --signal-400: #4F97C7;
+  --signal-500: #2E81B6;
+  --signal-600: #166A98;
+  --signal-700: #025378;
+  --signal-800: #013A54;
+  --signal-900: #001621;
+  --signal-950: #000D15;
+
+  --sand-25: #FFFAEF;
+  --sand-50: #F3ECDE;
+  --sand-100: #E1D8C9;
+  --sand-200: #C9BEAE;
+  --sand-300: #B1A392;
+  --sand-400: #9B8D7C;
+  --sand-500: #857768;
+  --sand-600: #6E6054;
+  --sand-700: #574A3F;
+  --sand-800: #3F3329;
+  --sand-900: #1A110A;
+  --sand-950: #110804;
+
+  --ember-25: #FFF9F1;
+  --ember-50: #FFEAC9;
+  --ember-100: #FFD18B;
+  --ember-200: #E6B672;
+  --ember-300: #CB9B5F;
+  --ember-400: #B38550;
+  --ember-500: #9B7041;
+  --ember-600: #825931;
+  --ember-700: #694321;
+  --ember-800: #4E2C0F;
+  --ember-900: #230C00;
+  --ember-950: #170600;
+
+  --heat-25: #FFF9F7;
+  --heat-50: #FFE7E1;
+  --heat-100: #FECBC2;
+  --heat-200: #FFA39C;
+  --heat-300: #F67A78;
+  --heat-400: #D96667;
+  --heat-500: #BD5357;
+  --heat-600: #9F3F45;
+  --heat-700: #822A34;
+  --heat-800: #621321;
+  --heat-900: #2C0009;
+  --heat-950: #1D0005;
+
+  --sage-25: #F1FFEF;
+  --sage-50: #DDF5DA;
+  --sage-100: #C6E2C5;
+  --sage-200: #A9CAA9;
+  --sage-300: #8BB18E;
+  --sage-400: #719C76;
+  --sage-500: #5D8564;
+  --sage-600: #486E50;
+  --sage-700: #34563D;
+  --sage-800: #1E3D28;
+  --sage-900: #01190A;
+  --sage-950: #000F05;
+
+  --paper: #FFFFFF;
+}
+
+/* The scheme's two anchors, and the four steps that carry hue. `color-scheme` still decides which
+ * pair applies, as it did when these were `Canvas` and `CanvasText`: every role below composites
+ * from them, so a mode is these declarations and nothing else. */
+:root {
+  --background: var(--sand-50);
+  --foreground: var(--void-900);
+  --card: var(--paper);
+  --card-foreground: var(--void-900);
+  --primary: var(--signal-600);
+  --ring: var(--signal-500);
+  --sidebar: var(--sand-100);
+  --brand-accent: var(--ember-100);
+  --brand-accent-foreground: var(--ember-800);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: var(--void-950);
+    --foreground: var(--sand-50);
+    --card: var(--void-900);
+    --card-foreground: var(--sand-50);
+    --primary: var(--signal-400);
+    --ring: var(--signal-400);
+    --sidebar: var(--void-900);
+    --brand-accent: var(--ember-200);
+    --brand-accent-foreground: var(--ember-900);
+  }
+}
+
 @theme {
-  --color-surface: Canvas;
-  --color-ink: color-mix(in srgb, CanvasText 90%, Canvas);
-  --color-field: Field;
-  --color-field-ink: FieldText;
+  --color-surface: var(--background);
+  --color-ink: color-mix(in srgb, var(--foreground) 90%, var(--background));
+  --color-field: var(--card);
+  --color-field-ink: var(--card-foreground);
 
-  --color-edge-faint: color-mix(in srgb, CanvasText 5%, transparent);
-  --color-edge-soft: color-mix(in srgb, CanvasText 12%, transparent);
-  --color-edge: color-mix(in srgb, CanvasText 15%, transparent);
-  --color-edge-strong: color-mix(in srgb, CanvasText 20%, transparent);
-  --color-edge-control: color-mix(in srgb, CanvasText 25%, transparent);
-  --color-edge-control-strong: color-mix(in srgb, CanvasText 35%, transparent);
+  --color-edge-faint: color-mix(in srgb, var(--foreground) 5%, transparent);
+  --color-edge-soft: color-mix(in srgb, var(--foreground) 12%, transparent);
+  --color-edge: color-mix(in srgb, var(--foreground) 15%, transparent);
+  --color-edge-strong: color-mix(in srgb, var(--foreground) 20%, transparent);
+  --color-edge-control: color-mix(in srgb, var(--foreground) 25%, transparent);
+  --color-edge-control-strong: color-mix(in srgb, var(--foreground) 35%, transparent);
 
-  --color-link: LinkText;
+  --color-link: var(--primary);
 
-  --color-ink-hover: color-mix(in srgb, CanvasText 88%, transparent);
+  --color-ink-hover: color-mix(in srgb, var(--foreground) 88%, transparent);
 
-  --color-fill-subtle: color-mix(in srgb, CanvasText 5%, transparent);
-  --color-fill-hover: color-mix(in srgb, CanvasText 8%, transparent);
-  --color-fill: color-mix(in srgb, CanvasText 12%, transparent);
-  --color-scrim: color-mix(in srgb, CanvasText 40%, transparent);
+  --color-fill-subtle: color-mix(in srgb, var(--foreground) 5%, transparent);
+  --color-fill-hover: color-mix(in srgb, var(--foreground) 8%, transparent);
+  --color-fill: color-mix(in srgb, var(--foreground) 12%, transparent);
+  --color-scrim: color-mix(in srgb, var(--foreground) 40%, transparent);
 
-  --color-attention: Mark;
-  --color-attention-ink: MarkText;
+  --color-attention: var(--brand-accent);
+  --color-attention-ink: var(--brand-accent-foreground);
 
-  --color-sidebar: color-mix(in srgb, CanvasText 1%, Canvas);
+  --color-sidebar: var(--sidebar);
 
   --shadow-raised:
-    0 8px 18px color-mix(in srgb, CanvasText 10%, transparent),
-    0 22px 55px color-mix(in srgb, CanvasText 16%, transparent);
+    0 8px 18px color-mix(in srgb, var(--foreground) 10%, transparent),
+    0 22px 55px color-mix(in srgb, var(--foreground) 16%, transparent);
 
   --ease-control: cubic-bezier(0.2, 0, 0, 1);
 
@@ -76,8 +206,8 @@
   --radius-menu: 16px;
   --radius-card: 28px;
 
-  --font-sans: system-ui, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --text-mono: 11px;
   --text-small: 12px;
@@ -182,7 +312,7 @@
   }
 
   :focus-visible {
-    outline: 2px solid var(--color-ink);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
 }

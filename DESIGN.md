@@ -14,7 +14,7 @@ surface outside this system.
 | No raw measurement or colour in a bracket class — resolve through `var(--…)` | `gates.py` `_portal_style_failures` |
 | A class with a short spelling is written short — `truncate`, `size-`, `gap-`, `cn()` | `gates.py` `_portal_style_failures` |
 | No `dark:` variant — `color-scheme` carries the scheme | `gates.py` `_portal_style_failures` |
-| Every colour resolves through the system-colour tokens | `theme.test.tsx` |
+| Every colour resolves through the brand palette ramps | `theme.test.tsx` |
 | Reduced motion, `100dvh` + safe-area insets, table overflow | `theme.test.tsx` |
 | Wordmark is the drawn ufo mark, an inline SVG labelled `ufo` | `theme.test.tsx` |
 | Hash grammar, place keys, push/replace/back history | `route.ts` types + `urlstate.test.tsx` |
@@ -31,11 +31,26 @@ radius (`sm`, `control`, `panel`, `bubble`), containers (`max-w-control`, `max-w
 value is a new token in `theme.css`, consumed as its utility or as `var(--…)` — the gate refuses
 the inline alternative.
 
+Under the roles sits the brand palette from `metalcraftai/ufo-brand-demo`: six ramps — `void`,
+`signal`, `sand`, `ember`, `heat`, `sage` — of twelve steps on one matched-lightness ladder, so
+contrast is a function of step distance rather than hue (distance ≥ 6 is AA body text, ≥ 5 is AA
+large text and UI). A ramp step is the only place a colour is written down, and every role
+composites from `--background` and `--foreground`, the two anchors a mode sets. A mode is those
+anchors and the four hue-carrying steps beside them (`--card`, `--primary`, `--sidebar`,
+`--brand-accent`) under `@media (prefers-color-scheme: dark)`: there is no `.dark` class and no
+`dark:` variant, so a scheme is nine declarations and a role never states a mode of its own.
+
+Type is the brand's Roboto Mono, bundled under `src/assets/fonts` and declared once in `theme.css`.
+`--font-sans` and `--font-mono` name the same family, so `font-mono` separates a value from its
+label by size and weight rather than by face; the two tokens stay apart because the choice is the
+brand's to change, not a view's. The brand's display face (Canela) has no consumer here — the
+largest step is `--text-title` (18px) and display type belongs to the landing page.
+
 ## Navigation
 
 The shell is a fixed left sidebar (`--container-sidebar`) and one pane; under
 `--breakpoint-narrow` it flips to a top strip. The sidebar sits on its own surface (`bg-sidebar`,
-a hair of ink mixed into `Canvas`) behind a soft edge, and holds, in order: wordmark, the primary
+one ramp step under the pane — `sand-100` light, `void-900` dark) behind a soft edge, and holds, in order: wordmark, the primary
 rows — New conversation, Agents, Scheduled, Artifacts, Customize, Workspace, each led by
 its glyph — the conversation rail, and the member footer: the initial in a `--size-avatar` circle,
 the email over the role (`Admin`/`Member`), and for admins the settings glyph opening
@@ -755,9 +770,9 @@ link semantics, so the variants travel and the element does not.
 A field states its own condition. `disabled` dims to `--disabled`, takes `cursor-not-allowed`, and
 drops the hover border, so a dead control never answers the pointer. A required field the member
 left empty takes `user-invalid:border-ink user-invalid:border-dashed` — the browser's own validity
-decides when. The border is drawn, not tinted: `Mark` measures 1.07:1 against light `Canvas`, so an
-`attention` border states nothing there; the dash carries the signal in either scheme and without
-colour.
+decides when. The border is drawn, not tinted: `attention` is `ember-100`, one step off the light
+ground, so an `attention` border states nothing there; the dash carries the signal in either scheme
+and without colour.
 
 An act already in flight takes `Button busy`. It sets `aria-disabled` rather than `disabled`, so
 the button stays in the accessibility tree and the keyboard keeps its place across the submit; the
@@ -779,8 +794,11 @@ one theme and no `components.json`, so it takes the conventions and not the dist
 | Radii and spacing named by role, not derived from one `--radius` by a numeric ladder | A role survives a redesign; a rung does not |
 | No `data-slot` on the primitives | shadcn's style CSS selects on them; nothing here would read them, and the gate forbids the selector that would |
 
-The portal has no destructive colour and cannot have one: the palette is system colours, which
-name no error hue. `attention` (`Mark`) carries every wrong-state signal instead.
+The portal draws no destructive colour. The palette carries a destructive ramp (`heat`) and a
+confirm ramp (`sage`), and no role consumes either — the confirm guards the slip and the audited
+intent lane guards the act, so a red act would state a danger the flow does not have. `attention`
+(`ember`, the brand's signal gold) carries every wrong-state signal instead, and stays under the
+brand's ceiling of about 2% of a screen because only a notice and a removed diff line take it.
 
 ## Destructive actions
 

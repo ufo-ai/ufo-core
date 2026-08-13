@@ -41,6 +41,7 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import _outcome
 from ufo_ext_web.surface import (
+    ASSET_MEDIA_TYPES,
     NO_MEMBER_FAULT,
     PORTAL_BUILD,
     PORTAL_FILE,
@@ -4247,7 +4248,10 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     """The page names no origin but this surface. Splitting the stylesheet out of the page makes
     the absence of an external URL insufficient on its own — a page referencing a file nobody
     serves carries no external origin either — so every `src` and `href` it names must resolve
-    under the surface's own static path and answer with the media type its element expects.
+    under the surface's own static path and answer with the media type its element expects. The
+    stylesheet's own `url()` references are the same claim one level down: the brand faces are
+    named there rather than in the page, and a font nobody serves degrades to a fallback family
+    silently instead of failing a load.
     Only the shell names these and the shell serves to a session, so an asset read carrying none is
     401; each revalidates by etag rather than transferring on every load."""
     client, workspace_id, _agent_id = web
@@ -4265,14 +4269,21 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     for ref in referenced:
         assert ref.startswith("/surface/web"), ref
 
+    sheet = next(ref for ref in assets if ref.endswith(".css"))
+    styles = (await client.get(sheet, headers=cookie)).text
+    faces = set(re.findall(r"url\(([^)]+)\)", styles))
+    assert faces, "the stylesheet names no font file"
+    assets |= faces
+
     for ref in sorted(assets):
+        assert ref.startswith("/surface/web/static/"), ref
         assert (await client.get(ref)).status_code == 401, ref
 
         signed_in = await client.get(ref, headers=cookie)
         assert signed_in.status_code == 200
-        expected = "text/javascript" if ref.endswith(".js") else "text/css"
+        expected = ASSET_MEDIA_TYPES[Path(ref).suffix]
         assert signed_in.headers["content-type"].startswith(expected)
-        assert signed_in.text.strip()
+        assert signed_in.content.strip()
 
         etag = signed_in.headers["etag"]
         unchanged = await client.get(ref, headers={**cookie, "if-none-match": etag})

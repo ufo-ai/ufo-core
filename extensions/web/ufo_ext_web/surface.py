@@ -160,6 +160,7 @@ STATIC_PREFIX = f"{PORTAL_PATH}/static/"
 ASSET_MEDIA_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".ttf": "font/ttf",
 }
 
 

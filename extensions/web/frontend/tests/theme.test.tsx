@@ -50,29 +50,49 @@ const AUTHORED = new RegExp(
   "g",
 );
 
+const RAMP_STEP = /--(?:void|signal|sand|ember|heat|sage)-\d+:#[0-9a-f]{6}/g;
+
+const PAPER = /--paper:#fff\b/g;
+
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
+
+/** Everything but the palette declarations themselves — a step is where a colour may be written. */
+const outsideThePalette = (css: string) => css.replace(RAMP_STEP, "").replace(PAPER, "");
 
 beforeEach(() => {
   location.hash = "";
   useStreamFake();
 });
 
-test("every colour the portal paints resolves through the system-colour tokens", () => {
+test("every colour the portal paints resolves through the brand palette ramps", () => {
   const css = builtStyles();
 
-  expect(authoredColours(css)).toEqual([]);
-  const basis = {
-    "--color-surface": "Canvas",
-    "--color-ink": String.raw`color-mix\(in srgb,\s*CanvasText 90%,\s*Canvas\)`,
-    "--color-field": "Field",
-    "--color-field-ink": "FieldText",
-    "--color-link": "LinkText",
+  expect(authoredColours(outsideThePalette(css))).toEqual([]);
+  const anchors = {
+    "--void-900": "#0d1418",
+    "--signal-500": "#2e81b6",
+    "--ember-100": "#ffd18b",
   };
-  for (const [token, system] of Object.entries(basis)) {
-    expect(new RegExp(`${token}:\\s*${system}`).test(css)).toBe(true);
+  for (const [step, hex] of Object.entries(anchors)) {
+    expect(css.replace(/:\s+/g, ":")).toContain(`${step}:${hex}`);
+  }
+  const basis = {
+    "--color-surface": String.raw`var\(--background\)`,
+    "--color-ink": String.raw`color-mix\(in srgb,\s*var\(--foreground\) 90%,\s*var\(--background\)\)`,
+    "--color-field": String.raw`var\(--card\)`,
+    "--color-field-ink": String.raw`var\(--card-foreground\)`,
+    "--color-link": String.raw`var\(--primary\)`,
+  };
+  for (const [token, brand] of Object.entries(basis)) {
+    expect(new RegExp(`${token}:\\s*${brand}`).test(css)).toBe(true);
   }
   expect(css.replace(/:\s+/g, ":")).toContain("color-scheme:light dark");
+  // The scheme is these two anchors and nothing else: no `.dark` class and no `dark:` variant, so
+  // the media query is what rebinds a mode, and every role composites from the pair it sets.
+  expect(css.replace(/\s+/g, "")).toContain(
+    "@media(prefers-color-scheme:dark){:root{--background:var(--void-950);--foreground:var(--sand-50)",
+  );
 });
 
 test("the drawer fills a narrow viewport rather than overflowing it", () => {
@@ -157,8 +177,15 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--leading-reading:1.65");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
-  expect(css).toContain("--color-link:LinkText");
-  expect(css).toContain("--color-attention:Mark");
+  expect(css).toContain("--color-link:var(--primary)");
+  expect(css).toContain("--color-attention:var(--brand-accent)");
+});
+
+test("the brand faces are bundled and carry the chrome as well as the code", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain('--font-sans:"RobotoMono"');
+  expect(css).toContain('--font-mono:"RobotoMono"');
+  expect(/@font-face\{font-family:RobotoMono;src:url\(\/surface\/web\/static\/assets\/RobotoMono-[^)]+\.ttf\)/.test(css)).toBe(true);
 });
 
 test("text is smoothed and wrapped, and headings balance", () => {
@@ -171,7 +198,7 @@ test("text is smoothed and wrapped, and headings balance", () => {
 test("a control answers the pointer, and reduced motion cuts the answer short", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain("active\\:scale-\\[0\\.96\\]:active{scale:.96}");
-  expect(css).toContain("--color-ink-hover:color-mix(insrgb,CanvasText88%,transparent)");
+  expect(css).toContain("--color-ink-hover:color-mix(insrgb,var(--foreground)88%,transparent)");
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*transition-duration:\.01ms!important/.test(css)).toBe(
     true,
   );
