@@ -88,11 +88,13 @@ agent = sa.Table(
     sa.Column("reasoning", sa.Text, nullable=False, server_default=sa.text("'auto'")),
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
+    sa.Column("sandbox_size", sa.Text, nullable=False, server_default=sa.text("'small'")),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
         "reasoning in ('auto', 'off', 'low', 'medium', 'high')", name="agent_reasoning"
     ),
+    sa.CheckConstraint("sandbox_size in ('small', 'medium', 'large')", name="agent_sandbox_size"),
     sa.UniqueConstraint("workspace_id", "name"),
     sa.UniqueConstraint("workspace_id", "id", name="agent_workspace_identity"),
     sa.Index(

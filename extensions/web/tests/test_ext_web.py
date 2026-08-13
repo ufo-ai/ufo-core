@@ -6392,6 +6392,95 @@ async def test_a_model_outside_the_registry_refuses_before_any_turn(
     assert (await _agent_row(agent_id)).model == "claude-opus-4-8"
 
 
+async def test_a_sandbox_size_refuses_where_the_deploy_offers_none(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The field is hidden from every form on a single-shape deploy, so a spec naming a size here
+    is a hand-built intent — refused before a turn exists, the same fence the model check holds."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {
+                "model": "claude-opus-4-8",
+                "internet_access_allowed": True,
+                "reasoning": "high",
+                "sandbox_size": "large",
+            },
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 200
+    assert refused.json() == {
+        "applied": False,
+        "message": "This deploy does not offer sandbox sizes.",
+    }
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deploy whose carrier declares sizes offers the setting on both agent forms: the update
+    schema and the create schema carry `sandbox_size` as its enum, the spec states the stored
+    value, and the field stays optional — a create that omits it births the default."""
+    config, hub, blob, sandboxes = dbos_runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    dbos_client = DBOSClient(system_database_url=config.database.system_url)
+    workspace_id, agent_id = await _seed_workspace()
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (web_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        user_skills=no_user_skills,
+        subagents=NO_SUBAGENTS,
+        sandbox_sizes=("small", "medium", "large"),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        overview = await client.get(
+            f"/surface/web/agents/{agent_id}/overview",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        boot = await client.get(
+            "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+        )
+    dbos_client.destroy()
+    assert overview.status_code == 200
+    data = overview.json()
+    assert data["spec"]["sandbox_size"] == "small"
+    assert data["spec_schema"]["properties"]["sandbox_size"]["enum"] == [
+        "small",
+        "medium",
+        "large",
+    ]
+    assert data["spec_schema"]["properties"]["sandbox_size"]["title"] == "Sandbox Size"
+    create = boot.json()["new_agent"]["spec_schema"]
+    assert create["properties"]["sandbox_size"]["enum"] == ["small", "medium", "large"]
+    assert "sandbox_size" not in create["required"]
+
+
 async def test_an_oversized_intent_answers_413(web: tuple[AsyncClient, UUID, UUID]) -> None:
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)

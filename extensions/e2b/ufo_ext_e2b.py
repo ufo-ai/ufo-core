@@ -44,7 +44,7 @@ import asyncio
 import os
 import shlex
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 from urllib.parse import urlsplit
@@ -60,6 +60,7 @@ from ufo.sdk.manifest import Manifest
 from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.sandbox import (
     NO_PROXY_HOSTS,
+    SANDBOX_SIZES,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     CarrierSpec,
@@ -74,7 +75,7 @@ from ufo.sdk.sandbox import (
 
 CARRIER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"
-E2B_TEMPLATE_ENV = "E2B_TEMPLATE"
+E2B_TEMPLATES_ENV = "E2B_TEMPLATES"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
@@ -238,7 +239,9 @@ class _Lease:
 @dataclass(frozen=True)
 class E2BCarrier:
     api_key: str
-    template: str
+    templates: Mapping[str, str]
+    """One published template per sandbox size — the build allocates cpu and memory per tier, so
+    which template a fresh sandbox is created from is what `SandboxSpec.size` decides."""
     idle_seconds: int = DEFAULT_IDLE_SECONDS
     """The span every piece of work needs the container to survive regardless of its own length: it
     is the model's thinking between two tool calls, not the calls, that a lease has to outlast."""
@@ -380,8 +383,11 @@ class E2BCarrier:
                     conversation_id=str(spec.conversation_id),
                     sandbox_id=resume_id,
                 )
+        template = None if spec.size is None else self.templates.get(spec.size)
+        if template is None:
+            raise RuntimeError(f"no e2b template serves sandbox size {spec.size!r}")
         sandbox = await self.sdk.create(
-            template=self.template,
+            template=template,
             timeout=SANDBOX_LEASE_SECONDS,
             metadata={CONVERSATION_METADATA_KEY: str(spec.conversation_id)},
             lifecycle=E2B_LIFECYCLE,
@@ -670,19 +676,46 @@ class E2BCarrier:
         log("sandbox.e2b.lease_dropped", conversation_id=str(conversation_id), during=during)
 
 
+def sandbox_templates(value: str) -> dict[str, str]:
+    """The size→template map off the `E2B_TEMPLATES` wire form (`small=ref,medium=ref,large=ref`,
+    the line `sandbox/build_template.py` prints). Every declared size must name a template — a map
+    missing one would boot a deploy whose portal offers a size no sandbox can be created at — and a
+    size no carrier declares is config drift, not a tier to serve quietly."""
+    entries: dict[str, str] = {}
+    for item in value.split(","):
+        size, sep, reference = item.partition("=")
+        if not sep or not size or not reference:
+            raise RuntimeError(
+                f"{E2B_TEMPLATES_ENV} entry {item!r} is not <size>=<template reference>"
+            )
+        entries[size] = reference
+    if set(entries) != set(SANDBOX_SIZES):
+        raise RuntimeError(
+            f"{E2B_TEMPLATES_ENV} names sizes {sorted(entries)}, expected {sorted(SANDBOX_SIZES)}"
+        )
+    return entries
+
+
 def build_e2b_carrier() -> E2BCarrier:
     key = os.environ.get(E2B_API_KEY_ENV)
     if not key:
         raise RuntimeError(f"e2b carrier selected but {E2B_API_KEY_ENV} is not set")
-    template = os.environ.get(E2B_TEMPLATE_ENV)
-    if not template:
-        raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATE_ENV} is not set")
-    return E2BCarrier(api_key=key, template=template)
+    templates = os.environ.get(E2B_TEMPLATES_ENV)
+    if not templates:
+        raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATES_ENV} is not set")
+    return E2BCarrier(api_key=key, templates=sandbox_templates(templates))
 
 
 def manifest() -> Manifest:
     return Manifest(
         name=CARRIER_NAME,
         version="0.1.0",
-        carriers=(CarrierSpec(name=CARRIER_NAME, factory=build_e2b_carrier, off_cluster=True),),
+        carriers=(
+            CarrierSpec(
+                name=CARRIER_NAME,
+                factory=build_e2b_carrier,
+                off_cluster=True,
+                sizes=SANDBOX_SIZES,
+            ),
+        ),
     )

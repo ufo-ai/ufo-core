@@ -131,6 +131,12 @@ class ProxyEndpoint:
     public_url: str | None = None
 
 
+SANDBOX_SIZES: tuple[str, ...] = ("small", "medium", "large")
+"""The sandbox sizes a sizing carrier provisions, in ascending order. A carrier that offers them
+declares them on its `CarrierSpec.sizes`; one that provisions a single shape (docker, local, the
+terminal) declares none and ignores `SandboxSpec.size`."""
+
+
 @dataclass(frozen=True)
 class SandboxSpec:
     """`workspace_host_path` is the host directory an in-cluster carrier serves `/workspace` from —
@@ -142,7 +148,12 @@ class SandboxSpec:
     process holds no live sandbox for the conversation, the carrier resumes that id rather than
     opening a fresh sandbox, so a serve restart reattaches instead of stranding it. None means
     create fresh (no stored handle, or one another backend wrote). A carrier that resumes by
-    conversation identity (docker's container name, the local host directory) ignores it."""
+    conversation identity (docker's container name, the local host directory) ignores it.
+
+    `size` is the owning agent's sandbox size, read off its row by the open that builds this spec.
+    It shapes only a fresh sandbox on a carrier that declares sizes — a resumed sandbox keeps the
+    size it was created at, and a single-shape carrier ignores it. None means the caller states no
+    size (an attach, a terminal bind)."""
 
     conversation_id: UUID
     image_ref: str
@@ -151,6 +162,7 @@ class SandboxSpec:
     run_token: str
     resume_id: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    size: str | None = None
 
 
 @dataclass(frozen=True)

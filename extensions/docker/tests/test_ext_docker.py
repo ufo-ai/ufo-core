@@ -56,9 +56,10 @@ def test_config_backend_docker_resolves_the_extension_contributed_carrier() -> N
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="docker"),
     )
-    carrier, off_cluster = select_carrier(config, (docker_ext.manifest(),))
+    carrier, spec = select_carrier(config, (docker_ext.manifest(),))
     assert isinstance(carrier, DockerCarrier)
-    assert off_cluster is False
+    assert spec.off_cluster is False
+    assert spec.sizes == ()
 
 
 async def test_exec_carries_the_turn_env_and_run_bakes_none(

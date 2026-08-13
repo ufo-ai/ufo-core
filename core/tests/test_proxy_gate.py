@@ -192,7 +192,10 @@ def test_main_passes_the_required_environment_to_the_gate(
         assert gate == expected
 
     monkeypatch.setenv(proxy_gate.EGRESS_CA_CERT_ENV, expected.ca_cert)
-    monkeypatch.setenv(proxy_gate.E2B_TEMPLATE_ENV, expected.template)
+    monkeypatch.setenv(
+        proxy_gate.E2B_TEMPLATES_ENV,
+        f"small={expected.template},medium=ufo-sbx-medium:b2,large=ufo-sbx-large:b3",
+    )
     monkeypatch.setattr(proxy_gate.ProxyTlsGate, "run", run)
     monkeypatch.setattr(sys, "argv", ["proxy-gate", "--proxy-url", expected.public_url])
 

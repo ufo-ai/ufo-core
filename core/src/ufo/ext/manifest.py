@@ -185,6 +185,10 @@ class CarrierSpec:
     name: str
     factory: Callable[[], Carrier]
     off_cluster: bool = False
+    sizes: tuple[str, ...] = ()
+    """The sandbox sizes this backend provisions (`SANDBOX_SIZES` for one template per size, empty
+    for a single-shape backend) — what decides whether a portal offers the agent's `sandbox_size`
+    setting on this deploy."""
 
 
 @dataclass(frozen=True)

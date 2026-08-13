@@ -190,7 +190,7 @@ def run() -> None:
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
     dbos_client = DBOSClient(system_database_url=config.database.system_url)
-    carrier, carrier_off_cluster = select_carrier(config, manifests)
+    carrier, carrier_spec = select_carrier(config, manifests)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
@@ -212,7 +212,7 @@ def run() -> None:
         sandboxes=ConversationSandbox(
             carrier=carrier,
             backend=config.sandbox.backend,
-            off_cluster=carrier_off_cluster,
+            off_cluster=carrier_spec.off_cluster,
             image_ref=SANDBOX_IMAGE_REF,
             proxy=_proxy_endpoint(
                 config, manifests, credentials, registry.pricing, run_tokens, blob
@@ -302,6 +302,7 @@ def run() -> None:
         ambient_reply=AmbientReplyClassifier(
             model=ModelAccess(replace(registry, auto_model=config.models.ambient_reply_model))
         ),
+        sandbox_sizes=carrier_spec.sizes,
         skills=skills,
         user_skills=lambda: turn_runtime_skills(manifests, credentials, index, embed),
         subagents=runtime.subagents,
@@ -797,6 +798,7 @@ def _mount_shared_surfaces(
     skills: SkillRegistry,
     user_skills: "Callable[[], Awaitable[tuple[RuntimeSkill, ...]]]",
     subagents: SubagentRegistry,
+    sandbox_sizes: tuple[str, ...] = (),
     memory: MemorySearch | None = None,
     objects: "Mapping[str, BoundKind] | None" = None,
 ) -> None:
@@ -877,6 +879,7 @@ def _mount_shared_surfaces(
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _deploy_extensions=deploy_extensions,
             _models=models,
+            _sandbox_sizes=sandbox_sizes,
             _skills=skills,
             _user_skills=user_skills,
             _subagents=subagent_roster,

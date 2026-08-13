@@ -115,12 +115,12 @@ jobs:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            E2B_TEMPLATE=ufo-sbx
+            E2B_TEMPLATES=small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large
           else
-            E2B_TEMPLATE=$(uv run python sandbox/build_template.py)
+            E2B_TEMPLATES=$(uv run python sandbox/build_template.py)
           fi
-          test -n "$E2B_TEMPLATE"
-          echo "E2B_TEMPLATE=$E2B_TEMPLATE" >> "$GITHUB_ENV"
+          test -n "$E2B_TEMPLATES"
+          echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
 
       - name: Build + push gateway image
         if: github.event_name != 'pull_request'
@@ -154,7 +154,7 @@ jobs:
           fi
           terraform plan -input=false -no-color -lock="$LOCK" \
             -out="$RUNNER_TEMP/testing.tfplan" -var "image_tag=$IMAGE_TAG" \
-            -var "e2b_template=$E2B_TEMPLATE"
+            -var "e2b_templates=$E2B_TEMPLATES"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -214,8 +214,8 @@ jobs:
           jq -n \
             --arg commit "$GITHUB_SHA" \
             --arg image_tag "$IMAGE_TAG" \
-            --arg sandbox_template "$E2B_TEMPLATE" \
-            '{commit: $commit, image_tag: $image_tag, sandbox_template: $sandbox_template}' \
+            --arg sandbox_templates "$E2B_TEMPLATES" \
+            '{commit: $commit, image_tag: $image_tag, sandbox_templates: $sandbox_templates}' \
             > "$RUNNER_TEMP/tested-artifacts.json"
 
       - uses: actions/upload-artifact@v4
@@ -305,7 +305,7 @@ jobs:
     if: github.event_name == 'pull_request' && needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     env:
-      E2B_TEMPLATE: ufo-sbx
+      E2B_TEMPLATES: small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large
       TF_DIR: infra/envs/prod
     steps:
       - uses: actions/checkout@v4
@@ -337,7 +337,7 @@ jobs:
             -target=module.platform.aws_secretsmanager_secret.platform \
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
-            -var "e2b_template=$E2B_TEMPLATE" \
+            -var "e2b_templates=$E2B_TEMPLATES" \
             -var "deployment_id=plan"
 
       - name: Reject destructive changes

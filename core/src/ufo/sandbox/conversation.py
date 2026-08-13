@@ -108,9 +108,11 @@ class ConversationSandbox:
         sandbox the row names and nothing is ever written into a sandbox no row references. The
         loser's extra sandbox is unreferenced and empty: docker arbitrates the name at the daemon so
         none exists there, and an e2b one idles into a paused, unbilled husk."""
-        stored = await self._stored(conversation_id)
+        stored, size = await self._binding(conversation_id)
         for _ in range(OPEN_CLAIM_ATTEMPTS):
-            backend, carrier, handle = await self._opened(conversation_id, stored, run_token, env)
+            backend, carrier, handle = await self._opened(
+                conversation_id, stored, run_token, env, size
+            )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
                 return SandboxSession(carrier=carrier, handle=handle)
@@ -271,6 +273,7 @@ class ConversationSandbox:
         stored: str | None,
         run_token: str,
         env: Mapping[str, str],
+        size: str,
     ) -> tuple[str, Carrier, SandboxHandle]:
         """The carrier this open runs on and the handle it opened — the one place the choice is
         made. A stored `client:` handle stays a terminal conversation forever, connected or not; a
@@ -319,6 +322,7 @@ class ConversationSandbox:
                 run_token=run_token,
                 resume_id=None if stored is None else sandbox_handle_id(self.backend, stored),
                 env=env,
+                size=size,
             )
         )
         return self.backend, self.carrier, handle
@@ -354,10 +358,23 @@ class ConversationSandbox:
             return None
 
     async def _stored(self, conversation_id: UUID) -> str | None:
+        handle, _ = await self._binding(conversation_id)
+        return handle
+
+    async def _binding(self, conversation_id: UUID) -> tuple[str | None, str]:
+        """The conversation's stored sandbox handle and its owning agent's sandbox size — one row
+        read for every open, so whichever caller creates first (a turn, an off-turn attachment
+        write) creates at the size the agent names."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.sandbox_handle).where(
+                    sa.select(tables.conversation.c.sandbox_handle, tables.agent.c.sandbox_size)
+                    .select_from(
+                        tables.conversation.join(
+                            tables.agent, tables.conversation.c.agent_id == tables.agent.c.id
+                        )
+                    )
+                    .where(
                         tables.conversation.c.id == conversation_id,
                         tables.conversation.c.workspace_id == ws_current().workspace_id,
                     )
@@ -365,8 +382,7 @@ class ConversationSandbox:
             ).one_or_none()
         if row is None:
             raise ValueError(f"conversation {conversation_id} is not in this workspace")
-        handle: str | None = row.sandbox_handle
-        return handle
+        return row.sandbox_handle, row.sandbox_size
 
     async def _claim(self, conversation_id: UUID, stored: str | None, handle: str) -> str:
         """Persist `handle` only over the value this open read, and return whatever the row holds

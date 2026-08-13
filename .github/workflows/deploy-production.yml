@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       attempt_id: ${{ steps.attempt.outputs.attempt_id }}
-      e2b_template: ${{ steps.artifacts.outputs.e2b_template }}
+      e2b_templates: ${{ steps.artifacts.outputs.e2b_templates }}
       image_tag: ${{ steps.artifacts.outputs.image_tag }}
       target_sha: ${{ steps.select.outputs.target_sha }}
     steps:
@@ -110,11 +110,11 @@ jobs:
           ARTIFACT="$RUNNER_TEMP/tested-artifacts/tested-artifacts.json"
           IMAGE_TAG="${TARGET_SHA::8}"
           jq -e --arg commit "$TARGET_SHA" --arg image_tag "$IMAGE_TAG" \
-            '.commit == $commit and .image_tag == $image_tag and (.sandbox_template | type == "string" and length > 0)' \
+            '.commit == $commit and .image_tag == $image_tag and (.sandbox_templates | type == "string" and length > 0)' \
             "$ARTIFACT"
-          E2B_TEMPLATE=$(jq -er '.sandbox_template' "$ARTIFACT")
+          E2B_TEMPLATES=$(jq -er '.sandbox_templates' "$ARTIFACT")
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "e2b_template=$E2B_TEMPLATE" >> "$GITHUB_OUTPUT"
+          echo "e2b_templates=$E2B_TEMPLATES" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -222,14 +222,14 @@ jobs:
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
       DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
       DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-production-deploy
-      E2B_TEMPLATE: ${{ needs.prepare.outputs.e2b_template }}
+      E2B_TEMPLATES: ${{ needs.prepare.outputs.e2b_templates }}
       IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
       TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
     steps:
       - name: Require production inputs
         run: |
           missing=false
-          for name in E2B_TEMPLATE IMAGE_TAG TARGET_SHA; do
+          for name in E2B_TEMPLATES IMAGE_TAG TARGET_SHA; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required"
               missing=true
@@ -274,7 +274,7 @@ jobs:
             -target=module.platform.aws_secretsmanager_secret.platform \
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
-            -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" \
+            -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" \
             -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive foundation changes
@@ -289,7 +289,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}

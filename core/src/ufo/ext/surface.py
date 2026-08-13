@@ -119,6 +119,7 @@ from ufo.schema.records import (
     ConnectRequest,
     CredentialRequest,
     ReasoningEffort,
+    SandboxSize,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -445,6 +446,7 @@ class AgentDetail(BaseModel):
     model: str
     internet_access_allowed: bool
     reasoning: ReasoningEffort
+    sandbox_size: SandboxSize
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
@@ -959,6 +961,7 @@ class SurfaceContext:
     _ambient_reply: AmbientReplyClassifier
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
+    _sandbox_sizes: tuple[str, ...] = ()
     _memory: "MemorySearch | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
@@ -1020,6 +1023,12 @@ class SurfaceContext:
         offers where an agent's model is chosen, the same records the runtime routes and bills
         on."""
         return self._models
+
+    @property
+    def sandbox_sizes(self) -> tuple[str, ...]:
+        """The sandbox sizes this deploy's selected carrier provisions, empty for a single-shape
+        backend — what decides whether a portal offers the agent's `sandbox_size` setting."""
+        return self._sandbox_sizes
 
     async def credential(self, slot: str) -> str:
         if self._credentials is None:
@@ -1687,6 +1696,7 @@ class SurfaceContext:
                         tables.agent.c.model,
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.reasoning,
+                        tables.agent.c.sandbox_size,
                         tables.agent.c.prompt,
                         tables.agent.c.updated_at,
                     ).where(
@@ -1717,6 +1727,7 @@ class SurfaceContext:
             model=row.model,
             internet_access_allowed=row.internet_access_allowed,
             reasoning=row.reasoning,
+            sandbox_size=row.sandbox_size,
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),

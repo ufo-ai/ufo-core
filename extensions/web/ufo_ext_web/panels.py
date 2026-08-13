@@ -282,6 +282,10 @@ async def submit_intent(
         model = submitted.spec.get("model")
         if model not in ctx.models:
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
+        if submitted.spec.get("sandbox_size") is not None and not ctx.sandbox_sizes:
+            return JSONResponse(
+                {"applied": False, "message": "This deploy does not offer sandbox sizes."}
+            )
     slot: CredentialSlotView | None = None
     if isinstance(submitted, ApplyIntent | CredentialIntent) and submitted.kind == "credential":
         by_name = {view.name: view for view in await ctx.list_credential_slots()}
@@ -331,21 +335,28 @@ async def submit_intent(
     raise RuntimeError("the turn's tail ended without a terminal frame")
 
 
-def agent_create_schema() -> dict[str, JsonValue]:
+def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The create form's field source: the whole writable spec, with `prompt` among the required
     fields. The kind takes the initial prompt at birth and refuses a create without one, so the
-    form states the requirement exactly where the kind enforces it."""
+    form states the requirement exactly where the kind enforces it. `sandbox_size` renders only
+    where the deploy's carrier offers sizes — on a single-shape backend the field would change
+    nothing a member can observe, so the form never states the choice."""
     schema = AgentSpec.model_json_schema()
+    hidden = set() if sandbox_sizes else {"sandbox_size"}
+    schema["properties"] = {
+        key: value for key, value in schema["properties"].items() if key not in hidden
+    }
     return {**schema, "required": [*schema["required"], "prompt"]}
 
 
-def _update_schema() -> dict[str, JsonValue]:
+def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     """The settings form's field source: the writable spec schema minus `prompt`, which is
     create-only — an existing agent's prompt changes through the governed proposal path, and a
     field the update verb refuses must not render on the update form."""
     schema = AgentSpec.model_json_schema()
+    hidden = {"prompt"} if sandbox_sizes else {"prompt", "sandbox_size"}
     schema["properties"] = {
-        key: value for key, value in schema["properties"].items() if key != "prompt"
+        key: value for key, value in schema["properties"].items() if key not in hidden
     }
     return schema
 
@@ -378,8 +389,12 @@ async def agent_overview(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
                 model=detail.model,
                 internet_access_allowed=detail.internet_access_allowed,
                 reasoning=detail.reasoning,
-            ).model_dump(mode="json", exclude={"prompt"}),
-            "spec_schema": _update_schema(),
+                sandbox_size=detail.sandbox_size,
+            ).model_dump(
+                mode="json",
+                exclude={"prompt"} if ctx.sandbox_sizes else {"prompt", "sandbox_size"},
+            ),
+            "spec_schema": _update_schema(ctx.sandbox_sizes),
             "audience": audience,
         }
     )

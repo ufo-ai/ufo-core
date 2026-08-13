@@ -420,7 +420,7 @@ spec:
             - name: E2B_API_KEY
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: E2B_API_KEY}
-            - {name: E2B_TEMPLATE, value: "${e2b_template}"}
+            - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}
@@ -590,7 +590,7 @@ spec:
             - secretRef: {name: ufo-platform-secrets}
           env:
             - {name: AWS_REGION, value: "${region}"}
-            - {name: E2B_TEMPLATE, value: "${e2b_template}"}
+            - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
             # The fleet's platform Fernet key (seals hosted credential rows) and artifact-delivery
             # secret — minted for the fleet, in the ufo-serve Secret.
             - name: UFO_CREDENTIAL_KEY

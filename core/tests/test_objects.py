@@ -879,6 +879,7 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
             "model": "claude-opus-4-8",
             "internet_access_allowed": True,
             "reasoning": "high",
+            "sandbox_size": "small",
             "prompt": None,
         }
         assert fetched["status"]["prompt"] == "be brief"
@@ -962,6 +963,44 @@ async def test_agent_kind_updates_model_admin_gated_and_shows_prompt_readonly(db
         )
         with pytest.raises(VerbNotSupported, match="proposal path"):
             await apply_tool.handler(owner_ctx, prompt_write)
+
+
+async def test_agent_kind_round_trips_sandbox_size(db: None) -> None:
+    """The row births at `small` and an apply naming another size persists it; an apply that omits
+    the field states the default, so a read-modify-write keeps whatever the agent holds only by
+    carrying it — the spec is declarative, never a patch."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, is_main=True)
+        owner_ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=agent_id)
+
+        manifest = yaml.safe_dump(
+            {
+                "kind": AGENT_KIND,
+                "name": "assistant",
+                "spec": {
+                    "model": "claude-fable-5",
+                    "internet_access_allowed": True,
+                    "reasoning": "high",
+                    "sandbox_size": "large",
+                },
+            }
+        )
+        applied = json.loads(await _text(tools, "object_apply", owner_ctx, manifest=manifest))
+        assert applied["result"] == "updated"
+        async with workspace_tx() as connection:
+            stored = await connection.scalar(
+                sa.select(tables.agent.c.sandbox_size).where(
+                    tables.agent.c.workspace_id == workspace_id
+                )
+            )
+        assert stored == "large"
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
+        )
+        assert fetched["spec"]["sandbox_size"] == "large"
 
 
 async def test_a_child_agent_is_scoped_to_the_main_agent(db: None) -> None:

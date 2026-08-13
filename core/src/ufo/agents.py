@@ -35,7 +35,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
-from ufo.schema.records import ReasoningEffort
+from ufo.schema.records import DEFAULT_SANDBOX_SIZE, ReasoningEffort, SandboxSize
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
@@ -81,6 +81,14 @@ class AgentSpec(BaseModel):
             "Reasoning effort for the agent's turns: a fixed level ('low', 'medium', 'high'), "
             "'off', or 'auto' — an Anthropic model sets its own depth per request; other "
             "providers run auto and off at their default."
+        ),
+    )
+    sandbox_size: SandboxSize = Field(
+        default=DEFAULT_SANDBOX_SIZE,
+        description=(
+            "The cpu/memory tier a new conversation's sandbox is provisioned at, on a deploy "
+            "whose sandbox backend offers sizes; a single-shape backend stores and ignores it. "
+            "An existing conversation keeps the size its sandbox was created at."
         ),
     )
     prompt: str | None = Field(
@@ -137,6 +145,7 @@ class AgentObjects:
                     model=row.model,
                     internet_access_allowed=row.internet_access_allowed,
                     reasoning=row.reasoning,
+                    sandbox_size=row.sandbox_size,
                 ),
                 created_at=row.created_at,
                 updated_at=row.updated_at,
@@ -198,6 +207,7 @@ class AgentObjects:
                     model=spec.model,
                     internet_access_allowed=spec.internet_access_allowed,
                     reasoning=spec.reasoning,
+                    sandbox_size=spec.sandbox_size,
                     updated_at=sa.func.now(),
                 )
                 .where(
@@ -226,6 +236,7 @@ class AgentObjects:
                         is_main=False,
                         internet_access_allowed=spec.internet_access_allowed,
                         reasoning=spec.reasoning,
+                        sandbox_size=spec.sandbox_size,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -256,6 +267,7 @@ class AgentObjects:
                         tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.reasoning,
+                        tables.agent.c.sandbox_size,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
                         sa.select(main.c.name)
@@ -281,12 +293,15 @@ AGENT_OBJECT = ObjectKind(
         "objects."
     ),
     guidance=(
-        "A workspace agent as an object. Apply {model, internet_access_allowed, reasoning} to "
-        "change its model, public-internet access, or reasoning effort — admin only, taking "
-        "effect on the next turn. Blocking public internet leaves exact model, credential, "
-        "connector, and transfer hosts available. Reasoning 'auto' lets an Anthropic model set "
-        "its own thinking depth per request and falls to the provider default elsewhere; a "
-        "fixed level pins it. Applying a name no agent holds "
+        "A workspace agent as an object. Apply {model, internet_access_allowed, reasoning, "
+        "sandbox_size} to change its model, public-internet access, reasoning effort, or sandbox "
+        "size — admin only, taking effect on the next turn. Blocking public internet leaves "
+        "exact model, credential, connector, and transfer hosts available. Reasoning 'auto' lets "
+        "an Anthropic model set its own thinking depth per request and falls to the provider "
+        "default elsewhere; a fixed level pins it. Sandbox size ('small', 'medium', 'large') "
+        "picks the cpu/memory tier a new conversation's sandbox is provisioned at, where the "
+        "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
+        "have. Applying a name no agent holds "
         "creates one — admin only, from the main agent, and the spec then requires `prompt`, the "
         "one write that is not an edit; a new agent starts empty, inheriting no grants, "
         "credentials, sources, or memory. An existing agent's prompt is read-only here: changes "

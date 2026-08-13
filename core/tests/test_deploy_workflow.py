@@ -19,6 +19,7 @@ ROOT = Path(__file__).parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
+TESTED_TEMPLATES = "small=ufo-sbx-small:b1,medium=ufo-sbx-medium:b2,large=ufo-sbx-large:b3"
 MONITORS = {
     environment: ROOT / "infra" / "envs" / environment / "monitors.tf"
     for environment in DEPLOY_ENVIRONMENTS
@@ -1073,13 +1074,13 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         step for step in rollout_steps if step.get("name") == "Select sandbox template"
     )
     assert "id" not in sandbox_template
-    assert "E2B_TEMPLATE=$(uv run python sandbox/build_template.py)" in sandbox_template["run"]
+    assert "E2B_TEMPLATES=$(uv run python sandbox/build_template.py)" in sandbox_template["run"]
     assert "GITHUB_OUTPUT" not in sandbox_template["run"]
 
     production = jobs["production"]
     assert isinstance(production, dict)
     assert production["env"] == {
-        "E2B_TEMPLATE": "ufo-sbx",
+        "E2B_TEMPLATES": "small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large",
         "TF_DIR": "infra/envs/prod",
     }
     steps = production["steps"]
@@ -1100,7 +1101,7 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
-        '  -var "e2b_template=$E2B_TEMPLATE" \\\n'
+        '  -var "e2b_templates=$E2B_TEMPLATES" \\\n'
         '  -var "deployment_id=plan"\n'
     )
 
@@ -1409,15 +1410,15 @@ def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
             for document in documents
             if re.search(rf"^kind: Deployment\nmetadata:\n  name: {name}$", document, re.MULTILINE)
         )
-        assert '- {name: E2B_TEMPLATE, value: "${e2b_template}"}' in deployment
+        assert '- {name: E2B_TEMPLATES, value: "${e2b_templates}"}' in deployment
     for environment in DEPLOY_ENVIRONMENTS:
         root = ROOT / "infra" / "envs" / environment
         assert (
-            "e2b_template                     = var.e2b_template" in (root / "ufo.tf").read_text()
+            "e2b_templates                    = var.e2b_templates" in (root / "ufo.tf").read_text()
         )
         variables = (root / "variables.tf").read_text()
-        assert 'variable "e2b_template"' in variables
-        assert 'condition     = var.e2b_template != ""' in variables
+        assert 'variable "e2b_templates"' in variables
+        assert 'condition     = var.e2b_templates != ""' in variables
 
 
 @pytest.mark.parametrize(
@@ -1496,7 +1497,7 @@ def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
 def test_rollout_plan_pins_the_selected_artifacts() -> None:
     script = _step("rollout", "Terraform plan")["run"]
     assert '-var "image_tag=$IMAGE_TAG"' in script
-    assert '-var "e2b_template=$E2B_TEMPLATE"' in script
+    assert '-var "e2b_templates=$E2B_TEMPLATES"' in script
 
 
 @pytest.mark.parametrize(
@@ -1715,7 +1716,7 @@ def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
         "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
         "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
         "DEPLOY_ROLE_ARN": "arn:aws:iam::899147036157:role/github-production-deploy",
-        "E2B_TEMPLATE": "${{ needs.prepare.outputs.e2b_template }}",
+        "E2B_TEMPLATES": "${{ needs.prepare.outputs.e2b_templates }}",
         "IMAGE_TAG": "${{ needs.prepare.outputs.image_tag }}",
         "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
     }
@@ -1754,7 +1755,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
         ["bash", "-e", "-o", "pipefail", "-c", record["run"]],
         check=True,
         env={
-            "E2B_TEMPLATE": "ufo-sbx:build-id",
+            "E2B_TEMPLATES": TESTED_TEMPLATES,
             "GITHUB_SHA": "0123456789abcdef0123456789abcdef01234567",
             "IMAGE_TAG": "01234567",
             "PATH": os.environ["PATH"],
@@ -1766,7 +1767,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     assert json.loads(artifact.read_text()) == {
         "commit": "0123456789abcdef0123456789abcdef01234567",
         "image_tag": "01234567",
-        "sandbox_template": "ufo-sbx:build-id",
+        "sandbox_templates": TESTED_TEMPLATES,
     }
     assert rollout_steps.index(record) < rollout_steps.index(upload)
 
@@ -1778,7 +1779,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     assert isinstance(prepare, dict)
     assert prepare["outputs"] == {
         "attempt_id": "${{ steps.attempt.outputs.attempt_id }}",
-        "e2b_template": "${{ steps.artifacts.outputs.e2b_template }}",
+        "e2b_templates": "${{ steps.artifacts.outputs.e2b_templates }}",
         "image_tag": "${{ steps.artifacts.outputs.image_tag }}",
         "target_sha": "${{ steps.select.outputs.target_sha }}",
     }
@@ -1803,7 +1804,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     assert 'ARTIFACT="$RUNNER_TEMP/tested-artifacts/tested-artifacts.json"' in verify["run"]
     assert "TARGET_SHA" in verify["run"]
     assert "image_tag" in verify["run"]
-    assert "e2b_template" in verify["run"]
+    assert "e2b_templates" in verify["run"]
     assert prepare_steps.index(select) < prepare_steps.index(download) < prepare_steps.index(verify)
 
 
@@ -1894,18 +1895,18 @@ def test_production_prepare_rejects_untested_artifact_values(tmp_path: Path) -> 
     values = {
         "commit": target_sha,
         "image_tag": target_sha[:8],
-        "sandbox_template": "ufo-sbx:build-id",
+        "sandbox_templates": TESTED_TEMPLATES,
     }
     accepted = verify(values)
     assert accepted.returncode == 0, accepted.stderr.decode()
     assert output.read_text().splitlines() == [
         f"image_tag={target_sha[:8]}",
-        "e2b_template=ufo-sbx:build-id",
+        f"e2b_templates={TESTED_TEMPLATES}",
     ]
     assert verify(values | {"commit": "f" * 40}).returncode != 0
     assert verify(values | {"image_tag": "ffffffff"}).returncode != 0
-    assert verify(values | {"sandbox_template": ""}).returncode != 0
-    assert verify(values | {"sandbox_template": None}).returncode != 0
+    assert verify(values | {"sandbox_templates": ""}).returncode != 0
+    assert verify(values | {"sandbox_templates": None}).returncode != 0
     assert verify({"commit": target_sha, "image_tag": target_sha[:8]}).returncode != 0
 
 
@@ -2271,7 +2272,7 @@ def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> No
         "with": {"ref": "${{ env.TARGET_SHA }}"},
     }
     assert "env" not in step
-    required = ("E2B_TEMPLATE", "IMAGE_TAG", "TARGET_SHA")
+    required = ("E2B_TEMPLATES", "IMAGE_TAG", "TARGET_SHA")
     environment = dict.fromkeys(required, "present")
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], check=True, env=environment)
     for missing in required:
@@ -2381,7 +2382,7 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.platform \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
-        '  -var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" \\\n'
+        '  -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" \\\n'
         '  -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
     )
     assert foundation_guard["run"] == (
@@ -2412,7 +2413,7 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     }
     assert runtime_plan["run"] == (
         'terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" '
-        '-var "image_tag=$IMAGE_TAG" -var "e2b_template=$E2B_TEMPLATE" '
+        '-var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" '
         '-var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"'
     )
     assert runtime_guard["run"] == (
@@ -2534,10 +2535,10 @@ def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(workflow: str, job
     gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
     if job_name == "rollout":
         selector = next(step for step in steps if step.get("name") == "Select sandbox template")
-        assert 'echo "E2B_TEMPLATE=$E2B_TEMPLATE" >> "$GITHUB_ENV"' in selector["run"]
+        assert 'echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"' in selector["run"]
         assert steps.index(selector) < steps.index(gate)
     else:
-        assert job["env"]["E2B_TEMPLATE"] == "${{ needs.prepare.outputs.e2b_template }}"
+        assert job["env"]["E2B_TEMPLATES"] == "${{ needs.prepare.outputs.e2b_templates }}"
     script = gate["run"]
     assert isinstance(script, str)
     assert "output -raw sandbox_proxy_ca_cert" in script

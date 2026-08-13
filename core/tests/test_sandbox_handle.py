@@ -76,7 +76,9 @@ def _derived_env(spec: SandboxSpec) -> Mapping[str, str]:
     return {key: value for key, value in spec.env.items() if key != CONVERSATION_ID_ENV}
 
 
-async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
+async def _conversation(
+    handle: str | None = None, sandbox_size: str = "small"
+) -> tuple[UUID, UUID]:
     workspace_id, conversation_id, agent_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -91,6 +93,7 @@ async def _conversation(handle: str | None = None) -> tuple[UUID, UUID]:
                 name=agent_id.hex[:8],
                 prompt="be brief",
                 model="claude-opus-4-8",
+                sandbox_size=sandbox_size,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -326,6 +329,21 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
     basic = "Basic " + base64.b64encode(f"{carrier.specs[0].run_token}:".encode()).decode()
     assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id)
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
+
+
+async def test_open_carries_the_owning_agents_sandbox_size_on_the_spec(
+    db: None, tmp_path: Path
+) -> None:
+    """Every open — a turn's, or an off-turn attachment write racing it — resolves the size from
+    the owning conversation's agent row, so whichever caller creates first creates at the size the
+    agent names."""
+    workspace_id, conversation_id = await _conversation(sandbox_size="large")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    with ws(workspace_id):
+        await _conversation_sandboxes(carrier, tmp_path, "e2b").open(conversation_id, "run-a", {})
+
+    assert carrier.specs[0].size == "large"
 
 
 async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrites_it(

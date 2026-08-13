@@ -196,7 +196,7 @@ data "kubectl_file_documents" "hosted" {
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"
     bundle_image                     = local.bundle_image
-    e2b_template                     = var.e2b_template
+    e2b_templates                    = var.e2b_templates
     serve_role_arn                   = module.platform.app_s3_role_arn
     workload_ha                      = false
     prestop_seconds                  = local.prestop_seconds

@@ -539,7 +539,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
             ],
             "subagents": [subagent.summary().model_dump(mode="json") for subagent in ctx.subagents],
             "new_agent": (
-                {"spec_schema": agent_create_schema(), "models": list(ctx.models)}
+                {"spec_schema": agent_create_schema(ctx.sandbox_sizes), "models": list(ctx.models)}
                 if audience.admin
                 else None
             ),

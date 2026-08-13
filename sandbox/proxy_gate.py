@@ -14,11 +14,12 @@ from e2b import Sandbox
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_STAGING_PATH,
-    E2B_TEMPLATE_ENV,
+    E2B_TEMPLATES_ENV,
     INSTALL_CA_COMMAND,
+    sandbox_templates,
 )
 
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV
+from ufo.sandbox.session import EGRESS_CA_CERT_ENV, SANDBOX_SIZES
 
 PROBE_URL = "https://api.anthropic.com/v1/messages"
 EXPECTED_CONNECT_STATUS = "403"
@@ -117,9 +118,10 @@ def main() -> None:
     ca_cert = os.environ.get(EGRESS_CA_CERT_ENV)
     if not ca_cert:
         raise RuntimeError(f"{EGRESS_CA_CERT_ENV} is required")
-    template = os.environ.get(E2B_TEMPLATE_ENV)
-    if not template:
-        raise RuntimeError(f"{E2B_TEMPLATE_ENV} is required")
+    templates = os.environ.get(E2B_TEMPLATES_ENV)
+    if not templates:
+        raise RuntimeError(f"{E2B_TEMPLATES_ENV} is required")
+    template = sandbox_templates(templates)[SANDBOX_SIZES[0]]
     ProxyTlsGate(public_url=args.proxy_url, ca_cert=ca_cert, template=template).run()
 
 

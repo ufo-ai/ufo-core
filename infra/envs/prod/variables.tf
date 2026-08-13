@@ -17,12 +17,12 @@ variable "deployment_id" {
   }
 }
 
-variable "e2b_template" {
+variable "e2b_templates" {
   type = string
 
   validation {
-    condition     = var.e2b_template != ""
-    error_message = "e2b_template must not be empty."
+    condition     = var.e2b_templates != ""
+    error_message = "e2b_templates must not be empty."
   }
 }
 

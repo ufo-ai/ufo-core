@@ -655,9 +655,10 @@ def _carrier_config(backend: str) -> Config:
 
 
 def test_config_backend_defaults_to_the_built_in_local_carrier() -> None:
-    carrier, off_cluster = select_carrier(_carrier_config("local"), ())
+    carrier, spec = select_carrier(_carrier_config("local"), ())
     assert isinstance(carrier, LocalCarrier)
-    assert off_cluster is False
+    assert spec.off_cluster is False
+    assert spec.sizes == ()
 
 
 def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
@@ -665,9 +666,9 @@ def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
     `[sandbox] backend` naming it `serve` builds exactly that carrier — a deploy swaps the sandbox
     backend to an extension's without core naming it."""
     manifest = _sample_manifest()
-    carrier, off_cluster = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier, spec = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
     assert isinstance(carrier, sample.SampleCarrier)
-    assert off_cluster is False
+    assert spec.off_cluster is False
 
 
 async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> None:
