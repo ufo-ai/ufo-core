@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from ufo.audience import SHARED_AUDIENCE, Audience
+from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.candidates import WorkspaceCandidates
 from ufo.connectors import AuthProxy, CliCredential, ConnectorBroker, ConnectorResolver
@@ -38,6 +39,7 @@ from ufo.memory import MemorySearchProvider
 from ufo.models.spec import ModelSpec
 from ufo.objects import ObjectKind
 from ufo.sandbox.session import Carrier
+from ufo.sandbox.terminal import TerminalTransport
 from ufo.schema.records import Agent, Turn
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill
@@ -242,6 +244,20 @@ class HubSpec:
 
     backend: str
     build: Callable[[str | None], Hub]
+
+
+@dataclass(frozen=True)
+class TerminalTransportSpec:
+    """A terminal-rendezvous transport an extension registers, mirroring `HubSpec`. `backend` is
+    the name `config.terminal.backend` selects it by; `build` constructs the process-wide
+    `TerminalTransport` from `config.hub.url` (reused, so the fleet's one Redis serves both hub and
+    terminal) and the deploy's `BlobStore` (the op's copy-in body and any large copy-out reply ride
+    the blob, never Redis), called once at boot and only when this backend is selected. Core ships
+    the in-process transport; a cross-pod backend is what makes terminals work on a shared fleet
+    where the held connection and the turn's workflow land on different pods."""
+
+    backend: str
+    build: Callable[[str | None, BlobStore], TerminalTransport]
 
 
 @dataclass(frozen=True)
@@ -584,6 +600,7 @@ class Manifest:
     surfaces: tuple[SurfaceSpec, ...] = ()
     models: tuple[ModelSpec, ...] = ()
     hubs: tuple[HubSpec, ...] = ()
+    terminal_transports: tuple[TerminalTransportSpec, ...] = ()
     skills: tuple[SkillSpec, ...] = ()
     cdp_providers: tuple[CdpProviderSpec, ...] = ()
     carriers: tuple[CarrierSpec, ...] = ()

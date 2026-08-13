@@ -1329,9 +1329,7 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
             ).scalar_one()
 
 
-def _terminal_sandboxes(
-    tmp_path: Path, terminals: Terminals, admissible: bool = True
-) -> ConversationSandbox:
+def _terminal_sandboxes(tmp_path: Path, terminals: Terminals) -> ConversationSandbox:
     return ConversationSandbox(
         carrier=LocalCarrier(),
         backend="local",
@@ -1340,7 +1338,6 @@ def _terminal_sandboxes(
         proxy=PROXY,
         workspace_root=tmp_path / "workspaces",
         terminals=terminals,
-        terminals_admissible=admissible,
     )
 
 
@@ -1363,40 +1360,20 @@ async def test_a_fresh_conversation_binds_to_the_connected_terminal(
     assert not (tmp_path / "workspaces" / str(conversation_id)).exists()
 
 
-async def test_a_fleet_replica_never_binds_a_terminal_and_falls_to_the_deploy_carrier(
-    db: None, tmp_path: Path
-) -> None:
-    """On a shared-hub fleet the rendezvous is process-local, so a `client:` binding would strand
-    every turn the queue hands another replica. A non-admissible instance never claims it: the
-    connected terminal is ignored, no `client:` handle is written, and the conversation opens on the
-    deploy's own carrier."""
+async def test_claim_binds_whenever_the_handle_is_empty(db: None, tmp_path: Path) -> None:
+    """The transport, not the process, owns whether a terminal is served, so a claim always fills an
+    empty handle: it writes `client:<directory>` and reports it made the bind. A second claim finds
+    the handle set and reports False — the binding is the row's, made once."""
     workspace_id, conversation_id = await _conversation()
     terminals = Terminals()
     terminals.connect(conversation_id, "/Users/member/proj", None)
-    sandboxes = _terminal_sandboxes(tmp_path, terminals, admissible=False)
+    sandboxes = _terminal_sandboxes(tmp_path, terminals)
 
     with ws(workspace_id):
+        assert await sandboxes.claim_terminal(conversation_id, "/Users/member/proj") is True
         assert await sandboxes.claim_terminal(conversation_id, "/Users/member/proj") is False
-        session = await sandboxes.open(conversation_id, "run-a", {})
 
-    assert isinstance(session.carrier, LocalCarrier)
-    assert await _stored_handle(conversation_id) == "local:local"
-
-
-async def test_a_client_bound_conversation_a_replica_cannot_serve_fails_loud(
-    db: None, tmp_path: Path
-) -> None:
-    """A conversation bound to a terminal while the deploy ran one replica, opened on a pod after it
-    scaled to a fleet, fails loud rather than opening a directory named `client:<path>` under the
-    workspace root — its workspace is a terminal no pod here can reach."""
-    workspace_id, conversation_id = await _conversation(handle="client:/Users/member/proj")
-    sandboxes = _terminal_sandboxes(tmp_path, Terminals(), admissible=False)
-
-    with ws(workspace_id):
-        with pytest.raises(TerminalGone) as refusal:
-            await sandboxes.open(conversation_id, "run-a", {})
-
-    assert "/Users/member/proj" in str(refusal.value)
+    assert await _stored_handle(conversation_id) == "client:/Users/member/proj"
 
 
 async def test_a_bound_conversation_refuses_a_terminal_standing_elsewhere(

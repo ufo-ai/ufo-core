@@ -45,6 +45,7 @@ from ufo.config import (
     HubConfig,
     ResearchConfig,
     SandboxConfig,
+    TerminalConfig,
 )
 from ufo.connectors import UnknownBrokerTool
 from ufo.credentials import CredentialSlotUnset, CredentialStore
@@ -93,6 +94,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
 )
+from ufo.sandbox.terminal import Terminals
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
 from ufo.search import FetchRequest, SearchQuery
@@ -104,6 +106,7 @@ from ufo.serve import (
     _select_cdp_provider,
     _select_hub,
     _select_search_provider,
+    _select_terminal_transport,
     _source_backends,
     _validate_requires,
 )
@@ -309,6 +312,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {kind.name for kind in manifest.objects} == {sample.WIDGET_KIND, sample.RELIC_KIND}
     assert {spec.name for spec in manifest.indexes} == {sample.INDEX_BACKEND}
     assert {spec.backend for spec in manifest.hubs} == {sample.HUB_BACKEND}
+    assert {spec.backend for spec in manifest.terminal_transports} == {sample.TERMINAL_BACKEND}
     assert {spec.path.name for spec in manifest.skills} == {sample.SKILL_NAME}
     assert {spec.backend for spec in manifest.cdp_providers} == {sample.CDP_PROVIDER}
     assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
@@ -341,6 +345,60 @@ def test_core_selects_a_manifest_contributed_hub() -> None:
         _select_hub(_config(sample.HUB_BACKEND), ())
     with pytest.raises(RuntimeError, match="two extensions register hub backend"):
         _select_hub(_config(sample.HUB_BACKEND), (manifest, manifest))
+
+
+def test_core_selects_a_manifest_contributed_terminal_transport(tmp_path: Path) -> None:
+    """The `terminal_transports` seam end to end, mirroring the hub: core's boot-time selection
+    knows only the in-process default, so resolving the sample's backend name proves the Manifest
+    `terminal_transports` point flowed into selection. Selecting a name no manifest registers, and
+    two manifests claiming one name, both fail loud."""
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+
+    def _config(backend: str) -> Config:
+        return Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+            blob=BlobConfig(backend="filesystem", root=Path()),
+            terminal=TerminalConfig(backend=backend),
+        )
+
+    assert isinstance(_select_terminal_transport(_config("in_process"), (), blob), Terminals)
+    assert isinstance(
+        _select_terminal_transport(_config(sample.TERMINAL_BACKEND), (manifest,), blob), Terminals
+    )
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_terminal_transport(_config(sample.TERMINAL_BACKEND), (), blob)
+    with pytest.raises(RuntimeError, match="two extensions register terminal transport"):
+        _select_terminal_transport(_config(sample.TERMINAL_BACKEND), (manifest, manifest), blob)
+
+
+def test_a_cross_process_hub_with_the_in_process_terminal_transport_fails_loud(
+    tmp_path: Path,
+) -> None:
+    """A cross-process hub declares a multi-instance fleet, whose held connection and turn workflow
+    land on different pods; the process-local terminal transport cannot reach across them, so that
+    combination fails loud at boot rather than stranding every cross-pod turn. The coherent combos
+    resolve normally: in-process both, or a cross-process transport beside a cross-process hub."""
+    manifest = _sample_manifest()
+    blob = FilesystemBlobStore(root=tmp_path)
+
+    def _config(terminal_backend: str, hub_backend: str) -> Config:
+        return Config(
+            database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+            blob=BlobConfig(backend="filesystem", root=Path()),
+            terminal=TerminalConfig(backend=terminal_backend),
+            hub=HubConfig(backend=hub_backend),
+        )
+
+    with pytest.raises(RuntimeError, match="cannot serve"):
+        _select_terminal_transport(_config("in_process", "redis"), (manifest,), blob)
+    assert isinstance(
+        _select_terminal_transport(_config("in_process", "in_process"), (), blob), Terminals
+    )
+    assert isinstance(
+        _select_terminal_transport(_config(sample.TERMINAL_BACKEND, "redis"), (manifest,), blob),
+        Terminals,
+    )
 
 
 def _cdp_config(cdp_provider: str) -> Config:

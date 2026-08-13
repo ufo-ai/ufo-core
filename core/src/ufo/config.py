@@ -251,6 +251,19 @@ class HubConfig(BaseModel):
     url: str | None = None
 
 
+class TerminalConfig(BaseModel):
+    """The terminal-rendezvous transport. `backend` selects among the in-process default and any
+    backend an extension registers through its Manifest `terminal_transports` point (the `redis_hub`
+    extension registers `redis`). The transport reuses `hub.url` for its connection string, so a
+    fleet already running the Redis hub selects the Redis terminal transport beside it with no new
+    URL. The in-process transport is correct only on a single serve instance; a shared fleet selects
+    a cross-pod backend so a member's held connection and their turn's workflow reach one terminal
+    even when they land on different pods."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: str = IN_PROCESS_BACKEND
+
+
 class BrowserConfig(BaseModel):
     """The browser transport. `cdp_provider` selects where the one BUA engine (the browser
     extension) connects — every provider is contributed by an extension at the `cdp_providers`
@@ -309,6 +322,7 @@ class Config(BaseModel):
     ext: ExtConfig = ExtConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     hub: HubConfig = HubConfig()
+    terminal: TerminalConfig = TerminalConfig()
     browser: BrowserConfig = BrowserConfig()
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()

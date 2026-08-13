@@ -196,6 +196,9 @@ from ufo.ext.manifest import (
     SubagentToolGrant as SubagentToolGrant,
 )
 from ufo.ext.manifest import (
+    TerminalTransportSpec as TerminalTransportSpec,
+)
+from ufo.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
 )
 from ufo.image_previews import (

@@ -3217,14 +3217,6 @@ class SurfaceContext:
             return None
         return await self._sandboxes.read(conversation_id, rel)
 
-    @property
-    def terminals_admissible(self) -> bool:
-        """Whether this instance may serve a conversation from the member's connected terminal —
-        false on a shared-hub fleet, where the rendezvous is process-local and a binding would
-        strand every turn the queue hands another replica. A surface reads it to decide whether an
-        `x-ufo-cwd` header means anything here at all."""
-        return self._sandboxes.terminals_admissible
-
     def terminal_connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
         """Publish the terminal this surface's held connection stands for, so the conversation's
         sandbox can be that terminal. Paired with `terminal_disconnect` around the connection's
@@ -3242,10 +3234,14 @@ class SurfaceContext:
         call made it — the one moment the surface tells the member where the agent works."""
         return await self._sandboxes.claim_terminal(conversation_id, cwd)
 
-    async def next_terminal_op(self, conversation_id: UUID) -> TerminalOp:
+    async def next_terminal_op(
+        self, conversation_id: UUID, exclude_op_id: str | None = None
+    ) -> TerminalOp:
         """The next op the conversation's turn asks of its terminal — what a held stream races
-        against the turn's own frames, rendering each op as one `run` directive."""
-        return await self._sandboxes.terminals.next_op(conversation_id)
+        against the turn's own frames, rendering each op as one `run` directive. `exclude_op_id` is
+        the op this same request just answered, so a reply POST that also resumes the tail never
+        re-renders the op it is the answer to."""
+        return await self._sandboxes.terminals.next_op(conversation_id, exclude_op_id)
 
     def terminal_resolve(
         self,
@@ -3257,26 +3253,25 @@ class SurfaceContext:
     ) -> bool:
         """Answer the in-flight op with what the member's client posted back. Gated twice: the op
         id is unguessable and single-use, and the reply must come from the member whose terminal
-        the binding named — another member's bearer on the same channel resolves nothing."""
-        bound = self._sandboxes.terminals.workspace(conversation_id)
-        if bound is None or bound.member_id != member_id:
-            return False
-        return self._sandboxes.terminals.resolve(conversation_id, op_id, reply, failed)
+        the binding named — another member's bearer on the same channel resolves nothing. The
+        member gate lives in the transport, which holds the binding: the reply POST can land on a
+        pod that never held the connection, so a workspace read here would answer for the wrong
+        pod."""
+        return self._sandboxes.terminals.resolve(conversation_id, op_id, reply, failed, member_id)
 
     async def terminal_op_body(
         self, queue_key: str, op_id: str, member_id: UUID | None
     ) -> bytes | None:
         """The bytes the in-flight op sends down to the terminal — the read projection a client
         `curl`s a write's body from, gated exactly as `terminal_resolve` and never creating a
-        conversation: an op in flight implies one exists."""
+        conversation: an op in flight implies one exists. The transport holds the binding and the
+        staged bytes, so the member gate and the read land together on whichever pod staged the op
+        rather than reading a binding this pod may never have held."""
         async with workspace_tx() as connection:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         if found is None:
             return None
-        bound = self._sandboxes.terminals.workspace(found.id)
-        if bound is None or bound.member_id != member_id:
-            return None
-        return self._sandboxes.terminals.staged(found.id, op_id)
+        return await self._sandboxes.terminals.staged(found.id, op_id, member_id)
 
     async def installation(self, peer_surface: str) -> str | None:
         """The workspace's installation identity on a peer surface (e.g. Slack's `team:<id>`), or

@@ -23,6 +23,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -174,6 +175,63 @@ class TerminalWorkspace:
 
     cwd: str
     member_id: UUID | None
+
+
+class TerminalTransport(Protocol):
+    """The rendezvous the surface and the terminal carrier reach a member's connected terminal
+    through, so which topology serves the terminal is one selected object, not a branch at every
+    call. Core ships the in-process `Terminals`; the `redis_hub` extension ships a Redis-Streams
+    transport for the shared fleet, where the held connection and the turn's workflow can land on
+    different pods.
+
+    The two-loop split is intrinsic: `send` runs on the turn's DBOS workflow loop while `next_op`,
+    `connect`, `disconnect`, `resolve`, and `staged` run on serve's, so every implementation wakes a
+    waiter on the waiter's own loop. `connect`/`disconnect`/`resolve` return without awaiting
+    because they are called from surface routes that must not block on the transport; a
+    cross-process backend does its own I/O off the running loop and the sender's `send` deadline is
+    the wait that always ends.
+
+    `member_id` on `resolve`/`staged` gates who may answer an op or read its staged bytes; `None`
+    leaves it ungated (the direct-drive tests), and the surface always passes the connected
+    member."""
+
+    def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None: ...
+
+    def disconnect(self, conversation_id: UUID) -> None: ...
+
+    def workspace(self, conversation_id: UUID) -> TerminalWorkspace | None: ...
+
+    async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None: ...
+
+    async def send(
+        self,
+        conversation_id: UUID,
+        kind: str,
+        timeout_s: int,
+        name: str = "",
+        arg: str = "",
+        params: str = "",
+        body: bytes | None = None,
+    ) -> bytes: ...
+
+    async def next_op(
+        self, conversation_id: UUID, exclude_op_id: str | None = None
+    ) -> TerminalOp: ...
+
+    async def staged(
+        self, conversation_id: UUID, op_id: str, member_id: UUID | None = None
+    ) -> bytes | None: ...
+
+    def resolve(
+        self,
+        conversation_id: UUID,
+        op_id: str,
+        reply: bytes,
+        failed: str | None = None,
+        member_id: UUID | None = None,
+    ) -> bool: ...
+
+    def in_flight(self, conversation_id: UUID) -> TerminalOp | None: ...
 
 
 def _wake(waiter: _Waiter, answer: object) -> None:
@@ -373,18 +431,20 @@ class Terminals:
                         slot.queue = deque(e for e in slot.queue if e[0] is not ticket)
                 raise TerminalGone(f"the terminal did not free up within {timeout_s:.0f}s")
 
-    async def next_op(self, conversation_id: UUID) -> TerminalOp:
+    async def next_op(self, conversation_id: UUID, exclude_op_id: str | None = None) -> TerminalOp:
         """The next op asked of this conversation's terminal, awaited by the held stream that will
         render it: the undelivered in-flight op when one is already waiting, else the next `send`.
         A newer stream replaces an older watcher — the old stream is the one that ended at its
-        hold, and two live watchers would race one op."""
+        hold, and two live watchers would race one op. `exclude_op_id` is the op the same request
+        just answered as a reply — never re-render it, so a reply POST that also resumes the tail
+        cannot re-run the op it is the answer to."""
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future[object] = loop.create_future()
         with self._lock:
             slot = self.slots.get(conversation_id)
             if slot is None:
                 raise TerminalGone("no terminal is connected to this conversation")
-            if slot.op is not None and not slot.delivered:
+            if slot.op is not None and not slot.delivered and slot.op.op_id != exclude_op_id:
                 slot.delivered = True
                 return slot.op
             slot.watcher = (waiter, loop)
@@ -398,12 +458,17 @@ class Terminals:
         assert isinstance(answer, TerminalOp)
         return answer
 
-    def staged(self, conversation_id: UUID, op_id: str) -> bytes | None:
+    async def staged(
+        self, conversation_id: UUID, op_id: str, member_id: UUID | None = None
+    ) -> bytes | None:
         """The bytes the in-flight op sends to the terminal, for the read projection serving them —
-        only while that exact op is the one waiting."""
+        only while that exact op is the one waiting, and only for the member the binding named.
+        `async` to match the transport whose backend fetches the body from the blob store."""
         with self._lock:
             slot = self.slots.get(conversation_id)
             if slot is None or slot.op is None or slot.op.op_id != op_id:
+                return None
+            if member_id is not None and slot.member_id != member_id:
                 return None
             return slot.body
 
@@ -415,13 +480,20 @@ class Terminals:
             return None if slot is None else slot.op
 
     def resolve(
-        self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None = None
+        self,
+        conversation_id: UUID,
+        op_id: str,
+        reply: bytes,
+        failed: str | None = None,
+        member_id: UUID | None = None,
     ) -> bool:
         """Answer the in-flight op, reporting whether it was the one waiting. `failed` is the
         terminal's own statement that the op could not run — surfaced to the sender as
         `TerminalOpFailed`, apart from the body, because a read's body is the file. A stale id
         belongs to an op that already timed out and is dropped rather than raised: the client that
-        answered it has nothing left to do with it either way."""
+        answered it has nothing left to do with it either way. `member_id` gates the answer to the
+        member the binding named — another member on the same channel resolves nothing; `None`
+        leaves it ungated (the direct-drive tests)."""
         with self._lock:
             slot = self.slots.get(conversation_id)
             if (
@@ -430,6 +502,7 @@ class Terminals:
                 or slot.op.op_id != op_id
                 or slot.reply is None
                 or slot.resolved
+                or (member_id is not None and slot.member_id != member_id)
             ):
                 return False
             slot.resolved = True
@@ -449,7 +522,7 @@ class TerminalCarrier:
     No isolation: the agent acts as the member, on their machine, guarded by nothing the member's
     own shell is not. The container carriers are where `containment` is load-bearing."""
 
-    terminals: Terminals
+    terminals: TerminalTransport
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """The bound terminal as a handle, waiting out the gap between the client's held streams —
@@ -496,7 +569,11 @@ class TerminalCarrier:
         )
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
-        bound = self.terminals.workspace(spec.conversation_id)
+        """Reattach off a turn, so the file browser and off-turn writers reach the bound terminal.
+        Reads the binding through `arrived` with no grace — a single cross-pod read — never the
+        process-local `workspace`, so a read that lands on a pod which never held the connection
+        still sees the terminal a peer holds rather than reporting an empty workspace."""
+        bound = await self.terminals.arrived(spec.conversation_id, 0.0)
         if bound is None or bound.cwd != spec.resume_id:
             return None
         return SandboxHandle(

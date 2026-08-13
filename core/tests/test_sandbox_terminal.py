@@ -25,6 +25,7 @@ from ufo.sandbox.terminal import (
     TerminalGone,
     TerminalOp,
     Terminals,
+    TerminalTransport,
 )
 
 
@@ -161,11 +162,32 @@ async def test_staged_bytes_serve_only_the_op_that_carries_them() -> None:
     )
     await asyncio.sleep(0)
     op = await terminals.next_op(conversation_id)
-    assert terminals.staged(conversation_id, op.op_id) == b"content"
-    assert terminals.staged(conversation_id, "another-op") is None
+    assert await terminals.staged(conversation_id, op.op_id) == b"content"
+    assert await terminals.staged(conversation_id, "another-op") is None
     terminals.resolve(conversation_id, op.op_id, b"{}")
     await sending
-    assert terminals.staged(conversation_id, op.op_id) is None
+    assert await terminals.staged(conversation_id, op.op_id) is None
+
+
+async def test_the_member_gate_rejects_a_stranger_and_admits_the_binding_member() -> None:
+    """The in-process transport, reached through the `TerminalTransport` Protocol: an op's staged
+    bytes and its reply answer only the member the binding named, and `None` leaves the gate open
+    for the direct-drive path."""
+    terminals: TerminalTransport = Terminals()
+    conversation_id = uuid4()
+    member = uuid4()
+    terminals.connect(conversation_id, "/p", member)
+    sending = asyncio.ensure_future(
+        terminals.send(conversation_id, "write", 5, arg="/p/a", body=b"content")
+    )
+    await asyncio.sleep(0)
+    op = await terminals.next_op(conversation_id)
+    assert await terminals.staged(conversation_id, op.op_id, uuid4()) is None
+    assert await terminals.staged(conversation_id, op.op_id, member) == b"content"
+    assert await terminals.staged(conversation_id, op.op_id) == b"content"
+    assert not terminals.resolve(conversation_id, op.op_id, b"{}", member_id=uuid4())
+    assert terminals.resolve(conversation_id, op.op_id, b"{}", member_id=member)
+    assert await sending == b"{}"
 
 
 async def test_the_last_disconnect_removes_an_idle_slot() -> None:
@@ -280,7 +302,7 @@ async def test_write_stages_the_bytes_and_maps_a_refusal() -> None:
     writing = asyncio.ensure_future(carrier.write(handle, "/workspace/new.txt", b"content"))
     await asyncio.sleep(0)
     op = await terminals.next_op(conversation_id)
-    assert terminals.staged(conversation_id, op.op_id) == b"content"
+    assert await terminals.staged(conversation_id, op.op_id) == b"content"
     assert op.kind == "write" and op.arg == "/p/new.txt" and op.name == "" and op.params == ""
     terminals.resolve(conversation_id, op.op_id, b"{}")
     await writing

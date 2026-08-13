@@ -2,8 +2,9 @@
 
 It imports only `ufo.sdk` — the surface a CI gate pins — and its entry point returns a Manifest
 declaring exactly the landed points: one tool, one job, one route, one credential slot carrying a
-wire-injection target, one onboarding step, one typed subagent profile, one hub backend, and one
-contributed skill (a `SKILL.md` plus a bundled script under `skills/`). Each handler records the
+wire-injection target, one onboarding step, one typed subagent profile, one hub backend, one
+terminal transport, and one contributed skill (a `SKILL.md` plus a bundled script under `skills/`).
+Each handler records the
 call it received through its own `ExtensionContext.store` (durable `ext_store` rows, never a mock
 log), so the tests read those rows back through the same public surfaces core writes them by.
 `UNDECLARED_SLOT` names a slot the Manifest never declares — the probe that a handler asking for an
@@ -75,6 +76,7 @@ from ufo.sdk.manifest import (
     Stop,
     SubagentProfile,
     SubagentToolGrant,
+    TerminalTransportSpec,
     WorkspaceChanges,
 )
 from ufo.sdk.memory import MemoryMatch
@@ -117,6 +119,7 @@ from ufo.sdk.search import (
 from ufo.sdk.sources import Page, SourceAuth, SyncResult
 from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
+from ufo.sdk.terminal import Terminals
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "sample"
@@ -145,6 +148,7 @@ BROKER_SEARCH_PLAN = "call SAMPLE_LIST_WIDGETS first"
 BROKER_UPLOAD_PREFIX = "connector_upload"
 BROKER_BEARER_PREFIX = "sample-broker-token:"
 HUB_BACKEND = "sample_hub"
+TERMINAL_BACKEND = "sample_terminal"
 TOOL_KEY = "tool:echo"
 JOB_KEY = "job:ran"
 TRAJECTORY_KEY = "job:trajectories"
@@ -1267,6 +1271,9 @@ def manifest() -> Manifest:
             ),
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),
+        terminal_transports=(
+            TerminalTransportSpec(backend=TERMINAL_BACKEND, build=lambda _url, _blob: Terminals()),
+        ),
         skills=(SkillSpec(path=SKILL_DIR),),
         cdp_providers=(
             CdpProviderSpec(backend=CDP_PROVIDER, build=lambda credentials: SampleCdpProvider()),

@@ -122,6 +122,7 @@ from ufo.sandbox.proxy.rules import (
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, ProxyEndpoint, RunTokenCodec
+from ufo.sandbox.terminal import Terminals, TerminalTransport
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
@@ -219,7 +220,7 @@ def run() -> None:
                 config, manifests, credentials, registry.pricing, run_tokens, blob
             ),
             workspace_root=config.sandbox.workspace_root,
-            terminals_admissible=config.hub.backend == IN_PROCESS_BACKEND,
+            terminals=_select_terminal_transport(config, manifests, blob),
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
@@ -504,6 +505,51 @@ def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub:
             f"config selects hub backend {config.hub.backend!r} but no extension registers it"
         )
     return build(config.hub.url)
+
+
+def _select_terminal_transport(
+    config: Config, manifests: tuple[Manifest, ...], blob: BlobStore
+) -> TerminalTransport:
+    """The process-wide terminal rendezvous the deploy selects, mirroring `_select_hub`: core's
+    in-process default, or a backend an extension registers through its Manifest
+    `terminal_transports` point, built from `config.hub.url` (reused, so one Redis serves hub and
+    terminal) and the deploy's blob store (the op's copy-in body and any large copy-out reply ride
+    the blob). Two extensions claiming one backend name fail loud, as does selecting a name no
+    extension registers, so the running transport resolves to exactly one implementation. A shared
+    fleet selects the Redis transport so a member's held connection and their turn's workflow reach
+    one terminal even when they land on different pods.
+
+    A cross-process hub with the in-process terminal transport fails loud here: a cross-process hub
+    declares a multi-instance fleet, where the held connection and the turn's workflow land on
+    different pods, and the process-local terminal rendezvous cannot reach across them — a
+    conversation bound `client:<dir>` on one pod would strand every later turn a peer pod runs. The
+    old coupling derived admissibility from the hub backend; decoupling the transport reopened the
+    combination, so the boot guard is restored explicitly."""
+    if config.terminal.backend == IN_PROCESS_BACKEND and config.hub.backend != IN_PROCESS_BACKEND:
+        raise RuntimeError(
+            f"terminal.backend is the in-process transport but hub.backend is "
+            f"{config.hub.backend!r}, a cross-process backend — a multi-instance fleet's held "
+            "connection and its turn's workflow land on different pods, which the process-local "
+            "terminal transport cannot serve; select a cross-process transport (terminal.backend = "
+            '"redis")'
+        )
+    builders: dict[str, Callable[[str | None, BlobStore], TerminalTransport]] = {
+        IN_PROCESS_BACKEND: lambda _url, _blob: Terminals()
+    }
+    for manifest in manifests:
+        for spec in manifest.terminal_transports:
+            if spec.backend in builders:
+                raise RuntimeError(
+                    f"two extensions register terminal transport backend {spec.backend!r}"
+                )
+            builders[spec.backend] = spec.build
+    build = builders.get(config.terminal.backend)
+    if build is None:
+        raise NotRegisteredError(
+            f"config selects terminal transport backend {config.terminal.backend!r} "
+            "but no extension registers it"
+        )
+    return build(config.hub.url, blob)
 
 
 def _select_cdp_provider(

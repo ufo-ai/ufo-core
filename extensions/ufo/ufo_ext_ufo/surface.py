@@ -364,10 +364,6 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     cwd = _utf8_header(request, CWD_HEADER)
     if cwd and not cwd.startswith("/"):
         return PlainTextResponse("x-ufo-cwd must be an absolute path", status_code=400)
-    if cwd and not ctx.terminals_admissible:
-        # A shared-hub fleet cannot serve a terminal from this pod, so the header means nothing
-        # here: the conversation falls to the deploy's own carrier, as if the client never sent it.
-        cwd = ""
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
     note: bytes | None = None
@@ -410,7 +406,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         ctx.credential_prompt_pending,
         connect,
         partial(shared_files, ctx, turn_id),
-        ops=partial(ctx.next_terminal_op, conversation_id) if cwd else None,
+        ops=partial(ctx.next_terminal_op, conversation_id, op_id or None) if cwd else None,
     )
 
     async def bound() -> AsyncIterator[bytes]:

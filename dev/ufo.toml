@@ -28,7 +28,8 @@ backend = "filesystem"
 root = "/data/blobs"
 
 # The assistant pack has no Redis hub (that lives in assistant_hosted); the in-process hub fits a
-# single local serve. Running more than one serve replica would need the redis_hub extension.
+# single local serve. Running more than one serve replica would need the redis_hub extension — which
+# also carries the terminal transport, so `terminal.backend` defaults to in_process here beside it.
 [hub]
 backend = "in_process"
 

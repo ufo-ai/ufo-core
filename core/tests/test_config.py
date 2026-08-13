@@ -138,6 +138,27 @@ def test_unknown_hub_key_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_terminal_defaults_to_the_in_process_backend(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID)
+    config = load_config(path)
+    assert config.terminal.backend == "in_process"
+
+
+def test_terminal_backend_parses(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + '\n[terminal]\nbackend = "redis"\n')
+    config = load_config(path)
+    assert config.terminal.backend == "redis"
+
+
+def test_unknown_terminal_key_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "ufo.toml"
+    path.write_text(VALID + '\n[terminal]\nbackend = "redis"\nurl = "redis://cache:6379/0"\n')
+    with pytest.raises(ValidationError):
+        load_config(path)
+
+
 def test_models_auto_default(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID)

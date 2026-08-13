@@ -12,7 +12,14 @@ Headless drive: the client is started in its own session (no controlling tty), s
 its stdin arm (`client:303-309`) and EOF after the answer is the clean exit. The terminal-op
 timeouts are tightened because the post-answer workspace-changes scan finds the member gone — by
 design it waits out the arrival grace and fails logged — and the drain in teardown must see the
-workflow settle inside its own 30s bound."""
+workflow settle inside its own 30s bound.
+
+This runs the in-process transport. The cross-pod transport's equivalent — a turn admitted on the
+pod that does NOT hold the connection still landing the op on the member's machine — is proven at
+the transport-and-carrier layer in `extensions/redis_hub/tests/integration/test_redis_terminal.py`
+(two `RedisTerminals` sharing one Redis, `TerminalCarrier` on the turn pod writing the connection
+pod's directory), because standing up two real serve instances with a load balancer and one shared
+DBOS worker in a single test buys flakiness, not coverage the two-instance transport suite lacks."""
 
 import asyncio
 import json

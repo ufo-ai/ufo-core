@@ -112,6 +112,9 @@ locals {
     backend = "redis"
     url = "redis://${module.platform.redis_endpoint}:6379/0"
 
+    [terminal]
+    backend = "redis"
+
     [sandbox]
     backend = "e2b"
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"

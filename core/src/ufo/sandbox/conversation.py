@@ -40,7 +40,12 @@ from ufo.sandbox.session import (
     sandbox_handle_id,
     workspace_path,
 )
-from ufo.sandbox.terminal import CLIENT_BACKEND, TerminalCarrier, TerminalGone, Terminals
+from ufo.sandbox.terminal import (
+    CLIENT_BACKEND,
+    TerminalCarrier,
+    Terminals,
+    TerminalTransport,
+)
 from ufo.schema import tables
 from ufo.workspace import ws_current
 
@@ -79,14 +84,11 @@ class ConversationSandbox:
     image_ref: str
     proxy: ProxyEndpoint
     workspace_root: Path
-    terminals: Terminals = field(default_factory=Terminals)
-    terminals_admissible: bool = True
-    """Whether this process may bind a conversation to a connected terminal — true only when it both
-    holds the member's connection and runs their turn, which is exactly the in-process hub's
-    single-instance condition. A deploy on a shared hub (a multi-replica fleet) sets it false: the
-    rendezvous is process-local, so a `client:` binding written on one pod would strand every turn
-    the queue hands another pod. False there means the terminal is never bound and the conversation
-    falls to the deploy's own carrier — the behaviour a member had before this existed."""
+    terminals: TerminalTransport = field(default_factory=Terminals)
+    """The rendezvous a conversation's terminal is reached through — the in-process transport on a
+    single node, a cross-pod transport (Redis) on a shared fleet. Whichever the deploy selects can
+    serve a terminal, so a `client:` binding is always admissible: the transport, not the process,
+    owns whether the held connection and the turn's workflow reach one terminal."""
 
     async def open(
         self, conversation_id: UUID, run_token: str, env: Mapping[str, str]
@@ -176,8 +178,6 @@ class ConversationSandbox:
         open lands after that connection's hold still selects the terminal — the row, not the
         transient binding, is what `_opened` trusts. A conversation already bound anywhere keeps
         its binding: the compare-and-swap only fills an empty handle."""
-        if not self.terminals_admissible:
-            return False
         claimed = f"{CLIENT_BACKEND}{SANDBOX_HANDLE_SEP}{cwd}"
         stored = await self._stored(conversation_id)
         if stored is not None:
@@ -281,17 +281,12 @@ class ConversationSandbox:
         deploy's carrier, and a stored handle from the deploy's own backend keeps it even while a
         terminal is connected — that conversation's workspace already lives elsewhere.
 
-        A stored `client:` handle this instance cannot serve terminals for — a deploy scaled from
-        one replica to a fleet since it was bound — fails loud rather than opening a directory named
-        `client:<path>` under `workspace_root`: the conversation's workspace is a terminal no pod
-        here can reach."""
+        The transport, not the process, owns whether a `client:` handle can be served: the terminal
+        carrier's `create` waits out the connection's reconnect and raises `TerminalGone` when the
+        terminal is not connected at the bound directory, so a stored handle whose terminal is
+        absent is named to the member rather than opened as a directory under `workspace_root`."""
         bound_path = None if stored is None else sandbox_handle_id(CLIENT_BACKEND, stored)
-        if bound_path is not None and not self.terminals_admissible:
-            raise TerminalGone(
-                f"this conversation's workspace is the terminal at {bound_path}, which this "
-                "instance cannot reach"
-            )
-        if bound_path is None and stored is None and self.terminals_admissible:
+        if bound_path is None and stored is None:
             bound = self.terminals.workspace(conversation_id)
             bound_path = None if bound is None else bound.cwd
         if bound_path is not None:

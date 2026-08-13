@@ -93,6 +93,18 @@ def test_secret_schema_matches_terraform() -> None:
         )
 
 
+def test_production_selects_the_redis_terminal_transport() -> None:
+    """The shared fleet's held connection and its turn's workflow land on different pods, so both
+    hosted configs select the cross-pod terminal transport the redis_hub extension registers beside
+    the redis hub — both ends, over the one Redis the hub already runs."""
+    for environment in ("prod", "testing"):
+        serve_config = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        assert re.search(r'\[terminal\]\n\s*backend = "redis"', serve_config), environment
+        assert re.search(r'\[hub\]\n\s*backend = "redis"', serve_config), environment
+    manifest = importlib.import_module("ufo_ext_redis_hub.manifest").manifest()
+    assert any(spec.backend == "redis" for spec in manifest.terminal_transports)
+
+
 def test_configured_production_backends_receive_platform_credentials() -> None:
     source = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
     _, start, remainder = source.partition("  serve_config = <<-TOML\n")
