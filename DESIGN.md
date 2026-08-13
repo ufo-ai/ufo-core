@@ -693,6 +693,18 @@ surface still resolve their heights from their own content, and centring unequal
 shorter one floating with its chevron off the line the row reads along. Stretching makes the row's
 height the one both agree to.
 
+The message box is the one control that sizes itself to what is in it. `GrowingTextarea`
+(`components/ui/field.tsx`) draws the value twice — once in an invisible mirror that sets the row's
+height, once in the textarea laid over it in the same grid cell — so the box grows on the browser's
+own layout pass, in the paint the keystroke is in. Reading `scrollHeight` and writing a height back
+is the shape to refuse: a second answer to how tall the box is, arriving a paint late. The mirror
+stops at `--size-composer`, so a long message holds the fold and scrolls inside it instead of
+pushing the conversation off the screen. Enter sends and Shift+Enter opens a line, which is the
+pairing every chat composer ships and so the one a member arrives already knowing; an IME
+composition keeps its own Enter. The composer's row is the one row that is `items-end` rather than
+`items-stretch`: its acts belong to the last line of the message, and a `Send` stretched to a
+nine-line box is a button the size of what was written.
+
 A listing filter is `Filter` (`components/ui/filter.tsx`) — one component, every screen. It is a
 segmented `role="tablist"` on no container surface: `All` plus one tab per declared state as muted
 labels, and one `bg-fill-subtle rounded-control` pill that slides beneath the active tab

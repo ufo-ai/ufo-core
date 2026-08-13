@@ -113,6 +113,7 @@
   --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
   --size-avatar: 24px;
   --size-band: 128px;
+  --size-composer: 15em;
   --size-fact: 16ch;
   --size-glyph: 16px;
   --size-icon: 1em;

@@ -1009,6 +1009,45 @@ test("a slot URL opens a conversation absent from the chat rail", async () => {
   expect(await screen.findByText("/workspace/repo/child.py")).toBeTruthy();
 });
 
+test("Shift+Enter opens a line in the message and Enter sends the whole of it", async () => {
+  const posted: string[] = [];
+  wire({
+    ...transcript(),
+    "/chat": (_url, init) => {
+      posted.push(String(init?.body));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "two lines" });
+    },
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const box = screen.getByLabelText("Message the agent") as HTMLTextAreaElement;
+  await userEvent.type(box, "first{Shift>}{Enter}{/Shift}second");
+  expect(box.value).toBe("first\nsecond");
+  expect(posted).toEqual([]);
+
+  await userEvent.type(box, "{Enter}");
+  await waitFor(() => expect(posted).toEqual(["first\nsecond"]));
+  expect(box.value).toBe("");
+  expect(screen.getByText("first second").className).toContain("whitespace-pre-wrap");
+});
+
+test("the message box is as tall as the message and stops growing at the fold", async () => {
+  wire(transcript());
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const box = screen.getByLabelText("Message the agent") as HTMLTextAreaElement;
+  const mirror = box.previousElementSibling!;
+  expect(mirror.textContent).toBe(" ");
+
+  await userEvent.type(box, "one{Shift>}{Enter}{/Shift}two");
+  expect(mirror.textContent).toBe("one\ntwo ");
+  expect(mirror.className).toContain("whitespace-pre-wrap");
+  expect(mirror.className).toContain("max-h-(--size-composer)");
+  expect(box.className).toContain("overflow-y-auto");
+});
+
 test("the composer is dead until the conversation loads, and open through the turn it sends", async () => {
   let load: (payload: unknown) => void = () => {};
   const held = new Promise<Response>((resolve) => {

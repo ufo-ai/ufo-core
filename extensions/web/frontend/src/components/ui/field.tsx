@@ -79,6 +79,42 @@ export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
   );
 }
 
+const GROWING_CELL = "col-start-1 row-start-1 w-full";
+
+/** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a
+ *  mirror that sizes the row, once in the textarea laid over it — so the box grows on the
+ *  browser's own layout pass, in the same paint as the keystroke. Measuring `scrollHeight` and
+ *  writing a height back is a second answer to how tall the box is, and it arrives a paint late.
+ *  The mirror stops at `--size-composer`, so past the fold the row holds and the textarea scrolls.
+ *  The trailing space is what gives a final newline a line of its own, since a line box ends at
+ *  the break otherwise. */
+export function GrowingTextarea({
+  className,
+  value,
+  ...props
+}: Omit<ComponentProps<"textarea">, "value" | "rows"> & { value: string }) {
+  return (
+    <div className={cn("grid", className)}>
+      <div
+        aria-hidden
+        className={cn(
+          CONTROL,
+          GROWING_CELL,
+          "invisible max-h-(--size-composer) overflow-hidden whitespace-pre-wrap wrap-anywhere",
+        )}
+      >
+        {value + " "}
+      </div>
+      <textarea
+        rows={1}
+        value={value}
+        className={cn(CONTROL, GROWING_CELL, "resize-none overflow-y-auto")}
+        {...props}
+      />
+    </div>
+  );
+}
+
 export function Checkbox({ className, ...props }: ComponentProps<"input">) {
   return (
     <input

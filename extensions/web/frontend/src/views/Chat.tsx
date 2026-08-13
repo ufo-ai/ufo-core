@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
+import { GrowingTextarea } from "@/components/ui/field";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Files, MessageLog, Meta } from "@/kernel/messages";
 import { cn } from "@/lib/cn";
@@ -43,7 +43,7 @@ export function Chat({
   const state = useChat(chatKey);
   const log = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const composer = useRef<HTMLInputElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const wasBusy = useRef(state.busy);
   const target: ChatTarget = {
     key: chatKey,
@@ -270,6 +270,10 @@ function Question({
   );
 }
 
+/** The message box holds as many lines as the member writes. Enter sends it and Shift+Enter opens
+ *  a line, which is the pairing every chat composer ships and the only one a member arrives
+ *  already knowing; a composition in flight (an IME candidate) takes its own Enter, so the guard
+ *  reads `isComposing` before claiming the key. */
 function Composer({
   target,
   draftKey,
@@ -278,7 +282,7 @@ function Composer({
 }: {
   target: ChatTarget;
   draftKey: string;
-  input: RefObject<HTMLInputElement | null>;
+  input: RefObject<HTMLTextAreaElement | null>;
   onSend: () => void;
 }) {
   const state = useChat(target.key);
@@ -295,8 +299,7 @@ function Composer({
 
   useEffect(() => installDraftFlush(), []);
 
-  function submit(event: FormEvent) {
-    event.preventDefault();
+  function send() {
     const attached = Array.from(files.current?.files ?? []);
     const trimmed = text.trim();
     if ((!trimmed && !attached.length) || disabled) return;
@@ -317,24 +320,35 @@ function Composer({
   }
 
   return (
-    <form onSubmit={submit} className="flex gap-sm border-t border-edge px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        send();
+      }}
+      className="flex items-end gap-sm border-t border-edge px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]"
+    >
       <label
         title="Attach files"
         className={cn(buttonVariants(), "flex cursor-pointer items-center py-0 font-strong")}
       >
         <input ref={files} type="file" multiple hidden />+
       </label>
-      <Input
+      <GrowingTextarea
         ref={input}
         value={text}
         onChange={(event) => {
           setText(event.target.value);
           writeDraft(draftKey, event.target.value);
         }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          send();
+        }}
         autoComplete="off"
         placeholder="Message the agent…"
         aria-label="Message the agent"
-        className="max-w-none flex-1"
+        className="flex-1"
       />
       <Button type="submit" variant="send" disabled={disabled}>
         Send
