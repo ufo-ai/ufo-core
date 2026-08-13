@@ -67,7 +67,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       attempt_id: ${{ steps.attempt.outputs.attempt_id }}
-      e2b_templates: ${{ steps.artifacts.outputs.e2b_templates }}
       image_tag: ${{ steps.artifacts.outputs.image_tag }}
       target_sha: ${{ steps.select.outputs.target_sha }}
     steps:
@@ -112,9 +111,7 @@ jobs:
           jq -e --arg commit "$TARGET_SHA" --arg image_tag "$IMAGE_TAG" \
             '.commit == $commit and .image_tag == $image_tag and (.sandbox_templates | type == "string" and length > 0)' \
             "$ARTIFACT"
-          E2B_TEMPLATES=$(jq -er '.sandbox_templates' "$ARTIFACT")
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "e2b_templates=$E2B_TEMPLATES" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -222,14 +219,13 @@ jobs:
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
       DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
       DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-production-deploy
-      E2B_TEMPLATES: ${{ needs.prepare.outputs.e2b_templates }}
       IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
       TARGET_SHA: ${{ needs.prepare.outputs.target_sha }}
     steps:
       - name: Require production inputs
         run: |
           missing=false
-          for name in E2B_TEMPLATES IMAGE_TAG TARGET_SHA; do
+          for name in IMAGE_TAG TARGET_SHA; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required"
               missing=true
@@ -246,6 +242,16 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+
+      # The production e2b project holds no ufo-sbx templates, so the promoted commit publishes its
+      # own under the production key instead of naming the testing project's tested build.
+      - name: Select sandbox template
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          E2B_TEMPLATES=$(uv run python sandbox/build_template.py)
+          test -n "$E2B_TEMPLATES"
+          echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:

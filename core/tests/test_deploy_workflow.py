@@ -1716,7 +1716,6 @@ def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
         "DD_API_KEY": "${{ secrets.DD_API_KEY }}",
         "DD_APP_KEY": "${{ secrets.DD_APP_KEY }}",
         "DEPLOY_ROLE_ARN": "arn:aws:iam::899147036157:role/github-production-deploy",
-        "E2B_TEMPLATES": "${{ needs.prepare.outputs.e2b_templates }}",
         "IMAGE_TAG": "${{ needs.prepare.outputs.image_tag }}",
         "TARGET_SHA": "${{ needs.prepare.outputs.target_sha }}",
     }
@@ -1729,6 +1728,66 @@ def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
     source = (WORKFLOWS / "deploy-production.yml").read_text()
     assert "docker build" not in source
     assert "docker push" not in source
+
+
+def test_production_publishes_its_own_sandbox_templates(tmp_path: Path) -> None:
+    jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["deploy"]
+    assert isinstance(job, dict)
+    assert "E2B_TEMPLATES" not in job["env"]
+    assert "e2b_templates" not in jobs["prepare"]["outputs"]
+    assert (
+        "needs.prepare.outputs.e2b_templates"
+        not in (WORKFLOWS / "deploy-production.yml").read_text()
+    )
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    select = _step("deploy", "Select sandbox template", "deploy-production.yml")
+    assert select["env"] == {"E2B_API_KEY": "${{ secrets.E2B_API_KEY }}"}
+    promoted = steps[1]
+    uv = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v5")
+    credentials = next(
+        step for step in steps if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
+    )
+    foundation = _step("deploy", "Terraform foundation plan", "deploy-production.yml")
+    assert (
+        steps.index(promoted)
+        < steps.index(uv)
+        < steps.index(select)
+        < steps.index(credentials)
+        < steps.index(foundation)
+    )
+
+    script = select["run"]
+    assert isinstance(script, str)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    call = tmp_path / "uv-call"
+    uv_shim = shim / "uv"
+    uv_shim.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$UV_CALL"\nprintf "%s" "$BUILD_OUTPUT"\n')
+    uv_shim.chmod(0o755)
+    github_env = tmp_path / "github-env"
+
+    def build(output: str) -> subprocess.CompletedProcess[bytes]:
+        github_env.write_text("")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", script],
+            capture_output=True,
+            env={
+                "BUILD_OUTPUT": output,
+                "GITHUB_ENV": str(github_env),
+                "PATH": f"{shim}:{os.environ['PATH']}",
+                "UV_CALL": str(call),
+            },
+        )
+
+    published = build(TESTED_TEMPLATES)
+    assert published.returncode == 0, published.stderr.decode()
+    assert call.read_text().strip() == "run python sandbox/build_template.py"
+    assert github_env.read_text().splitlines() == [f"E2B_TEMPLATES={TESTED_TEMPLATES}"]
+    assert build("").returncode != 0
+    assert github_env.read_text() == ""
 
 
 def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -> None:
@@ -1779,7 +1838,6 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     assert isinstance(prepare, dict)
     assert prepare["outputs"] == {
         "attempt_id": "${{ steps.attempt.outputs.attempt_id }}",
-        "e2b_templates": "${{ steps.artifacts.outputs.e2b_templates }}",
         "image_tag": "${{ steps.artifacts.outputs.image_tag }}",
         "target_sha": "${{ steps.select.outputs.target_sha }}",
     }
@@ -1804,7 +1862,7 @@ def test_testing_run_records_the_artifacts_production_consumes(tmp_path: Path) -
     assert 'ARTIFACT="$RUNNER_TEMP/tested-artifacts/tested-artifacts.json"' in verify["run"]
     assert "TARGET_SHA" in verify["run"]
     assert "image_tag" in verify["run"]
-    assert "e2b_templates" in verify["run"]
+    assert "sandbox_templates" in verify["run"]
     assert prepare_steps.index(select) < prepare_steps.index(download) < prepare_steps.index(verify)
 
 
@@ -1899,10 +1957,7 @@ def test_production_prepare_rejects_untested_artifact_values(tmp_path: Path) -> 
     }
     accepted = verify(values)
     assert accepted.returncode == 0, accepted.stderr.decode()
-    assert output.read_text().splitlines() == [
-        f"image_tag={target_sha[:8]}",
-        f"e2b_templates={TESTED_TEMPLATES}",
-    ]
+    assert output.read_text().splitlines() == [f"image_tag={target_sha[:8]}"]
     assert verify(values | {"commit": "f" * 40}).returncode != 0
     assert verify(values | {"image_tag": "ffffffff"}).returncode != 0
     assert verify(values | {"sandbox_templates": ""}).returncode != 0
@@ -2272,7 +2327,7 @@ def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> No
         "with": {"ref": "${{ env.TARGET_SHA }}"},
     }
     assert "env" not in step
-    required = ("E2B_TEMPLATES", "IMAGE_TAG", "TARGET_SHA")
+    required = ("IMAGE_TAG", "TARGET_SHA")
     environment = dict.fromkeys(required, "present")
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], check=True, env=environment)
     for missing in required:
@@ -2284,7 +2339,7 @@ def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> No
         assert failed.returncode != 0
         assert failed.stdout.decode() == f"::error::{missing} is required\n"
         assert b"present" not in failed.stdout + failed.stderr
-    missing = required[::2]
+    missing = required
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
         capture_output=True,
@@ -2533,12 +2588,9 @@ def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(workflow: str, job
     steps = job["steps"]
     assert isinstance(steps, list)
     gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
-    if job_name == "rollout":
-        selector = next(step for step in steps if step.get("name") == "Select sandbox template")
-        assert 'echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"' in selector["run"]
-        assert steps.index(selector) < steps.index(gate)
-    else:
-        assert job["env"]["E2B_TEMPLATES"] == "${{ needs.prepare.outputs.e2b_templates }}"
+    selector = next(step for step in steps if step.get("name") == "Select sandbox template")
+    assert 'echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"' in selector["run"]
+    assert steps.index(selector) < steps.index(gate)
     script = gate["run"]
     assert isinstance(script, str)
     assert "output -raw sandbox_proxy_ca_cert" in script
