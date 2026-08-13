@@ -54,6 +54,7 @@ def test_assistant_packs_activate_durable_objectives() -> None:
         objectives = next(manifest for manifest in manifests if manifest.name == "objectives")
         assert {tool.name for tool in objectives.tools} == {
             "plan_objective",
+            "run_independent_steps",
             "read_objective",
             "record_step",
         }

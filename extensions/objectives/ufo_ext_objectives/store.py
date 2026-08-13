@@ -46,6 +46,7 @@ objective_step = sa.Table(
     sa.Column("position", sa.Integer, nullable=False),
     sa.Column("title", sa.Text, nullable=False),
     sa.Column("accepts", sa.JSON, nullable=False),
+    sa.Column("independent", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("objective_id", "title"),
 )
@@ -112,9 +113,14 @@ type Condition = FileExists | FileContains | CommandSucceeds
 
 
 class StepPlan(BaseModel):
+    """`independent` says this step needs nothing the steps before it produce, so the engine may run
+    it alongside its siblings. The plan is the only place that can know it, and stating it as data
+    means the fan-out shape is decided once rather than re-derived by whichever turn wakes next."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
     title: str = Field(min_length=1, max_length=200)
     accepts: tuple[Condition, ...] = Field(default=(), max_length=CONDITIONS_MAX)
+    independent: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +151,7 @@ class StepView:
     events: tuple[StepEvent, ...]
     verdicts: tuple[ConditionVerdict, ...]
     checked_at: datetime | None = None
+    independent: bool = False
 
     @property
     def attempted(self) -> bool:
@@ -195,6 +202,17 @@ class ObjectiveView:
     @property
     def confirmed(self) -> int:
         return sum(1 for step in self.steps if step.state == DONE_STATE)
+
+    @property
+    def runnable(self) -> tuple[StepView, ...]:
+        """The steps a dispatch may take at once: declared independent, not yet attempted, and not
+        standing on a block. Ordering says only what was listed first; independence is what says two
+        steps may be taken together, so this is the set the engine fans out over."""
+        return tuple(
+            step
+            for step in self.frontier
+            if step.independent and not step.attempted and step.open_block is None
+        )
 
     @property
     def frontier(self) -> tuple[StepView, ...]:
@@ -289,7 +307,7 @@ class Objectives:
             payload = [condition.model_dump() for condition in accepts]
             updated = await self.connection.execute(
                 sa.update(objective_step)
-                .values(position=position, accepts=payload)
+                .values(position=position, accepts=payload, independent=step.independent)
                 .where(
                     objective_step.c.objective_id == objective_id,
                     objective_step.c.title == step.title,
@@ -304,6 +322,7 @@ class Objectives:
                         position=position,
                         title=step.title,
                         accepts=payload,
+                        independent=step.independent,
                         created_at=sa.func.now(),
                     )
                 )
@@ -410,6 +429,7 @@ class Objectives:
                     events=tuple(events.get(step.id, ())),
                     verdicts=_verdicts(checks[step.id].verdicts) if step.id in checks else (),
                     checked_at=checks[step.id].created_at if step.id in checks else None,
+                    independent=step.independent,
                 )
                 for step in step_rows
             ),

@@ -76,6 +76,17 @@ class RecordStepInput(BaseModel):
     )
 
 
+class RunIndependentStepsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(description="The objective's name.")
+    profile: str = Field(
+        description="The subagent profile each step is delegated to, e.g. 'coding'."
+    )
+    user_description: str = Field(
+        description="What you are dispatching, in plain language for the activity timeline."
+    )
+
+
 class ReadObjectiveInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(description="The objective's name.")
@@ -195,6 +206,55 @@ async def record_step(ctx: ToolContext, args: RecordStepInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=render(graded)),))
 
 
+async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput) -> ToolResult:
+    """Dispatch every step the plan declared independent, at once.
+
+    The plan already answered which steps need nothing from each other, so the shape of the fan-out
+    is read from the record instead of decided again by whichever turn is awake — no tokens spent
+    re-deriving it and the same answer every time. Each child is keyed on the step it is taking, so
+    a step re-executed inside this turn reconnects to the child it already started rather than
+    paying for a second one. Children deliver their own results, so this turn ends rather than
+    holding its conversation's partition open while they run."""
+    ext = _require_ext(ctx)
+    async with ext.transaction() as connection:
+        view = await Objectives(connection, agent_current().workspace_id).named(
+            ctx.turn.conversation_id, args.name
+        )
+    if view is None:
+        return ToolResult(
+            content=(TextContent(text=f"no objective named {args.name!r}"),), is_error=True
+        )
+    runnable = view.runnable
+    if not runnable:
+        return ToolResult(
+            content=(
+                TextContent(
+                    text="no step is ready to run on its own: every independent step is "
+                    "already attempted or blocked. Read the objective and take the dependent "
+                    "steps in order."
+                ),
+            )
+        )
+    dispatched = []
+    for step in runnable:
+        result = await ctx.spawn(
+            args.profile,
+            {"task": f"{view.directive}\n\nYour step: {step.title}"},
+            background=True,
+            dedup_key=f"{args.name}/{step.title}",
+            delivers_result=True,
+        )
+        dispatched.append((step.title, result.turn_id))
+        emit_metric("objective_step_dispatched_total", profile=args.profile)
+    lines = [f"dispatched {len(dispatched)} independent step(s) to {args.profile!r}:"]
+    lines.extend(f"  {title} -> subagent {turn_id}" for title, turn_id in dispatched)
+    lines.append(
+        "Each hands its result back to this conversation when it finishes. End your turn; you will "
+        "be woken with their answers. Record each step when its result arrives."
+    )
+    return ToolResult(content=(TextContent(text="\n".join(lines)),))
+
+
 async def read_objective(ctx: ToolContext, args: ReadObjectiveInput) -> ToolResult:
     ext = _require_ext(ctx)
     async with ext.transaction() as connection:
@@ -255,6 +315,20 @@ RECORD_STEP_TOOL = ToolDef(
     side_effecting=True,
     subagent_default=True,
 )
+
+RUN_INDEPENDENT_STEPS_TOOL = ToolDef(
+    name="run_independent_steps",
+    description=(
+        "Delegate every step the plan marked independent to a subagent at once, then end your "
+        "turn. "
+        "Use it instead of taking those steps yourself or spawning them one at a time — the plan "
+        "already says which steps need nothing from each other."
+    ),
+    input_model=RunIndependentStepsInput,
+    handler=run_independent_steps,
+    side_effecting=True,
+)
+
 
 READ_OBJECTIVE_TOOL = ToolDef(
     name="read_objective",

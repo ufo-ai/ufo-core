@@ -67,6 +67,7 @@ METRICS = (
     "objective_step_recorded_total",
     "objective_condition_total",
     "objective_frontier_injected_total",
+    "objective_step_dispatched_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"

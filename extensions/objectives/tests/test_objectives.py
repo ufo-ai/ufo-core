@@ -10,6 +10,7 @@ So the test that matters is not that a step can close. It is that a step whose c
 state that is false does **not** close, however confidently it was recorded, and that a condition
 fixed at plan time survives a later revision that would have weakened it."""
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -25,6 +26,8 @@ from ufo_ext_objectives.store import (
     ConditionVerdict,
     FileExists,
     Objectives,
+    ObjectiveView,
+    StepEvent,
     StepPlan,
     StepView,
     condition_summary,
@@ -67,6 +70,7 @@ async def _seeded_conversation() -> tuple[UUID, UUID]:
     return workspace_id, conversation_id
 
 
+NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 REQUIRED_PATH = "/workspace/1099/2025/W9_Whitfield_Consulting_Group.pdf"
 WRONG_PATH = "/workspace/W9_Whitfield_Consulting_Group.pdf"
 
@@ -390,3 +394,85 @@ async def test_a_subagent_reusing_a_name_does_not_adopt_its_parents_objective(db
         assert parent.directive == "ship the thing"
         assert tuple(step.title for step in parent.steps) == ("build it", "verify it")
         assert tuple(step.title for step in child.steps) == ("build it",)
+
+
+def _step(title: str, *, independent: bool, events: tuple[str, ...] = ()) -> StepView:
+    return StepView(
+        id=uuid4(),
+        title=title,
+        accepts=(),
+        events=tuple(
+            StepEvent(kind=kind, actor_turn_id=uuid4(), evidence="", created_at=NOW)
+            for kind in events
+        ),
+        verdicts=(),
+        independent=independent,
+    )
+
+
+def _objective(*steps: StepView) -> ObjectiveView:
+    return ObjectiveView(id=uuid4(), name="rollout", directive="ship it", steps=steps)
+
+
+def test_only_independent_untaken_steps_are_runnable() -> None:
+    """The fan-out shape is read off the plan, not decided again by whichever turn is awake. A step
+    the plan did not mark independent needs something its siblings produce, so dispatching it
+    alongside them would run it against state that does not exist yet."""
+    view = _objective(
+        _step("read the spec", independent=True),
+        _step("write the migration", independent=False),
+        _step("read the dashboard", independent=True),
+    )
+    assert tuple(step.title for step in view.runnable) == ("read the spec", "read the dashboard")
+
+
+def test_a_step_already_attempted_is_not_dispatched_again() -> None:
+    view = _objective(
+        _step("read the spec", independent=True, events=(DID,)),
+        _step("read the dashboard", independent=True),
+    )
+    assert tuple(step.title for step in view.runnable) == ("read the dashboard",)
+
+
+def test_a_blocked_step_is_not_dispatched() -> None:
+    """A step standing on a question already put to the member is waiting on a person, not on a
+    worker. Dispatching it spends a subagent on work that cannot proceed."""
+    view = _objective(
+        _step("pick the folder", independent=True, events=(BLOCKED,)),
+        _step("read the dashboard", independent=True),
+    )
+    assert tuple(step.title for step in view.runnable) == ("read the dashboard",)
+
+
+async def test_independence_survives_a_plan_revision(db: None) -> None:
+    """A revision restates the plan, so it must restate independence with it — a step that comes
+    back declared dependent must stop being dispatched, and one that comes back independent must
+    start."""
+    workspace_id, conversation_id = await _seeded_conversation()
+    async with workspace_tx() as connection:
+        objectives = Objectives(connection, workspace_id)
+        await objectives.plan(
+            conversation_id,
+            "rollout",
+            "ship it",
+            (
+                StepPlan(title="read the spec", independent=True),
+                StepPlan(title="write the migration"),
+            ),
+        )
+        first = await objectives.named(conversation_id, "rollout")
+        assert first is not None
+        assert tuple(step.title for step in first.runnable) == ("read the spec",)
+
+        await objectives.plan(
+            conversation_id,
+            "rollout",
+            "ship it",
+            (
+                StepPlan(title="read the spec"),
+                StepPlan(title="write the migration", independent=True),
+            ),
+        )
+        second = await objectives.named(conversation_id, "rollout")
+        assert second is not None
+        assert tuple(step.title for step in second.runnable) == ("write the migration",)

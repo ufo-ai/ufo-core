@@ -461,7 +461,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
     assert {
         _core_migration_head(),
         "index_default_0002",
-        "objectives_0001",
+        "objectives_0002",
         "memory_0012",
         "sample_ext_note_0001",
         "skill_create_0002",

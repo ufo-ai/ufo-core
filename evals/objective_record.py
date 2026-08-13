@@ -22,6 +22,7 @@ class RecordedStep:
     title: str
     conditions: tuple[str, ...]
     kinds: tuple[str, ...]
+    independent: bool = False
 
     @property
     def attempted(self) -> bool:
@@ -63,7 +64,12 @@ async def recorded_objective(conversation_id: UUID) -> RecordedObjective | None:
             return None
         step_rows = (
             await connection.execute(
-                sa.select(objective_step.c.id, objective_step.c.title, objective_step.c.accepts)
+                sa.select(
+                    objective_step.c.id,
+                    objective_step.c.title,
+                    objective_step.c.accepts,
+                    objective_step.c.independent,
+                )
                 .where(objective_step.c.objective_id == row.id)
                 .order_by(objective_step.c.position)
             )
@@ -88,6 +94,7 @@ async def recorded_objective(conversation_id: UUID) -> RecordedObjective | None:
                     str(condition) for condition in (step.accepts if step.accepts else ())
                 ),
                 kinds=tuple(kinds.get(step.id, ())),
+                independent=bool(step.independent),
             )
             for step in step_rows
         ),

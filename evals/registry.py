@@ -14,6 +14,7 @@ from evals import (
     cos_workflows,
     dead_route_repeat,
     document_visual,
+    fanout,
     github_connections,
     handback,
     object_tools,
@@ -124,6 +125,7 @@ TASKS: tuple[EvalTask, ...] = (
         serial=True,
     ),
     arc_task("handback", handback.CASES),
+    arc_task("fanout", fanout.CASES),
     arc_task("ab_reversal", ab_reversal.CASES),
     arc_task("red_after_green", red_after_green.CASES),
 )

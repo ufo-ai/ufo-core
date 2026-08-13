@@ -20,6 +20,7 @@ from ufo_ext_objectives.tools import (
     PLAN_OBJECTIVE_TOOL,
     READ_OBJECTIVE_TOOL,
     RECORD_STEP_TOOL,
+    RUN_INDEPENDENT_STEPS_TOOL,
 )
 
 NAME = "objectives"
@@ -91,7 +92,12 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=(PLAN_OBJECTIVE_TOOL, RECORD_STEP_TOOL, READ_OBJECTIVE_TOOL),
+        tools=(
+            PLAN_OBJECTIVE_TOOL,
+            RUN_INDEPENDENT_STEPS_TOOL,
+            RECORD_STEP_TOOL,
+            READ_OBJECTIVE_TOOL,
+        ),
         hooks=(HookSpec(event="user_prompt_submit", handler=_inject_frontier),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )
