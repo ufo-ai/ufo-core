@@ -30,6 +30,7 @@ from evals import (
     slack_message_block,
     tool_calling,
     web_research,
+    writing_subagent,
 )
 from evals.harness.registry import (
     EvalTask,
@@ -110,6 +111,16 @@ TASKS: tuple[EvalTask, ...] = (
     skill_authoring_task("skill_gtm", SKILL_GTM_CASES),
     capability_task("github_connections", github_connections.CASES, serial=True),
     capability_task("connector_refs", connector_refs.CASES),
+    capability_task(
+        "writing_subagent",
+        writing_subagent.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
+    capability_task(
+        "writing_launch_thread",
+        writing_subagent.LAUNCH_CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
     capability_task(
         "document_visual",
         document_visual.CASES,

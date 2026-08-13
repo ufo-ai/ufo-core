@@ -36,10 +36,12 @@ Do not ask when a reasonable default is obvious from the venue.
 
 - **Preserve the writer's real voice.** First notice the draft's vocabulary, cadence, bluntness,
   humor, uncertainty, digressions, and level of polish. Keep the traits that feel personal. Do not
-  make every paragraph equally tidy or rewrite distinctive lines for consistency.
+  make every paragraph equally tidy or rewrite distinctive lines for consistency. Voice is the
+  pattern across the draft, not a duty to retain any one sentence.
 - **Make the minimum effective edit.** Fix AI patterns, errors, repetition, and unclear passages.
   Leave strong human sentences alone. A rough draft with a real voice should still sound like the
-  same person afterwards.
+  same person afterwards. Measure the minimum by failures cleared, not words changed. A fluent
+  sentence that contains only generic setup is not strong.
 - **Lead with the point when the setup adds nothing.** Cut generic throat-clearing. Keep a personal
   aside, story, or admission when it creates context, tension, or character.
 - **Front-load only when it improves clarity.** Do not force every section into the same
@@ -83,6 +85,14 @@ more than the model."
 
 **Throat-clearing openers.** "Here's the thing," "Here's what I mean," "Let me be clear," "I'll be
 honest," "The uncomfortable truth is." Cut and state the point.
+
+"Every team is different. Today we announce X." is also setup. In launch copy, make the product,
+change, or reader the subject. "Today we announce," "today we release," and "today we launch" all
+describe the company's act instead of the news. Changing the verb or moving the first sentence does
+not fix it.
+
+"Every company, project, and person is unique" stays generic when moved behind the product sentence.
+Delete it wherever it appears.
 
 **Faux-insight setups.** "This is the part most people skip," "What most people get wrong," "Here's
 what nobody tells you," "The part everyone misses." They flatter the writer as the lone expert. Cut
@@ -158,11 +168,20 @@ and let the other one decide structure: `ufo-weekly-changelog` for changelog ent
 `research-report` for reports and executive summaries, `office-docx` or `pdf` for a requested file
 format.
 
+## Delegating a draft
+
+For a whole draft or a full-pass edit, `spawn_subagent("writing", {"objective": ...})` runs a child
+that already holds this workflow. Put the draft's path, the audience, the venue, and every fact it
+may use in the objective: the child has no conversation history, cannot ask, and will not invent a
+missing fact. It saves the draft in the workspace and reports the path, and you deliver it. Keep a
+short line, a headline, or a quick tighten for yourself.
+
 ## Workflow
 
 1. Read the whole draft before touching it.
-2. Name the core point and 3-5 voice signals to preserve. Keep that note internal. If you cannot find
-   the core point, ask.
+2. Name the core point, factual claims, and 3-5 voice signals to preserve. Keep that note internal.
+   If several passages fail the checklist, rewrite from this note and use the source only to check
+   omissions. If you cannot find the core point, ask.
 3. For a detect request, return the findings report described above and stop.
 4. For an edit or a fresh draft, make the minimum effective changes, then check the result yourself
    against `references/checklist.md`.
