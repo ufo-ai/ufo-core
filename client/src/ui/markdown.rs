@@ -10,6 +10,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as InkColor, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::ui::osc;
 use crate::ui::theme::{rgb_to_256, ColorMode, Scheme, Theme};
 use crate::ui::wrap;
 
@@ -160,6 +161,7 @@ struct Render<'a> {
     code: Option<(String, String)>,
     table: Option<Cells>,
     links: Vec<(usize, String)>,
+    marks: Vec<(usize, usize, String)>,
 }
 
 impl<'a> Render<'a> {
@@ -178,6 +180,7 @@ impl<'a> Render<'a> {
             code: None,
             table: None,
             links: Vec::new(),
+            marks: Vec::new(),
         }
     }
 
@@ -338,19 +341,23 @@ impl<'a> Render<'a> {
         self.spans.push(Span::styled(text.to_string(), style));
     }
 
+    /// A closed link becomes a mark over its label's spans; the label is all the member sees,
+    /// and [`Render::flush`] wraps each rendered row's share of it in OSC 8 markers the client
+    /// reads back on click. A table cell clips rather than wraps, so its markers embed directly
+    /// and [`clip_spans`] carries them whole.
     fn close_link(&mut self) {
         let Some((at, dest)) = self.links.pop() else {
             return;
         };
-        let text: String = self.spans[at..]
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect();
-        if dest.is_empty() || dest == text {
+        if dest.is_empty() || at >= self.spans.len() {
             return;
         }
-        self.spans
-            .push(Span::styled(format!(" ({dest})"), self.theme.muted));
+        if self.table.is_some() {
+            self.spans.insert(at, Span::raw(osc::link_open(&dest)));
+            self.spans.push(Span::raw(osc::LINK_CLOSE));
+            return;
+        }
+        self.marks.push((at, self.spans.len(), dest));
     }
 
     fn inline(&self) -> Style {
@@ -399,6 +406,16 @@ impl<'a> Render<'a> {
             );
             runs.push((text.len(), span.style));
         }
+        let mut links: Vec<(usize, usize, String)> = self
+            .marks
+            .drain(..)
+            .rev()
+            .map(|(at, to, url)| {
+                let from = if at == 0 { 0 } else { runs[at - 1].0 };
+                (from, runs[to - 1].0, url)
+            })
+            .collect();
+        links.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         let body = &text[..text.trim_end().len()];
         let mut prefix = first;
         let mut at = 0;
@@ -406,8 +423,22 @@ impl<'a> Render<'a> {
             let cap = self.width.saturating_sub(span_width(&prefix)).max(1);
             let left = &body[at..];
             let (head, next) = wrap::wrap_head(left, cap);
+            let row_end = at + head;
             let mut row = std::mem::take(&mut prefix);
-            row.extend(styled_slice(body, &runs, at, at + head));
+            let mut cursor = at;
+            for (from, to, url) in &links {
+                let lo = (*from).max(cursor);
+                let hi = (*to).min(row_end);
+                if lo >= hi {
+                    continue;
+                }
+                row.extend(styled_slice(body, &runs, cursor, lo));
+                row.push(Span::raw(osc::link_open(url)));
+                row.extend(styled_slice(body, &runs, lo, hi));
+                row.push(Span::raw(osc::LINK_CLOSE));
+                cursor = hi;
+            }
+            row.extend(styled_slice(body, &runs, cursor, row_end));
             self.lines.push(Line::from(row));
             at += next;
             if at >= body.len() {
@@ -577,22 +608,36 @@ fn assets() -> &'static (SyntaxSet, ThemeSet) {
 }
 
 fn span_width(spans: &[Span<'static>]) -> usize {
-    spans.iter().map(|span| wrap::width(&span.content)).sum()
+    spans
+        .iter()
+        .flat_map(|span| wrap::units(&span.content))
+        .map(|(_, step)| step)
+        .sum()
 }
 
+/// The prefix of `spans` that fits `max` display columns. OSC markers take no columns and are
+/// all kept, clipped or not, so a link's open always meets its close.
 fn clip_spans(spans: &[Span<'static>], max: usize) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut used = 0;
+    let mut full = false;
     for span in spans {
-        if used >= max {
-            break;
+        let mut kept = String::new();
+        for (unit, step) in wrap::units(&span.content) {
+            if step == 0 {
+                kept.push_str(unit);
+                continue;
+            }
+            if full || used + step > max {
+                full = true;
+                continue;
+            }
+            used += step;
+            kept.push_str(unit);
         }
-        let text = wrap::clip(&span.content, max - used);
-        if text.is_empty() {
-            continue;
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, span.style));
         }
-        used += wrap::width(text);
-        out.push(Span::styled(text.to_string(), span.style));
     }
     out
 }
@@ -743,9 +788,60 @@ mod tests {
     }
 
     #[test]
-    fn link_states_its_url_after_the_text() {
+    fn a_link_renders_its_label_alone() {
         let lines = render("see [docs](https://ufo.test)", &plain(), 60);
-        assert_eq!(lines[0].to_string(), "see docs (https://ufo.test)");
+        assert_eq!(
+            lines[0].to_string(),
+            "see \u{1b}]8;;https://ufo.test\u{7}docs\u{1b}]8;;\u{7}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_link_reopens_on_every_row() {
+        let lines = render("[alpha beta](https://u.fo)", &plain(), 5);
+        assert_eq!(lines.len(), 2);
+        for (line, label) in lines.iter().zip(["alpha", "beta"]) {
+            assert_eq!(
+                line.to_string(),
+                format!("\u{1b}]8;;https://u.fo\u{7}{label}\u{1b}]8;;\u{7}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_link_clicks_by_its_label() {
+        let table = "| Doc |\n| --- |\n| [x](https://u.fo) |\n";
+        let lines = render(table, &plain(), 24);
+        assert!(lines[3]
+            .to_string()
+            .contains("\u{1b}]8;;https://u.fo\u{7}x\u{1b}]8;;\u{7}"));
+        let visible_widths: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .flat_map(|span| wrap::units(&span.content))
+                    .map(|(_, step)| step)
+                    .sum()
+            })
+            .collect();
+        assert!(visible_widths
+            .iter()
+            .all(|width| *width == visible_widths[0]));
+    }
+
+    #[test]
+    fn a_clipped_table_cell_keeps_its_markers_balanced() {
+        let table = "| Doc |\n| --- |\n| [alpha beta gamma](https://u.fo) |\n";
+        let lines = render(table, &plain(), 10);
+        for line in &lines {
+            let text = line.to_string();
+            assert_eq!(
+                text.matches('\u{1b}').count(),
+                text.matches('\u{7}').count(),
+                "markers torn: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -859,8 +955,8 @@ mod linked_image_tests {
             .collect();
         assert!(text.contains("build"), "alt text renders: {text}");
         assert!(
-            text.contains("https://ci.example"),
-            "outer link stated: {text}"
+            text.contains("\u{1b}]8;;https://ci.example\u{7}"),
+            "outer link carries the click target: {text}"
         );
     }
 

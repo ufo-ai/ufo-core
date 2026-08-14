@@ -312,12 +312,11 @@ impl App {
 
     pub fn file(&mut self, name: &str, size: &str, url: &str) {
         self.flush_stream();
-        let said = osc::hyperlink(self.caps, url, name);
-        let line = if url.is_empty() || said != name {
-            format!("shared {said} ({size} bytes)")
-        } else {
-            format!("shared {name} ({size} bytes) {url}")
+        let said = match url.is_empty() {
+            true => name.to_string(),
+            false => format!("{}{name}{}", osc::link_open(url), osc::LINK_CLOSE),
         };
+        let line = format!("shared {said} ({size} bytes)");
         self.retained
             .push(Entry::Raw(vec![Line::styled(line, self.theme.muted)]));
     }
@@ -1334,16 +1333,10 @@ pub fn decode_key(key: KeyEvent) -> Option<Key> {
 mod tests {
     use super::*;
 
-    const LINKED: Caps = Caps {
-        hyperlinks: true,
-        osc52: false,
-        images: ImageProtocol::None,
-        notifications: false,
-    };
-
     fn shared_line() -> Line<'static> {
-        let said = osc::hyperlink(LINKED, "https://ufo.test/artifacts/abc?exp=1&sig=2", "name");
-        Line::styled(format!("shared {said} (12 bytes)"), Style::new())
+        let open = osc::link_open("https://ufo.test/artifacts/abc?exp=1&sig=2");
+        let said = format!("shared {open}name{} (12 bytes)", osc::LINK_CLOSE);
+        Line::styled(said, Style::new())
     }
 
     fn visible(text: &str) -> String {

@@ -1,12 +1,10 @@
 //! Terminal integrations spoken in OSC: hyperlinks, clipboard, inline images, and desktop
-//! notifications — each gated by a detected capability, because an escape a terminal swallows is
-//! content the member never sees. The browser handoff lives here too, as the other integration
-//! that leaves the terminal.
+//! notifications. Clipboard, images, and notifications are gated by a detected capability,
+//! because an escape a terminal swallows is content the member never sees; a hyperlink's label
+//! is the content, so its markers ship everywhere and the client reads them back itself. The
+//! browser handoff lives here too, as the other integration that leaves the terminal.
 
-use std::io::Read;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -18,9 +16,6 @@ const NOTIFICATION_COLUMNS: usize = 120;
 const HTTP_SCHEME: &str = "http://";
 const HTTPS_SCHEME: &str = "https://";
 const KITTY_ID_CEILING: u32 = 0xffff_fffe;
-const TMUX_PROBE_WAIT: Duration = Duration::from_millis(250);
-const TMUX_PROBE_POLL: Duration = Duration::from_millis(5);
-const TMUX_HYPERLINK_FEATURE: &str = "hyperlinks";
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 const PNG_HEADER_LEN: usize = 24;
 const JPEG_FILL: u8 = 0xff;
@@ -36,7 +31,6 @@ const JPEG_SOF_LAST: u8 = 0xc2;
 /// What the running terminal is known to honor, sniffed from the environment once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
-    pub hyperlinks: bool,
     pub osc52: bool,
     pub notifications: bool,
     pub images: ImageProtocol,
@@ -78,24 +72,16 @@ impl TermEnv {
 
 impl Caps {
     /// Sniff the environment: known terminals get their known features, unknown terminals get
-    /// none — a swallowed OSC 8 renders the URL invisible, so the default is off. Under tmux the
-    /// hyperlink answer comes from tmux itself, which alone knows what the outer terminal spoke.
+    /// none — a swallowed escape renders its payload invisible, so the default is off.
     pub fn detect() -> Caps {
-        let env = TermEnv::snapshot();
-        let mut caps = caps_for(&env);
-        if env.tmux {
-            caps.hyperlinks = tmux_passes_hyperlinks();
-        }
-        caps
+        caps_for(&TermEnv::snapshot())
     }
 }
 
 /// The capability matrix, pure over a snapshot. Under tmux no image protocol and no notification
-/// reaches the outer terminal and hyperlinks wait on the probe [`Caps::detect`] runs; under screen
-/// nothing passes through at all.
+/// reaches the outer terminal; under screen nothing passes through at all.
 pub fn caps_for(env: &TermEnv) -> Caps {
     let none = Caps {
-        hyperlinks: false,
         osc52: false,
         notifications: false,
         images: ImageProtocol::None,
@@ -105,25 +91,21 @@ pub fn caps_for(env: &TermEnv) -> Caps {
     }
     let caps = match identify(env) {
         Terminal::Kitty | Terminal::Ghostty | Terminal::WezTerm => Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: true,
             images: ImageProtocol::Kitty,
         },
         Terminal::Warp => Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: false,
             images: ImageProtocol::Kitty,
         },
         Terminal::Iterm2 => Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: true,
             images: ImageProtocol::Iterm2,
         },
         Terminal::Vscode | Terminal::Windows | Terminal::Alacritty => Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: false,
             images: ImageProtocol::None,
@@ -132,7 +114,6 @@ pub fn caps_for(env: &TermEnv) -> Caps {
     };
     if env.tmux {
         return Caps {
-            hyperlinks: false,
             notifications: false,
             images: ImageProtocol::None,
             ..caps
@@ -173,43 +154,14 @@ fn identify(env: &TermEnv) -> Terminal {
     }
 }
 
-fn tmux_passes_hyperlinks() -> bool {
-    let spawned = Command::new("tmux")
-        .args(["display-message", "-p", "#{client_termfeatures}"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = spawned else {
-        return false;
-    };
-    let deadline = Instant::now() + TMUX_PROBE_WAIT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => thread::sleep(TMUX_PROBE_POLL),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        }
-    }
-    let mut features = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut features);
-    }
-    features.contains(TMUX_HYPERLINK_FEATURE)
+/// OSC 8 markers around a transcript label, BEL-terminated — some terminals only make
+/// BEL-terminated links clickable. The client reads them back for click-to-open, terminals that
+/// speak hyperlinks make the label natively clickable, and every other terminal swallows them.
+pub fn link_open(url: &str) -> String {
+    format!("\x1b]8;;{url}\x07")
 }
 
-/// An OSC 8 hyperlink, BEL-terminated — some terminals only make BEL-terminated links
-/// clickable. Answers the plain text when hyperlinks are off.
-pub fn hyperlink(caps: Caps, url: &str, text: &str) -> String {
-    if !caps.hyperlinks || url.is_empty() {
-        return text.to_string();
-    }
-    format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
-}
+pub const LINK_CLOSE: &str = "\x1b]8;;\x07";
 
 /// Open `url` in the member's browser and return: the child is detached, holding none of this
 /// process's streams, and nothing waits on it. Anything that is not http(s) opens nothing, so a
@@ -395,7 +347,6 @@ mod tests {
     use super::*;
 
     const OFF: Caps = Caps {
-        hyperlinks: false,
         osc52: false,
         notifications: false,
         images: ImageProtocol::None,
@@ -442,15 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn hyperlink_falls_back_to_text() {
-        assert_eq!(hyperlink(OFF, "https://x", "label"), "label");
-        let on = Caps {
-            hyperlinks: true,
-            ..OFF
-        };
-        let linked = hyperlink(on, "https://x", "label");
-        assert!(linked.starts_with("\x1b]8;;https://x\x07"));
-        assert!(linked.ends_with("\x1b]8;;\x07"));
+    fn link_markers_wrap_a_label_bel_terminated() {
+        let said = format!("{}label{}", link_open("https://x"), LINK_CLOSE);
+        assert_eq!(said, "\x1b]8;;https://x\x07label\x1b]8;;\x07");
     }
 
     #[test]
@@ -551,15 +496,12 @@ mod tests {
         assert_eq!(caps.images, matrix.images);
         if env.tmux {
             assert_eq!(caps.images, ImageProtocol::None);
-        } else {
-            assert_eq!(caps.hyperlinks, matrix.hyperlinks);
         }
     }
 
     #[test]
     fn kitty_terminals_speak_every_feature() {
         let expected = Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: true,
             images: ImageProtocol::Kitty,
@@ -579,7 +521,6 @@ mod tests {
         assert_eq!(
             caps_for(&env("xterm-256color", "WarpTerminal")),
             Caps {
-                hyperlinks: true,
                 osc52: true,
                 notifications: false,
                 images: ImageProtocol::Kitty,
@@ -592,7 +533,6 @@ mod tests {
         assert_eq!(
             caps_for(&env("xterm-256color", "iTerm.app")),
             Caps {
-                hyperlinks: true,
                 osc52: true,
                 notifications: true,
                 images: ImageProtocol::Iterm2,
@@ -601,9 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn hyperlink_only_terminals_carry_no_images() {
+    fn clipboard_only_terminals_carry_no_images() {
         let expected = Caps {
-            hyperlinks: true,
             osc52: true,
             notifications: false,
             images: ImageProtocol::None,
@@ -636,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_drops_images_and_notifications_and_defers_hyperlinks() {
+    fn tmux_drops_images_and_notifications() {
         let under_tmux = TermEnv {
             tmux: true,
             ..env("screen-256color", "iTerm.app")
@@ -644,7 +583,6 @@ mod tests {
         assert_eq!(
             caps_for(&under_tmux),
             Caps {
-                hyperlinks: false,
                 osc52: true,
                 notifications: false,
                 images: ImageProtocol::None,

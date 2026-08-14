@@ -445,7 +445,7 @@ fn urls(text: &str) -> Vec<(usize, usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::osc::{self, Caps, ImageProtocol};
+    use crate::ui::osc;
     use crate::ui::theme::{ColorMode, Scheme, Theme};
 
     const PARAGRAPH: &str = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu";
@@ -660,14 +660,8 @@ mod tests {
     }
 
     fn linked_line() -> Line<'static> {
-        let caps = Caps {
-            hyperlinks: true,
-            osc52: false,
-            images: ImageProtocol::None,
-            notifications: false,
-        };
-        let said = osc::hyperlink(caps, "https://ufo.test/artifacts/abc?exp=1&sig=2", "name");
-        Line::raw(format!("shared {said} (12 bytes)"))
+        let open = osc::link_open("https://ufo.test/artifacts/abc?exp=1&sig=2");
+        Line::raw(format!("shared {open}name{} (12 bytes)", osc::LINK_CLOSE))
     }
 
     #[test]
@@ -691,15 +685,28 @@ mod tests {
     }
 
     #[test]
-    fn a_markdown_links_paren_is_not_part_of_the_url() {
+    fn link_at_finds_a_markdown_link_by_its_label() {
         let theme = theme();
         let mut retained = Retained::new(60);
         retained.push(Entry::Markdown("see [docs](https://ufo.test)".into()));
-        assert_eq!(retained.text_of(0, &theme), "see docs (https://ufo.test)");
+        assert_eq!(retained.text_of(0, &theme), "see docs");
         assert_eq!(
-            retained.link_at(0, 12, &theme).as_deref(),
+            retained.link_at(0, 4, &theme).as_deref(),
             Some("https://ufo.test")
         );
+        assert_eq!(retained.link_at(0, 3, &theme), None);
+    }
+
+    #[test]
+    fn a_prose_urls_trailing_paren_stays_prose() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.push(Entry::Note("docs (https://ufo.test) now".into()));
+        assert_eq!(
+            retained.link_at(0, 8, &theme).as_deref(),
+            Some("https://ufo.test")
+        );
+        assert_eq!(retained.link_at(0, 22, &theme), None);
     }
 
     #[test]
