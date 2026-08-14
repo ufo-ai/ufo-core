@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td } from "@/components/ui/table";
 import { Pager, type Placement } from "@/kernel/pager";
+import { PageToolbar } from "@/kernel/pane";
 import {
   OutcomeNotice,
   Panel,
@@ -88,17 +89,16 @@ export function Memory({
 
   return (
     <>
-      <Section
-        bar={
-          !submitted && kinds.length ? (
-            <Filter
-              options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
-              value={place.kind ?? ""}
-              onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
-            />
-          ) : null
-        }
-      >
+      {!submitted && kinds.length ? (
+        <PageToolbar>
+          <Filter
+            options={kinds.map((kind) => ({ label: kindLabel(kind), value: kind }))}
+            value={place.kind ?? ""}
+            onChange={(kind) => onPlace({ kind: kind || undefined, after: undefined })}
+          />
+        </PageToolbar>
+      ) : null}
+      <Section>
         <Panel
           state={state}
           empty={(payload) => (payload.available ? null : "This deploy has no memory extension.")}

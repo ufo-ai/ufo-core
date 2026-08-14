@@ -13,6 +13,7 @@ import {
   type ObjectRow,
 } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
+import { PageToolbar } from "@/kernel/pane";
 import {
   Panel,
   PanelBlank,
@@ -253,27 +254,25 @@ export function Artifacts({
   const families = absent ? Object.keys(MEDIA) : FAMILIES;
 
   return (
-    <Section
-      bar={
-        state.phase === "loading" ? null : (
-          <>
-            <Filter
-              options={families.map((family) => ({ label: family, value: family }))}
-              value={picked}
-              onChange={(value) => onPlace({ chip: value || undefined, after: undefined })}
-            />
-            {state.phase === "failed" && place.after ? (
-              <Button
-                variant="row"
-                onClick={() => onPlace({ after: undefined, open: undefined })}
-              >
-                First page
-              </Button>
-            ) : null}
-          </>
-        )
-      }
-    >
+    <>
+      {state.phase === "loading" ? null : (
+        <PageToolbar>
+          <Filter
+            options={families.map((family) => ({ label: family, value: family }))}
+            value={picked}
+            onChange={(value) => onPlace({ chip: value || undefined, after: undefined })}
+          />
+          {state.phase === "failed" && place.after ? (
+            <Button
+              variant="row"
+              onClick={() => onPlace({ after: undefined, open: undefined })}
+            >
+              First page
+            </Button>
+          ) : null}
+        </PageToolbar>
+      )}
+      <Section>
       <Panel state={state} shape="cards">
         {(payload) => {
           if (unknown) return <PanelBlank body="That filter is not available." />;
@@ -314,7 +313,8 @@ export function Artifacts({
           );
         }}
       </Panel>
-    </Section>
+      </Section>
+    </>
   );
 }
 

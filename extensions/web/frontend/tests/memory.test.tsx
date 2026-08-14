@@ -42,8 +42,10 @@ test("the search heads the page and the filter stands with the table", async () 
   expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
   expect(header.contains(screen.getByRole("table"))).toBe(false);
 
-  const bar = (await screen.findByRole("tab", { name: "Fact" })).closest("section")!;
-  expect(bar.contains(screen.getByRole("table"))).toBe(true);
+  const filter = await screen.findByRole("tab", { name: "Fact" });
+  const table = screen.getByRole("table");
+  expect(header.contains(filter)).toBe(false);
+  expect(filter.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryAllByRole("heading", { level: 2, name: "Memory" })).toEqual([]);
 });
 
