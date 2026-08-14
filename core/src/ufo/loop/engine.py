@@ -132,6 +132,8 @@ MAIN_ROUND_LIMIT = 200
 MAX_PARALLEL_TOOL_CALLS = 8
 DELTA_FLUSH_BYTES = 2048
 DELTA_FLUSH_SECONDS = 0.2
+CACHE_5M_SECONDS = 5 * 60
+CACHE_1H_SECONDS = 60 * 60
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 TRUNCATION_FEEDBACK = (
@@ -362,11 +364,13 @@ class _RoundInput:
     system: str
     offer_tools: bool
     force_finish: bool
+    first_round: bool
 
     def __repr__(self) -> str:
         return (
             f"_RoundInput(messages={len(self.messages)}, system_chars={len(self.system)}, "
-            f"offer_tools={self.offer_tools}, force_finish={self.force_finish})"
+            f"offer_tools={self.offer_tools}, force_finish={self.force_finish}, "
+            f"first_round={self.first_round})"
         )
 
 
@@ -786,6 +790,12 @@ class _TurnMeter:
         )
         if self.rounds:
             emit_metric("turn_rounds_total", self.rounds, status=status, profile=self.profile)
+            emit_metric(
+                "turn_round_path_total",
+                path="single" if self.rounds == 1 else "multiple",
+                status=status,
+                profile=self.profile,
+            )
 
 
 @dataclass(frozen=True, repr=False)
@@ -810,6 +820,7 @@ class TurnEngine:
     audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
+    previous_turn_ended_at: datetime | None = None
     sandbox_for: SandboxFor | None = None
     subagents_for: SubagentsFor | None = None
     requestable_credentials: CredentialRequests | None = None
@@ -1273,7 +1284,11 @@ class TurnEngine:
             meter.rounds += 1
             try:
                 messages, round_result = await self._stream_recovering_overflow(
-                    messages, usage_events, system, active_requests=active_requests
+                    messages,
+                    usage_events,
+                    system,
+                    active_requests=active_requests,
+                    first_round=meter.rounds == 1,
                 )
                 text, tool_calls = round_result.text, round_result.tool_calls
             except ModelStreamError as error:
@@ -1610,6 +1625,7 @@ class TurnEngine:
         offer_tools: bool = True,
         force_finish: bool = False,
         active_requests: tuple[str, ...] = (),
+        first_round: bool = False,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         compaction already ran, so an overflow here means the window is still too large — force a
@@ -1624,6 +1640,7 @@ class TurnEngine:
                     system=system,
                     offer_tools=offer_tools,
                     force_finish=force_finish,
+                    first_round=first_round,
                 )
             )
             usage_events.extend(result.usages)
@@ -1652,6 +1669,7 @@ class TurnEngine:
                     system=system,
                     offer_tools=offer_tools,
                     force_finish=force_finish,
+                    first_round=first_round,
                 )
             )
             usage_events.extend(result.usages)
@@ -1748,6 +1766,25 @@ class TurnEngine:
             reasoning="off" if round_input.force_finish else self.agent.reasoning,
             prompt_cache_ttl=self.cache_ttl,
         )
+        if not round_input.first_round:
+            gap = "within_turn"
+        elif self.previous_turn_ended_at is None:
+            gap = "new"
+        else:
+            gap_seconds = (datetime.now(UTC) - self.previous_turn_ended_at).total_seconds()
+            if gap_seconds <= CACHE_5M_SECONDS:
+                gap = "lte_5m"
+            elif gap_seconds <= CACHE_1H_SECONDS:
+                gap = "5m_1h"
+            else:
+                gap = "gt_1h"
+        cache_dimensions = {
+            "provider": self.provider,
+            "profile": self.profile,
+            "ttl": request.prompt_cache_ttl,
+            "round": "first" if round_input.first_round else "later",
+            "gap": gap,
+        }
         parts: list[str] = []
         buffer: list[str] = []
         pending = 0
@@ -1813,6 +1850,23 @@ class TurnEngine:
                 profile=self.profile,
             )
         round_usage = _total_usage(usages)
+        cache_result = "hit" if round_usage.cache_read_tokens else "miss"
+        emit_metric("model_cache_round_total", **cache_dimensions, result=cache_result)
+        if first_event_ms is not None:
+            emit_histogram(
+                "model_cache_first_event_ms",
+                first_event_ms,
+                **cache_dimensions,
+                result=cache_result,
+            )
+        for kind, amount in (
+            ("input", round_usage.input_tokens),
+            ("cache_read", round_usage.cache_read_tokens),
+            ("cache_write_5m", round_usage.cache_write_5m_tokens),
+            ("cache_write_1h", round_usage.cache_write_1h_tokens),
+        ):
+            if amount:
+                emit_metric("model_cache_tokens_total", amount, **cache_dimensions, kind=kind)
         for kind, amount in (
             ("input", round_usage.input_tokens),
             ("output", round_usage.output_tokens),

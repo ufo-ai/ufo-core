@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -282,6 +283,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 handoff.workflow_id,
             )
         turn, agent, audience = await _load_turn(UUID(turn_id))
+        previous_turn_ended_at = (
+            None
+            if turn.admission_source == INTENT_ADMISSION
+            else await _previous_turn_ended_at(turn)
+        )
         subagents = Subagents(
             client=runtime.dbos,
             registry=runtime.subagents,
@@ -426,6 +432,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             audience=audience,
             artifact_token_secret=runtime.artifact_token_secret,
             grants=grants,
+            previous_turn_ended_at=previous_turn_ended_at,
             pricing=runtime.registry.pricing,
             attempt=attempt,
             max_rounds=max_rounds,
@@ -578,6 +585,21 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         Agent(prompt=row.prompt, model=row.model, reasoning=row.reasoning),
         parse_audience(row.audience),
     )
+
+
+async def _previous_turn_ended_at(turn: Turn) -> datetime | None:
+    if turn.seq == 1:
+        return None
+    async with workspace_tx() as connection:
+        ended_at = (
+            await connection.execute(
+                sa.select(tables.turn.c.updated_at).where(
+                    tables.turn.c.conversation_id == turn.conversation_id,
+                    tables.turn.c.seq == turn.seq - 1,
+                )
+            )
+        ).scalar_one()
+    return ended_at if ended_at.tzinfo is not None else ended_at.replace(tzinfo=UTC)
 
 
 async def _open_sandbox(

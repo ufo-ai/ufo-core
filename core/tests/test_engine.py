@@ -7,7 +7,7 @@ import zlib
 from base64 import b64decode, b64encode
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -104,6 +104,7 @@ from ufo.loop.engine import (
     _TurnMeter,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.loop.queue import _previous_turn_ended_at
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemoryMatch, MemorySearch
 from ufo.models.interface import (
@@ -1569,6 +1570,74 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     } == {("input", "claude-opus-4-8", 3), ("output", "claude-opus-4-8", 3)}
 
 
+async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None, seq=2)
+    engine = replace(
+        _engine(
+            turn,
+            ToolCallingModel(),
+            tmp_path,
+            carrier=RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0)),
+        ),
+        previous_turn_ended_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    frame = await engine.run()
+    assert frame.status == "done"
+    points = _exported_metrics(reader)
+    assert {
+        (
+            point.attributes["round"],
+            point.attributes["gap"],
+            point.attributes["ttl"],
+            point.attributes["result"],
+            point.value,
+        )
+        for point in points["ufo.model_cache_round_total"]
+    } == {
+        ("first", "5m_1h", "1h", "miss", 1),
+        ("later", "within_turn", "1h", "miss", 1),
+    }
+    assert {
+        (point.attributes["round"], point.attributes["gap"], point.attributes["kind"], point.value)
+        for point in points["ufo.model_cache_tokens_total"]
+    } == {
+        ("first", "5m_1h", "input", 2),
+        ("later", "within_turn", "input", 1),
+    }
+    assert {
+        (point.attributes["round"], point.attributes["gap"], point.attributes["result"])
+        for point in points["ufo.model_cache_first_event_ms"]
+    } == {("first", "5m_1h", "miss"), ("later", "within_turn", "miss")}
+    assert [
+        (point.attributes["path"], point.attributes["status"], point.value)
+        for point in points["ufo.turn_round_path_total"]
+    ] == [("multiple", "done", 1)]
+
+
+async def test_previous_turn_end_is_loaded_for_cache_gap_measurement(db: None) -> None:
+    turn = await _seed_turn("queued", None, seq=2)
+    ended_at = ADMITTED_AT - timedelta(minutes=10)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=1,
+                status="done",
+                inbound="prior",
+                terminal=TerminalFrame(status="done", answer="done").model_dump(mode="json"),
+                created_at=ended_at - timedelta(minutes=1),
+                updated_at=ended_at,
+            )
+        )
+    assert await _previous_turn_ended_at(turn) == ended_at
+
+
 async def test_a_metered_round_separates_first_event_latency_from_the_round_wall(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1586,6 +1655,14 @@ async def test_a_metered_round_separates_first_event_latency_from_the_round_wall
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
     } == {("input", 11), ("output", 5), ("cache_read", 7), ("cache_write", 3)}
+    assert {
+        (point.attributes["kind"], point.value) for point in points["ufo.model_cache_tokens_total"]
+    } == {
+        ("input", 11),
+        ("cache_read", 7),
+        ("cache_write_1h", 3),
+    }
+    assert [point.attributes["path"] for point in points["ufo.turn_round_path_total"]] == ["single"]
 
 
 async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_spent(
@@ -4230,6 +4307,7 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
         system=secret,
         offer_tools=True,
         force_finish=False,
+        first_round=True,
     )
     call = ToolUseBlock(id="toolu_1", name="write", input={"content": secret})
     bound = _BoundToolCall(context=_dispatch_context(engine), call=call)
@@ -4250,7 +4328,8 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
         f"TurnEngine(turn_id={turn.id}, agent_id={turn.agent_id}, profile=main)"
     )
     assert repr(round_input) == (
-        f"_RoundInput(messages=1, system_chars={len(secret)}, offer_tools=True, force_finish=False)"
+        f"_RoundInput(messages=1, system_chars={len(secret)}, offer_tools=True, "
+        "force_finish=False, first_round=True)"
     )
     assert repr(bound) == "_BoundToolCall(tool=write, call_id=toolu_1)"
     assert repr(rejected) == (

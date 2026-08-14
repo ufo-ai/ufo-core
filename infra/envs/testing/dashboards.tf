@@ -848,3 +848,135 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 }
+
+resource "datadog_dashboard" "prompt_cache" {
+  title       = "ufo prompt cache"
+  layout_type = "ordered"
+
+  template_variable {
+    name     = "env"
+    prefix   = "env"
+    defaults = ["prod"]
+  }
+
+  template_variable {
+    name     = "profile"
+    prefix   = "profile"
+    defaults = ["main"]
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Anthropic charges 1.25x base input for a 5-minute write, 2x for a 1-hour write, and
+        0.1x for a read. A read refreshes the entry.
+
+        `gap` is the time from the prior turn's terminal write to this turn's first model request.
+        `within_turn` marks later rounds and `new` marks a conversation's first turn. A hit after
+        5 minutes proves that the 1-hour window had value. Later-round reads show the value of the
+        first round's write inside one turn.
+
+        The 1-hour write premium is 0.75x base input. A protected read saves 0.9x. The extended
+        window pays for itself above 83.3 read tokens per 100 write tokens, before latency and rate
+        limit value.
+
+        The board does not link a first-round hit to the prior turn's round count. Use it to select
+        a policy, then compare that policy with the same token and first-event measures.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "completed executions with one model round"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.turn_round_path_total{$env,$profile,status:done,path:single}.as_count() / sum:ufo.turn_round_path_total{$env,$profile,status:done}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "first model requests by idle gap"
+      request {
+        q            = "sum:ufo.model_cache_round_total{$env,$profile,provider:anthropic,round:first} by {gap}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "extended-window token return"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 1
+      request {
+        q          = "100 * sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,gap:5m_1h,kind:cache_read}.as_count() / sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,kind:cache_write_1h}.as_count()"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = ">="
+          value      = 83.3
+          palette    = "white_on_green"
+        }
+        conditional_formats {
+          comparator = "<"
+          value      = 83.3
+          palette    = "white_on_yellow"
+        }
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "first-round prompt cache hit ratio by idle gap"
+      request {
+        q            = "100 * sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_read} by {gap}.as_count() / (sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_read} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:input} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_write_5m} by {gap}.as_count() + sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic,round:first,kind:cache_write_1h} by {gap}.as_count())"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "cache tokens by round, kind, and requested TTL"
+      request {
+        q            = "sum:ufo.model_cache_tokens_total{$env,$profile,provider:anthropic} by {round,kind,ttl}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "first-event latency by cache result and idle gap"
+      request {
+        q            = "p50:ufo.model_cache_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.model_cache_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "model requests by round and requested TTL"
+      request {
+        q            = "sum:ufo.model_cache_round_total{$env,$profile,provider:anthropic} by {round,ttl}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+}

@@ -40,6 +40,13 @@ resource "datadog_metric_tag_configuration" "model_first_event_ms" {
   tags                = ["env", "host", "model", "profile", "provider", "service"]
 }
 
+resource "datadog_metric_tag_configuration" "model_cache_first_event_ms" {
+  metric_name         = "ufo.model_cache_first_event_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "gap", "host", "profile", "provider", "result", "round", "service", "ttl"]
+}
+
 resource "datadog_metric_tag_configuration" "tool_call_ms" {
   metric_name         = "ufo.tool_call_ms"
   metric_type         = "distribution"
@@ -77,6 +84,12 @@ resource "datadog_metric_metadata" "model_round_ms" {
 
 resource "datadog_metric_metadata" "model_first_event_ms" {
   metric = "ufo.model_first_event_ms"
+  type   = "gauge"
+  unit   = "millisecond"
+}
+
+resource "datadog_metric_metadata" "model_cache_first_event_ms" {
+  metric = "ufo.model_cache_first_event_ms"
   type   = "gauge"
   unit   = "millisecond"
 }

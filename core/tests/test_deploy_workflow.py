@@ -3370,6 +3370,18 @@ def test_production_owns_database_and_model_dashboards() -> None:
     )
 
 
+def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    assert 'resource "datadog_dashboard" "prompt_cache"' in dashboard
+    assert "ufo.model_cache_round_total" in dashboard
+    assert "ufo.model_cache_tokens_total" in dashboard
+    assert "ufo.model_cache_first_event_ms" in dashboard
+    assert "by {round,kind,ttl}" in dashboard
+    assert "by {result,gap}" in dashboard
+    assert "gap:5m_1h,kind:cache_read" in dashboard
+    assert "value      = 83.3" in dashboard
+
+
 @pytest.mark.parametrize(
     ("environment", "monitor", "query", "critical", "warning"),
     [
