@@ -113,15 +113,15 @@ resource "tls_locally_signed_cert" "sandbox_proxy" {
   allowed_uses          = ["digital_signature", "key_encipherment", "server_auth"]
 }
 
+# The retired front door's certificate, kept only until its `create_before_destroy` is out of state:
+# the flag propagates to every resource it depends on and inverts their destroy edges, so deleting
+# the chain while state still records it makes terraform's graph cyclic against the manifests that
+# once read its ARN. Dropping the flag here is what lets the next apply delete the chain outright.
 resource "aws_acm_certificate" "sandbox_proxy" {
   private_key       = tls_private_key.sandbox_proxy.private_key_pem
   certificate_body  = tls_locally_signed_cert.sandbox_proxy.cert_pem
   certificate_chain = tls_self_signed_cert.egress_ca.cert_pem
   tags              = local.tags
-
-  lifecycle {
-    create_before_destroy = true
-  }
 }
 
 # The proxy's front door is a public endpoint, so its NLB listener carries a publicly trusted
