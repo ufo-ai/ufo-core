@@ -379,13 +379,19 @@ mod tests {
         assert_eq!(target_for("windows", "aarch64"), None);
     }
 
-    fn path_holding(bin_dir: &Path) {
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn path_holding(bin_dir: &Path) -> std::sync::MutexGuard<'static, ()> {
+        let held = PATH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let joined = format!(
             "{}:{}",
             env::var("PATH").unwrap_or_default(),
             bin_dir.display()
         );
         env::set_var("PATH", joined);
+        held
     }
 
     #[test]
@@ -393,7 +399,7 @@ mod tests {
         let home = Home {
             root: scratch("download"),
         };
-        path_holding(&home.bin());
+        let _held = path_holding(&home.bin());
         let report = install_self(&home, |target, dest| {
             assert_eq!(Some(target), client_target());
             fs::write(dest, b"SERVED BINARY").map_err(|error| error.to_string())
@@ -421,7 +427,7 @@ mod tests {
         let home = Home {
             root: scratch("fallback"),
         };
-        path_holding(&home.bin());
+        let _held = path_holding(&home.bin());
         let report = install_self(&home, |_, _| Err("404".into())).unwrap();
         assert!(report.contains("Installed ufo"));
         let landed = fs::metadata(home.bin().join(BIN_NAME)).unwrap().len();
