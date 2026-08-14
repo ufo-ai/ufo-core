@@ -44,6 +44,13 @@ from ufo.tools.context import UntrustedContentError
 from ufo.workspace import ws
 
 
+@pytest.fixture(autouse=True)
+def _keep_the_record_factory():
+    factory = logging.getLogRecordFactory()
+    yield
+    logging.setLogRecordFactory(factory)
+
+
 def test_redact_payload_drops_sensitive_keys_at_depth():
     payload = {
         "turn_id": "abc",
@@ -659,21 +666,40 @@ def test_stdlib_warnings_export_through_the_logs_pipeline():
         logging.getLogger().removeHandler(handler)
 
 
-def test_an_oversized_library_warning_is_capped_before_the_exporter():
+_PROMPT_MARKER = "PLANTED-PROMPT-MARKER"
+_FRAGMENT_CHARS = 5
+
+
+def _planted_prompt(chars: int) -> str:
+    """Oversized text made of nothing but a marker, so any surviving run of the message holds a
+    fragment of that marker."""
+    return (_PROMPT_MARKER * (chars // len(_PROMPT_MARKER) + 1))[:chars]
+
+
+def _assert_no_marker_fragment(text: str) -> None:
+    """No `_FRAGMENT_CHARS` consecutive characters of the planted prompt survive, at either end of
+    the message or across the seam between two repetitions of the marker."""
+    cycle = _planted_prompt(len(_PROMPT_MARKER) + _FRAGMENT_CHARS)
+    fragments = {cycle[start : start + _FRAGMENT_CHARS] for start in range(len(_PROMPT_MARKER))}
+    assert sorted(fragment for fragment in fragments if fragment in text) == []
+
+
+def test_an_oversized_library_warning_reaches_the_exporter_stripped_of_its_text():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    o11y.init_o11y(None)
     o11y._bridge_warning_logs(provider)
     handler = logging.getLogger().handlers[-1]
     try:
-        logging.getLogger("ufo_ext_slack").warning("upload failed for %s", "x" * 100_000)
+        logging.getLogger("ufo_ext_slack").warning("upload failed for %s", _planted_prompt(100_000))
         (body,) = [item.log_record.body for item in exporter.get_finished_logs()]
     finally:
         logging.getLogger().removeHandler(handler)
-    dropped = len("upload failed for ") + 100_000 - o11y.LIBRARY_MESSAGE_MAX_CHARS
+    _assert_no_marker_fragment(str(body))
     assert body == (
-        f"upload failed for {'x' * (o11y.LIBRARY_MESSAGE_MAX_CHARS - len('upload failed for '))}"
-        f"{o11y.LIBRARY_MESSAGE_ELISION.format(dropped=dropped)}"
+        f"ufo_ext_slack WARNING record dropped: {len('upload failed for ') + 100_000} chars "
+        f"exceed the {o11y.LIBRARY_MESSAGE_MAX_CHARS}-char cap"
     )
 
 
@@ -686,19 +712,84 @@ class _CapturingHandler(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def test_an_oversized_dbos_warning_is_capped_on_the_logger_that_bypasses_the_root_handler():
-    warning = f"Asyncio task cancelled for workflow or step {'x' * 500_000}"
+def test_a_cancelled_dbos_step_writes_no_prompt_text_to_the_dbos_console_handler(capsys):
+    """The reported emitter: `dbos` logs a cancelled step by interpolating the callable, whose repr
+    renders every argument bound into it. That logger keeps `propagate = False` and writes the pod's
+    stderr through a console handler DBOS builds for itself, so the guard has to already hold when
+    the record is made. Not one character of the interpolated prompt reaches stderr: the line the
+    handler writes is the record's identity and the length it dropped."""
     o11y.init_o11y(None)
-    logger = logging.getLogger(o11y.DBOS_LOGGER_NAME)
+    logger = logging.getLogger("dbos")
+    handler = logging.StreamHandler()
+    logger.addHandler(handler)
+    prompt = _planted_prompt(500_000)
+    try:
+        logger.warning(f"Asyncio task cancelled for workflow or step {prompt}")
+    finally:
+        logger.removeHandler(handler)
+    written = capsys.readouterr().err
+    _assert_no_marker_fragment(written)
+    dropped = len("Asyncio task cancelled for workflow or step ") + len(prompt)
+    assert written.rstrip("\n") == (
+        f"dbos WARNING record dropped: {dropped} chars "
+        f"exceed the {o11y.LIBRARY_MESSAGE_MAX_CHARS}-char cap"
+    )
+
+
+def test_a_short_library_line_arrives_whole():
+    """The same logger's useful lines are untouched: the guard judges length, never text."""
+    o11y.init_o11y(None)
+    logger = logging.getLogger("dbos")
     captured: list[str] = []
     handler = _CapturingHandler(captured)
     logger.addHandler(handler)
     try:
-        logger.warning(warning)
+        logger.warning("Stopping queue manager, joining all worker threads...")
+        logger.warning("listing %s queues failed", 3)
     finally:
         logger.removeHandler(handler)
-    dropped = len(warning) - o11y.LIBRARY_MESSAGE_MAX_CHARS
     assert captured == [
-        warning[: o11y.LIBRARY_MESSAGE_MAX_CHARS]
-        + o11y.LIBRARY_MESSAGE_ELISION.format(dropped=dropped)
+        "Stopping queue manager, joining all worker threads...",
+        "listing 3 queues failed",
     ]
+
+
+def test_the_guard_holds_on_a_child_of_a_library_logger():
+    """A logger's filters never run for a child logger's records, and the child's records still
+    reach the parent's handler — so the guard cannot live on the loggers a library owns. The line
+    that survives names the child, the logger that emitted the record."""
+    o11y.init_o11y(None)
+    parent = logging.getLogger("dbos")
+    captured: list[str] = []
+    handler = _CapturingHandler(captured)
+    parent.addHandler(handler)
+    try:
+        logging.getLogger("dbos.queue").warning(_planted_prompt(500_000))
+    finally:
+        parent.removeHandler(handler)
+    (message,) = captured
+    _assert_no_marker_fragment(message)
+    assert message == (
+        f"dbos.queue WARNING record dropped: 500000 chars "
+        f"exceed the {o11y.LIBRARY_MESSAGE_MAX_CHARS}-char cap"
+    )
+
+
+def test_a_message_that_cannot_be_rendered_reaches_the_handler_untouched():
+    """A `%`-style call whose arguments do not match its template raises on interpolation. Rendering
+    it in the factory would move that raise onto the caller's `logger.warning`, so the record passes
+    through with its template and arguments and stdlib logging reports it at the handler, as it does
+    without the guard."""
+    o11y.init_o11y(None)
+    record = logging.getLogRecordFactory()(
+        "ufo_ext_slack", logging.WARNING, __file__, 1, "malformed %s %s", ("one",), None
+    )
+    assert (record.msg, record.args) == ("malformed %s %s", ("one",))
+
+
+def test_the_guard_installs_once_however_often_o11y_initializes():
+    o11y.init_o11y(None)
+    factory = logging.getLogRecordFactory()
+    assert isinstance(factory, o11y._GuardedRecordFactory)
+    o11y.init_o11y(None)
+    assert logging.getLogRecordFactory() is factory

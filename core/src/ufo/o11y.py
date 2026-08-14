@@ -2,8 +2,9 @@
 
 import logging
 import traceback
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
@@ -43,9 +44,10 @@ OTLP_METRICS_PATH = "v1/metrics"
 OTLP_LOGS_PATH = "v1/logs"
 STACK_MAX_CHARS = 8_000
 STACK_ELISION = "\n... middle frames elided ...\n"
-DBOS_LOGGER_NAME = "dbos"
 LIBRARY_MESSAGE_MAX_CHARS = 2_000
-LIBRARY_MESSAGE_ELISION = "... {dropped} chars elided"
+LIBRARY_MESSAGE_DROPPED = (
+    "{logger} {level} record dropped: {dropped} chars exceed the {limit}-char cap"
+)
 METRICS = (
     "turn_started_total",
     "turn_terminal_total",
@@ -222,9 +224,9 @@ _histograms: dict[str, Histogram] = {}
 
 def init_o11y(otlp_endpoint: str | None) -> None:
     """Install OTel providers exporting to the OTLP/HTTP collector; None keeps no-op defaults. The
-    `dbos` message cap installs either way — that logger writes to the pod's stdout regardless, and
-    keeps `propagate = False`, so it never reaches the root handler below."""
-    logging.getLogger(DBOS_LOGGER_NAME).addFilter(_cap_library_message)
+    message guard installs either way — a library that logs a megabyte writes it to the pod's stderr
+    through a handler of its own, whatever this deploy exports."""
+    _guard_log_messages()
     if otlp_endpoint is None:
         return
     traces_url, metrics_url, logs_url = _otlp_signal_urls(otlp_endpoint)
@@ -261,18 +263,69 @@ def _bridge_warning_logs(logger_provider: LoggerProvider) -> None:
             record.name != INSTRUMENTATION_NAME and not record.name.startswith("opentelemetry")
         )
     )
-    handler.addFilter(_cap_library_message)
     logging.getLogger().addHandler(handler)
 
 
-def _cap_library_message(record: logging.LogRecord) -> bool:
-    message = record.getMessage()
-    if len(message) <= LIBRARY_MESSAGE_MAX_CHARS:
-        return True
-    elision = LIBRARY_MESSAGE_ELISION.format(dropped=len(message) - LIBRARY_MESSAGE_MAX_CHARS)
-    record.msg = f"{message[:LIBRARY_MESSAGE_MAX_CHARS]}{elision}"
-    record.args = None
-    return True
+@dataclass(frozen=True)
+class _GuardedRecordFactory:
+    """The stdlib log record factory, replacing an oversized message with the record's identity.
+
+    A third-party library reports a cancelled call by interpolating the callable it was handed, and
+    a `functools.partial`'s repr renders every argument bound into it — for a turn's step that is
+    the composed system prompt, every mounted skill's markdown, and the extension context. One such
+    record is megabytes of prompt on the pod's stderr and in the collector.
+
+    An oversized record keeps none of its text. A head is the same prompt as the middle, so keeping
+    the first `LIBRARY_MESSAGE_MAX_CHARS` chars publishes a member's words in the one place they may
+    not appear. What survives is the record's identity — its logger, its level, and the length it
+    dropped — which is what an operator reads to find the emitter. A message this long is a repr,
+    never a sentence, so no readable line goes with it.
+
+    The guard sits at the factory because nothing else sees every record. The handlers that write
+    those lines belong to the libraries that emit them — DBOS builds its console handler inside
+    `DBOS(...)` and keeps `propagate = False`, uvicorn builds its own inside `uvicorn.run`, and a
+    record whose logger tree carries no handler at all still reaches stderr through
+    `logging.lastResort` — so none of them exists to be filtered when o11y initializes, and a
+    filter on a logger does not run for records a child logger emits. The factory runs once per
+    record, before any handler, formatter, or exporter reads it.
+
+    Only the size is judged, never the text: a short line from the same logger arrives whole."""
+
+    inner: Callable[..., logging.LogRecord]
+
+    def __call__(self, *args: object, **kwargs: object) -> logging.LogRecord:
+        record = self.inner(*args, **kwargs)
+        message = _rendered_message(record)
+        if message is None or len(message) <= LIBRARY_MESSAGE_MAX_CHARS:
+            return record
+        record.msg = LIBRARY_MESSAGE_DROPPED.format(
+            logger=record.name,
+            level=record.levelname,
+            dropped=len(message),
+            limit=LIBRARY_MESSAGE_MAX_CHARS,
+        )
+        record.args = None
+        return record
+
+
+def _guard_log_messages() -> None:
+    factory = logging.getLogRecordFactory()
+    if isinstance(factory, _GuardedRecordFactory):
+        return
+    logging.setLogRecordFactory(_GuardedRecordFactory(factory))
+
+
+def _rendered_message(record: logging.LogRecord) -> str | None:
+    """One record's text, or None when rendering it here would raise — a `%`-style call whose
+    arguments do not match its template raises on interpolation, and stdlib logging reports that at
+    the handler and keeps running, where a raise out of the caller's `logger.warning` would not.
+    An argument-free message is read as it stands, so the common record costs no interpolation."""
+    if not record.args and isinstance(record.msg, str):
+        return record.msg
+    try:
+        return record.getMessage()
+    except Exception:
+        return None
 
 
 def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]:
