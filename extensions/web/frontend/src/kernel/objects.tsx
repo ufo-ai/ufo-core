@@ -516,7 +516,7 @@ export function ObjectDetail({
         <Button variant="row" onClick={onBack}>
           Back
         </Button>
-        <h2 className="m-0 font-sans text-title font-strong">{name}</h2>
+        <h2 className="m-0 text-title font-strong">{name}</h2>
         <span className="text-ink-soft">{noun(kind)}</span>
       </div>
       <Panel state={state} shape="form">

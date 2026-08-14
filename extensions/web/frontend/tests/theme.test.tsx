@@ -228,6 +228,13 @@ test("the bundled faces are Inter for the chrome and Roboto Mono for the code", 
   expect(/@font-face\{font-family:Canela;src:url\(\/surface\/web\/static\/assets\/Canela-[^)]+\.otf\)/.test(css)).toBe(true);
 });
 
+test("a heading takes the body face, and the display serif reaches only what names it", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain("h1,h2,h3{text-wrap:balance}");
+  expect(/h1,h2,h3\{[^}]*font-family/.test(css)).toBe(false);
+  expect(css).toContain(".font-display{font-family:var(--font-display)}");
+});
+
 test("the shadcn contract carries the theme, and names nothing no component reads", () => {
   const css = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8").replace(
     /\s+/g,

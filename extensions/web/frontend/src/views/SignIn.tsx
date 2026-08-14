@@ -20,7 +20,7 @@ export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {
   const stated = FAULTS[fault];
   return (
     <section className="m-auto w-card rounded-card border border-edge bg-card text-card-foreground p-4xl">
-      <h1 className="m-0 mb-2xs text-title">{stated.title}</h1>
+      <h1 className="m-0 mb-2xs text-title font-medium">{stated.title}</h1>
       <div className="mb-xl text-label text-ink-soft">{stated.cause}</div>
       <a
         href="/login"

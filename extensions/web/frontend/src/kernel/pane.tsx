@@ -77,7 +77,7 @@ export function PageHeader({
   return (
     <div className="flex h-(--size-control) shrink-0 items-center gap-sm">
       {title ? (
-        <h1 className="m-0 flex-1 truncate font-sans text-title font-medium">{title}</h1>
+        <h1 className="m-0 flex-1 truncate text-title font-medium">{title}</h1>
       ) : (
         <span className="flex-1" />
       )}
@@ -165,7 +165,7 @@ export function RecordPanel({
     >
       <BesideHost over>
         <header className="flex h-(--size-control) shrink-0 items-center gap-md px-(--size-record-gutter)">
-          <h2 className="m-0 flex-1 truncate font-sans text-subtitle font-medium">{title}</h2>
+          <h2 className="m-0 flex-1 truncate text-subtitle font-medium">{title}</h2>
           <Button size="icon" aria-label="Close" onClick={onClose}>
             <IconX className="size-icon" aria-hidden />
           </Button>

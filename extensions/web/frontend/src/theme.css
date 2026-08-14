@@ -351,11 +351,13 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* A heading takes the body face and the weight its own screen states. The display serif is asked
+     for by name — `font-display` on a card's or an item's title — and reaches nothing that does not
+     name it. Set here as a default it painted every `<h1>`/`<h2>`/`<h3>` in the portal, which is
+     why all but one carried a `font-sans` to take it back off. */
   h1,
   h2,
   h3 {
-    font-family: var(--font-display);
-    font-weight: 300;
     text-wrap: balance;
   }
 

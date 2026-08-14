@@ -787,7 +787,7 @@ function RailList({
   return (
     <>
       <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
-        <h2 className="m-0 font-sans text-label font-medium text-ink-soft">Conversations</h2>
+        <h2 className="m-0 text-label font-medium text-ink-soft">Conversations</h2>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -833,7 +833,7 @@ function RailList({
       ) : null}
       {railGroups(rail.rows, sort, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 flex h-(--size-row) items-center px-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
+          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium text-ink-soft max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">

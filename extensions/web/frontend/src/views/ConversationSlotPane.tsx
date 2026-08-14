@@ -242,7 +242,7 @@ function SlotContent({ payload }: { payload: SlotPayload }) {
     <div className="flex flex-col gap-xl">
       {payload.sources.map((source) => (
         <article key={source.url} className="min-w-0 rounded-panel border border-edge p-lg">
-          <h2 className="m-0 font-sans text-label font-strong">
+          <h2 className="m-0 text-label font-strong">
             <a href={source.url} target="_blank" rel="noreferrer">
               {source.title || source.url}
             </a>
@@ -280,7 +280,7 @@ function TasksContent({ payload }: { payload: TasksPayload }) {
   return (
     <section className="min-w-0">
       {payload.title ? (
-        <h2 className="m-0 font-sans text-title font-strong">{payload.title}</h2>
+        <h2 className="m-0 text-title font-strong">{payload.title}</h2>
       ) : null}
       <p className="m-0 mt-sm font-mono text-mono text-ink-soft">
         {payload.completed_count} of {payload.total_count} completed.

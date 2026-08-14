@@ -229,7 +229,7 @@ export function Section({
         <div className="flex flex-col gap-2xs">
           {title ? (
             <div className="flex items-baseline gap-md">
-              <h2 className="m-0 font-sans text-subtitle font-medium">{title}</h2>
+              <h2 className="m-0 text-subtitle font-medium">{title}</h2>
               {action}
             </div>
           ) : null}
