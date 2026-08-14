@@ -13,6 +13,7 @@ from evals import (
     connector_connections,
     connector_refs,
     cos_workflows,
+    credential_handoff,
     dead_route_repeat,
     document_visual,
     fanout,
@@ -112,6 +113,12 @@ TASKS: tuple[EvalTask, ...] = (
     skill_authoring_task("skill_authoring", SKILL_AUTHORING_CASES),
     skill_authoring_task("skill_gtm", SKILL_GTM_CASES),
     capability_task("github_connections", github_connections.CASES, serial=True),
+    capability_task(
+        "credential_handoff",
+        credential_handoff.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        serial=True,
+    ),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "writing_subagent",

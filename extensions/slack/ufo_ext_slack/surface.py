@@ -739,6 +739,7 @@ MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
 SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
+CREDENTIALS_FRAGMENT = "#/workspace/credentials"
 MARKDOWN_LINK_PATTERN = r"\[[^\]]*\]\(<?https?://[^)>\s]+[^)]*\)"
 URL_PATTERN = r"https?://[^\s>|]+"
 HEADER_PADDING_PATTERN = r"\n[ \t]*\n+(?=#{1,6} )"
@@ -2940,17 +2941,30 @@ def _reply_text(writeback: Writeback) -> str:
 
 
 def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str:
-    """The reply text, plus the terminal hint when the turn asked for credentials (Slack never
-    collects a secret — the member's own terminal does), plus a link block for any shared file too
-    large to upload inline — a TTL download link so an over-cap artifact is delivered rather than
-    silently dropped."""
+    """The reply text, plus the portal hint when the turn asked for credentials, plus a link block
+    for any shared file too large to upload inline — a TTL download link so an over-cap artifact is
+    delivered rather than silently dropped.
+
+    Slack cannot collect a secret, so it is the surface that has to name one that can. The prompt
+    this turn raised belongs to this thread's conversation and no other, so it is not waiting in
+    the portal's chat; Workspace → Credentials is the screen that fills the slot whatever raised
+    the need, so that is the screen the link opens. A deploy with no public base or no browser
+    surface has no address to give and names the screen in words instead — the member still knows
+    where to go, and a dead link would be worse than none.
+
+    The link is Markdown, like the oversize-artifact lines below it: this text rides the Block Kit
+    `markdown` block `slack_reply_body` builds, which reads standard Markdown, so Slack's own
+    `<url|label>` form would print verbatim."""
     text = _reply_text(writeback)
     if writeback.terminal.credential_request is not None:
         reason = writeback.terminal.credential_request.reason
-        text = (
-            f"{text}\n\n:lock: {reason} — open your terminal, run "
-            "`ufo`, and ask me there to continue; secrets never pass through chat."
+        link = ctx.home_url(CREDENTIALS_FRAGMENT)
+        where = (
+            f"[Workspace → Credentials]({link})"
+            if link
+            else "the ufo portal, under Workspace → Credentials"
         )
+        text = f"{text}\n\n:lock: {reason} — set it in {where}; secrets never pass through chat."
     oversized = tuple(a for a in writeback.artifacts if a.size_bytes > SLACK_UPLOAD_MAX_BYTES)
     if not oversized:
         return text

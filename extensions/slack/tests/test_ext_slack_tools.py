@@ -6,10 +6,9 @@ and `slack_app_manifest` renders the exact YAML the skill teaches."""
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -21,6 +20,7 @@ import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_slack.surface import (
+    MARKDOWN_LINK_PATTERN,
     SLACK_BOT_TOKEN_SLOT,
     SLACK_SIGNING_SECRET_SLOT,
     _reply_text,
@@ -49,7 +49,6 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequest,
-    SurfaceContext,
     TerminalFrame,
     Writeback,
 )
@@ -790,9 +789,23 @@ async def test_slack_channels_needs_the_bot_token(db: None, tmp_path: Path) -> N
             )
 
 
-def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> None:
-    """Slack never collects a secret: a turn that asked for credentials renders as a pointer to
-    the member's own terminal, where the member asks again and the prompts render privately."""
+@dataclass(frozen=True)
+class _PortalCtx:
+    """Stands in for the surface context's one collaborator this rendering reads. `home_url`'s own
+    format is proved against the real context in `core/tests/test_surface.py`; what is asserted
+    here is what Slack does with the address it is handed, and what it says without one."""
+
+    base: str | None
+
+    def home_url(self, fragment: str = "") -> str | None:
+        return None if self.base is None else f"{self.base}{fragment}"
+
+
+def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
+    """Slack collects no secret, so it hands the member a link to the one screen that fills a slot
+    whatever raised it. The link is Markdown, matching the oversize-artifact lines this same text
+    carries, because the reply rides a Block Kit `markdown` block — Slack's `<url|label>` form
+    would print verbatim there. A deploy with no address names the screen in words instead."""
     writeback = Writeback(
         turn_id=uuid4(),
         conversation_id=uuid4(),
@@ -811,10 +824,22 @@ def test_slack_writeback_hints_at_the_terminal_for_a_credential_request() -> Non
         ),
         artifacts=(),
     )
-    text = _reply_with_oversize_links(cast(SurfaceContext, None), writeback)
-    assert "connecting Slack" in text
-    assert "`ufo`" in text
-    assert "secrets never pass through chat" in text
+    linked = _reply_with_oversize_links(
+        _PortalCtx("https://ufo.example.test/surface/web"), writeback
+    )
+    assert "connecting Slack" in linked
+    assert (
+        "[Workspace → Credentials]"
+        "(https://ufo.example.test/surface/web#/workspace/credentials)" in linked
+    )
+    assert re.search(MARKDOWN_LINK_PATTERN, linked) is not None
+    assert "|Workspace" not in linked
+    assert "secrets never pass through chat" in linked
+    assert "terminal" not in linked and "`ufo`" not in linked
+
+    unlinked = _reply_with_oversize_links(_PortalCtx(None), writeback)
+    assert "the ufo portal, under Workspace → Credentials" in unlinked
+    assert "http" not in unlinked and "[" not in unlinked
 
 
 def test_reply_text_renders_a_cancelled_turns_reason() -> None:

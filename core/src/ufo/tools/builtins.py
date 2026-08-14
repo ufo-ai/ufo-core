@@ -793,8 +793,9 @@ async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -
 
 
 REQUEST_CREDENTIALS_DIRECTIVE = (
-    "Tell the member what you need in your reply, then end your turn — their terminal prompts for "
-    "each value privately, and the entered secrets never appear in this conversation."
+    "Tell the member what you need in your reply, then end your turn — a private prompt collects "
+    "each value, and the entered secrets never appear in this conversation. Name no place to enter "
+    "them: the surface the member is on supplies its own, and only it knows which."
 )
 
 
@@ -1001,8 +1002,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="request_credentials",
         description=(
             "Ask the speaking member to fill credential slots (API keys, bot tokens, signing "
-            "secrets) without the values passing through this conversation — their terminal "
-            "prompts for each one privately. Use it when a capability needs a secret a member "
+            "secrets) without the values passing through this conversation — a private prompt "
+            "collects each one. Use it when a capability needs a secret a member "
             "must supply; never ask for a secret in chat prose. Only a workspace admin can "
             "fill slots. After calling it, explain what you need in your reply and end your "
             "turn; verify the slots once the member says they have entered them."

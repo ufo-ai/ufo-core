@@ -926,6 +926,7 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _public_base_url=public_base_url,
+            _home_surface=home_surface(manifests),
             _ingress_public_url=ingress_public_url,
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _deploy_extensions=deploy_extensions,

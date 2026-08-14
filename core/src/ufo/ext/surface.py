@@ -979,6 +979,7 @@ class SurfaceContext:
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
+    _home_surface: str | None
     _ingress_public_url: str | None
     _deploy_sandbox_internet: bool
     _models: tuple[str, ...]
@@ -1131,6 +1132,18 @@ class SurfaceContext:
         """The deploy's public base (`[connect] public_base_url`), or None when unset — a
         channel's callback URL (Slack's Events request URL) renders from it."""
         return self._public_base_url
+
+    def home_url(self, fragment: str = "") -> str | None:
+        """A link into the deploy's browser portal, or None when this deploy has no public base or
+        installs no browser surface — a surface that cannot answer an act itself renders one so the
+        member reaches a surface that can.
+
+        Core owns both halves, so no surface has to know another's routes: `/surface/<name>` is
+        core's own mount path and `home` is the manifest flag naming the one surface a browser
+        belongs on. `fragment` is the portal's own hash route, which core does not interpret."""
+        if not self._public_base_url or self._home_surface is None:
+            return None
+        return f"{self._public_base_url.rstrip('/')}/surface/{self._home_surface}{fragment}"
 
     async def shared_artifacts(self, turn_id: UUID) -> tuple[SharedArtifact, ...]:
         """The files a turn shared, in share order (key-tiebroken within one timestamp) — the rows

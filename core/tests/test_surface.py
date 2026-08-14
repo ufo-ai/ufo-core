@@ -261,6 +261,7 @@ def _context(
         _user_skills=no_user_skills,
         _subagents=(),
         _public_base_url="https://ufo.example.test",
+        _home_surface="web",
         _ingress_public_url="https://sites.example.test",
         _deploy_sandbox_internet=False,
         _models=("auto", "claude-opus-4-8", "claude-sonnet-5"),
@@ -1465,6 +1466,24 @@ def test_public_base_url_is_the_wired_connect_base(tmp_path) -> None:
     context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert context.public_base_url == "https://ufo.example.test"
     assert replace(context, _public_base_url=None).public_base_url is None
+
+
+def test_home_url_addresses_the_browser_portal_at_cores_own_mount_path(tmp_path) -> None:
+    """The link a surface that cannot answer an act hands the member: core's `/surface/<name>`
+    mount joined to the home surface, carrying the portal's own hash route untouched. A deploy
+    missing either half has no address to give and says so with None, so no caller renders a link
+    to nowhere."""
+    context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert context.home_url() == "https://ufo.example.test/surface/web"
+    assert (
+        context.home_url("#/workspace/credentials")
+        == "https://ufo.example.test/surface/web#/workspace/credentials"
+    )
+    assert replace(context, _public_base_url="https://ufo.example.test/").home_url() == (
+        "https://ufo.example.test/surface/web"
+    )
+    assert replace(context, _public_base_url=None).home_url("#/workspace/credentials") is None
+    assert replace(context, _home_surface=None).home_url("#/workspace/credentials") is None
 
 
 def test_ingress_url_addresses_the_site_the_ingress_resolves(

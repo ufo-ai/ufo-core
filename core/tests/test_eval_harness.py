@@ -265,6 +265,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["closing_message"].simulator_model is None
     assert tasks["onboarding_help"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["onboarding_help"].simulator_model is None
+    assert tasks["credential_handoff"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["credential_handoff"].simulator_model is None
     assert tasks["writing_subagent"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["writing_subagent"].simulator_model is None
     assert tasks["writing_launch_thread"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -292,6 +294,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "onboarding_help",
             "writing_subagent",
             "writing_launch_thread",
+            "credential_handoff",
         }
     )
 
@@ -309,6 +312,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "connector_connections",
         "github_connections",
         "onboarding_help",
+        "credential_handoff",
         "handback",
         "fanout",
         "ab_reversal",
