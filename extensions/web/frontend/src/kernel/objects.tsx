@@ -49,6 +49,11 @@ const LEADING_FIELDS = 1;
  *  the projection composes. */
 const PROSE_FIELD = "prompt";
 
+/** How many characters of a spec value still read beside their label. A schedule, a day, a name fit
+ *  the value column; a prompt does not, and neither does a url nobody can break a line in, so past
+ *  this they take their own wrapped block under the label instead of being cut. */
+const FACT_VALUE_LINE = 72;
+
 export type ObjectValue = string | number | boolean | null;
 
 export type ObjectRow = { name: string; summary: string } & Record<string, ObjectValue>;
@@ -594,13 +599,13 @@ function specFact(field: string, value: ObjectValue, schema: SpecSchema | null):
       : typeof value === "string" && isMoment(value)
         ? (day(value) ?? value)
         : String(value);
+  if (enumerated(schema, field)) {
+    return { label: heading(field, schema), value: <Chip>{rendered}</Chip> };
+  }
   return {
     label: heading(field, schema),
-    value: enumerated(schema, field) ? (
-      <Chip>{rendered}</Chip>
-    ) : (
-      <span className="whitespace-pre-wrap">{rendered}</span>
-    ),
+    value: rendered,
+    block: rendered.includes("\n") || rendered.length > FACT_VALUE_LINE,
   };
 }
 

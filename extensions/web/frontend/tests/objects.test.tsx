@@ -47,6 +47,17 @@ const TASK_ROW = owned({
   owner_email: "mel@example.com",
 });
 
+/** A prompt of the length a member actually writes one: several steps over several lines. */
+const LONG_PROMPT = [
+  "1. Read every pull request merged in the last 24 hours.",
+  "2. Group them by the surface each one lands on.",
+  "3. Post the roll-up to the channel this task reports to.",
+].join("\n");
+
+const LONG_URL =
+  "https://app.testing.flyingobject.ai/surface/web/objects/scheduled_task/" +
+  "daily-ufo-changelog?agent=d5eeb0ec-8aa7-4624-be37-1411f2d13b54";
+
 const SECOND_CONVO_ID = "6f1d4c2a-9b3e-4a71-8c05-2d7e6b1f0a94";
 
 const SECOND_TASK_ROW = owned(
@@ -102,6 +113,21 @@ function cells(name: string): string[] {
 
 function headings(): string[] {
   return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
+}
+
+/** One fact of the detail's `Spec` group, scoped to that group: `Status` states some of the same
+ *  fields, so a label alone names two rows on the page. */
+function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
+  const group = [...document.querySelectorAll("h2")]
+    .find((heading) => heading.textContent === "Spec")
+    ?.closest("section");
+  const term = [...(group?.querySelectorAll("dt") ?? [])].find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!term?.parentElement || !term.nextElementSibling) {
+    throw new Error("the Spec group states no fact " + label);
+  }
+  return { row: term.parentElement, said: term.nextElementSibling as HTMLElement };
 }
 
 function mount(agents = [AGENT]) {
@@ -439,6 +465,46 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(fact("Created By")).toBe("mel@example.com");
   expect(screen.queryByText("Owner Email")).toBeNull();
   expect(screen.getByText(/^Created Jul/)).toBeTruthy();
+});
+
+test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK_DETAIL, spec: { ...TASK_DETAIL.spec, prompt: LONG_PROMPT } }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+  });
+  mount();
+
+  await openRow("daily-brief");
+
+  const prompt = await waitFor(() => specFact("Prompt"));
+  expect(prompt.said.textContent).toBe(LONG_PROMPT);
+  expect(prompt.said.className).toContain("whitespace-pre-wrap");
+  expect(prompt.said.className).toContain("wrap-anywhere");
+  expect(prompt.said.className).not.toContain("truncate");
+  expect(prompt.row.className).toContain("flex-col");
+
+  const schedule = specFact("Schedule");
+  expect(schedule.said.textContent).toBe("0 9 * * *");
+  expect(schedule.said.className).toContain("truncate");
+  expect(schedule.row.className).toContain("overflow-hidden");
+  expect(schedule.row.className).not.toContain("flex-col");
+});
+
+test("a spec value with no space to break on wraps in its own block rather than being cut", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK_DETAIL, spec: { ...TASK_DETAIL.spec, prompt: LONG_URL } }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+  });
+  mount();
+
+  await openRow("daily-brief");
+
+  const prompt = await waitFor(() => specFact("Prompt"));
+  expect(prompt.said.textContent).toBe(LONG_URL);
+  expect(prompt.said.className).toContain("wrap-anywhere");
+  expect(prompt.row.className).toContain("flex-col");
 });
 
 test("a creator reads as You to its own member, the address to another, Workspace to none", async () => {
