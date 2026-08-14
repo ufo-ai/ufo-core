@@ -52,7 +52,15 @@ from ufo.loop.subagents import (
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import emit_metric, formatted_stack, log, log_error, turn_profile
+from ufo.o11y import (
+    emit_metric,
+    formatted_stack,
+    log,
+    log_error,
+    span,
+    turn_profile,
+    turn_span,
+)
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
@@ -175,15 +183,30 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     with ws(workspace_uuid):
         try:
             async with workspace_tx() as connection:
-                agent_id = (
+                row = (
                     await connection.execute(
-                        sa.select(tables.turn.c.agent_id).where(
+                        sa.select(
+                            tables.turn.c.agent_id,
+                            tables.turn.c.conversation_id,
+                            tables.turn.c.traceparent,
+                            tables.turn.c.subagent_profile,
+                            tables.turn.c.parent_turn_id,
+                        ).where(
                             tables.turn.c.id == turn_uuid,
                             tables.turn.c.workspace_id == workspace_uuid,
                         )
                     )
-                ).scalar_one()
-            with agent(agent_id):
+                ).one()
+            with (
+                agent(row.agent_id),
+                turn_span(
+                    turn_uuid,
+                    row.conversation_id,
+                    row.traceparent,
+                    row.subagent_profile,
+                    row.parent_turn_id,
+                ),
+            ):
                 status = await _run_turn(runtime, turn_id)
         except asyncio.CancelledError:
             raise
@@ -270,7 +293,8 @@ async def _enqueue_handoff(
 async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     try:
         attempt = DBOS.workflow_id or turn_id
-        claimed, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
+        with span("turn.claim"):
+            claimed, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
         if not claimed:
             turn, _, _ = await _load_turn(UUID(turn_id))
             await TranscriptRepair(
@@ -287,7 +311,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 handoff.conversation_id,
                 handoff.workflow_id,
             )
-        turn, agent, audience = await _load_turn(UUID(turn_id))
+        with span("turn.load"):
+            turn, agent, audience = await _load_turn(UUID(turn_id))
         previous_turn_ended_at = (
             None
             if turn.admission_source == INTENT_ADMISSION
@@ -306,33 +331,34 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             authorized = subagents.authorize(acting_member_id)
             return authorized.spawn, authorized
 
-        all_tools, tool_ext = turn_tools(
-            runtime.manifests,
-            runtime.credentials,
-            runtime.index,
-            runtime.embed,
-            audience=audience,
-            public_base_url=runtime.config.connect.public_base_url,
-        )
-        hooks = turn_hooks(
-            runtime.manifests,
-            runtime.credentials,
-            runtime.index,
-            runtime.embed,
-            runtime.tailer,
-            audience=audience,
-            public_base_url=runtime.config.connect.public_base_url,
-        )
-        skills = runtime.skills.merged_with(
-            await turn_runtime_skills(
-                runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+        with span("extensions.load"):
+            all_tools, tool_ext = turn_tools(
+                runtime.manifests,
+                runtime.credentials,
+                runtime.index,
+                runtime.embed,
+                audience=audience,
+                public_base_url=runtime.config.connect.public_base_url,
             )
-        )
-        sections = tuple(
-            (section.name, section.body)
-            for manifest in runtime.manifests
-            for section in manifest.prompt_sections
-        )
+            hooks = turn_hooks(
+                runtime.manifests,
+                runtime.credentials,
+                runtime.index,
+                runtime.embed,
+                runtime.tailer,
+                audience=audience,
+                public_base_url=runtime.config.connect.public_base_url,
+            )
+            skills = runtime.skills.merged_with(
+                await turn_runtime_skills(
+                    runtime.manifests, runtime.credentials, runtime.index, runtime.embed
+                )
+            )
+            sections = tuple(
+                (section.name, section.body)
+                for manifest in runtime.manifests
+                for section in manifest.prompt_sections
+            )
         preload: tuple[LoadedSkill, ...] = ()
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
@@ -367,15 +393,16 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         model = await runtime.registry.client_for(resolved.model)
         grants = GrantStore() if runtime.credentials is not None else None
         clis = connector_clis(runtime.manifests)
-        sandbox = await _open_sandbox(
-            runtime.sandboxes,
-            runtime.run_tokens,
-            turn,
-            grants,
-            clis,
-            runtime.credentials,
-            injecting_slots(runtime.manifests),
-        )
+        with span("sandbox.open"):
+            sandbox = await _open_sandbox(
+                runtime.sandboxes,
+                runtime.run_tokens,
+                turn,
+                grants,
+                clis,
+                runtime.credentials,
+                injecting_slots(runtime.manifests),
+            )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
             run_tokens=runtime.run_tokens,
@@ -383,8 +410,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             clis=clis,
             turn=turn,
         )
-        for entry in preload:
-            await mount_skill(sandbox, entry.skill)
+        if preload:
+            with span("skills.mount", count=len(preload)):
+                for entry in preload:
+                    await mount_skill(sandbox, entry.skill)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,

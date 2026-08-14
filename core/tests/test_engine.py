@@ -18,16 +18,12 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos._error import DBOSWorkflowCancelledError
-from opentelemetry import trace
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     HistogramDataPoint,
     InMemoryMetricReader,
     NumberDataPoint,
 )
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -227,19 +223,6 @@ class StaticMemorySearch:
                 created_at=datetime(2026, 7, 9, tzinfo=UTC),
             ),
         )
-
-
-@dataclass
-class TraceCapturingModel:
-    """Records the span context active during each model call, so a test can assert the whole turn
-    ran inside the trace its stored traceparent names."""
-
-    contexts: list[trace.SpanContext] = field(default_factory=list)
-
-    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        self.contexts.append(trace.get_current_span().get_span_context())
-        yield TextDelta(text="ok")
-        yield Usage(input_tokens=1, output_tokens=1)
 
 
 @dataclass(frozen=True)
@@ -1503,21 +1486,6 @@ async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Pa
     assert provider.subject_sets == [audience_subjects(conversation_audience(None))]
 
 
-async def test_turn_with_a_traceparent_runs_inside_the_admitting_trace(
-    db: None, tmp_path: Path
-) -> None:
-    """The engine parents its turn span on the turn's stored traceparent, so work inside the turn —
-    here the model call — happens in the trace of the turn that spawned it."""
-    turn = await _seed_turn("queued", None)
-    traced = turn.model_copy(
-        update={"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
-    )
-    model = TraceCapturingModel()
-    frame = await _engine(traced, model, tmp_path).run()
-    assert frame.status == "done"
-    assert [context.trace_id for context in model.contexts] == [0x0AF7651916CD43DD8448EB211C80319C]
-
-
 def _metric_capture(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
     """Route what the turn emits onto a reader the test reads back, installing no global meter
     provider. Both instrument caches hold instruments bound to the provider they were created
@@ -2333,18 +2301,15 @@ async def test_a_subagent_turn_meters_under_its_profile(
     } == {("input", "coding"), ("output", "coding")}
 
 
-async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_span_and_the_logs(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_logs(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A chat turn and an intent turn open the same span and write the same two lifecycle
-    records, so a live subagent failure is attributable from either without joining the two: the
-    profile it ran as and the turn that spawned it. Both are asserted by value on a turn carrying
-    both, because the two arguments sit adjacent and are the same shape — a span whose profile reads
-    as a turn id is the wiring crossed over, which the main-facing turn's two Nones cannot catch."""
-    exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider()
-    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
+    """A chat turn and an intent turn write the same two lifecycle records, so a live subagent
+    failure is attributable from either: the profile it ran as and the turn that spawned it. Both
+    are asserted by value on a turn carrying both, because the two arguments sit adjacent and are
+    the same shape — a profile reading as a turn id is the wiring crossed over, which the
+    main-facing turn's two Nones cannot catch. The turn span carrying the same pair is proved at
+    the workflow seam, where it now opens."""
     parent_turn_id = uuid4()
     spawned = {"subagent_profile": "coding", "parent_turn_id": parent_turn_id}
     chat = (await _seed_turn("queued", None)).model_copy(update=spawned)
@@ -2365,10 +2330,6 @@ async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_s
     assert chat_frame is not None and chat_frame.status == "done"
     assert intent_frame is not None and intent_frame.status == "done"
     spawn = ("coding", str(parent_turn_id))
-    assert [
-        (span.attributes["ufo.profile"], span.attributes["ufo.parent_turn_id"])
-        for span in exporter.get_finished_spans()
-    ] == [spawn, spawn]
     assert [
         (record.getMessage(), record.ufo["profile"], record.ufo["parent_turn_id"])
         for record in caplog.records

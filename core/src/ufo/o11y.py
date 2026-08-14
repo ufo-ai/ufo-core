@@ -372,7 +372,9 @@ def turn_span(
 ) -> Iterator[Span]:
     """Open the SERVER span wrapping one durable turn, tagged with the ambient workspace.
     `traceparent` parents the span on the trace that admitted the turn — a subagent's turn lands
-    in the trace of the turn that spawned it; None roots a fresh trace (a member-facing turn).
+    in the trace of the turn that spawned it, a member's in its admission trace, so the gap
+    between the two spans is the queue wait; None roots a fresh trace (an admission with no
+    ambient span).
     The profile and the spawning turn are attributes as well as the parent link, so a trace search
     can select one profile's turns without walking every trace to its root; `main` for a
     member-facing turn, matching the `profile` metric dimension."""
@@ -398,6 +400,22 @@ def turn_span(
         "turn", context=parent, kind=SpanKind.SERVER, attributes=attributes
     ) as span:
         yield span
+
+
+@contextmanager
+def span(name: str, kind: SpanKind = SpanKind.INTERNAL, **attributes: object) -> Iterator[Span]:
+    """Open a span named `name` on the ambient trace — a stage inside a turn (a model round, a
+    tool dispatch, a sandbox open) whose wall-clock the trace waterfall attributes. Attributes are
+    redacted and stringified; the workspace rides along from the ambient scope. SERVER kind marks
+    an entry point (admission), INTERNAL a stage within one."""
+    redacted = redact_payload({**_ambient_scope(), **attributes})
+    flat = {
+        f"ufo.{key}": value if isinstance(value, bool | int | float | str) else str(value)
+        for key, value in redacted.items()
+    }
+    tracer = trace.get_tracer(INSTRUMENTATION_NAME)
+    with tracer.start_as_current_span(name, kind=kind, attributes=flat) as opened:
+        yield opened
 
 
 def redact_payload(fields: Mapping[str, object]) -> dict[str, JsonValue]:

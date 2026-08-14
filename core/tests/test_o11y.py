@@ -793,3 +793,23 @@ def test_the_guard_installs_once_however_often_o11y_initializes():
     assert isinstance(factory, o11y._GuardedRecordFactory)
     o11y.init_o11y(None)
     assert logging.getLogRecordFactory() is factory
+
+
+def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
+    workspace_id = uuid4()
+    with ws(workspace_id), o11y.turn_span(uuid4(), uuid4(), None, None, None):
+        with o11y.span("model.round", model="claude-opus-5", round=1, secret="x") as opened:
+            opened.add_event("model.first_event")
+    child, parent = exporter.get_finished_spans()
+    assert child.name == "model.round"
+    assert parent.name == "turn"
+    assert child.parent.span_id == parent.context.span_id
+    assert child.attributes["ufo.model"] == "claude-opus-5"
+    assert child.attributes["ufo.round"] == 1
+    assert child.attributes["ufo.workspace_id"] == str(workspace_id)
+    assert "ufo.secret" not in child.attributes
+    assert [event.name for event in child.events] == ["model.first_event"]

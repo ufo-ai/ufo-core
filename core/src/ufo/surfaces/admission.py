@@ -45,11 +45,12 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
+from opentelemetry.trace import SpanKind
 
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted
-from ufo.o11y import log
+from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -112,17 +113,18 @@ class Admission:
             raise ValueError("a prepared intent requires a speaking member")
         if intent is not None and body != intent.model_dump_json():
             raise ValueError("body and intent disagree — the envelope is the turn's inbound")
-        return await self._admit(
-            workspace_id,
-            conversation_id,
-            None,
-            body,
-            speaker_member_id,
-            idempotency_key,
-            context,
-            member_admission=True,
-            intent=intent,
-        )
+        with span("admission", kind=SpanKind.SERVER):
+            return await self._admit(
+                workspace_id,
+                conversation_id,
+                None,
+                body,
+                speaker_member_id,
+                idempotency_key,
+                context,
+                member_admission=True,
+                intent=intent,
+            )
 
     async def redispatch(
         self, workspace_id: UUID, conversation_id: UUID
@@ -568,6 +570,7 @@ class Admission:
                         context=None if context is None else context.model_dump(mode="json"),
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,
+                        traceparent=current_traceparent(),
                         created_at=admitted_at if admitted_at is not None else sa.func.now(),
                         updated_at=sa.func.now(),
                     )

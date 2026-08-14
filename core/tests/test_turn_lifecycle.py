@@ -13,6 +13,9 @@ import pytest
 import sqlalchemy as sa
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_index_default import DefaultIndex
@@ -579,6 +582,49 @@ async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
     assert handle.workspace_host_path is not None
     assert Path(handle.workspace_host_path).is_absolute()
     assert await asyncio.to_thread(Path(handle.workspace_host_path).is_dir)
+
+
+async def test_member_turn_trace_joins_admission_and_names_its_stages(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One member message yields one trace: the admission SERVER span roots it, the turn span
+    parents on the traceparent admission stored — the gap between them is the queue hop — and the
+    stages inside the turn (claim, load, extension load, sandbox open, transcript, model round)
+    are children of the turn span, so one waterfall attributes the turn's wall-clock."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", provider.get_tracer)
+    seed = await _bootstrap()
+    STREAM_GATE.arm()
+    turn_id = await surface.admit(seed, "ping")
+    _, terminal = await surface.consume(seed, turn_id)
+    assert terminal["status"] == "done"
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        while True:
+            spans = {finished.name: finished for finished in exporter.get_finished_spans()}
+            if "turn" in spans:
+                break
+            await asyncio.sleep(0.05)
+    admission, turn = spans["admission"], spans["turn"]
+    assert turn.context.trace_id == admission.context.trace_id
+    assert turn.parent is not None and turn.parent.span_id == admission.context.span_id
+    assert turn.attributes["ufo.profile"] == "main"
+    assert turn.attributes["ufo.turn_id"] == turn_id
+    stages = {
+        finished.name
+        for finished in exporter.get_finished_spans()
+        if finished.parent is not None and finished.parent.span_id == turn.context.span_id
+    }
+    assert {
+        "turn.claim",
+        "turn.load",
+        "extensions.load",
+        "sandbox.open",
+        "transcript.load",
+        "model.round",
+    } <= stages
+    assert [event.name for event in spans["model.round"].events] == ["model.first_event"]
 
 
 async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:

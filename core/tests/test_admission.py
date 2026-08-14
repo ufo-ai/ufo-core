@@ -3,7 +3,11 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from ufo import o11y
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted
 from ufo.loop.engine import _claim_turn
@@ -1274,3 +1278,22 @@ async def test_redispatch_founds_on_the_oldest_and_leaves_the_rest_for_the_drain
         ).scalar_one()
     assert inbound == "first follow up"
     assert await _queued_bodies(conversation_id) == ["second follow up"]
+
+
+async def test_member_admission_stores_its_trace_for_the_turn_span(db: None, monkeypatch) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", provider.get_tracer)
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member(
+        workspace_id, conversation_id, "hi", member_id
+    )
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.traceparent).where(tables.turn.c.id == admitted.turn_id)
+            )
+        ).scalar_one()
+    admission = next(s for s in exporter.get_finished_spans() if s.name == "admission")
+    assert stored.split("-")[1] == format(admission.context.trace_id, "032x")
