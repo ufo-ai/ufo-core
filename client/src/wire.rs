@@ -26,6 +26,12 @@ pub struct OpRequest {
 pub enum Directive {
     Say(String),
     You(String),
+    Sent {
+        turn_id: String,
+        opened: bool,
+        arrival_id: String,
+    },
+    Absorbed(Vec<String>),
     Note(String),
     Txt(String),
     Status(String),
@@ -89,6 +95,12 @@ pub fn parse_line(line: &str) -> Directive {
     match verb {
         "say" => Directive::Say(field(&fields, 0)),
         "you" => Directive::You(field(&fields, 0)),
+        "sent" if fields.len() >= 2 => Directive::Sent {
+            turn_id: fields[0].clone(),
+            opened: fields[1] == "1",
+            arrival_id: field(&fields, 2),
+        },
+        "absorbed" => Directive::Absorbed(fields.into_iter().filter(|id| !id.is_empty()).collect()),
         "note" => Directive::Note(field(&fields, 0)),
         "txt" => Directive::Txt(field(&fields, 0)),
         "status" => Directive::Status(field(&fields, 0)),
@@ -253,6 +265,18 @@ impl Session {
         ))
     }
 
+    /// The lane for send-only POSTs — None on an onboarding stream, which holds no conversation
+    /// to send into. The lane carries only what admission needs, never the terminal headers, so a
+    /// send can never disturb the held stream's claim.
+    pub fn send_lane(&self) -> Option<SendLane> {
+        self.workspace_url.as_ref()?;
+        Some(SendLane {
+            endpoint: self.endpoint(),
+            session_id: self.session_id.clone(),
+            token: self.token.clone(),
+        })
+    }
+
     /// POST one privately entered secret out of band; the response body is directive lines whose
     /// `say` fields are returned for the caller to render.
     pub fn post_secret(
@@ -345,6 +369,70 @@ impl Session {
         }
         request
     }
+}
+
+/// The instant-send ack: the turn that took the message, whether this send opened it, and the
+/// arrival id the turn names when it folds the message in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SentAck {
+    pub turn_id: String,
+    pub opened: bool,
+    pub arrival_id: String,
+}
+
+/// Builds send-only POSTs: one message admitted the moment it is typed, on its own connection,
+/// while the held stream keeps the tail.
+#[derive(Clone)]
+pub struct SendLane {
+    endpoint: String,
+    session_id: String,
+    token: Option<String>,
+}
+
+impl SendLane {
+    /// POST one message under `send_id`. A retry with the same id is admitted once and answers
+    /// the same ack, so a flaky link never doubles a message.
+    pub fn send(&self, send_id: &str, text: &str) -> Result<SentAck, String> {
+        let mut request = build_agent()
+            .request("POST", &self.endpoint)
+            .set("content-type", "text/plain")
+            .set("x-ufo-session", &self.session_id)
+            .set("x-ufo-send", "1")
+            .set("x-ufo-send-id", &header_safe(send_id));
+        if let Some(token) = &self.token {
+            request = request.set("authorization", &format!("Bearer {token}"));
+        }
+        let response = match request.send_string(text) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(format!(
+                    "send failed ({code}): {}",
+                    response.into_string().unwrap_or_default().trim()
+                ))
+            }
+            Err(error) => return Err(format!("lost connection ({error})")),
+        };
+        let body = response
+            .into_string()
+            .map_err(|error| format!("lost connection ({error})"))?;
+        sent_ack(&body).ok_or_else(|| "the server acknowledged nothing".to_string())
+    }
+}
+
+/// The `sent` ack inside a send-only response body.
+fn sent_ack(body: &str) -> Option<SentAck> {
+    body.lines().find_map(|line| match parse_line(line) {
+        Directive::Sent {
+            turn_id,
+            opened,
+            arrival_id,
+        } => Some(SentAck {
+            turn_id,
+            opened,
+            arrival_id,
+        }),
+        _ => None,
+    })
 }
 
 /// One member stop, prepared and not yet sent: the whole request, so the thread watching for Esc
@@ -468,6 +556,18 @@ mod tests {
         assert_eq!(
             parse_line("you\tmy words"),
             Directive::You("my words".into())
+        );
+        assert_eq!(
+            parse_line("sent\tturn-9\t0\tarr-3"),
+            Directive::Sent {
+                turn_id: "turn-9".into(),
+                opened: false,
+                arrival_id: "arr-3".into(),
+            }
+        );
+        assert_eq!(
+            parse_line("absorbed\tarr-3\tarr-4"),
+            Directive::Absorbed(vec!["arr-3".into(), "arr-4".into()])
         );
         assert_eq!(parse_line("txt\tchunk"), Directive::Txt("chunk".into()));
         assert_eq!(
@@ -607,6 +707,19 @@ mod tests {
                 Some(("file", vec![name.clone(), size.clone(), url.clone()]))
             }
             Directive::Exit(code) => Some(("exit", vec![code.to_string()])),
+            Directive::Sent {
+                turn_id,
+                opened,
+                arrival_id,
+            } => Some((
+                "sent",
+                vec![
+                    turn_id.clone(),
+                    if *opened { "1" } else { "0" }.to_string(),
+                    arrival_id.clone(),
+                ],
+            )),
+            Directive::Absorbed(arrival_ids) => Some(("absorbed", arrival_ids.clone())),
             Directive::Unknown => None,
         }
     }
@@ -642,6 +755,20 @@ mod tests {
         assert_eq!(replayed + dropped, raw.lines().count());
         assert_eq!(dropped, 1);
         assert!(replayed > 0);
+    }
+
+    #[test]
+    fn a_send_ack_is_read_out_of_the_response_body() {
+        let ack = sent_ack("note\tqueued\nsent\tturn-7\t1\tarr-2\n").expect("ack parses");
+        assert_eq!(
+            ack,
+            SentAck {
+                turn_id: "turn-7".into(),
+                opened: true,
+                arrival_id: "arr-2".into(),
+            }
+        );
+        assert_eq!(sent_ack("note\tno ack here"), None);
     }
 
     #[test]

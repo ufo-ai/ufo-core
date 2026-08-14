@@ -19,13 +19,15 @@ use crate::ui::history::{list_conversations, record_conversation, PastConversati
 use crate::ui::picker::{PickOutcome, Picker};
 use crate::ui::plain::Plain;
 use crate::ui::{App, Reply};
-use crate::wire::{Directive, OpRequest, PostBody, Session, Stop};
+use crate::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
 
 const GATEWAY_URL_DEFAULT: &str = "https://flyingobject.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
 const RECONNECT_ATTEMPTS: u32 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(80);
+const SEND_ATTEMPTS: usize = 3;
+const SEND_RETRY: Duration = Duration::from_millis(500);
 const RESUME_ROWS: usize = 12;
 
 fn main() {
@@ -205,6 +207,28 @@ fn hostname() -> String {
     }
 }
 
+/// Admit one message into the running turn on its own connection, retrying under one
+/// idempotency key; a send that never acks falls back to the wire's boundary queue.
+fn send_instant(lane: SendLane, text: String, evt: Sender<LoopEvent>, cmd: Sender<WireCmd>) {
+    thread::spawn(move || {
+        let send_id = random_hex::<16>();
+        for attempt in 0..SEND_ATTEMPTS {
+            match lane.send(&send_id, &text) {
+                Ok(ack) => {
+                    let _ = evt.send(LoopEvent::Wire(WireEvent::Sent {
+                        text: text.clone(),
+                        ack,
+                    }));
+                    return;
+                }
+                Err(_) if attempt + 1 < SEND_ATTEMPTS => thread::sleep(SEND_RETRY),
+                Err(_) => {}
+            }
+        }
+        let _ = cmd.send(WireCmd::Say(text));
+    });
+}
+
 fn random_channel() -> String {
     random_hex::<16>()
 }
@@ -352,6 +376,8 @@ enum WireEvent {
     Reconnecting { attempt: u32, retry_in_s: u64 },
     WorkspaceChanged { url: String, channel: String },
     Stoppable(Stop),
+    Sendable(SendLane),
+    Sent { text: String, ack: SentAck },
     StreamEnd { continues: bool },
     Fatal(String),
 }
@@ -401,6 +427,9 @@ impl Wire {
             let Some(post) = body.take() else { return };
             if let Some(stop) = self.session.stop() {
                 let _ = self.evt.send(WireEvent::Stoppable(stop));
+            }
+            if let Some(lane) = self.session.send_lane() {
+                let _ = self.evt.send(WireEvent::Sendable(lane));
             }
             let stream = match self.session.post(post.clone()) {
                 Ok(stream) => stream,
@@ -730,6 +759,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     }
     let mut gate = Gate::default();
     let mut stop: Option<Stop> = None;
+    let mut sends: Option<SendLane> = None;
     let mut latest_workspace = workspace_url;
     let mut latest_channel = channel_name;
     let code = loop {
@@ -749,10 +779,18 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     Reply::Send(text) => {
                         if app.is_working() {
                             app.push_queued(&text);
+                            match sends.clone() {
+                                Some(lane) => {
+                                    send_instant(lane, text, stop_evt.clone(), cmd_tx.clone())
+                                }
+                                None => {
+                                    let _ = cmd_tx.send(WireCmd::Say(text));
+                                }
+                            }
                         } else {
                             app.begin_turn();
+                            let _ = cmd_tx.send(WireCmd::Say(text));
                         }
-                        let _ = cmd_tx.send(WireCmd::Say(text));
                     }
                     Reply::Choice(choice) => {
                         let Some((prompt, _)) = gate.questions.pop_front() else {
@@ -825,6 +863,8 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 app.on_mouse(mouse);
                 app.paint();
             }
+            LoopEvent::Term(TermEvent::FocusGained) => app.set_focus(true),
+            LoopEvent::Term(TermEvent::FocusLost) => app.set_focus(false),
             LoopEvent::Term(_) => {}
             LoopEvent::StdinClosed => {}
             LoopEvent::Wire(wire_event) => match wire_event {
@@ -865,6 +905,18 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     app.set_endpoint(host, channel);
                 }
                 WireEvent::Stoppable(prepared) => stop = Some(prepared),
+                WireEvent::Sendable(lane) => sends = Some(lane),
+                WireEvent::Sent { text, ack } => {
+                    if ack.opened {
+                        if !app.is_working() {
+                            app.begin_turn();
+                        }
+                        app.queued_sent(&text);
+                    } else {
+                        app.sent_ack(&text, &ack.arrival_id);
+                    }
+                    app.paint();
+                }
                 WireEvent::StreamEnd { continues } => {
                     if let Some(code) = gate.exit.take() {
                         break code;
@@ -926,6 +978,7 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
     match directive {
         Directive::Say(text) => app.say(&text),
         Directive::You(text) => app.member_replay(&text),
+        Directive::Absorbed(arrival_ids) => app.absorbed(&arrival_ids),
         Directive::Note(text) => app.note(&text),
         Directive::Txt(chunk) => app.txt(&chunk),
         Directive::Status(text) => app.status_text(&text),
@@ -998,6 +1051,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
             WireEvent::Dir(directive) => match directive {
                 Directive::Say(text) => out.say(&text),
                 Directive::You(text) => out.member(&text),
+                Directive::Absorbed(_) | Directive::Sent { .. } => {}
                 Directive::Note(text) => out.note(&text),
                 Directive::Txt(chunk) => out.txt(&chunk),
                 Directive::Status(text) => out.status(&text),
@@ -1026,6 +1080,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 latest_channel = channel;
             }
             WireEvent::Stoppable(_) => {}
+            WireEvent::Sendable(_) | WireEvent::Sent { .. } => {}
             WireEvent::StreamEnd { continues } => {
                 if let Some(code) = gate.exit.take() {
                     break code;
@@ -1096,6 +1151,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
     let (cmd_tx, cmd_rx) = channel::<WireCmd>();
 
     let stdin_tx = evt_tx.clone();
+    let send_evt = evt_tx.clone();
     thread::spawn(move || {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
@@ -1133,6 +1189,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
     let mut in_turn = false;
     let mut stdin_open = true;
     emit_json(&driver.session_start(&channel_name, workspace_url.as_deref()));
+    let mut sends: Option<SendLane> = None;
     if first_nonempty {
         emit_json(&driver.on_turn_start());
         in_turn = true;
@@ -1153,8 +1210,17 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                             if !in_turn {
                                 emit_json(&driver.on_turn_start());
                                 in_turn = true;
+                                let _ = cmd_tx.send(WireCmd::Say(text));
+                            } else {
+                                match sends.clone() {
+                                    Some(lane) => {
+                                        send_instant(lane, text, send_evt.clone(), cmd_tx.clone())
+                                    }
+                                    None => {
+                                        let _ = cmd_tx.send(WireCmd::Say(text));
+                                    }
+                                }
                             }
-                            let _ = cmd_tx.send(WireCmd::Say(text));
                         }
                         Ok(jsonio::AnswerRouting::Secret {
                             sealed,
@@ -1206,6 +1272,10 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     emit_json(&driver.signed_in(&url, &channel));
                 }
                 WireEvent::Stoppable(_) => {}
+                WireEvent::Sendable(lane) => sends = Some(lane),
+                WireEvent::Sent { ack, .. } => {
+                    emit_json(&driver.message_sent(&ack));
+                }
                 WireEvent::StreamEnd { continues } => {
                     if continues {
                         continue;

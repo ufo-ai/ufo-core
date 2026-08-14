@@ -1,5 +1,5 @@
 //! The ask editor as a pure state machine over decoded keys: multiline text, visual-line motion,
-//! a kill ring, coalescing undo, and collapsed paste markers.
+//! a kill ring, coalescing undo, prefix-filtered history, and collapsed paste markers.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -71,7 +71,8 @@ struct Snapshot {
     pastes: BTreeMap<usize, Arc<str>>,
 }
 
-/// The in-flight ask: the text, the byte cursor, and where history browsing stands.
+/// The in-flight ask: the text, the byte cursor, and where history browsing stands. The draft the
+/// walk began from is also the prefix it visits entries under.
 pub struct AskState {
     pub text: String,
     pub cursor: usize,
@@ -465,35 +466,45 @@ impl AskState {
     }
 
     fn hist_prev(&mut self, history: &[String]) {
-        if history.is_empty() {
-            return;
+        if self.hist_at.is_none() {
+            self.draft = self.text.clone();
         }
-        let at = match self.hist_at {
-            None => {
-                self.draft = self.text.clone();
-                history.len() - 1
-            }
-            Some(at) => at.saturating_sub(1),
-        };
-        self.hist_at = Some(at);
-        self.text = history[at].clone();
-        self.cursor = self.text.len();
+        let from = self.hist_at.unwrap_or(history.len());
+        let found = history
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(at, entry)| *at < from && self.recalls(entry));
+        if let Some((at, entry)) = found {
+            self.hist_at = Some(at);
+            self.text = entry.clone();
+            self.cursor = self.text.len();
+        }
     }
 
     fn hist_next(&mut self, history: &[String]) {
-        match self.hist_at {
-            None => {}
-            Some(at) if at + 1 < history.len() => {
-                self.hist_at = Some(at + 1);
-                self.text = history[at + 1].clone();
-                self.cursor = self.text.len();
+        let Some(from) = self.hist_at else {
+            return;
+        };
+        let found = history
+            .iter()
+            .enumerate()
+            .find(|(at, entry)| *at > from && self.recalls(entry));
+        match found {
+            Some((at, entry)) => {
+                self.hist_at = Some(at);
+                self.text = entry.clone();
             }
-            Some(_) => {
+            None => {
                 self.hist_at = None;
                 self.text = self.draft.clone();
-                self.cursor = self.text.len();
             }
         }
+        self.cursor = self.text.len();
+    }
+
+    fn recalls(&self, entry: &str) -> bool {
+        self.draft.is_empty() || (entry.starts_with(&self.draft) && entry != self.draft)
     }
 }
 
@@ -579,28 +590,106 @@ mod tests {
     fn history_walks_and_restores_draft() {
         let history = vec!["first".to_string(), "second".to_string()];
         let mut state = AskState::new();
-        drive(
-            &mut state,
-            &[Key::Paste("draft".into()), Key::HistPrev],
-            &history,
-        );
+        drive(&mut state, &[Key::HistPrev], &history);
         assert_eq!(state.text, "second");
         drive(&mut state, &[Key::HistPrev, Key::HistPrev], &history);
         assert_eq!(state.text, "first");
-        drive(&mut state, &[Key::HistNext, Key::HistNext], &history);
+        assert_eq!(state.cursor, 5);
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "second");
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "");
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn history_recalls_only_entries_under_the_typed_prefix() {
+        let history = vec![
+            "git status".to_string(),
+            "cargo test".to_string(),
+            "git push".to_string(),
+        ];
+        let mut state = AskState::new();
+        typed(&mut state, "git");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "git push");
+        assert_eq!(state.cursor, state.text.len());
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "git status");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "git status");
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "git push");
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "git");
+        assert_eq!(state.cursor, 3);
+    }
+
+    #[test]
+    fn a_prefix_skips_the_entry_it_equals() {
+        let history = vec!["git push --force".to_string(), "git push".to_string()];
+        let mut state = AskState::new();
+        typed(&mut state, "git push");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "git push --force");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "git push --force");
+    }
+
+    #[test]
+    fn a_prefix_matching_nothing_leaves_the_ask_alone() {
+        let history = vec!["first".to_string(), "second".to_string()];
+        let mut state = AskState::new();
+        typed(&mut state, "draft");
+        drive(&mut state, &[Key::Left, Key::HistPrev], &history);
         assert_eq!(state.text, "draft");
+        assert_eq!(state.cursor, 4);
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "draft");
+        assert_eq!(state.cursor, 4);
+    }
+
+    #[test]
+    fn a_multiline_draft_filters_on_the_whole_text() {
+        let history = vec!["one\nfour".to_string(), "one\ntwo three".to_string()];
+        let mut state = AskState::new();
+        drive(
+            &mut state,
+            &[Key::Paste("one\ntwo".into()), Key::HistPrev],
+            &history,
+        );
+        assert_eq!(state.text, "one\ntwo three");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "one\ntwo three");
+        drive(&mut state, &[Key::HistNext], &history);
+        assert_eq!(state.text, "one\ntwo");
+    }
+
+    #[test]
+    fn a_multibyte_prefix_is_boundary_safe() {
+        let history = vec!["état".to_string(), "eau".to_string(), "élan".to_string()];
+        let mut state = AskState::new();
+        typed(&mut state, "é");
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "élan");
+        assert_eq!(state.cursor, state.text.len());
+        drive(&mut state, &[Key::HistPrev], &history);
+        assert_eq!(state.text, "état");
+        assert_eq!(state.cursor, state.text.len());
+        drive(&mut state, &[Key::HistNext, Key::HistNext], &history);
+        assert_eq!(state.text, "é");
     }
 
     #[test]
     fn editing_a_history_entry_detaches_it() {
-        let history = vec!["old".to_string()];
+        let history = vec!["old news".to_string(), "old".to_string()];
         let mut state = AskState::new();
-        drive(&mut state, &[Key::HistPrev, Key::Char('!')], &history);
-        assert_eq!(state.text, "old!");
+        drive(&mut state, &[Key::HistPrev, Key::Char(' ')], &history);
+        assert_eq!(state.text, "old ");
         drive(&mut state, &[Key::HistPrev], &history);
-        assert_eq!(state.text, "old");
+        assert_eq!(state.text, "old news");
         drive(&mut state, &[Key::HistNext], &history);
-        assert_eq!(state.text, "old!");
+        assert_eq!(state.text, "old ");
     }
 
     #[test]
@@ -737,13 +826,13 @@ mod tests {
 
     #[test]
     fn vertical_motion_reaches_history_at_the_edges() {
-        let history = vec!["earlier".to_string()];
+        let history = vec!["one\ntwo three".to_string(), "earlier".to_string()];
         let mut state = AskState::new();
         drive(&mut state, &[Key::Paste("one\ntwo".into())], &[]);
         drive(&mut state, &[Key::CursorUp], &history);
         assert_eq!(state.text, "one\ntwo");
         drive(&mut state, &[Key::CursorUp], &history);
-        assert_eq!(state.text, "earlier");
+        assert_eq!(state.text, "one\ntwo three");
         drive(&mut state, &[Key::CursorDown], &history);
         assert_eq!(state.text, "one\ntwo");
     }

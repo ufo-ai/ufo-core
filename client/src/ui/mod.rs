@@ -8,6 +8,8 @@ pub mod markdown;
 pub mod osc;
 pub mod picker;
 pub mod plain;
+pub mod retained;
+pub mod select;
 pub mod status;
 pub mod term;
 pub mod theme;
@@ -20,9 +22,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyCode,
-    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal;
 use crossterm::tty::IsTty as _;
@@ -33,6 +36,8 @@ use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
+use crate::ui::retained::{Entry, Retained};
+use crate::ui::select::{ClickTracker, Grain, Selection};
 use crate::ui::status::{Activity, Progress, Signals, StatusRow};
 use crate::ui::term::AltScreen;
 use crate::ui::theme::{ColorMode, Theme};
@@ -44,12 +49,12 @@ const QUEUE_SHOWN: usize = 3;
 const ENTRY_ROWS_MAX: usize = 8;
 const PICKER_ROWS: usize = 8;
 const OP_LOG_ROWS: usize = 6;
-const TRANSCRIPT_MAX: usize = 5000;
 const ECHO_INDENT: &str = "  ";
 const IMAGE_COLS_MAX: u16 = 60;
 const IMAGE_BYTES_MAX: usize = 2 * 1024 * 1024;
 const KEY_COL: usize = 26;
 const FLASH_SECONDS: u64 = 2;
+const EARLY_ABSORBED_MAX: usize = 64;
 
 /// Whether the fancy renderer runs: a TTY, a real TERM, and no `UFO_PLAIN`.
 pub fn wants_fx() -> bool {
@@ -72,7 +77,12 @@ impl RawGuard {
         #[cfg(unix)]
         crate::interrupt::hold_modes();
         let _ = terminal::enable_raw_mode();
-        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            EnableBracketedPaste,
+            EnableMouseCapture,
+            EnableFocusChange
+        );
         if kitty {
             let _ = crossterm::execute!(
                 io::stdout(),
@@ -88,7 +98,12 @@ impl Drop for RawGuard {
         if self.kitty {
             let _ = crossterm::execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
-        let _ = crossterm::execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            DisableFocusChange,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         let _ = terminal::disable_raw_mode();
         #[cfg(unix)]
         crate::interrupt::release_modes();
@@ -126,41 +141,16 @@ struct SecretEntry {
     value: String,
 }
 
+/// One message waiting under the composer: typed, and — once an instant send is acknowledged —
+/// named by the arrival id the turn will fold.
+struct QueuedSend {
+    text: String,
+    arrival: Option<String>,
+}
+
 struct PathPick {
     picker: Picker,
     token_start: usize,
-}
-
-/// A mouse selection over the visible frame, anchored where the drag began.
-struct Selection {
-    anchor: (u16, u16),
-    head: (u16, u16),
-    dragged: bool,
-}
-
-impl Selection {
-    /// The selected span of `row`, as display columns, or None when the row is outside.
-    fn cols_for(&self, row: u16, width: usize) -> Option<(usize, usize)> {
-        let (start, end) = self.ordered();
-        if row < start.0 || row > end.0 {
-            return None;
-        }
-        let from = if row == start.0 { start.1 as usize } else { 0 };
-        let to = if row == end.0 {
-            (end.1 as usize).saturating_add(1)
-        } else {
-            width
-        };
-        (from < to).then_some((from, to))
-    }
-
-    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
-        if (self.anchor.0, self.anchor.1) <= (self.head.0, self.head.1) {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
 }
 
 /// The dock and everything drawn in it.
@@ -175,19 +165,21 @@ pub struct App {
     ask: AskState,
     prompt: String,
     history: History,
-    queued: VecDeque<String>,
+    queued: VecDeque<QueuedSend>,
+    early_absorbed: Vec<String>,
     focus: Focus,
     chooser: Option<Chooser>,
     secret: Option<SecretEntry>,
     path_pick: Option<PathPick>,
-    transcript: Vec<Line<'static>>,
-    scroll_back: usize,
+    retained: Retained,
+    reply_open: bool,
     view_rows: usize,
+    window_start: usize,
     exit_images: Vec<String>,
     selection: Option<Selection>,
-    frame_rows: Vec<Line<'static>>,
+    clicks: ClickTracker,
+    focused: bool,
     flash: Option<(String, Instant)>,
-    last_line_blank: bool,
     op_log: Vec<Line<'static>>,
     running_op: Option<OpView>,
     running_desc: Option<String>,
@@ -220,18 +212,20 @@ impl App {
             prompt: PROMPT_IDLE.to_string(),
             history: History::load(home_root),
             queued: VecDeque::new(),
+            early_absorbed: Vec::new(),
             focus: Focus::Compose,
             chooser: None,
             secret: None,
             path_pick: None,
-            transcript: Vec::new(),
-            scroll_back: 0,
+            retained: Retained::new(cols),
+            reply_open: false,
             view_rows: 1,
+            window_start: 0,
             exit_images: Vec::new(),
             selection: None,
-            frame_rows: Vec::new(),
+            clicks: ClickTracker::new(),
+            focused: true,
             flash: None,
-            last_line_blank: true,
             op_log: Vec::new(),
             running_op: None,
             running_desc: None,
@@ -259,19 +253,31 @@ impl App {
         self.flush_stream();
         self.op_log.clear();
         self.last_reply = text.to_string();
-        let lines = markdown::render(text, &self.theme, self.transcript_width());
-        self.extend_pending(lines);
+        self.retained.push(Entry::Markdown(text.to_string()));
+        self.reply_open = false;
     }
 
     pub fn txt(&mut self, chunk: &str) {
         self.last_reply.push_str(chunk);
-        let lines = self
-            .stream
-            .push(chunk, &self.theme, self.transcript_width());
-        if !lines.is_empty() {
+        let source = self.stream.push(chunk);
+        self.commit_reply(source);
+    }
+
+    /// Committed reply source joins the transcript: growing the open reply entry, or opening one
+    /// on the first non-blank commit — so one streamed reply re-wraps as one document.
+    fn commit_reply(&mut self, source: String) {
+        if source.is_empty() {
+            return;
+        }
+        if !source.trim().is_empty() {
             self.op_log.clear();
         }
-        self.extend_pending(lines);
+        if self.reply_open {
+            self.retained.extend_markdown(&source);
+        } else if !source.trim().is_empty() {
+            self.retained.push(Entry::Markdown(source));
+            self.reply_open = true;
+        }
     }
 
     /// A server note. Tool narration — the activity the client also states for its own ops —
@@ -289,8 +295,7 @@ impl App {
             return;
         }
         self.flush_stream();
-        let note = Line::styled(text.to_string(), self.theme.muted);
-        self.extend_pending(vec![note]);
+        self.retained.push(Entry::Note(text.to_string()));
     }
 
     pub fn status_text(&mut self, text: &str) {
@@ -310,7 +315,8 @@ impl App {
         } else {
             format!("shared {name} ({size} bytes) {url}")
         };
-        self.extend_pending(vec![Line::styled(line, self.theme.muted)]);
+        self.retained
+            .push(Entry::Raw(vec![Line::styled(line, self.theme.muted)]));
     }
 
     /// The op's header throbs in the activity row while it runs; it joins the dock's op log
@@ -366,7 +372,7 @@ impl App {
             "read image {} ({}×{} px, printed when this session ends)",
             op.arg, size.0, size.1
         );
-        self.extend_pending(vec![Line::styled(said, self.theme.muted)]);
+        self.retained.push(Entry::Note(said));
     }
 
     // ── turn state ────────────────────────────────────────────────────────────────────────────
@@ -386,8 +392,8 @@ impl App {
         self.working = false;
         self.op_log.clear();
         self.running_op = None;
-        let tail = self.stream.finish(&self.theme, self.transcript_width());
-        self.extend_pending(tail);
+        self.flush_stream();
+        self.reply_open = false;
         self.status.activity = if waiting {
             Activity::WaitingInput
         } else {
@@ -398,6 +404,19 @@ impl App {
         if waiting {
             self.splice_raw(&self.signals.bell());
         }
+        if !self.focused {
+            let body = if waiting {
+                "ufo needs input"
+            } else {
+                "ufo replied"
+            };
+            let said = osc::notification(self.caps, body);
+            self.splice_raw(&said);
+        }
+    }
+
+    pub fn set_focus(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     pub fn reconnecting(&mut self, attempt: u32, of: u32, retry_in_s: u64) {
@@ -457,12 +476,57 @@ impl App {
     }
 
     pub fn push_queued(&mut self, text: &str) {
-        self.queued.push_back(text.to_string());
+        self.queued.push_back(QueuedSend {
+            text: text.to_string(),
+            arrival: None,
+        });
+    }
+
+    /// The server admitted an instant send into the running turn: the row it acknowledged now
+    /// waits under its arrival id for the turn to fold it in. An `absorbed` that outran this ack
+    /// settles the row at once.
+    pub fn sent_ack(&mut self, text: &str, arrival_id: &str) {
+        if let Some(at) = self.early_absorbed.iter().position(|id| id == arrival_id) {
+            self.early_absorbed.remove(at);
+            self.queued_sent(text);
+            return;
+        }
+        if let Some(row) = self
+            .queued
+            .iter_mut()
+            .find(|row| row.text == text && row.arrival.is_none())
+        {
+            row.arrival = Some(arrival_id.to_string());
+        }
+    }
+
+    /// The turn took up these arrivals; the queued rows they name settle into the transcript. An
+    /// id with no acknowledged row yet is held for the ack racing it.
+    pub fn absorbed(&mut self, arrival_ids: &[String]) {
+        for id in arrival_ids {
+            match self
+                .queued
+                .iter()
+                .position(|row| row.arrival.as_deref() == Some(id))
+            {
+                Some(at) => {
+                    let row = self.queued.remove(at).expect("the row was just found");
+                    self.member_echo(&row.text);
+                }
+                None => {
+                    self.early_absorbed.push(id.clone());
+                    let overflow = self.early_absorbed.len().saturating_sub(EARLY_ABSORBED_MAX);
+                    if overflow > 0 {
+                        self.early_absorbed.drain(..overflow);
+                    }
+                }
+            }
+        }
     }
 
     /// A queued message the wire has now posted: it leaves the queue and joins the transcript.
     pub fn queued_sent(&mut self, text: &str) {
-        if let Some(at) = self.queued.iter().position(|held| held == text) {
+        if let Some(at) = self.queued.iter().position(|row| row.text == text) {
             self.queued.remove(at);
         }
         self.member_echo(text);
@@ -481,21 +545,8 @@ impl App {
 
     fn draw_member(&mut self, text: &str) {
         self.flush_stream();
-        self.gap();
-        let mut rows = text.lines();
-        let first = rows.next().unwrap_or("").to_string();
-        let mut lines = vec![Line::from(vec![
-            Span::styled(format!("{PROMPT_IDLE} "), self.theme.prompt),
-            Span::styled(first, self.theme.member),
-        ])];
-        for row in rows {
-            lines.push(Line::from(Span::styled(
-                format!("{ECHO_INDENT}{row}"),
-                self.theme.member,
-            )));
-        }
-        self.extend_pending(lines);
-        self.gap();
+        self.retained.push(Entry::Member(text.to_string()));
+        self.reply_open = false;
     }
 
     // ── keys ──────────────────────────────────────────────────────────────────────────────────
@@ -504,6 +555,7 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Reply::Exit;
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::PageUp => {
                 self.scroll(self.page());
@@ -511,6 +563,18 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll(-self.page());
+                return Reply::None;
+            }
+            KeyCode::Up if ctrl => {
+                self.retained.jump_member(&self.theme, true);
+                return Reply::None;
+            }
+            KeyCode::Down if ctrl => {
+                self.retained.jump_member(&self.theme, false);
+                return Reply::None;
+            }
+            KeyCode::End if self.retained.scrolled() > 0 => {
+                self.retained.scroll_to_end();
                 return Reply::None;
             }
             _ => {}
@@ -750,74 +814,79 @@ impl App {
 
     // ── painting ──────────────────────────────────────────────────────────────────────────────
 
-    /// The alternate screen owns every row, so a resize is one clean repaint at the new size.
+    /// The alternate screen owns every row, so a resize is one clean repaint at the new size,
+    /// and every retained entry re-wraps to the new width.
     pub fn resize(&mut self) {
         let (cols, rows) = sane_size();
         self.cols = cols;
         self.rows = rows;
+        self.retained.set_width(cols);
         self.screen.invalidate();
     }
 
-    /// Every mouse event: the wheel scrolls, a drag selects, releasing a drag copies the
-    /// selection, and a plain click clears it.
+    /// Every mouse event: the wheel scrolls; a press anchors a selection at the grain repeated
+    /// clicks cycle to; a drag extends it, scrolling at the window's edges; releasing a drag or a
+    /// widened grain copies it. A plain click opens the URL under it, or clears the selection.
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll(3),
             MouseEventKind::ScrollDown => self.scroll(-3),
             MouseEventKind::Down(MouseButton::Left) => {
-                self.selection = Some(Selection {
-                    anchor: (mouse.row, mouse.column),
-                    head: (mouse.row, mouse.column),
-                    dragged: false,
-                });
+                if (mouse.row as usize) >= self.view_rows {
+                    self.selection = None;
+                    return;
+                }
+                let at = (
+                    self.window_start + mouse.row as usize,
+                    mouse.column as usize,
+                );
+                let grain = self.clicks.press(at);
+                self.selection = Some(Selection::begin(at.0, at.1, grain));
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                let edge = select::edge_scroll(mouse.row, self.view_rows);
+                if edge != 0 {
+                    self.scroll(-edge);
+                }
                 if let Some(selection) = self.selection.as_mut() {
-                    selection.head = (mouse.row, mouse.column);
-                    selection.dragged = true;
+                    let row = (mouse.row as usize).min(self.view_rows.saturating_sub(1));
+                    selection.drag_to(self.window_start + row, mouse.column as usize);
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self.selection.as_ref().is_some_and(|s| s.dragged);
-                if dragged {
-                    self.copy_selection();
-                } else {
-                    self.selection = None;
-                }
-            }
+            MouseEventKind::Up(MouseButton::Left) => self.finish_press(),
             _ => {}
         }
     }
 
-    fn copy_selection(&mut self) {
-        let Some(selection) = self.selection.as_ref() else {
+    fn finish_press(&mut self) {
+        let Some(selection) = self.selection.take() else {
             return;
         };
-        let width = self.cols as usize;
-        let mut parts: Vec<String> = Vec::new();
-        for (index, line) in self.frame_rows.iter().enumerate() {
-            let Some((from, to)) = selection.cols_for(index as u16, width) else {
-                continue;
-            };
-            parts.push(slice_columns(line, from, to).trim_end().to_string());
-        }
-        let text = parts.join("\n");
-        if text.trim().is_empty() {
+        if selection.dragged || selection.grain != Grain::Char {
+            let retained = &mut self.retained;
+            let theme = &self.theme;
+            let text = selection.extract(&mut |line| retained.text_of(line, theme));
+            if !text.trim().is_empty() {
+                let escape = osc::copy_to_clipboard(self.caps, &text);
+                if !escape.is_empty() {
+                    self.splice_raw(&escape);
+                    self.flash = Some(("Copied.".to_string(), Instant::now()));
+                }
+            }
+            self.selection = Some(selection);
             return;
         }
-        let escape = osc::copy_to_clipboard(self.caps, &text);
-        if escape.is_empty() {
-            return;
+        let (line, col) = selection.anchor;
+        if let Some(url) = self.retained.link_at(line, col, &self.theme) {
+            osc::open_url(&url);
+            self.flash = Some((format!("Opened {url}"), Instant::now()));
         }
-        self.splice_raw(&escape);
-        self.flash = Some(("Copied.".to_string(), Instant::now()));
     }
 
     /// Scroll the transcript: positive is up into history, negative back toward the live end.
     /// Reaching the end resumes following.
     pub fn scroll(&mut self, up: isize) {
-        let max = self.transcript.len().saturating_sub(1) as isize;
-        self.scroll_back = (self.scroll_back as isize + up).clamp(0, max) as usize;
+        self.retained.scroll(up);
     }
 
     pub fn page(&self) -> isize {
@@ -837,6 +906,14 @@ impl App {
     pub fn paint(&mut self) {
         let cols = self.cols as usize;
         let mut dock: Vec<Line> = Vec::new();
+        let below = self.retained.scrolled();
+        if below > 0 {
+            let noun = if below == 1 { "line" } else { "lines" };
+            dock.push(Line::styled(
+                format!(" ↓ {below} {noun} below — End follows"),
+                self.theme.accent,
+            ));
+        }
         dock.push(self.activity_line(cols));
         dock.extend(self.op_log.iter().cloned());
         let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
@@ -856,38 +933,31 @@ impl App {
         let avail = (self.rows as usize).saturating_sub(dock.len()).max(1);
         self.view_rows = avail;
         let live = self.live_tail();
-        let shown = self
-            .transcript
-            .len()
-            .saturating_sub(self.scroll_back.min(self.transcript.len()));
-        let mut window: Vec<Line> = Vec::with_capacity(avail + dock.len());
-        let held: Vec<&Line> = self.transcript[..shown].iter().chain(live.iter()).collect();
-        let start = held.len().saturating_sub(avail);
-        for line in &held[start..] {
-            window.push((*line).clone());
-        }
-        while window.len() < avail {
-            window.push(Line::raw(""));
-        }
-        window.extend(dock);
-        self.frame_rows = window.clone();
+        let window = self.retained.window(avail, &live, &self.theme);
+        self.window_start = window.start;
+        let mut frame = window.lines;
+        let retained = &mut self.retained;
+        let theme = &self.theme;
         if let Some(selection) = self.selection.as_ref() {
-            for (index, line) in window.iter_mut().enumerate() {
-                if let Some((from, to)) = selection.cols_for(index as u16, cols) {
+            for (index, line) in frame.iter_mut().enumerate() {
+                let at = window.start + index;
+                let text = retained.text_of(at, theme);
+                if let Some((from, to)) = selection.cols_for(at, &text) {
                     *line = highlight_columns(line.clone(), from, to);
                 }
             }
         }
+        frame.extend(dock);
         let cursor =
             cursor_in_entry.map(|(row, col)| ((avail + entry_at + row) as u16, col as u16));
-        let _ = self.screen.frame(&window, cursor);
+        let _ = self.screen.frame(&frame, cursor);
     }
 
     /// The reply as it stands, rendered live while it streams — a block does not wait for its
     /// close to be readable. Scrolled away from the end, the live tail yields to history.
     fn live_tail(&self) -> Vec<Line<'static>> {
         let tail = self.stream.open_tail();
-        if tail.trim().is_empty() || self.scroll_back > 0 {
+        if tail.trim().is_empty() || self.retained.scrolled() > 0 {
             return Vec::new();
         }
         markdown::render(
@@ -921,7 +991,7 @@ impl App {
 
     fn queued_rows(&self, dock: &mut Vec<Line<'static>>, width: usize) {
         for held in self.queued.iter().take(QUEUE_SHOWN) {
-            let first = held.lines().next().unwrap_or("");
+            let first = held.text.lines().next().unwrap_or("");
             let row = format!(
                 "{PROMPT_IDLE} {}",
                 wrap::clip(first, width.saturating_sub(4))
@@ -1049,35 +1119,8 @@ impl App {
     /// Anything the stream still holds commits now: a transcript element that is not part of the
     /// reply is about to land, and the held block stands before it.
     fn flush_stream(&mut self) {
-        let width = self.transcript_width();
-        let lines = self.stream.finish(&self.theme, width);
-        self.extend_pending(lines);
-    }
-
-    /// The one door to the transcript: consecutive blank lines collapse here, and a reader
-    /// scrolled into history keeps their place while new lines arrive under them.
-    fn extend_pending(&mut self, lines: Vec<Line<'static>>) {
-        let mut appended = 0usize;
-        for line in lines {
-            let blank = line.spans.iter().all(|span| span.content.trim().is_empty());
-            if blank && self.last_line_blank {
-                continue;
-            }
-            self.last_line_blank = blank;
-            self.transcript.push(line);
-            appended += 1;
-        }
-        if self.scroll_back > 0 {
-            self.scroll_back += appended;
-        }
-        let overflow = self.transcript.len().saturating_sub(TRANSCRIPT_MAX);
-        if overflow > 0 {
-            self.transcript.drain(..overflow);
-        }
-    }
-
-    fn gap(&mut self) {
-        self.extend_pending(vec![Line::raw("")]);
+        let source = self.stream.finish();
+        self.commit_reply(source);
     }
 
     fn splice_raw(&mut self, bytes: &str) {
@@ -1090,35 +1133,17 @@ impl App {
     }
 
     /// Leave the alternate screen and print the whole conversation into the terminal's own
-    /// scrollback, images last — the session ends, the transcript stays.
+    /// scrollback, images last — the session ends, the transcript stays at its final width.
     pub fn close(&mut self) {
         self.flush_stream();
+        let document = self.retained.document(&self.theme);
         let _ = self.screen.leave();
-        let _ = self.screen.print_document(&self.transcript);
+        let _ = self.screen.print_document(&document);
         for blob in std::mem::take(&mut self.exit_images) {
             self.splice_raw(&blob);
             self.splice_raw("\r\n");
         }
     }
-}
-
-/// The text of `line` between two display columns.
-fn slice_columns(line: &Line, from: usize, to: usize) -> String {
-    let mut out = String::new();
-    let mut at = 0usize;
-    for span in &line.spans {
-        for ch in span.content.chars() {
-            let step = wrap::width(&ch.to_string()).max(1);
-            if at >= to {
-                return out;
-            }
-            if at >= from {
-                out.push(ch);
-            }
-            at += step;
-        }
-    }
-    out
 }
 
 /// `line` with the span between two display columns drawn in reverse video.

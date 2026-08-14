@@ -31,31 +31,26 @@ pub fn render(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     Render::new(theme, width).run(text)
 }
 
-/// Accumulates a streamed reply and commits fully-arrived markdown blocks to the transcript,
-/// holding back the open tail so a half-arrived construct is never committed mid-block.
+/// Accumulates a streamed reply and commits fully-arrived markdown blocks as source text,
+/// holding back the open tail so a half-arrived construct is never committed mid-block. The
+/// committed source keeps its own blank separators, so the transcript re-wraps it whole.
 pub struct StreamRenderer {
     pending: String,
-    committed: bool,
 }
 
 impl StreamRenderer {
     pub fn new() -> StreamRenderer {
         StreamRenderer {
             pending: String::new(),
-            committed: false,
         }
     }
 
-    /// Feed one delta; returns the lines now safe to commit to the transcript. A block still
+    /// Feed one delta; returns the source now safe to commit to the transcript. A block still
     /// arriving — an open fence, a table, a list, a paragraph — is held back whole.
-    pub fn push(&mut self, chunk: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    pub fn push(&mut self, chunk: &str) -> String {
         self.pending.push_str(chunk);
         let closed = closed_block_end(&self.pending);
-        if closed == 0 {
-            return Vec::new();
-        }
-        let block: String = self.pending.drain(..closed).collect();
-        self.commit(&block, theme, width)
+        self.pending.drain(..closed).collect()
     }
 
     /// The uncommitted tail, shown in the activity row while the reply streams.
@@ -63,24 +58,9 @@ impl StreamRenderer {
         &self.pending
     }
 
-    /// End of stream: render whatever remains.
-    pub fn finish(&mut self, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-        let rest = std::mem::take(&mut self.pending);
-        let lines = self.commit(&rest, theme, width);
-        self.committed = false;
-        lines
-    }
-
-    fn commit(&mut self, text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-        let mut lines = render(text, theme, width);
-        if lines.is_empty() {
-            return lines;
-        }
-        if self.committed {
-            lines.insert(0, Line::raw(""));
-        }
-        self.committed = true;
-        lines
+    /// End of stream: whatever remains commits now.
+    pub fn finish(&mut self) -> String {
+        std::mem::take(&mut self.pending)
     }
 }
 
@@ -798,82 +778,63 @@ mod tests {
 
     #[test]
     fn stream_holds_an_open_fence_until_it_closes() {
-        let theme = plain();
         let mut stream = StreamRenderer::new();
-        assert!(stream.push("```rust\n", &theme, 40).is_empty());
-        assert!(stream.push("fn main() {}\n", &theme, 40).is_empty());
+        assert!(stream.push("```rust\n").is_empty());
+        assert!(stream.push("fn main() {}\n").is_empty());
         assert_eq!(stream.open_tail(), "```rust\nfn main() {}\n");
-        let lines = stream.push("```\n", &theme, 40);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "  fn main() {}");
+        assert_eq!(stream.push("```\n"), "```rust\nfn main() {}\n```\n");
         assert_eq!(stream.open_tail(), "");
     }
 
     #[test]
     fn stream_holds_a_table_until_a_blank_line_ends_it() {
-        let theme = plain();
         let mut stream = StreamRenderer::new();
-        assert!(stream.push("| a | b |\n| - | - |\n", &theme, 40).is_empty());
-        assert!(stream.push("| 1 | 2 |\n", &theme, 40).is_empty());
-        let lines = stream.push("\nafter", &theme, 40);
-        assert_eq!(lines.len(), 5);
-        assert!(lines[0].to_string().starts_with('┌'));
+        assert!(stream.push("| a | b |\n| - | - |\n").is_empty());
+        assert!(stream.push("| 1 | 2 |\n").is_empty());
+        assert_eq!(
+            stream.push("\nafter"),
+            "| a | b |\n| - | - |\n| 1 | 2 |\n\n"
+        );
         assert_eq!(stream.open_tail(), "after");
     }
 
     #[test]
     fn stream_commits_a_paragraph_on_its_blank_line() {
-        let theme = plain();
         let mut stream = StreamRenderer::new();
-        assert!(stream.push("one two\nthree\n", &theme, 40).is_empty());
-        let lines = stream.push("\nnext", &theme, 40);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "one two three");
+        assert!(stream.push("one two\nthree\n").is_empty());
+        assert_eq!(stream.push("\nnext"), "one two\nthree\n\n");
         assert_eq!(stream.open_tail(), "next");
-        let rest = stream.finish(&theme, 40);
-        assert_eq!(rest.len(), 2);
-        assert_eq!(rest[0].width(), 0);
-        assert_eq!(rest[1].to_string(), "next");
+        assert_eq!(stream.finish(), "next");
         assert_eq!(stream.open_tail(), "");
     }
 
     #[test]
-    fn streamed_deltas_settle_as_the_whole_document_renders() {
-        let theme = plain();
+    fn streamed_deltas_commit_the_source_losslessly() {
         let source = "# Title\n\nA paragraph long enough that it has to wrap somewhere.\n\n\
              - one\n- two\n  - nested\n\n1. first\n2. second\n\n\
              ```rust\nfn main() {}\n```\n\n\
              | a | b |\n| - | - |\n| 1 | 2 |\n\n> quoted\n\n---\n\nlast word\n";
-        let whole: Vec<String> = render(source, &theme, 40)
-            .iter()
-            .map(Line::to_string)
-            .collect();
         let mut stream = StreamRenderer::new();
-        let mut streamed = Vec::new();
+        let mut committed = String::new();
         let mut delta = String::new();
         for ch in source.chars() {
             delta.push(ch);
             if delta.chars().count() == 5 {
-                streamed.extend(stream.push(&delta, &theme, 40));
+                committed.push_str(&stream.push(&delta));
                 delta.clear();
             }
         }
-        streamed.extend(stream.push(&delta, &theme, 40));
-        streamed.extend(stream.finish(&theme, 40));
-        let streamed: Vec<String> = streamed.iter().map(Line::to_string).collect();
-        assert_eq!(streamed, whole);
+        committed.push_str(&stream.push(&delta));
+        committed.push_str(&stream.finish());
+        assert_eq!(committed, source);
     }
 
     #[test]
     fn stream_holds_a_list_until_a_block_follows_it() {
-        let theme = plain();
         let mut stream = StreamRenderer::new();
-        assert!(stream.push("1. one\n", &theme, 40).is_empty());
-        assert!(stream.push("2. two\n\n", &theme, 40).is_empty());
-        let lines = stream.push("after", &theme, 40);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].to_string(), "1. one");
-        assert_eq!(lines[1].to_string(), "2. two");
+        assert!(stream.push("1. one\n").is_empty());
+        assert!(stream.push("2. two\n\n").is_empty());
+        assert_eq!(stream.push("after"), "1. one\n2. two\n\n");
         assert_eq!(stream.open_tail(), "after");
     }
 }

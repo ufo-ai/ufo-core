@@ -1,6 +1,7 @@
-//! Terminal integrations spoken in OSC: hyperlinks, clipboard, and inline images — each gated
-//! by a detected capability, because an escape a terminal swallows is content the member never
-//! sees.
+//! Terminal integrations spoken in OSC: hyperlinks, clipboard, inline images, and desktop
+//! notifications — each gated by a detected capability, because an escape a terminal swallows is
+//! content the member never sees. The browser handoff lives here too, as the other integration
+//! that leaves the terminal.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -10,7 +11,12 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
+use crate::ui::wrap;
+
 const KITTY_CHUNK: usize = 4096;
+const NOTIFICATION_COLUMNS: usize = 120;
+const HTTP_SCHEME: &str = "http://";
+const HTTPS_SCHEME: &str = "https://";
 const KITTY_ID_CEILING: u32 = 0xffff_fffe;
 const TMUX_PROBE_WAIT: Duration = Duration::from_millis(250);
 const TMUX_PROBE_POLL: Duration = Duration::from_millis(5);
@@ -32,6 +38,7 @@ const JPEG_SOF_LAST: u8 = 0xc2;
 pub struct Caps {
     pub hyperlinks: bool,
     pub osc52: bool,
+    pub notifications: bool,
     pub images: ImageProtocol,
 }
 
@@ -83,32 +90,42 @@ impl Caps {
     }
 }
 
-/// The capability matrix, pure over a snapshot. Under tmux no image protocol reaches the outer
-/// terminal and hyperlinks wait on the probe [`Caps::detect`] runs; under screen nothing passes
-/// through at all.
+/// The capability matrix, pure over a snapshot. Under tmux no image protocol and no notification
+/// reaches the outer terminal and hyperlinks wait on the probe [`Caps::detect`] runs; under screen
+/// nothing passes through at all.
 pub fn caps_for(env: &TermEnv) -> Caps {
     let none = Caps {
         hyperlinks: false,
         osc52: false,
+        notifications: false,
         images: ImageProtocol::None,
     };
     if env.term.starts_with("screen") && !env.tmux {
         return none;
     }
     let caps = match identify(env) {
-        Terminal::Kitty | Terminal::Ghostty | Terminal::WezTerm | Terminal::Warp => Caps {
+        Terminal::Kitty | Terminal::Ghostty | Terminal::WezTerm => Caps {
             hyperlinks: true,
             osc52: true,
+            notifications: true,
+            images: ImageProtocol::Kitty,
+        },
+        Terminal::Warp => Caps {
+            hyperlinks: true,
+            osc52: true,
+            notifications: false,
             images: ImageProtocol::Kitty,
         },
         Terminal::Iterm2 => Caps {
             hyperlinks: true,
             osc52: true,
+            notifications: true,
             images: ImageProtocol::Iterm2,
         },
         Terminal::Vscode | Terminal::Windows | Terminal::Alacritty => Caps {
             hyperlinks: true,
             osc52: true,
+            notifications: false,
             images: ImageProtocol::None,
         },
         Terminal::Unknown => none,
@@ -116,6 +133,7 @@ pub fn caps_for(env: &TermEnv) -> Caps {
     if env.tmux {
         return Caps {
             hyperlinks: false,
+            notifications: false,
             images: ImageProtocol::None,
             ..caps
         };
@@ -193,6 +211,37 @@ pub fn hyperlink(caps: Caps, url: &str, text: &str) -> String {
     format!("\x1b]8;;{url}\x07{text}\x1b]8;;\x07")
 }
 
+/// Open `url` in the member's browser and return: the child is detached, holding none of this
+/// process's streams, and nothing waits on it. Anything that is not http(s) opens nothing, so a
+/// link the member follows can never reach a scheme handler beyond the browser.
+pub fn open_url(url: &str) {
+    let Some((program, args)) = browser_command(url) else {
+        return;
+    };
+    let _ = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// The platform's browser handoff for an http(s) `url`, or `None` for every other scheme. The url
+/// is one argument to a real executable, never a string a shell parses.
+fn browser_command(url: &str) -> Option<(&'static str, Vec<String>)> {
+    if !url.starts_with(HTTP_SCHEME) && !url.starts_with(HTTPS_SCHEME) {
+        return None;
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    Some((program, vec![url.to_string()]))
+}
+
 /// OSC 52: place `text` on the clipboard. Empty when the terminal is not known to honor it.
 pub fn copy_to_clipboard(caps: Caps, text: &str) -> String {
     if !caps.osc52 {
@@ -200,6 +249,22 @@ pub fn copy_to_clipboard(caps: Caps, text: &str) -> String {
     }
     let encoded = STANDARD.encode(text.as_bytes());
     format!("\x1b]52;c;{encoded}\x07")
+}
+
+/// OSC 9: a desktop notification reading `body`. Empty when the terminal is not known to honor
+/// it, and empty for a body that sanitizes to nothing — a blank notification says less than none.
+/// Control characters are dropped, since the escape ends at the first one the terminal reads, and
+/// the rest is clipped to a line a notification pane can show whole.
+pub fn notification(caps: Caps, body: &str) -> String {
+    if !caps.notifications {
+        return String::new();
+    }
+    let sanitized: String = body.chars().filter(|ch| !ch.is_control()).collect();
+    let shown = wrap::clip(sanitized.trim(), NOTIFICATION_COLUMNS);
+    if shown.is_empty() {
+        return String::new();
+    }
+    format!("\x1b]9;{shown}\x07")
 }
 
 /// Emit one image inline at up to `max_width_cells` columns — zero leaves the sizing to the
@@ -332,7 +397,13 @@ mod tests {
     const OFF: Caps = Caps {
         hyperlinks: false,
         osc52: false,
+        notifications: false,
         images: ImageProtocol::None,
+    };
+
+    const NOTIFYING: Caps = Caps {
+        notifications: true,
+        ..OFF
     };
 
     fn env(term: &str, program: &str) -> TermEnv {
@@ -388,11 +459,95 @@ mod tests {
     }
 
     #[test]
+    fn notification_is_silent_when_unsupported() {
+        assert!(notification(OFF, "The turn finished.").is_empty());
+    }
+
+    #[test]
+    fn notification_carries_the_body() {
+        assert_eq!(
+            notification(NOTIFYING, "The turn finished."),
+            "\x1b]9;The turn finished.\x07"
+        );
+    }
+
+    #[test]
+    fn notification_drops_control_characters() {
+        assert_eq!(
+            notification(NOTIFYING, "one\ntwo\x07three\x1b]9;x"),
+            "\x1b]9;onetwothree]9;x\x07"
+        );
+        assert!(notification(NOTIFYING, "\n\t ").is_empty());
+        assert!(notification(NOTIFYING, "").is_empty());
+    }
+
+    #[test]
+    fn notification_clips_to_one_line() {
+        let long = "x".repeat(NOTIFICATION_COLUMNS + 40);
+        assert_eq!(
+            notification(NOTIFYING, &long),
+            format!("\x1b]9;{}\x07", "x".repeat(NOTIFICATION_COLUMNS))
+        );
+        let wide = notification(NOTIFYING, &"日".repeat(NOTIFICATION_COLUMNS));
+        let body = wide.trim_start_matches("\x1b]9;").trim_end_matches('\x07');
+        assert_eq!(wrap::width(body), NOTIFICATION_COLUMNS);
+    }
+
+    #[test]
+    fn browser_command_refuses_every_other_scheme() {
+        for url in [
+            "",
+            "example.com",
+            " https://example.com",
+            "https:/example.com",
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+            "javascript:alert(1)",
+            "vscode://file/etc/passwd",
+            "HTTPS://example.com",
+        ] {
+            assert!(browser_command(url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn browser_command_passes_the_url_as_one_argument() {
+        let (_, args) = browser_command("https://example.com/a?b=1&c=2").unwrap();
+        assert_eq!(args, vec!["https://example.com/a?b=1&c=2".to_string()]);
+        assert!(browser_command("http://localhost:8080/x").is_some());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_hands_off_to_open() {
+        assert_eq!(browser_command("https://example.com").unwrap().0, "open");
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn other_unix_hands_off_to_xdg_open() {
+        assert_eq!(
+            browser_command("https://example.com").unwrap().0,
+            "xdg-open"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_hands_off_to_explorer() {
+        assert_eq!(
+            browser_command("https://example.com").unwrap().0,
+            "explorer"
+        );
+    }
+
+    #[test]
     fn detect_answers_for_the_running_terminal() {
         let env = TermEnv::snapshot();
         let caps = Caps::detect();
         let matrix = caps_for(&env);
         assert_eq!(caps.osc52, matrix.osc52);
+        assert_eq!(caps.notifications, matrix.notifications);
         assert_eq!(caps.images, matrix.images);
         if env.tmux {
             assert_eq!(caps.images, ImageProtocol::None);
@@ -406,17 +561,30 @@ mod tests {
         let expected = Caps {
             hyperlinks: true,
             osc52: true,
+            notifications: true,
             images: ImageProtocol::Kitty,
         };
         assert_eq!(caps_for(&env("xterm-kitty", "")), expected);
         assert_eq!(caps_for(&env("xterm-ghostty", "ghostty")), expected);
         assert_eq!(caps_for(&env("xterm-256color", "WezTerm")), expected);
-        assert_eq!(caps_for(&env("xterm-256color", "WarpTerminal")), expected);
         let marked = TermEnv {
             kitty_window_id: true,
             ..env("xterm-256color", "")
         };
         assert_eq!(caps_for(&marked), expected);
+    }
+
+    #[test]
+    fn warp_carries_images_but_no_notifications() {
+        assert_eq!(
+            caps_for(&env("xterm-256color", "WarpTerminal")),
+            Caps {
+                hyperlinks: true,
+                osc52: true,
+                notifications: false,
+                images: ImageProtocol::Kitty,
+            }
+        );
     }
 
     #[test]
@@ -426,6 +594,7 @@ mod tests {
             Caps {
                 hyperlinks: true,
                 osc52: true,
+                notifications: true,
                 images: ImageProtocol::Iterm2,
             }
         );
@@ -436,6 +605,7 @@ mod tests {
         let expected = Caps {
             hyperlinks: true,
             osc52: true,
+            notifications: false,
             images: ImageProtocol::None,
         };
         assert_eq!(caps_for(&env("xterm-256color", "vscode")), expected);
@@ -466,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_drops_images_and_defers_hyperlinks() {
+    fn tmux_drops_images_and_notifications_and_defers_hyperlinks() {
         let under_tmux = TermEnv {
             tmux: true,
             ..env("screen-256color", "iTerm.app")
@@ -476,6 +646,7 @@ mod tests {
             Caps {
                 hyperlinks: false,
                 osc52: true,
+                notifications: false,
                 images: ImageProtocol::None,
             }
         );
@@ -484,6 +655,7 @@ mod tests {
             ..env("xterm-kitty", "")
         };
         assert_eq!(caps_for(&kitty).images, ImageProtocol::None);
+        assert!(!caps_for(&kitty).notifications);
     }
 
     #[test]

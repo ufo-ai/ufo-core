@@ -12,6 +12,7 @@ use std::time::Duration;
 struct Exchange {
     reply_lines: &'static [&'static str],
     delay_ms: u64,
+    status: u16,
 }
 
 struct Served {
@@ -26,6 +27,8 @@ struct Request {
     op_header: Option<String>,
     slot_header: Option<String>,
     stop_header: Option<String>,
+    send_header: Option<String>,
+    send_id: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
@@ -61,8 +64,13 @@ fn serve(script: Vec<Exchange>) -> Served {
                 .iter()
                 .map(|line| format!("{line}\n"))
                 .collect();
+            let status_line = match exchange.status {
+                200 => "200 OK",
+                500 => "500 Internal Server Error",
+                other => panic!("unscripted status {other}"),
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status_line}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).expect("respond");
@@ -79,7 +87,15 @@ fn serve(script: Vec<Exchange>) -> Served {
 fn read_request(stream: &mut std::net::TcpStream) -> Request {
     let mut raw = Vec::new();
     let mut buffer = [0u8; 4096];
-    let (headers_end, mut content_length, mut op_header, mut slot_header, mut stop_header) = loop {
+    let (
+        headers_end,
+        mut content_length,
+        mut op_header,
+        mut slot_header,
+        mut stop_header,
+        mut send_header,
+        mut send_id,
+    ) = loop {
         let read = stream.read(&mut buffer).expect("read");
         raw.extend_from_slice(&buffer[..read]);
         let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
@@ -90,6 +106,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         let mut op = None;
         let mut slot = None;
         let mut stop = None;
+        let mut send = None;
+        let mut send_key = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -104,8 +122,14 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             if lower.starts_with("x-ufo-stop:") {
                 stop = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-send:") {
+                send = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
+            if lower.starts_with("x-ufo-send-id:") {
+                send_key = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
-        break (end + 4, length, op, slot, stop);
+        break (end + 4, length, op, slot, stop, send, send_key);
     };
     while raw.len() < headers_end + content_length {
         let read = stream.read(&mut buffer).expect("read body");
@@ -120,6 +144,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         op_header: op_header.take(),
         slot_header: slot_header.take(),
         stop_header: stop_header.take(),
+        send_header: send_header.take(),
+        send_id: send_id.take(),
     }
 }
 
@@ -283,10 +309,12 @@ fn plain_session_round_trips_ask_and_exit() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\thello there", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["txt\tThe answer.", "exit\t0"],
         },
     ]);
@@ -315,10 +343,12 @@ fn exec_op_runs_and_replies_on_the_op_channel() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["run\top-1\texec\texec\t30\t\t{\"argv\":[\"echo\",\"proof\"]}"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tdone", "exit\t0"],
         },
     ]);
@@ -344,6 +374,7 @@ fn exec_op_runs_and_replies_on_the_op_channel() {
 fn json_mode_speaks_the_event_protocol() {
     let served = serve(vec![Exchange {
         delay_ms: 0,
+        status: 200,
         reply_lines: &[
             "token\ttok-1",
             "workspace\thttp://workspace.example",
@@ -384,6 +415,7 @@ fn json_mode_speaks_the_event_protocol() {
 fn resume_replays_history_before_the_tail() {
     let served = serve(vec![Exchange {
         delay_ms: 0,
+        status: 200,
         reply_lines: &[
             "you\tearlier question",
             "say\tearlier answer",
@@ -408,6 +440,7 @@ fn a_command_burst_while_the_wire_waits_loses_nothing() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &[
                 "say\thello",
                 "secret\tsealed1\ts1\tFirst secret",
@@ -417,14 +450,17 @@ fn a_command_burst_while_the_wire_waits_loses_nothing() {
         },
         Exchange {
             delay_ms: 300,
+            status: 200,
             reply_lines: &["say\tstored"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tstored"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["exit\t0"],
         },
     ]);
@@ -446,14 +482,32 @@ fn a_finished_ops_reply_outranks_a_queued_message() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
-            reply_lines: &["run\top-slow\texec\texec\t30\t\t{\"argv\":[\"sleep\",\"1\"]}"],
+            status: 200,
+            reply_lines: &["run\top-slow\texec\texec\t30\t\t{\"argv\":[\"sleep\",\"2\"]}"],
         },
         Exchange {
             delay_ms: 0,
+            status: 500,
+            reply_lines: &["no lane"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 500,
+            reply_lines: &["still none"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 500,
+            reply_lines: &["and none"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tok", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["exit\t0"],
         },
     ]);
@@ -471,8 +525,10 @@ fn a_finished_ops_reply_outranks_a_queued_message() {
             .spawn()
             .expect("spawn client");
         let mut stdin = child.stdin.take().unwrap();
+        let arrived = served.arrived;
         let writer = thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(500));
+            arrived.recv().expect("the first post arrives");
+            thread::sleep(std::time::Duration::from_millis(200));
             let _ = stdin.write_all(b"{\"type\":\"send\",\"text\":\"queued while the op ran\"}\n");
         });
         let output = child.wait_with_output().expect("client exits");
@@ -484,53 +540,98 @@ fn a_finished_ops_reply_outranks_a_queued_message() {
     };
     let requests = served.handle.join().unwrap();
     assert_eq!(code, 0, "stdout: {stdout}");
+    for attempt in 1..=3 {
+        assert_eq!(
+            requests[attempt].send_header.as_deref(),
+            Some("1"),
+            "the mid-turn message travels its own request: {requests:?}"
+        );
+        assert_eq!(requests[attempt].body, "queued while the op ran");
+        assert_eq!(
+            requests[attempt].send_id, requests[1].send_id,
+            "every retry keeps the delivery's one idempotency key: {requests:?}"
+        );
+    }
     assert_eq!(
-        requests[1].op_header.as_deref(),
+        requests[4].op_header.as_deref(),
         Some("op-slow"),
-        "the turn is blocked on the op reply, so it posts first: {requests:?}"
+        "the turn is blocked on the op reply, so it posts before the fallback: {requests:?}"
     );
-    assert!(
-        stdout.contains("\"command\":\"exec sleep 1\""),
-        "op_start states the command an embedder can show: {stdout}"
+    assert_eq!(requests[5].send_header, None);
+    assert_eq!(
+        requests[5].body, "queued while the op ran",
+        "a send that never acks falls back to the boundary queue: {requests:?}"
     );
-    assert_eq!(requests[2].body, "queued while the op ran");
 }
 
 #[test]
-fn a_message_that_supersedes_a_poll_clears_it() {
+fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
     let served = serve(vec![
         Exchange {
-            delay_ms: 700,
+            delay_ms: 1500,
+            status: 200,
             reply_lines: &["say\tfirst", "poll\t1"],
         },
         Exchange {
             delay_ms: 0,
-            reply_lines: &["say\tsecond", "ask\t>"],
+            status: 200,
+            reply_lines: &["sent\tturn-1\t0\tarr-9"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["absorbed\tarr-9", "say\tsecond", "exit\t0"],
         },
     ]);
-    let home = scratch_home("poll-supersede");
-    let (stdout, code) = run_client(
-        &served.url,
-        &["--json", "go"],
-        "{\"type\":\"send\",\"text\":\"while polling\"}\n",
-        &home,
-    );
+    let home = scratch_home("instant-send");
+    let (stdout, code) = {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ufo"))
+            .args(["--json", "go"])
+            .env("WORKSPACE_URL", &served.url)
+            .env("UFO_URL", &served.url)
+            .env("UFO_HOME", &home)
+            .env("UFO_CHANNEL", "e2e-test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn client");
+        let mut stdin = child.stdin.take().unwrap();
+        let arrived = served.arrived;
+        let writer = thread::spawn(move || {
+            arrived.recv().expect("the first post arrives");
+            thread::sleep(std::time::Duration::from_millis(200));
+            let _ = stdin.write_all(b"{\"type\":\"send\",\"text\":\"while the turn ran\"}\n");
+        });
+        let output = child.wait_with_output().expect("client exits");
+        writer.join().unwrap();
+        (
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            output.status.code().unwrap_or(-1),
+        )
+    };
     let requests = served.handle.join().unwrap();
     assert_eq!(code, 0, "stdout: {stdout}");
-    let seconds = stdout
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[1].send_header.as_deref(), Some("1"));
+    assert_eq!(requests[1].body, "while the turn ran");
+    assert!(requests[1].send_id.is_some());
+    assert_eq!(
+        requests[2].body, "",
+        "the scheduled poll still fires: {requests:?}"
+    );
+    let sent = stdout
         .lines()
-        .filter(|line| line.contains("\"type\":\"message\"") && line.contains("second"))
-        .count();
-    assert_eq!(
-        seconds, 1,
-        "the reply prints once, never re-tailed: {stdout}"
-    );
-    assert_eq!(
-        requests.len(),
-        2,
-        "no stale poll posts a third time: {requests:?}"
-    );
-    assert_eq!(requests[1].body, "while polling");
+        .find(|line| line.contains("\"type\":\"message_sent\""))
+        .expect("the ack is observable");
+    assert!(sent.contains("\"turn_id\":\"turn-1\""), "{sent}");
+    assert!(sent.contains("\"arrival_id\":\"arr-9\""), "{sent}");
+    assert!(sent.contains("\"opened_run\":false"), "{sent}");
+    let absorbed = stdout
+        .lines()
+        .find(|line| line.contains("\"type\":\"message_absorbed\""))
+        .expect("the fold is observable");
+    assert!(absorbed.contains("arr-9"), "{absorbed}");
 }
 
 #[cfg(unix)]
@@ -539,10 +640,12 @@ fn esc_on_a_running_turn_posts_the_stop() {
     let served = serve(vec![
         Exchange {
             delay_ms: 2000,
+            status: 200,
             reply_lines: &["txt\tthinking", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tcancelled", "ask\t>"],
         },
     ]);
@@ -570,6 +673,64 @@ fn esc_on_a_running_turn_posts_the_stop() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 2500,
+            status: 200,
+            reply_lines: &["txt\tworking", "poll\t1"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["sent\tturn-1\t0\tarr-1"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["absorbed\tarr-1", "say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-send");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"later thought\r")
+        .expect("the mid-turn message reaches the pty");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !session.ended() {
+        assert!(std::time::Instant::now() < deadline, "client never exited");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(
+        requests[1].send_header.as_deref(),
+        Some("1"),
+        "{requests:?}"
+    );
+    assert_eq!(requests[1].body, "later thought");
+    assert_eq!(
+        requests[2].body, "",
+        "the poll resumes the tail: {requests:?}"
+    );
+    let printed = session.painted();
+    let member = printed
+        .find("\u{203a} later thought")
+        .expect("the absorbed message joins the transcript as the member's own");
+    let reply = printed.find("done").expect("the reply follows");
+    assert!(member < reply, "{printed}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The signed-out client at the gateway's own prompts: the address types through untouched, one
 /// Enter answers it, and the answered question leaves the composer while the turn runs.
 #[cfg(unix)]
@@ -578,10 +739,12 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tufo", "ask\tEnter your work email:"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &[
                 "say\tWe emailed a code to member@metalcraft.ai",
                 "ask\tEnter the code:",
@@ -589,6 +752,7 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
         },
         Exchange {
             delay_ms: 2500,
+            status: 200,
             reply_lines: &["say\tSigned in: member@metalcraft.ai", "ask\t>"],
         },
     ]);
@@ -642,10 +806,12 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\thello", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tread it", "ask\t>"],
         },
     ]);
@@ -692,14 +858,17 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     let served = serve(vec![
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\thello", "secret\tsealed1\ts1\tPaste the key", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tstored", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
+            status: 200,
             reply_lines: &["say\tread it", "ask\t>"],
         },
     ]);

@@ -70,6 +70,14 @@ pub enum Event {
         prompt: String,
     },
     TurnEnd,
+    MessageSent {
+        turn_id: String,
+        opened_run: bool,
+        arrival_id: String,
+    },
+    MessageAbsorbed {
+        arrival_ids: Vec<String>,
+    },
     SignedIn {
         workspace_url: String,
         channel: String,
@@ -165,7 +173,11 @@ impl Driver {
                 prompt,
             } => vec![self.raise_secret(sealed, slot, prompt)],
             Directive::Exit(code) => vec![Event::Exit { code: *code }],
-            Directive::Poll(_)
+            Directive::Absorbed(arrival_ids) => vec![Event::MessageAbsorbed {
+                arrival_ids: arrival_ids.clone(),
+            }],
+            Directive::Sent { .. }
+            | Directive::Poll(_)
             | Directive::Since(_)
             | Directive::Run(_)
             | Directive::Token(_)
@@ -232,6 +244,14 @@ impl Driver {
 
     /// Sign-in completed: the workspace this session now talks to, and the conversation channel —
     /// re-minted when onboarding hands the session its workspace.
+    pub fn message_sent(&self, ack: &crate::wire::SentAck) -> Event {
+        Event::MessageSent {
+            turn_id: ack.turn_id.clone(),
+            opened_run: ack.opened,
+            arrival_id: ack.arrival_id.clone(),
+        }
+    }
+
     pub fn signed_in(&self, workspace_url: &str, channel: &str) -> Event {
         Event::SignedIn {
             workspace_url: workspace_url.to_string(),

@@ -1,3 +1,4 @@
+{"wire": "workspace", "verb": "absorbed", "fields": ["arr-1", "arr-2"], "line": "absorbed\tarr-1\tarr-2"}
 {"wire": "workspace", "verb": "ask", "fields": [">"], "line": "ask\t>"}
 {"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
 {"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
@@ -7,6 +8,7 @@
 {"wire": "workspace", "verb": "run", "fields": ["op-1", "exec", "exec", "120", "", "{\"argv\":[\"ls\"]}"], "line": "run\top-1\texec\texec\t120\t\t{\"argv\":[\"ls\"]}"}
 {"wire": "workspace", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
 {"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "exa_api_key", "Paste your Exa key"], "line": "secret\tsealed-blob\texa_api_key\tPaste your Exa key"}
+{"wire": "workspace", "verb": "sent", "fields": ["turn-1", "1", "arr-1"], "line": "sent\tturn-1\t1\tarr-1"}
 {"wire": "workspace", "verb": "since", "fields": ["turn-1", "cursor-9"], "line": "since\tturn-1\tcursor-9"}
 {"wire": "workspace", "verb": "status", "fields": ["12 tok - $0.000110"], "line": "status\t12 tok - $0.000110"}
 {"wire": "workspace", "verb": "txt", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "txt\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}

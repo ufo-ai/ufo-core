@@ -13,7 +13,12 @@ time they speak; a token whose email names no member still gets a conversation, 
 One POST is one held stream. A body is the member's message, admitted onto the durable queue and
 tailed as directives up to `HOLD_SECONDS` (just under the shell's `curl --max-time 90`); an answer
 that outruns the hold ends the stream with `poll` and the shell reconnects with an empty body, which
-admits nothing and resumes tailing the conversation's latest turn."""
+admits nothing and resumes tailing the conversation's latest turn.
+
+A send (`x-ufo-send`) is the one POST that holds nothing: it admits its body, answers with the
+`sent` ack, and returns. It is the request a member's second message rides while their first turn
+still runs — admission speed rather than the held stream's next boundary — and the consequences
+reach them down the stream they are already holding."""
 
 import asyncio
 import os
@@ -64,6 +69,8 @@ SECRET_SLOT_HEADER = "x-ufo-slot"
 CWD_HEADER = "x-ufo-cwd"
 OP_HEADER = "x-ufo-op"
 STOP_HEADER = "x-ufo-stop"
+SEND_HEADER = "x-ufo-send"
+SEND_ID_HEADER = "x-ufo-send-id"
 SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
@@ -166,9 +173,9 @@ def directives_for(
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
     activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
     caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
-    names the credential prompts still awaiting values, `files` the ones it shared). A drain of the
-    conversation's arrivals renders nothing: the shell prompts between turns, so it never holds a
-    message of its own waiting for the running turn to take it up."""
+    names the credential prompts still awaiting values, `files` the ones it shared). A drain names
+    the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
+    mid-turn learns the agent has taken that message up."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
@@ -184,7 +191,8 @@ def directives_for(
         case Parked():
             return (directive("say", frame.message), directive("ask", PROMPT))
         case Absorbed():
-            return ()
+            arrivals = tuple(str(arrival) for arrival in frame.arrivals)
+            return (directive("absorbed", *arrivals),) if arrivals else ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
@@ -439,7 +447,10 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
 
     A stop (`x-ufo-stop`, the member's Esc) admits nothing either: it ends the conversation's
     running turn and resumes that same tail, which replays to the cancelled terminal the stop
-    committed. A press with nothing running resumes the tail unchanged."""
+    committed. A press with nothing running resumes the tail unchanged.
+
+    A send (`x-ufo-send`) admits and answers without holding anything — the one request that is not
+    a stream."""
     email = _authenticated_email(request, ctx.workspace_id)
     if email is None:
         return PlainTextResponse("unauthorized", status_code=401)
@@ -452,6 +463,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         return PlainTextResponse("x-ufo-cwd must be an absolute path", status_code=400)
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
+    if request.headers.get(SEND_HEADER, "").strip():
+        return await _send(ctx, request, conversation_id, member_id, email, cwd)
     note: bytes | None = None
     resumed = False
     update = b""
@@ -532,6 +545,59 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
                 ctx.terminal_disconnect(conversation_id)
 
     return StreamingResponse(bound(), media_type="text/plain")
+
+
+async def _send(
+    ctx: SurfaceContext,
+    request: Request,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    email: str,
+    cwd: str,
+) -> Response:
+    """Admit one message and answer it, holding nothing. The member's stream is a second request
+    already tailing this conversation, so the consequences have somewhere to arrive and this one
+    owes only the ack: the turn the message belongs to, whether this delivery opened that turn's
+    run, and the `arrival_id` the turn's `absorbed` line will carry when it folds the row in — the
+    id a client holds its queued row against. A send with nothing running opens a turn like any
+    other message; the stream picks it up.
+
+    `x-ufo-send-id` is the delivery's identity, scoped to the conversation and carried into the
+    engine's own idempotency: a resend over a link that dropped the answer joins the turn the first
+    delivery landed in rather than saying it twice. The ack states what this delivery did, so a
+    resend that finds the turn already opened, or the row already folded, reports the turn and no
+    longer claims the run or the pending arrival.
+
+    No terminal is connected here. The ops rendezvous and the frame tail are the held stream's, and
+    a send that connected one would take its refcount and its watcher. The binding itself is still
+    this request's to make when it is the first message: `cwd` claims it exactly as an admitting
+    stream does, and the claim that lands names the directory the agent works in."""
+    try:
+        send_id = UUID(request.headers.get(SEND_ID_HEADER, "").strip())
+    except ValueError:
+        return PlainTextResponse(f"{SEND_ID_HEADER} must be a uuid", status_code=400)
+    body = (await request.body()).decode("utf-8", "replace").strip()
+    if not body:
+        return PlainTextResponse("a send carries a message", status_code=400)
+    if len(body.encode()) > MAX_MESSAGE_BYTES:
+        return PlainTextResponse("message too large", status_code=413)
+    note = b""
+    if cwd and await ctx.claim_terminal(conversation_id, cwd):
+        note = directive("note", f"Workspace: {cwd}")
+    admitted = await ctx.admit(
+        conversation_id,
+        body,
+        idempotency_key=f"{conversation_id}{QUEUE_KEY_SEPARATOR}send{QUEUE_KEY_SEPARATOR}{send_id}",
+        context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+        speaker_member_id=member_id,
+    )
+    ack = directive(
+        "sent",
+        str(admitted.turn_id),
+        "1" if admitted.opened_run else "0",
+        "" if admitted.arrival_id is None else str(admitted.arrival_id),
+    )
+    return PlainTextResponse(ack + note)
 
 
 async def _fulfill_secret(

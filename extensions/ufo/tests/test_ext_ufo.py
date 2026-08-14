@@ -54,7 +54,7 @@ from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from ufo.hub import CostTick, InProcessHub, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import Absorbed, CostTick, InProcessHub, Parked, SkillLoad, Terminal, ToolCall
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -114,6 +114,16 @@ def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
         b"status\t3000 tok - $0.055000\n",
     )
+
+
+def test_a_drain_names_the_member_arrivals_it_folded() -> None:
+    """The turn has taken up what the member sent into it, so the client settles the rows it is
+    holding. A drain that folded nothing of the member's says nothing."""
+    first, second = uuid4(), uuid4()
+    assert directives_for(Absorbed(arrivals=(first, second)), streamed=True) == (
+        f"absorbed\t{first}\t{second}\n".encode(),
+    )
+    assert directives_for(Absorbed(arrivals=()), streamed=True) == ()
 
 
 def test_terminal_frame_maps_by_status_and_streamed() -> None:
@@ -956,6 +966,206 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
         "timezone": None,
         "source": "ufo cli (owner@example.com)",
     }
+
+
+async def _post_send(
+    client: AsyncClient, token: str, body: bytes, send_id: UUID, cwd: str | None = None
+) -> Response:
+    headers = {
+        "authorization": f"Bearer {token}",
+        "x-ufo-send": "1",
+        "x-ufo-send-id": str(send_id),
+    }
+    if cwd is not None:
+        headers["x-ufo-cwd"] = cwd
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        return await client.post("/surface/ufo/main", content=body, headers=headers)
+
+
+async def _arrivals(workspace_id: UUID) -> list[tuple[UUID, str]]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.id, tables.inbound_message.c.body).where(
+                    tables.inbound_message.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    return [(row.id, row.body) for row in rows]
+
+
+async def _tailing(hub: InProcessHub, turn_id: UUID) -> None:
+    while not (ring := hub._turns.get(turn_id)) or not ring.subscribers:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+
+
+async def test_a_send_joins_the_running_turn_and_leaves_the_held_stream_its_ops(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+    tmp_path: Path,
+) -> None:
+    """A member speaking while their turn runs. The send admits onto that turn and answers with the
+    ack — the turn, `0` because another delivery opened its run, and the arrival the drain will
+    name — while the stream they are already holding goes untouched: the send connects no terminal,
+    so the op the turn asks for after it still reaches the watcher that stream owns."""
+    client, workspace_id = ufo
+    hub, terminals = runtime[1], runtime[3].terminals
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    cwd = str(tmp_path / "proj")
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    held = asyncio.ensure_future(_post_terminal(client, "main", token, b"", cwd))
+    await _tailing(hub, turn_id)
+
+    sent = await _post_send(client, token, b"and the tests too", uuid4())
+
+    assert sent.status_code == 200
+    assert not held.done()
+    verb, named, opened, arrival = _lines(sent.content)[0]
+    assert (verb, named, opened) == ("sent", str(turn_id), "0")
+    assert await _arrivals(workspace_id) == [(UUID(arrival), "and the tests too")]
+
+    reading = asyncio.ensure_future(
+        terminals.send(conversation_id, "read", 30, arg=f"{cwd}/notes.txt")
+    )
+    lines = await held
+    assert [line[0] for line in lines] == ["since", "run"]
+    assert terminals.resolve(conversation_id, lines[1][1], b"notes")
+    assert await reading == b"notes"
+
+
+async def test_the_tail_names_the_arrival_the_ack_promised(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The other half of the mid-turn send: the id the ack named is the id the held stream reads
+    back when the turn folds that row into its window, so the client settles the row it was holding
+    against the agent actually taking the message up."""
+    client, workspace_id = ufo
+    hub = runtime[1]
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    held = asyncio.ensure_future(_post(client, "main", token, b""))
+    await _tailing(hub, turn_id)
+    sent = await _post_send(client, token, b"and the tests too", uuid4())
+    arrival = UUID(_lines(sent.content)[0][3])
+
+    await hub.publish(turn_id, Absorbed(arrivals=(arrival,)))
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="Both done.")))
+
+    assert await held == [["absorbed", str(arrival)], ["say", "Both done."], ["ask", ">"]]
+
+
+async def test_a_resent_delivery_admits_once_and_names_the_same_turn(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The client retries a send whose answer the link dropped. The `x-ufo-send-id` it repeats is
+    the delivery's identity, so the message lands once and the retry reads back the same ack — the
+    turn it joined and the arrival still waiting in it."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    send_id = uuid4()
+
+    first = await _post_send(client, token, b"and the tests too", send_id)
+    resent = await _post_send(client, token, b"and the tests too", send_id)
+
+    assert first.content == resent.content
+    assert _lines(first.content)[0][:3] == ["sent", str(turn_id), "0"]
+    assert await _arrivals(workspace_id) == [
+        (UUID(_lines(first.content)[0][3]), "and the tests too")
+    ]
+    assert await _turn_count(workspace_id) == 1
+
+
+async def test_a_send_with_nothing_running_opens_a_turn_the_stream_reads(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A send is not a mid-turn special case: with nothing running it founds a turn like any other
+    message, says so with `1`, and names no arrival — there is no queue row, the message is the
+    turn's own inbound. The member's next stream tails that turn to its answer."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    sent = await _post_send(client, token, b"hello", uuid4())
+
+    assert _lines(sent.content) == [["sent", str((await _sole_turn(workspace_id))[0]), "1", ""]]
+    lines = await _post(client, "main", token, b"")
+    answer = "".join(field for verb, *rest in lines if verb in ("txt", "say") for field in rest)
+    assert "echo:1" in answer
+    assert lines[-1] == ["ask", ">"]
+
+
+async def test_a_resent_send_that_founded_a_turn_names_it_without_reopening_it(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The retry of a send that founded a turn: the message stays said once and the turn stays the
+    one it founded, but the run was opened by the delivery before it — so the ack names the turn and
+    claims neither the run nor an arrival, which is the answer every later delivery of that message
+    gets."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    send_id = uuid4()
+
+    founded = await _post_send(client, token, b"hello", send_id)
+    resent = await _post_send(client, token, b"hello", send_id)
+
+    turn_id = (await _sole_turn(workspace_id))[0]
+    assert _lines(founded.content) == [["sent", str(turn_id), "1", ""]]
+    assert _lines(resent.content) == [["sent", str(turn_id), "0", ""]]
+    assert await _turn_count(workspace_id) == 1
+    assert await _arrivals(workspace_id) == []
+
+
+async def test_a_first_send_claims_the_terminal_it_stands_in(
+    ufo: tuple[AsyncClient, UUID], tmp_path: Path
+) -> None:
+    """A send standing in a directory claims the conversation's terminal exactly as an admitting
+    stream does — the binding is made at admission, and a member whose first message is a send is
+    owed the same agent workspace — and names it after the ack. The claim fills an empty handle
+    only, so the next send finds the conversation bound and says nothing."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    cwd = str(tmp_path / "proj")
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    await _seed_running_turn(workspace_id, conversation_id, member_id)
+
+    first = await _post_send(client, token, b"hello", uuid4(), cwd=cwd)
+    second = await _post_send(client, token, b"and again", uuid4(), cwd=cwd)
+
+    assert _lines(first.content)[0][0] == "sent"
+    assert _lines(first.content)[1] == ["note", f"Workspace: {cwd}"]
+    assert [line[0] for line in _lines(second.content)] == ["sent"]
+
+
+async def test_a_send_states_what_it_needs_and_admits_nothing_without_it(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A send is one message under one delivery id: a body it cannot identify, or no body at all, is
+    a client that would have its message doubled by a retry or say nothing at all."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        unkeyed = await client.post(
+            "/surface/ufo/main",
+            content=b"hello",
+            headers={"authorization": f"Bearer {token}", "x-ufo-send": "1"},
+        )
+    empty = await _post_send(client, token, b"", uuid4())
+
+    assert (unkeyed.status_code, unkeyed.text) == (400, "x-ufo-send-id must be a uuid")
+    assert (empty.status_code, empty.text) == (400, "a send carries a message")
+    assert await _turn_count(workspace_id) == 0
 
 
 ARTIFACT_SECRET = "artifact-token-secret"
