@@ -44,8 +44,8 @@ from ufo.credentials import (
 )
 from ufo.db import workspace_tx
 from ufo.ext.surface import (
+    CONVERSATION_TITLE_CHARS,
     MAX_CONVERSATION_SPEAKERS,
-    OPENING_MESSAGE_CHARS,
     OPERATOR_EMAIL_DOMAIN,
     TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
@@ -62,6 +62,7 @@ from ufo.ext.surface import (
     WritebackPoller,
     fence_member_message,
     inbox_name,
+    member_message_text,
     mint_marker,
     record_transcript_access,
     writeback_workspaces,
@@ -2563,6 +2564,14 @@ async def _seed_conversation_turn(
                 updated_at=sa.func.now(),
             )
         )
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.title.is_(None),
+            )
+            .values(title=member_message_text(inbound).strip()[:CONVERSATION_TITLE_CHARS])
+        )
     return turn_id
 
 
@@ -2851,7 +2860,7 @@ async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
         workspace_id, agent_id, queue_key="long", audience=str(SHARED_AUDIENCE), member_id=None
     )
     await _seed_conversation_turn(
-        workspace_id, long_open, agent_id, seq=1, inbound="w" * (OPENING_MESSAGE_CHARS + 50)
+        workspace_id, long_open, agent_id, seq=1, inbound="w" * (CONVERSATION_TITLE_CHARS + 50)
     )
     turnless = await _seed_conversation(
         workspace_id, agent_id, queue_key="quiet", audience=str(SHARED_AUDIENCE), member_id=None
@@ -2861,16 +2870,16 @@ async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
     listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
     by_id = {entry.summary.id: entry for entry in listed}
 
-    assert by_id[channel].opening_message == "can you take a look at the failing deploy"
-    assert "bystander" not in by_id[channel].opening_message
+    assert by_id[channel].title == "can you take a look at the failing deploy"
+    assert "bystander" not in by_id[channel].title
     assert [(who.email, who.sender) for who in by_id[channel].speakers] == [
         ("m@example.com", "Mel Okafor (m@example.com)"),
         ("peer@example.com", "Pat Reyes (peer@example.com)"),
     ]
     assert by_id[channel].source == OPENING_PERMALINK
-    assert by_id[long_open].opening_message == "w" * OPENING_MESSAGE_CHARS
+    assert by_id[long_open].title == "w" * CONVERSATION_TITLE_CHARS
     assert by_id[long_open].source is None
-    assert by_id[turnless].opening_message == ""
+    assert by_id[turnless].title == ""
     assert by_id[turnless].source is None
     assert by_id[turnless].speakers == ()
 
@@ -2920,9 +2929,112 @@ async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
     assert by_id[theirs].summary.member_email == "owner@example.com"
     for conversation_id in (theirs, room):
         assert by_id[conversation_id].readable is False
-        assert by_id[conversation_id].opening_message == ""
+        assert by_id[conversation_id].title == ""
         assert by_id[conversation_id].source is None
         assert by_id[conversation_id].speakers == ()
+
+
+async def test_a_conversation_search_narrows_ahead_of_the_bound(db: None, tmp_path) -> None:
+    """A term reaches every conversation the member may see, never the page a bound already cut:
+    the one they are looking for is the one that fell off it. Matched on what the conversation is
+    called and on who has spoken in it."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    peer_id = await _seed_member_row(workspace_id, "pat@example.com")
+    wanted = await _seed_conversation(
+        workspace_id, agent_id, queue_key="wanted", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    aged = await _seed_conversation_turn(
+        workspace_id,
+        wanted,
+        agent_id,
+        seq=1,
+        inbound="the warehouse rollout plan",
+        speaker_member_id=peer_id,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == aged)
+            .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+    for index in range(5):
+        newer = await _seed_conversation(
+            workspace_id,
+            agent_id,
+            queue_key=f"newer{index}",
+            audience=str(SHARED_AUDIENCE),
+            member_id=None,
+        )
+        await _seed_conversation_turn(
+            workspace_id,
+            newer,
+            agent_id,
+            seq=1,
+            inbound="something else",
+            speaker_member_id=member_id,
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    unsearched = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=2)
+    assert wanted not in {entry.summary.id for entry in unsearched}
+
+    by_title = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=2, search="WAREHOUSE"
+    )
+    by_speaker = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=2, search="pat@example"
+    )
+    unmatched = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=2, search="nothing here"
+    )
+
+    assert [entry.summary.id for entry in by_title] == [wanted]
+    assert [entry.summary.id for entry in by_speaker] == [wanted]
+    assert unmatched == ()
+
+
+async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read(
+    db: None, tmp_path
+) -> None:
+    """What a conversation holds — what it is called, who spoke in it — is matched only where this
+    member may read it. An admin searching another member's private thread by its words would be
+    told whether those words stand in it, which is the content the acknowledgement audits. What the
+    row states about itself either way — whose it is, where it came in — still matches."""
+    workspace_id, agent_id, admin_id = await _seed(member_email="boss@example.com")
+    assert admin_id is not None
+    owner_id = await _seed_member_row(workspace_id, "owner@example.com")
+    theirs = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="theirs",
+        audience=str(conversation_audience(owner_id)),
+        member_id=owner_id,
+        surface_label="Direct message",
+    )
+    await _seed_conversation_turn(
+        workspace_id,
+        theirs,
+        agent_id,
+        seq=1,
+        inbound="the salary review spreadsheet",
+        speaker_member_id=owner_id,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    by_words = await context.list_agent_conversations(
+        agent_id, admin_id, admin=True, limit=50, search="salary"
+    )
+    by_speaker = await context.list_agent_conversations(
+        agent_id, admin_id, admin=True, limit=50, search="owner@example.com"
+    )
+    by_origin = await context.list_agent_conversations(
+        agent_id, admin_id, admin=True, limit=50, search="Direct message"
+    )
+
+    assert by_words == ()
+    assert [entry.summary.id for entry in by_speaker] == [theirs]
+    assert [entry.summary.id for entry in by_origin] == [theirs]
 
 
 async def test_agent_conversation_speakers_stop_at_the_bound(db: None, tmp_path) -> None:

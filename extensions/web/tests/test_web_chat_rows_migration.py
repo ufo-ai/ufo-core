@@ -193,3 +193,53 @@ def test_chat_rows_backfill_covers_bare_keys_and_downgrade_removes_only_them(
         remaining = _rows(connection)
     engine.dispose()
     assert set(remaining) == {f"audience/{AGENT}/peer@example.com", f"chat/{MINTED}"}
+
+
+def test_web_0002_carries_each_stored_title_onto_the_conversation_and_strikes_it(
+    migration_urls: tuple[str, str],
+) -> None:
+    """The name a portal chat was kept under moves onto the conversation it names, and leaves the
+    store row holding only the binding this surface gates on. It stands over the opening words
+    `0086` filled the column with: a summary is the better name, and the one the member has been
+    reading on every row."""
+    migration_url, sync_url = migration_urls
+    config = _config(migration_url)
+    command.upgrade(config, "0085")
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        _seed(connection)
+        connection.execute(
+            sa.text(
+                "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+                "inbound, created_at, updated_at) "
+                "values (:id, :ws, :conversation, :agent, 1, 'queued', :inbound, :m, :m)"
+            ),
+            {
+                "id": uuid4().hex,
+                "ws": WORKSPACE.hex,
+                "conversation": BARE.hex,
+                "agent": AGENT.hex,
+                "inbound": "the words it opened with",
+                "m": MOMENT,
+            },
+        )
+        connection.commit()
+
+    command.upgrade(config, "0086")
+    with engine.connect() as connection:
+        opened = connection.execute(
+            sa.text("select title from conversation where id = :id"), {"id": BARE.hex}
+        ).scalar_one()
+    assert opened == "the words it opened with"
+
+    command.upgrade(config, "web_0002")
+
+    with engine.connect() as connection:
+        rows = _rows(connection)
+        named = connection.execute(
+            sa.text("select title from conversation where id = :id"), {"id": BARE.hex}
+        ).scalar_one()
+    engine.dispose()
+
+    assert named == "assistant"
+    assert rows[f"chat/{BARE}"] == {"agent_id": str(AGENT), "email": "owner@example.com"}

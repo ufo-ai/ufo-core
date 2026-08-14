@@ -7,11 +7,18 @@ import sqlalchemy as sa
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
-from ufo.audience import Audience, conversation_audience, foreign_room_audience, room_audience
+from ufo.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
+from ufo.ext.surface import conversation_name
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
 from ufo.loop.queue import _load_turn, _subagent_tools
@@ -1847,3 +1854,34 @@ async def test_a_capped_workspace_holds_the_result_rather_than_discarding_it(db:
     assert woken.status == "parked"
     assert woken.terminal is None
     assert "paid for" in woken.inbound
+
+
+async def test_a_spawned_run_is_called_the_words_it_was_spawned_with(
+    db: None, dbos_launched: Config
+) -> None:
+    """A run's conversation is named where it is opened, exactly as a member's thread is. The spawn
+    writes its own rows rather than going through admission, so a run named nowhere would list and
+    head itself as a nameless record and answer no search — the one thing a member has to go on when
+    they come looking for what an agent did."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+
+    spawned = await Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=SHARED_AUDIENCE,
+    ).spawn("research", {"task": "chase the warehouse rollout"}, background=True)
+
+    child, _, _ = await _load_turn(spawned.turn_id)
+    async with workspace_tx() as connection:
+        title = (
+            await connection.execute(
+                sa.select(tables.conversation.c.title).where(
+                    tables.conversation.c.id == child.conversation_id
+                )
+            )
+        ).scalar_one()
+
+    assert title
+    assert title == conversation_name(child.inbound)

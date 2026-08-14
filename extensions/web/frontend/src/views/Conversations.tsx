@@ -218,11 +218,6 @@ function WayOut({ out }: { out: { href: string; channel: string } }) {
   );
 }
 
-function matches(entry: Conversation, query: string, viewer: string | null): boolean {
-  const stated = [subject(entry, viewer), who(entry, viewer), origin(entry), ...entry.speakers];
-  return stated.join(" ").toLowerCase().includes(query.toLowerCase());
-}
-
 /** Every screen that lists conversations draws this one section — an agent's own and a subagent's
  *  runs alike — so a row reads the same wherever the member met it: the search on the bar, one
  *  row line per conversation, and the row itself as the control that opens it. The
@@ -234,35 +229,40 @@ function matches(entry: Conversation, query: string, viewer: string | null): boo
 export function ConversationList({
   rows,
   blank,
+  typed,
+  searched,
+  onType,
+  onSearch,
   onOpen,
   onDisclose,
 }: {
   rows: Conversation[];
   blank: string;
+  typed: string;
+  searched: string;
+  onType: (typed: string) => void;
+  onSearch: () => void;
   onOpen: (conversation: Conversation) => void;
   onDisclose?: (conversation: Conversation) => void;
 }) {
-  const [query, setQuery] = useState("");
   const viewer = useViewer();
-  const shown = rows.filter((entry) => matches(entry, query, viewer));
   return (
     <Section
       title="Conversations"
       bar={
-        <>
-          <Search
-            label="Search"
-            placeholder="Search"
-            className="w-(--container-control-row)"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </>
+        <Search
+          label="Search"
+          placeholder="Search"
+          className="w-(--container-control-row)"
+          value={typed}
+          onChange={(event) => onType(event.target.value)}
+          onSubmit={onSearch}
+        />
       }
     >
-      {shown.length ? (
+      {rows.length ? (
         <RowLines
-          rows={shown}
+          rows={rows}
           rowKey={(entry) => entry.id}
           primary={(entry) => subject(entry, viewer)}
           meta={(entry) => metaParts(entry, viewer)}
@@ -276,7 +276,7 @@ export function ConversationList({
           }
         />
       ) : (
-        <PanelBlank body={query ? "No conversation matches this search." : blank} />
+        <PanelBlank body={searched ? "No conversation matches this search." : blank} />
       )}
     </Section>
   );
@@ -292,8 +292,10 @@ export function Conversations({
   onPlace: (place: WorkspacePlace) => void;
 }) {
   const [disclosed, setDisclosed] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+  const [searched, setSearched] = useState("");
   const state = usePanelRead<{ conversations: Conversation[] }>(
-    "/agents/" + agent.id + "/conversations",
+    "/agents/" + agent.id + "/conversations" + (searched ? "?q=" + encodeURIComponent(searched) : ""),
   );
 
   const opened =
@@ -326,6 +328,10 @@ export function Conversations({
         <ConversationList
           rows={payload.conversations}
           blank={"No conversation with " + agent.name + " yet."}
+          typed={typed}
+          searched={searched}
+          onType={setTyped}
+          onSearch={() => setSearched(typed)}
           onOpen={(conversation) => onPlace({ open: conversation.id })}
           onDisclose={(conversation) => onPlace({ open: conversation.id })}
         />

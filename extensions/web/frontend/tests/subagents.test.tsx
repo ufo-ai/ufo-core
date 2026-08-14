@@ -217,8 +217,9 @@ test("the conversations tab lists this subagent's runs as rows that name the age
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
 });
 
-test("a search over the runs states that nothing matched", async () => {
+test("a search over the runs asks the server and states that nothing matched", async () => {
   wire({
+    "/subagents/deep_research/conversations?q=ops": () => json({ conversations: [] }),
     "/subagents/deep_research/conversations": () => json({ conversations: [RUN] }),
     "/subagents/deep_research/overview": () => json(OVERVIEW),
   });
@@ -226,9 +227,9 @@ test("a search over the runs states that nothing matched", async () => {
   portal({});
 
   const panel = within(await screen.findByTestId("panel"));
-  await userEvent.type(await panel.findByLabelText("Search"), "ops");
+  await userEvent.type(await panel.findByLabelText("Search"), "ops{Enter}");
 
-  expect(panel.getByText("No conversation matches this search.")).toBeTruthy();
+  expect(await panel.findByText("No conversation matches this search.")).toBeTruthy();
   expect(panel.queryByText("Find the filing deadline")).toBeNull();
 });
 

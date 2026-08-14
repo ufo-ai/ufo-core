@@ -24,7 +24,7 @@ privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
@@ -126,6 +126,7 @@ SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
 MAX_MEMORY_QUERY_CHARS = 500
+MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
@@ -367,12 +368,11 @@ def _chat_title(text: str, paths: tuple[str, ...]) -> str:
 
 class ChatRecord(BaseModel):
     """One conversation this surface opened, as its store row persists it: the (agent, member)
-    binding the chat gate checks and the title the rail shows. Validated at construction — a row
-    that fails to parse is a fault, never a silent "no chat"."""
+    binding the chat gate checks. Validated at construction — a row that fails to parse is a fault,
+    never a silent "no chat"."""
 
     agent_id: UUID
     email: str
-    title: str
 
 
 def _message_text(message: Message) -> str:
@@ -399,12 +399,11 @@ def _title_excerpt(messages: tuple[Message, ...]) -> str:
 
 async def summarize_chat_titles(ctx: ExtensionContext) -> None:
     """Retitle each newly opened chat from its opening exchange — the batch job behind the rail's
-    summary titles. The pending marker written at open is the whole state machine: the job fires
-    only in workspaces holding one, a marker whose conversation has answered is summarized and
-    deleted, and one whose conversation has not yet answered waits for the next tick. The rewrite
-    is a `put_if` against the row the summary was computed for, so a concurrent writer's newer row
-    is never overwritten, and the marker is deleted either way — a summary is written at most
-    once, and a failed compare keeps the title the concurrent writer stored."""
+    summary titles, naming the conversation over the opening words the turn that opened it named it
+    with. The pending marker written at open is the whole state machine: the job fires only in
+    workspaces holding one, a marker whose conversation has answered is summarized and deleted, and
+    one whose conversation has not yet answered waits for the next tick. The marker is deleted
+    whether or not the model wrote a name, so one conversation costs at most one summary."""
     pending = await ctx.store.list(CHAT_PENDING_PREFIX)
     if not pending:
         return
@@ -413,15 +412,13 @@ async def summarize_chat_titles(ctx: ExtensionContext) -> None:
     trajectories = {t.conversation_id: t for t in await ctx.corpus.trajectories()}
     for key, _ in pending:
         conversation_id = UUID(key.removeprefix(CHAT_PENDING_PREFIX))
-        stored = await ctx.store.get(_chat_row_key(conversation_id))
-        if stored is None:
+        if await ctx.store.get(_chat_row_key(conversation_id)) is None:
             await ctx.store.delete(key)
             continue
         trajectory = trajectories.get(conversation_id)
         excerpt = "" if trajectory is None else _title_excerpt(trajectory.messages)
         if not excerpt:
             continue
-        record = ChatRecord.model_validate(stored)
         summary = _chat_title(
             await ctx.model.complete(
                 ModelRequest(
@@ -434,12 +431,7 @@ async def summarize_chat_titles(ctx: ExtensionContext) -> None:
             ),
             (),
         )
-        if summary:
-            await ctx.store.put_if(
-                _chat_row_key(conversation_id),
-                record.model_copy(update={"title": summary}).model_dump(mode="json"),
-                stored,
-            )
+        await ctx.retitle_conversation(conversation_id, summary)
         await ctx.store.delete(key)
 
 
@@ -456,24 +448,38 @@ async def _open_conversation(
     """Open a conversation under `queue_key`, its chat row written first, keyed by the id the
     conversation is then created with — a crash between the two leaves an inert row, never a
     conversation the rail must carry rowless. A lost creation race on the queue key lands on the
-    surviving conversation, whose winner wrote its row."""
+    surviving conversation, whose winner wrote its row and named it.
+
+    What the conversation is called is core's, so the opening turn names it and the rail, the index
+    and this reply all read the one string. The chat row is the (agent, member) binding this
+    surface gates its own chat on, and holds nothing a listing states."""
     title = _chat_title(text, paths)
     minted = uuid4()
     await store.put(
         _chat_row_key(minted),
-        ChatRecord(agent_id=agent_id, email=email, title=title).model_dump(mode="json"),
+        ChatRecord(agent_id=agent_id, email=email).model_dump(mode="json"),
     )
     conversation_id = await ctx.conversation_for(
         queue_key, conversation_audience(member_id), agent_id=agent_id, conversation_id=minted
     )
     if conversation_id != minted:
         await store.delete(_chat_row_key(minted))
-        record = await _own_chat(store, agent_id, email, conversation_id)
-        if record is None:
+        if await _own_chat(store, agent_id, email, conversation_id) is None:
             raise RuntimeError(f"conversation {conversation_id} has no chat row")
-        return conversation_id, record.title
+        return conversation_id, await _named(ctx, agent_id, member_id, conversation_id)
+    await ctx.retitle_conversation(conversation_id, title)
     await store.put(f"{CHAT_PENDING_PREFIX}{minted}", {})
     return conversation_id, title
+
+
+async def _named(
+    ctx: SurfaceContext, agent_id: UUID, member_id: UUID, conversation_id: UUID
+) -> str:
+    """What one conversation is called, off the read every listing takes it from."""
+    listed = await ctx.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
+    )
+    return listed[0].title if listed else ""
 
 
 async def _own_chat(
@@ -751,10 +757,9 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
             conversation_id = UUID(requested)
         except ValueError:
             return Response("no such conversation", status_code=404)
-        record = await _own_chat(store, agent_id, email, conversation_id)
-        if record is None:
+        if await _own_chat(store, agent_id, email, conversation_id) is None:
             return Response("no such conversation", status_code=404)
-        title = record.title
+        title = await _named(ctx, agent_id, member_id, conversation_id)
     if stop is not None:
         try:
             stopped = await ctx.stop_turn(conversation_id, stop)
@@ -1248,20 +1253,18 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
             )
             records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
             for entry in listed:
-                value = records.get(_chat_row_key(entry.summary.id))
-                if value is None:
-                    if entry.summary.surface == SURFACE_WEB or not entry.readable:
-                        continue
-                    title = _chat_title(entry.opening_message, ())
-                else:
-                    title = ChatRecord.model_validate(value).title
+                bound = records.get(_chat_row_key(entry.summary.id))
+                if bound is not None:
+                    ChatRecord.model_validate(bound)
+                elif entry.summary.surface == SURFACE_WEB or not entry.readable:
+                    continue
                 speakers = [who.sender or who.email for who in entry.speakers]
                 rows.append(
                     {
                         "conversation_id": str(entry.summary.id),
                         "agent_id": str(agent.id),
                         "agent_name": agent.name,
-                        "title": title,
+                        "title": entry.title,
                         "mine": participation == "mine",
                         "speaker": (
                             None if participation == "mine" or not speakers else speakers[0]
@@ -1299,8 +1302,7 @@ async def _resolve_chat(
     except ValueError:
         return JSONResponse({"chats": []})
     for agent in audience.agents:
-        record = await _own_chat(store, agent.id, email, named)
-        if record is None:
+        if await _own_chat(store, agent.id, email, named) is None:
             continue
         latest = await ctx.latest_turn(named)
         if latest is None:
@@ -1315,7 +1317,7 @@ async def _resolve_chat(
                         "conversation_id": str(named),
                         "agent_id": str(agent.id),
                         "agent_name": agent.name,
-                        "title": record.title,
+                        "title": await _named(ctx, agent.id, member_id, named),
                         "mine": True,
                         "speaker": None,
                         "last_at": _iso(detail.turn.created_at),
@@ -1336,14 +1338,11 @@ async def _resolve_chat(
     )
     if not listed:
         return JSONResponse({"chats": []})
-    titles = await _chat_titles(store, listed)
     return JSONResponse(
         {
             "chats": [],
             "conversation": _conversation_row(
-                listed[0],
-                titles.get(listed[0].summary.id),
-                {"id": str(target_agent.id), "name": target_agent.name},
+                listed[0], {"id": str(target_agent.id), "name": target_agent.name}
             ),
         }
     )
@@ -1671,47 +1670,38 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     ones, every one of the agent's for an admin. Each says whether its content reads now and
     whether an admin may disclose it to themselves by acknowledging. Recorded disclosures are not
     here and no portal read lists them: that record is the operator's, read with
-    `ufoctl transcript-reads`."""
+    `ufoctl transcript-reads`.
+
+    `q` narrows the read itself rather than the page it returns, so a member searching for a
+    conversation older than the bound finds it."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, _email, audience, agent_id = gated
     listed = await ctx.list_agent_conversations(
-        agent_id, member_id, admin=audience.admin, limit=CONVERSATION_LIST_LIMIT
+        agent_id,
+        member_id,
+        admin=audience.admin,
+        limit=CONVERSATION_LIST_LIMIT,
+        search=_searched(request),
     )
-    titles = await _chat_titles(web_extension().store, listed)
-    return JSONResponse(
-        {
-            "conversations": [
-                _conversation_row(entry, titles.get(entry.summary.id)) for entry in listed
-            ]
-        }
-    )
+    return JSONResponse({"conversations": [_conversation_row(entry) for entry in listed]})
 
 
-async def _chat_titles(store: ScopedStore, listed: Sequence[ListedConversation]) -> dict[UUID, str]:
-    """The rail's own label for each listed conversation this surface opened, read in one go. A
-    conversation another surface holds carries no chat row, and one this viewer may not read is
-    not asked for: its label is cut from its first message, which is content the row withholds."""
-    keys = {entry.summary.id: _chat_row_key(entry.summary.id) for entry in listed if entry.readable}
-    records = await store.get_many(list(keys.values()))
-    titles: dict[UUID, str] = {}
-    for conversation_id, key in keys.items():
-        value = records.get(key)
-        if value is not None:
-            titles[conversation_id] = ChatRecord.model_validate(value).title
-    return titles
+def _searched(request: Request) -> str | None:
+    """What the member typed into a listing's search box, or None where the box is empty. Bounded
+    beside the query it reaches, because it is a member's string on a read this surface runs."""
+    typed = request.query_params.get("q", "").strip()[:MAX_SEARCH_CHARS]
+    return typed or None
 
 
 def _conversation_row(
-    entry: ListedConversation, title: str | None, agent: dict[str, str] | None = None
+    entry: ListedConversation, agent: dict[str, str] | None = None
 ) -> dict[str, object]:
-    """One conversation as the panel lists it. `description` is what the conversation is called:
-    the title this surface stored when it opened the chat — the same string the rail shows, so an
-    index row and a rail row never name one conversation two ways — else that same cut taken from
-    the words that opened it, which is how a conversation another surface holds gets a name at
-    all. A row this viewer may not read carries neither a description nor a speaker: core withholds
-    the content, and the title of a chat it did not open is that content by another route.
+    """One conversation as the panel lists it. `description` is what the conversation is called —
+    the one string the rail row, this row and the record's own heading all read, so no screen names
+    one conversation two ways. A row this viewer may not read carries neither a description nor a
+    speaker: what a conversation is called is content, and core withholds it with the rest.
 
     `agent` names the owner of a row read across every agent, and is null for a read taken inside
     one agent's namespace, where the pane names it once instead of every row naming it again.
@@ -1728,7 +1718,7 @@ def _conversation_row(
         "surface_label": entry.surface_label,
         "audience": entry.audience,
         "member_email": entry.summary.member_email,
-        "description": (title or _chat_title(entry.opening_message, ())) if entry.readable else "",
+        "description": entry.title,
         "source": entry.source,
         "speakers": [who.sender or who.email for who in entry.speakers],
         "turn_count": entry.summary.turn_count,
@@ -2153,7 +2143,8 @@ async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Respo
     """The conversations this profile ran in, under the agents this viewer's audience reaches — the
     children of their own requests and of the workspace-shared ones, every one for an admin. A
     spawn copies the spawning conversation's audience onto the child, so whose work a member sees
-    is the parent's answer."""
+    is the parent's answer. `q` narrows the read the same way an agent's own conversations read
+    narrows: ahead of the bound, so a run older than it is still reachable by name."""
     gated = await _subagent_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -2164,6 +2155,7 @@ async def subagent_conversations(ctx: SurfaceContext, request: Request) -> Respo
         _reachable_agents(audience),
         admin=audience.admin,
         limit=CONVERSATION_LIST_LIMIT,
+        search=_searched(request),
     )
     return JSONResponse({"conversations": [_subagent_run_row(run) for run in listed]})
 
@@ -2172,9 +2164,7 @@ def _subagent_run_row(run: SubagentRun) -> dict[str, object]:
     """One subagent run as both its listing row and the header its own page titles with — the same
     conversation row every other portal index draws, naming the agent that ran it because this read
     spans every agent the viewer reaches."""
-    return _conversation_row(
-        run.conversation, None, {"id": str(run.agent_id), "name": run.agent_name}
-    )
+    return _conversation_row(run.conversation, {"id": str(run.agent_id), "name": run.agent_name})
 
 
 async def subagent_conversation(ctx: SurfaceContext, request: Request) -> Response:

@@ -420,8 +420,36 @@ AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
 LIST_CONVERSATIONS_LIMIT = 200
 LIST_TURNS_LIMIT = 500
 TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
-OPENING_MESSAGE_CHARS = 240
+CONVERSATION_TITLE_CHARS = 240
 MAX_CONVERSATION_SPEAKERS = 8
+
+
+def conversation_name(inbound: str) -> str:
+    """What a conversation is called when the turn that opens it names it: the member's own words
+    out of the fence — the ambient digest a channel surface wraps them in is not what the
+    conversation is about — bounded. Every path that opens a conversation names it through this,
+    so a run spawned by an agent and a thread opened by a member are named the same way."""
+    return member_message_text(inbound).strip()[:CONVERSATION_TITLE_CHARS]
+
+
+async def retitle_conversation(workspace_id: UUID, conversation_id: UUID, title: str) -> None:
+    """Name a conversation what the surface holding it now calls it — the string every listing row,
+    rail row and record header states, and the one a search narrows on. The turn that opens a
+    conversation names it from the words it opened with; this is how a surface that has since
+    written a better name says so. A blank name is not one and leaves the conversation called what
+    it was; an id naming no conversation of this workspace writes nothing."""
+    named = title.strip()[:CONVERSATION_TITLE_CHARS]
+    if not named:
+        return
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.id == conversation_id,
+            )
+            .values(title=named)
+        )
 
 
 class AgentSummary(BaseModel):
@@ -796,9 +824,9 @@ class ListedConversation(BaseModel):
     `audience` and `surface_label` travel as the conversation row stores them — the portal maps
     them to member words.
 
-    `opening_message` is the member's own words out of the first turn's inbound — the ambient
-    digest a channel surface renders around them is not what the conversation is about — capped at
-    `OPENING_MESSAGE_CHARS`, and empty for a conversation no member opened. `source` is that same
+    `title` is what the conversation is called: the member's own opening words as the turn that
+    opened it stored them — the ambient digest a channel surface renders around them is not what
+    the conversation is about — or whatever a surface has since named it. `source` is the first
     turn's `TurnContext.source`: the link the admitting surface reported for the message that
     opened the conversation, which for Slack is the permalink of its first message, so a screen
     reading the conversation leads back to the thread it came in on. It is None where the surface
@@ -816,21 +844,9 @@ class ListedConversation(BaseModel):
     surface_label: str | None
     readable: bool
     disclosable: bool
-    opening_message: str
+    title: str
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
-
-
-@dataclass(frozen=True)
-class ConversationOpening:
-    """The first turn of a conversation as a listing row reads it: the member's own opening words
-    and the source the admitting surface reported for them, off the one row that holds both."""
-
-    message: str
-    source: str | None
-
-
-UNOPENED = ConversationOpening(message="", source=None)
 
 
 class SubagentRun(BaseModel):
@@ -1410,6 +1426,11 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if found is None else found.agent_id
+
+    async def retitle_conversation(self, conversation_id: UUID, title: str) -> None:
+        """Name a conversation this surface holds — what it calls the conversation on its own rows,
+        replacing the words the opening turn named it with."""
+        await retitle_conversation(self.workspace_id, conversation_id, title)
 
     async def conversation_for(
         self,
@@ -2524,6 +2545,7 @@ class SurfaceContext:
         surface: str | None = None,
         conversation_id: UUID | None = None,
         participation: Literal["mine", "others"] | None = None,
+        search: str | None = None,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
@@ -2559,6 +2581,7 @@ class SurfaceContext:
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
                 tables.conversation.c.surface_label,
+                tables.conversation.c.title,
                 tables.member.c.email,
                 tables.conversation.c.created_at,
                 activity.c.turn_count,
@@ -2592,13 +2615,15 @@ class SurfaceContext:
                 pass
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        if search:
+            query = query.where(self._matches(search, member_id))
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         if not rows:
             return ()
         readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
-        openings = await self._conversation_openings(content)
+        sources = await self._conversation_sources(content)
         speakers = await self._conversation_speakers(content)
         mine = str(conversation_audience(member_id))
         return tuple(
@@ -2618,8 +2643,8 @@ class SurfaceContext:
                 disclosable=admin
                 and row.audience != mine
                 and audience_member(parse_audience(row.audience)) is not None,
-                opening_message=openings.get(row.id, UNOPENED).message,
-                source=openings.get(row.id, UNOPENED).source,
+                title=row.title or "" if row.audience in readable else "",
+                source=sources.get(row.id),
                 speakers=speakers.get(row.id, ()),
             )
             for row in rows
@@ -2672,9 +2697,38 @@ class SurfaceContext:
             self._spoken(None),
         )
 
-    async def _conversation_openings(
-        self, listed: Sequence[UUID]
-    ) -> dict[UUID, ConversationOpening]:
+    def _matches(self, search: str, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether a conversation answers to `search`. It narrows in the query, ahead of the bound,
+        because a term applied after one is a filter over the page the bound already cut — the
+        conversation the member is looking for is the one that fell off it.
+
+        What a row states about itself is matched for whoever may list it: the origin the surface
+        named, and the member it belongs to. What the conversation holds — what it is called, and
+        who has spoken in it — is matched only where this member may read that content, the same
+        gate `readable` puts on carrying it. Otherwise an admin's search would answer which words
+        stand in another member's private thread, which reading it would have audited."""
+        speaker = tables.member.alias("search_speaker")
+        spoke = (
+            sa.select(sa.literal(1))
+            .select_from(tables.turn.join(speaker, speaker.c.id == tables.turn.c.speaker_member_id))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                speaker.c.email.icontains(search, autoescape=True),
+            )
+            .correlate(tables.conversation)
+            .exists()
+        )
+        return sa.or_(
+            tables.conversation.c.surface_label.icontains(search, autoescape=True),
+            tables.member.c.email.icontains(search, autoescape=True),
+            sa.and_(
+                tables.conversation.c.audience.in_(readable_audiences(member_id)),
+                sa.or_(tables.conversation.c.title.icontains(search, autoescape=True), spoke),
+            ),
+        )
+
+    async def _conversation_sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]:
         if not listed:
             return {}
         opening = (
@@ -2690,7 +2744,7 @@ class SurfaceContext:
             .subquery()
         )
         query = (
-            sa.select(tables.turn.c.conversation_id, tables.turn.c.inbound, tables.turn.c.context)
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.context)
             .select_from(
                 tables.turn.join(
                     opening,
@@ -2705,11 +2759,8 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
-            row.conversation_id: ConversationOpening(
-                message=member_message_text(row.inbound)[:OPENING_MESSAGE_CHARS],
-                source=(
-                    None if row.context is None else TurnContext.model_validate(row.context).source
-                ),
+            row.conversation_id: (
+                None if row.context is None else TurnContext.model_validate(row.context).source
             )
             for row in rows
         }
@@ -2828,7 +2879,14 @@ class SurfaceContext:
         return None if value is None else parse_audience(value)
 
     async def list_subagent_conversations(
-        self, profile: str, member_id: UUID, agent_ids: frozenset[UUID], *, admin: bool, limit: int
+        self,
+        profile: str,
+        member_id: UUID,
+        agent_ids: frozenset[UUID],
+        *,
+        admin: bool,
+        limit: int,
+        search: str | None = None,
     ) -> tuple[SubagentRun, ...]:
         """Every conversation one subagent profile ran in, newest activity first and bounded — the
         per-profile view of the work `list_agent_conversations` deliberately withholds, where that
@@ -2859,6 +2917,7 @@ class SurfaceContext:
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
                 tables.conversation.c.surface_label,
+                tables.conversation.c.title,
                 tables.conversation.c.created_at,
                 tables.conversation.c.agent_id,
                 tables.agent.c.name.label("agent_name"),
@@ -2883,13 +2942,15 @@ class SurfaceContext:
         )
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        if search:
+            query = query.where(self._matches(search, member_id))
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         if not rows:
             return ()
         readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
-        openings = await self._conversation_openings(content)
+        sources = await self._conversation_sources(content)
         speakers = await self._conversation_speakers(content)
         return tuple(
             SubagentRun(
@@ -2907,8 +2968,8 @@ class SurfaceContext:
                     surface_label=row.surface_label,
                     readable=row.audience in readable,
                     disclosable=False,
-                    opening_message=openings.get(row.id, UNOPENED).message,
-                    source=openings.get(row.id, UNOPENED).source,
+                    title=row.title or "" if row.audience in readable else "",
+                    source=sources.get(row.id),
                     speakers=speakers.get(row.id, ()),
                 ),
                 agent_id=row.agent_id,
@@ -2947,6 +3008,7 @@ class SurfaceContext:
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
                 tables.conversation.c.surface_label,
+                tables.conversation.c.title,
                 tables.conversation.c.created_at,
                 tables.agent.c.name.label("agent_name"),
                 tables.member.c.email,
@@ -2973,6 +3035,7 @@ class SurfaceContext:
                 tables.conversation.c.queue_key,
                 tables.conversation.c.audience,
                 tables.conversation.c.surface_label,
+                tables.conversation.c.title,
                 tables.conversation.c.created_at,
                 tables.agent.c.name,
                 tables.member.c.email,
@@ -3010,7 +3073,7 @@ class SurfaceContext:
             )
         if not authorized:
             return None
-        openings = await self._conversation_openings([conversation_id])
+        sources = await self._conversation_sources([conversation_id])
         speakers = await self._conversation_speakers([conversation_id])
         return SubagentRun(
             conversation=ListedConversation(
@@ -3027,8 +3090,8 @@ class SurfaceContext:
                 surface_label=found.surface_label,
                 readable=True,
                 disclosable=False,
-                opening_message=openings.get(conversation_id, UNOPENED).message,
-                source=openings.get(conversation_id, UNOPENED).source,
+                title=found.title or "",
+                source=sources.get(conversation_id),
                 speakers=speakers.get(conversation_id, ()),
             ),
             agent_id=found.agent_id,

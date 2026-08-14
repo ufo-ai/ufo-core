@@ -46,6 +46,7 @@ from ufo.ext.surface import (
     TERMINAL_TURN_STATUSES,
     SurfaceInstallationAccess,
     TurnTailer,
+    retitle_conversation,
 )
 from ufo.governance import Governance, prompt_digest
 from ufo.hub import LiveFrame
@@ -809,6 +810,11 @@ class ExtensionContext:
     @property
     def workspace_id(self) -> UUID:
         return self.store.workspace_id
+
+    async def retitle_conversation(self, conversation_id: UUID, title: str) -> None:
+        """Name a conversation of this workspace — what a job that reads a conversation and writes
+        a better name for it than its opening words calls the result."""
+        await retitle_conversation(self.workspace_id, conversation_id, title)
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new

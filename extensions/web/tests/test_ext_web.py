@@ -90,7 +90,9 @@ from ufo.ext.context import ScopedStore, context_for
 from ufo.ext.loader import member_object_registry, skill_registry, turn_runtime_skills
 from ufo.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
+    CONVERSATION_TITLE_CHARS,
     fence_member_message,
+    member_message_text,
     mint_marker,
     record_transcript_access,
 )
@@ -3922,7 +3924,7 @@ async def test_a_malformed_chat_row_is_a_fault_not_a_missing_conversation(
                 tables.ext_store.c.extension == "web",
                 tables.ext_store.c.key == f"chat/{conversation_id}",
             )
-            .values(value={"agent_id": "not-a-uuid", "title": 7})
+            .values(value={"agent_id": "not-a-uuid", "email": 7})
         )
     with pytest.raises(ValidationError):
         await client.post(
@@ -4463,6 +4465,7 @@ async def _seed_web_turn(
                 surface="web",
                 queue_key=f"{agent_id}/{email}/{uuid4().hex}",
                 member_id=member_id,
+                title=title,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -4472,7 +4475,7 @@ async def _seed_web_turn(
                 workspace_id=workspace_id,
                 extension="web",
                 key=f"chat/{conversation_id}",
-                value={"agent_id": str(agent_id), "email": email, "title": title},
+                value={"agent_id": str(agent_id), "email": email},
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -7227,6 +7230,14 @@ async def _seed_listed_turn(
                 updated_at=sa.func.now(),
             )
         )
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.title.is_(None),
+            )
+            .values(title=member_message_text(inbound).strip()[:CONVERSATION_TITLE_CHARS])
+        )
     return turn_id
 
 
@@ -7361,9 +7372,8 @@ async def test_a_slack_conversation_row_states_the_thread_it_came_in_on(
 async def test_a_web_conversation_is_described_by_the_title_the_rail_shows(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """One conversation is named one way wherever the member meets it. A chat this surface opened
-    already carries the rail's title in its own store row, so the panel states that string rather
-    than re-cutting the first message and drifting from the row beside it."""
+    """One conversation is named one way wherever the member meets it: the panel and the rail read
+    the one string the conversation carries, so neither can drift from the other."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "m@example.com")
     conversation_id, _turn_id = await _seed_web_turn(
@@ -7384,6 +7394,41 @@ async def test_a_web_conversation_is_described_by_the_title_the_rail_shows(
     assert [row["id"] for row in rows] == [str(conversation_id)]
     assert rows[0]["description"] == "Rename the deploy job"
     assert rows[0]["speakers"] == ["m@example.com"]
+
+
+async def test_the_conversations_search_narrows_the_read_not_the_page(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """`q` reaches the query the bound is applied to, so a conversation the member searches for is
+    found by what it is called whether or not it would have stood on the unsearched page."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    wanted, _turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="Rename the deploy job",
+    )
+    await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="Order more coffee",
+    )
+    path = f"/surface/web/agents/{agent_id}/conversations"
+
+    everything = await client.get(path, headers=cookie)
+    matched = await client.get(path + "?q=DEPLOY", headers=cookie)
+    unmatched = await client.get(path + "?q=nothing%20here", headers=cookie)
+
+    assert len({row["id"] for row in everything.json()["conversations"]}) == 2
+    assert [row["id"] for row in matched.json()["conversations"]] == [str(wanted)]
+    assert unmatched.json()["conversations"] == []
 
 
 async def test_an_unreadable_conversation_states_no_words_and_no_speakers(

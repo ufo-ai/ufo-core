@@ -49,7 +49,7 @@ from opentelemetry.trace import SpanKind
 
 from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
-from ufo.ext.surface import Admitted
+from ufo.ext.surface import Admitted, conversation_name
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -574,6 +574,15 @@ class Admission:
                         created_at=admitted_at if admitted_at is not None else sa.func.now(),
                         updated_at=sa.func.now(),
                     )
+                )
+                await connection.execute(
+                    sa.update(tables.conversation)
+                    .where(
+                        tables.conversation.c.workspace_id == workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.title.is_(None),
+                    )
+                    .values(title=conversation_name(body))
                 )
                 if conversation.surface in self.durable_surfaces:
                     await connection.execute(

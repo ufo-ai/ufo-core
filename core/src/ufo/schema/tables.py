@@ -109,6 +109,7 @@ conversation = sa.Table(
     sa.Column("surface", sa.Text, nullable=False),
     sa.Column("queue_key", sa.Text, nullable=False),
     sa.Column("surface_label", sa.Text, nullable=True),
+    sa.Column("title", sa.Text, nullable=True),
     sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column(
         "audience",

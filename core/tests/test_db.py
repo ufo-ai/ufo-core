@@ -424,6 +424,22 @@ def _core_migration_head() -> str:
     return head
 
 
+def _reached(stamped: set[str]) -> set[str]:
+    """Every revision a stamped database has run, which is what the stamp names plus everything
+    those revisions reach. A revision another head declares a dependency on is not stamped
+    separately — alembic records the head that absorbs it — so a chain is read as applied through
+    whatever depends on it, never by looking for its own row."""
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    scripts = ScriptDirectory.from_config(config)
+    return {revision.revision for revision in scripts.iterate_revisions(stamped, "base")}
+
+
 def test_apply_migrations_rejects_duplicate_revision_ids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -472,7 +488,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "coding_0003",
         "eval_env_0001",
         "sites_0002",
-        "web_0001",
+        "web_0002",
     } <= set(heads)
     assert len(heads) == 14
 
@@ -511,7 +527,7 @@ def test_one_memory_surface_advances_both_old_heads(tmp_path: Path, graph_instal
             row[0] for row in connection.execute("select version_num from alembic_version")
         }
     assert not {"graph_entity", "graph_edge"} & tables
-    assert _core_migration_head() in revisions
+    assert _core_migration_head() in _reached(revisions)
     assert "knowledge_graph_0001" not in revisions
 
 
@@ -2354,3 +2370,63 @@ def test_the_pause_migration_takes_its_rows_with_the_columns(tmp_path: Path) -> 
     assert not {"origin_seq", "resume_turn_id"} & columns
     assert "scheduled_task_pause" not in indexes
     assert "scheduled_task_due" in indexes
+
+
+def test_the_conversation_title_backfill_names_every_conversation_that_has_spoken(
+    tmp_path: Path,
+) -> None:
+    """0086 gives every existing conversation the name its listing row already showed: the member's
+    own words out of the first turn, unfenced — the ambient digest a channel surface wrapped them
+    in is not what the conversation is about — and cut to the same bound. A conversation no turn
+    has opened has nothing to be called and stays unnamed, which is what its row already said."""
+    database_path = tmp_path / "conversation-title.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("version_locations", str(MIGRATIONS_DIR / "versions"))
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "0085")
+    workspace_id, agent_id = uuid4(), uuid4()
+    spoke, quiet = uuid4(), uuid4()
+    now = datetime(2026, 8, 14, tzinfo=UTC).isoformat()
+    marker = "0f1e2d3c"
+    fenced = (
+        "<ambient_context_"
+        + marker
+        + ">\na bystander said something\n</ambient_context_"
+        + marker
+        + ">\n<member_message_"
+        + marker
+        + ">\nroll the warehouse plan forward\n</member_message_"
+        + marker
+        + ">"
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+            "updated_at) values (?, ?, 'assistant', 'p', 'auto', 1, ?, ?)",
+            (agent_id.hex, workspace_id.hex, now, now),
+        )
+        for index, conversation_id in enumerate((spoke, quiet)):
+            connection.execute(
+                "insert into conversation (id, workspace_id, agent_id, surface, queue_key, "
+                "created_at, updated_at) values (?, ?, ?, 'slack', ?, ?, ?)",
+                (conversation_id.hex, workspace_id.hex, agent_id.hex, f"c{index}", now, now),
+            )
+        for seq, inbound in ((1, fenced), (2, "and one more thing")):
+            connection.execute(
+                "insert into turn (id, workspace_id, conversation_id, agent_id, seq, status, "
+                "inbound, created_at, updated_at) values (?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                (uuid4().hex, workspace_id.hex, spoke.hex, agent_id.hex, seq, inbound, now, now),
+            )
+    command.upgrade(config, "0086")
+    with sqlite3.connect(database_path) as connection:
+        titles = dict(connection.execute("select id, title from conversation").fetchall())
+
+    assert titles[spoke.hex] == "roll the warehouse plan forward"
+    assert titles[quiet.hex] is None

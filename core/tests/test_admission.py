@@ -9,7 +9,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from ufo import o11y
 from ufo.db import workspace_tx
-from ufo.ext.surface import Admitted
+from ufo.ext.surface import Admitted, fence_member_message, mint_marker
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, TurnContext
@@ -150,6 +150,45 @@ async def test_repeated_delivery_dedups_to_one_turn(db: None) -> None:
     assert await _turn_count(conversation_id) == 1
     assert dbos.enqueued == [str(first), str(first)]
     assert dbos.workflow_ids == [str(first), str(first)]
+
+
+async def test_the_opening_turn_names_the_conversation_and_no_later_one_renames_it(
+    db: None,
+) -> None:
+    """A conversation is called what its first message said — the member's own words out of the
+    fence, never the ambient digest a channel surface renders around them. Every later message
+    leaves that name standing: a rail row that renamed itself on each reply would name a
+    conversation something its member never chose."""
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    marker = mint_marker()
+    opened = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        fence_member_message(
+            marker,
+            "<ambient>a bystander said something</ambient>\n",
+            "roll the warehouse plan forward",
+            "",
+        ),
+        "C0000001:1.5",
+    )
+    await _finish(opened)
+    await admission.invoke(
+        workspace_id, conversation_id, agent_id, "and one more thing", "C0000001:2.0"
+    )
+
+    async with workspace_tx() as connection:
+        title = (
+            await connection.execute(
+                sa.select(tables.conversation.c.title).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+
+    assert title == "roll the warehouse plan forward"
 
 
 async def test_idempotency_key_keeps_the_first_body(db: None) -> None:

@@ -1239,3 +1239,41 @@ test("every container that stacks bands states the one gap between them", async 
   const page = panel.parentElement;
   expect(page?.className).toContain("gap-6xl");
 });
+
+test("an agent's conversation search asks the server rather than the rows on the page", async () => {
+  const kept = "5c0be3aa-0000-4000-8000-000000000009";
+  const row = (id: string, description: string) => ({
+    id,
+    surface: "web",
+    surface_label: null,
+    audience: "shared",
+    member_email: null,
+    description,
+    speakers: [],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: null,
+    readable: true,
+    disclosable: false,
+  });
+  const { calls } = wire({
+    "/conversations?q=deploy": () => json({ conversations: [row(kept, "Rename the deploy job")] }),
+    "/conversations": () =>
+      json({
+        conversations: [
+          row(kept, "Rename the deploy job"),
+          row("5c0be3aa-0000-4000-8000-000000000010", "Order more coffee"),
+        ],
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/conversations";
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Order more coffee")).toBeTruthy();
+  await userEvent.type(await screen.findByLabelText("Search"), "deploy{Enter}");
+
+  expect(await screen.findByText("Rename the deploy job")).toBeTruthy();
+  expect(screen.queryByText("Order more coffee")).toBeNull();
+  expect(calls.some((url) => url.includes("/conversations?q=deploy"))).toBe(true);
+});

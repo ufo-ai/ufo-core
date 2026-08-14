@@ -25,6 +25,7 @@ from ufo.cancellation import cancel_one_turn
 from ufo.db import workspace_tx
 from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
+from ufo.ext.surface import conversation_name
 from ufo.loop.prompts.render import (
     CITATION_BLOCK,
     CITATION_SLOT,
@@ -476,6 +477,7 @@ class Subagents:
                     queue_key=str(turn_id),
                     member_id=audience_member(self.audience),
                     audience=str(self.audience),
+                    title=conversation_name(inbound),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

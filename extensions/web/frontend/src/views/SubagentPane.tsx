@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
@@ -172,8 +174,12 @@ function SubagentConversations({
   conversationId?: string;
   rootConversationId?: string;
 }) {
+  const [typed, setTyped] = useState("");
+  const [searched, setSearched] = useState("");
   const state = usePanelRead<{ conversations: Conversation[] }>(
-    conversationId ? null : base + "/conversations",
+    conversationId
+      ? null
+      : base + "/conversations" + (searched ? "?q=" + encodeURIComponent(searched) : ""),
   );
 
   if (conversationId) {
@@ -192,6 +198,10 @@ function SubagentConversations({
         <ConversationList
           rows={payload.conversations}
           blank="No conversation this subagent ran is shared with you."
+          typed={typed}
+          searched={searched}
+          onType={setTyped}
+          onSearch={() => setSearched(typed)}
           onOpen={(conversation) => {
             location.hash = subagentConversationHash(name, conversation.id);
           }}
