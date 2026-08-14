@@ -24,6 +24,7 @@ import {
 } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
+const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "assets", "brand");
 
 const builtStyles = () => {
   const page = readFileSync(join(STATIC, "index.html"), "utf8");
@@ -307,13 +308,17 @@ test("the wordmark is the drawn ufo mark in the sidebar", async () => {
   expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
 });
 
-test("the favicon contains only the square brand mark", () => {
+test("the favicons use the exact light and dark brand marks", () => {
   const page = readFileSync(join(STATIC, "index.html"), "utf8");
-  const asset = /rel="icon" href="\/surface\/web\/static\/(assets\/ufo-mark-[^"]+\.svg)"/.exec(page);
-  if (!asset) throw new Error("the built page references no brand mark favicon");
-  const favicon = readFileSync(join(STATIC, asset[1]), "utf8");
-  expect(favicon).toContain('viewBox="0 0 46 46"');
-  expect(favicon.match(/<path /g)).toHaveLength(3);
+  const light = /href="\/surface\/web\/static\/(assets\/ufo-mark-[^"]+\.svg)"[^>]+media="\(prefers-color-scheme: light\)"/.exec(page);
+  const dark = /href="\/surface\/web\/static\/(assets\/ufo-mark-on-dark-[^"]+\.svg)"[^>]+media="\(prefers-color-scheme: dark\)"/.exec(page);
+  if (!light || !dark) throw new Error("the built page references no light and dark favicons");
+  expect(readFileSync(join(STATIC, light[1]), "utf8")).toBe(
+    readFileSync(join(BRAND, "ufo-mark.svg"), "utf8"),
+  );
+  expect(readFileSync(join(STATIC, dark[1]), "utf8")).toBe(
+    readFileSync(join(BRAND, "ufo-mark-on-dark.svg"), "utf8"),
+  );
 });
 
 test("a field shows the member that it is disabled, or that they left it invalid", () => {

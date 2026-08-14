@@ -4,6 +4,14 @@ import { DatabaseSync } from "node:sqlite";
 
 const moduleDir = new URL(".", import.meta.url);
 const landingTemplate = await readFile(new URL("landing.html", moduleDir), "utf8");
+export const FAVICON_SVG = await readFile(
+  new URL("../../../assets/brand/ufo-mark.svg", moduleDir),
+  "utf8",
+);
+export const FAVICON_DARK_SVG = await readFile(
+  new URL("../../../assets/brand/ufo-mark-on-dark.svg", moduleDir),
+  "utf8",
+);
 const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
 export const landingPage = (hostname) => landingTemplate.replaceAll("__HOSTNAME__", hostname);
 export const LANDING_PAGE = landingPage("flyingobject.ai");
@@ -23,6 +31,8 @@ export async function importWorker(tag, hostname = "flyingobject.ai") {
       '"__LANDING_HTML__"',
       JSON.stringify(landingPage(hostname)),
     )
+    .replace('"__FAVICON_SVG__"', JSON.stringify(FAVICON_SVG))
+    .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))
     .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE))
     .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));

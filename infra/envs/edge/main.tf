@@ -2,6 +2,11 @@ data "cloudflare_zone" "flyingobject_ai" {
   filter = { name = "flyingobject.ai" }
 }
 
+locals {
+  favicon_svg      = file("${path.root}/../../../assets/brand/ufo-mark.svg")
+  favicon_dark_svg = file("${path.root}/../../../assets/brand/ufo-mark-on-dark.svg")
+}
+
 # `curl flyingobject.ai` must answer with the card, not a 301: the zone-wide Always Use HTTPS
 # redirect fires before worker routes, so it moves here as a redirect rule that exempts the two
 # apexes' `/` (the worker serves CLI clients over plain http and bounces browsers to https
@@ -42,19 +47,23 @@ resource "cloudflare_zone_setting" "always_use_https" {
 module "prod" {
   source = "../../modules/edge"
 
-  name        = "ufo-edge"
-  hostname    = "flyingobject.ai"
-  zone_id     = data.cloudflare_zone.flyingobject_ai.id
-  account_id  = data.cloudflare_zone.flyingobject_ai.account.id
-  origin_base = "https://origin.flyingobject.ai"
+  name             = "ufo-edge"
+  hostname         = "flyingobject.ai"
+  zone_id          = data.cloudflare_zone.flyingobject_ai.id
+  account_id       = data.cloudflare_zone.flyingobject_ai.account.id
+  origin_base      = "https://origin.flyingobject.ai"
+  favicon_svg      = local.favicon_svg
+  favicon_dark_svg = local.favicon_dark_svg
 }
 
 module "testing" {
   source = "../../modules/edge"
 
-  name        = "ufo-edge-testing"
-  hostname    = "testing.flyingobject.ai"
-  zone_id     = data.cloudflare_zone.flyingobject_ai.id
-  account_id  = data.cloudflare_zone.flyingobject_ai.account.id
-  origin_base = "https://origin.testing.flyingobject.ai"
+  name             = "ufo-edge-testing"
+  hostname         = "testing.flyingobject.ai"
+  zone_id          = data.cloudflare_zone.flyingobject_ai.id
+  account_id       = data.cloudflare_zone.flyingobject_ai.account.id
+  origin_base      = "https://origin.testing.flyingobject.ai"
+  favicon_svg      = local.favicon_svg
+  favicon_dark_svg = local.favicon_dark_svg
 }

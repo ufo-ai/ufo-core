@@ -3490,6 +3490,8 @@ def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
     worker = (module / "worker.js").read_text()
     harness = (module / "harness.mjs").read_text()
     substituted = {
+        "__FAVICON_DARK_SVG__": "var.favicon_dark_svg",
+        "__FAVICON_SVG__": "var.favicon_svg",
         "__LANDING_HTML__": "local.landing_html",
         "__PRIVACY_HTML__": "local.privacy_html",
         "__TERMS_HTML__": "local.terms_html",

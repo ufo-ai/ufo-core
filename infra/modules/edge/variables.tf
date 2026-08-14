@@ -22,3 +22,13 @@ variable "origin_base" {
   type        = string
   description = "This door's gateway base URL."
 }
+
+variable "favicon_svg" {
+  type        = string
+  description = "Product mark served as the apex favicon."
+}
+
+variable "favicon_dark_svg" {
+  type        = string
+  description = "Product mark served as the apex favicon in dark mode."
+}

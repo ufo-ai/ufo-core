@@ -48,9 +48,17 @@ resource "cloudflare_workers_script" "edge" {
     replace(
       replace(
         replace(
-          file("${path.module}/worker.js"),
-          "\"__LANDING_HTML__\"",
-          jsonencode(local.landing_html),
+          replace(
+            replace(
+              file("${path.module}/worker.js"),
+              "\"__LANDING_HTML__\"",
+              jsonencode(local.landing_html),
+            ),
+            "\"__FAVICON_SVG__\"",
+            jsonencode(var.favicon_svg),
+          ),
+          "\"__FAVICON_DARK_SVG__\"",
+          jsonencode(var.favicon_dark_svg),
         ),
         "\"__PRIVACY_HTML__\"",
         jsonencode(local.privacy_html),

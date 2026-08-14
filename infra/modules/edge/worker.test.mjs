@@ -3,6 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
+  FAVICON_DARK_SVG,
+  FAVICON_SVG,
   LANDING_PAGE,
   PRIVACY_PAGE,
   TERMS_PAGE,
@@ -81,6 +83,29 @@ test("browser landing hides the terminal hint from sight", () => {
     LANDING_PAGE,
     /console\.info\("Terminal interface: curl https:\/\/flyingobject\.ai"\);/,
   );
+});
+
+test("browser landing links the product favicon", () => {
+  assert.match(
+    LANDING_PAGE,
+    /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml" media="\(prefers-color-scheme: light\)" \/>/,
+  );
+  assert.match(
+    LANDING_PAGE,
+    /<link rel="icon" href="\/favicon-dark\.svg" type="image\/svg\+xml" media="\(prefers-color-scheme: dark\)" \/>/,
+  );
+});
+
+test("favicons serve the exact light and dark product marks", async () => {
+  for (const [path, mark] of [
+    ["favicon.svg", FAVICON_SVG],
+    ["favicon-dark.svg", FAVICON_DARK_SVG],
+  ]) {
+    const reply = await request(`https://flyingobject.ai/${path}`, { ua: "Mozilla/5.0" });
+    assert.equal(reply.headers.get("content-type"), "image/svg+xml");
+    assert.equal(reply.headers.get("cache-control"), "no-cache");
+    assert.equal(await reply.text(), mark);
+  }
 });
 
 test("every front door serves its own embedded page to browsers", async () => {

@@ -8,6 +8,8 @@ const MAX_FLEET = 100;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
 const LANDING_HTML = "__LANDING_HTML__";
+const FAVICON_SVG = "__FAVICON_SVG__";
+const FAVICON_DARK_SVG = "__FAVICON_DARK_SVG__";
 const PRIVACY_HTML = "__PRIVACY_HTML__";
 const TERMS_HTML = "__TERMS_HTML__";
 
@@ -182,6 +184,14 @@ export default {
     switch (url.pathname) {
       case "/":
         return landing(request, env, url);
+      case "/favicon.svg":
+        return new Response(FAVICON_SVG, {
+          headers: { "cache-control": "no-cache", "content-type": "image/svg+xml" },
+        });
+      case "/favicon-dark.svg":
+        return new Response(FAVICON_DARK_SVG, {
+          headers: { "cache-control": "no-cache", "content-type": "image/svg+xml" },
+        });
       case "/waitlist":
         return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
       case "/privacy":
