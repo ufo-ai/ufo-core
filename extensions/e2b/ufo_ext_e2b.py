@@ -571,7 +571,12 @@ class E2BCarrier:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
         except TimeoutException as error:
             emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
-            return ExecResult(stdout="", stderr=str(error), exit_code=EXEC_TIMEOUT_CODE)
+            return ExecResult(
+                stdout="",
+                stderr=str(error),
+                exit_code=EXEC_TIMEOUT_CODE,
+                timed_out_after_s=timeout_s,
+            )
         except Exception:
             self._drop(handle.conversation_id, "exec")
             raise

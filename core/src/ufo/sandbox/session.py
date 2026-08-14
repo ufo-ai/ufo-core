@@ -263,9 +263,15 @@ def sandbox_handle_id(backend: str, value: str) -> str | None:
 
 @dataclass(frozen=True)
 class ExecResult:
+    """One command's outcome. `timed_out_after_s` is the carrier's own deadline firing, in the
+    seconds it allowed; None means the command chose its own exit however it ended. The exit code
+    cannot carry this: a command that runs `timeout` exits 124 exactly as a carrier-stopped one
+    does, so a caller reading the code alone cannot tell whose deadline ended the work."""
+
     stdout: str
     stderr: str
     exit_code: int
+    timed_out_after_s: int | None = None
 
 
 @dataclass(frozen=True)

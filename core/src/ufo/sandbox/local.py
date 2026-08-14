@@ -183,7 +183,12 @@ class LocalCarrier:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
             await _kill_process_group(process)
-            return ExecResult(stdout="", stderr="timed out", exit_code=EXEC_TIMEOUT_CODE)
+            return ExecResult(
+                stdout="",
+                stderr="timed out",
+                exit_code=EXEC_TIMEOUT_CODE,
+                timed_out_after_s=timeout_s,
+            )
         except BaseException:
             await _kill_process_group(process)
             raise

@@ -167,8 +167,9 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
 class _RecordingCarrier:
     """Records the exec timeout so the bash tool's ms→s conversion and cap can be asserted."""
 
-    def __init__(self) -> None:
+    def __init__(self, result: ExecResult | None = None) -> None:
         self.timeouts: list[int] = []
+        self.result = result or ExecResult(stdout="", stderr="", exit_code=0)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise NotImplementedError
@@ -179,7 +180,7 @@ class _RecordingCarrier:
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
-        return ExecResult(stdout="", stderr="", exit_code=0)
+        return self.result
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         raise NotImplementedError
@@ -229,3 +230,63 @@ async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path)
     )
     await bash_handler(ctx, BashInput(command="echo hi", user_description="checking the box"))
     assert carrier.timeouts == [5, 600, DEFAULT_EXEC_TIMEOUT_SECONDS]
+
+
+async def test_a_stopped_command_names_the_deadline_that_stopped_it(tmp_path: Path) -> None:
+    """The seconds reported are the ones that applied, and a request the cap reduced says so. An
+    agent that cannot tell which deadline fired re-runs the same command against the same wall,
+    and one that never learns its request was capped keeps asking for a budget it cannot have."""
+    default_stop = _RecordingCarrier(
+        ExecResult(
+            stdout="",
+            stderr="",
+            exit_code=124,
+            timed_out_after_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+    )
+    capped = _RecordingCarrier(
+        ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=600)
+    )
+    exact = _RecordingCarrier(ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=5))
+
+    unset = await bash_handler(
+        _bash_ctx(default_stop, tmp_path),
+        BashInput(command="pytest -q", user_description="running the tests"),
+    )
+    reduced = await bash_handler(
+        _bash_ctx(capped, tmp_path),
+        BashInput(command="pytest -q", timeout=9_000_000, user_description="running the tests"),
+    )
+    honoured = await bash_handler(
+        _bash_ctx(exact, tmp_path),
+        BashInput(command="pytest -q", timeout=5000, user_description="running the tests"),
+    )
+
+    assert unset.is_error and reduced.is_error and honoured.is_error
+    assert f"{DEFAULT_EXEC_TIMEOUT_SECONDS}s" in unset.content[0].text
+    assert "no timeout" in unset.content[0].text
+    assert (
+        "600s" in reduced.content[0].text
+        and "9000s requested was capped" in reduced.content[0].text
+    )
+    assert "5s" in honoured.content[0].text and "capped" not in honoured.content[0].text
+
+
+async def test_a_commands_own_timeout_is_not_reported_as_the_sandboxs(tmp_path: Path) -> None:
+    """`timeout` inside the command exits 124 exactly as a carrier-stopped command does. Only the
+    carrier says whether its own deadline fired, so a 124 it did not produce stays a plain exit
+    code — reporting it as a sandbox timeout would send the agent raising a limit that was never
+    what stopped it."""
+    carrier = _RecordingCarrier(
+        ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=None)
+    )
+
+    result = await bash_handler(
+        _bash_ctx(carrier, tmp_path),
+        BashInput(
+            command="timeout 3000 pytest -q", timeout=600_000, user_description="running the tests"
+        ),
+    )
+
+    assert result.is_error
+    assert result.content[0].text == "exit code: 124"

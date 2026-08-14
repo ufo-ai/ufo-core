@@ -1027,6 +1027,7 @@ async def test_a_command_that_timed_out_is_counted(monkeypatch: pytest.MonkeyPat
     result = await carrier.exec(handle, ("bash", "-lc", "pytest -q"), 60)
 
     assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.timed_out_after_s == 60
     assert _counted(reader, "ufo.sandbox_exec_timeout_total") == [(1, {"carrier": CARRIER_NAME})]
 
 
@@ -1082,6 +1083,7 @@ async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     result = await carrier.exec(handle, ("bash", "-lc", "sleep 999"), 1)
 
     assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.timed_out_after_s == 1
     assert "timed out" in result.stderr
 
 

@@ -339,14 +339,36 @@ class MessageSubagentInput(BaseModel):
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
+    """Run one command and report what ended it. A stopped command reports the deadline that
+    stopped it rather than a bare `exit code: 124`, which `timeout` inside the command produces
+    just as the sandbox does — a caller reading the code alone cannot tell which fired, and one
+    that assumes its own is the only deadline re-runs the same command against the same wall. The
+    seconds named are the ones that actually applied, so a request the cap reduced says so at the
+    moment it costs something rather than silently at the call."""
+    requested_s = None if args.timeout is None else int(args.timeout / 1000)
     timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
     result = await ctx.sandbox.bash(args.command, timeout_s=timeout_s)
     output = result.stdout + result.stderr
     if result.exit_code == 0:
         return ToolResult(content=(TextContent(text=output),))
-    exit_line = f"exit code: {result.exit_code}"
+    stopped = result.timed_out_after_s
+    if stopped is None:
+        notice = f"exit code: {result.exit_code}"
+    elif requested_s is None:
+        notice = (
+            f"timed out: the sandbox stopped this command after {stopped}s, the default when the "
+            f"call sets no timeout. Set timeout (up to {MAX_BASH_TIMEOUT_MS // 1000}s) to allow "
+            "longer work."
+        )
+    elif requested_s > stopped:
+        notice = (
+            f"timed out: the sandbox stopped this command after {stopped}s, the maximum. The "
+            f"{requested_s}s requested was capped."
+        )
+    else:
+        notice = f"timed out: the sandbox stopped this command after {stopped}s."
     return ToolResult(
-        content=(TextContent(text=f"{output}\n{exit_line}" if output else exit_line),),
+        content=(TextContent(text=f"{output}\n{notice}" if output else notice),),
         is_error=True,
     )
 

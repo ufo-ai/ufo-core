@@ -60,6 +60,12 @@ DEFAULT_NETWORK = "ufo-sandbox"
 HOST_GATEWAY_NAME = "host.docker.internal"
 HOST_GATEWAY_MAPPING = f"{HOST_GATEWAY_NAME}:host-gateway"
 DROP_NET_RAW_ARGS = ("--cap-drop", "NET_RAW")
+EXEC_TIMEOUT_CODE = 124
+TIMED_OUT_CODE = -1000
+"""`_docker`'s own deadline, told apart from every code a process can report: an exit status is
+0-255 and a signal death is negative down to the highest signal number, so no command reaches it.
+A caller that only asks whether the code is zero reads a timeout as the failure it is; `exec`
+translates it to the shell's own timeout code and names the deadline that produced it."""
 
 
 async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[int, bytes, bytes]:
@@ -75,7 +81,7 @@ async def _docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60) -> tuple[
     except TimeoutError:
         process.kill()
         await process.wait()
-        return 124, b"", b"timed out"
+        return TIMED_OUT_CODE, b"", b"timed out"
     return process.returncode or 0, stdout, stderr
 
 
@@ -306,10 +312,12 @@ class DockerCarrier:
                     code, stdout, stderr = await _docker(
                         "exec", *env_args, handle.container_id, *argv, timeout_s=timeout_s
                     )
+            timed_out = code == TIMED_OUT_CODE
             return ExecResult(
                 stdout=stdout.decode(errors="replace"),
                 stderr=stderr.decode(errors="replace"),
-                exit_code=code,
+                exit_code=EXEC_TIMEOUT_CODE if timed_out else code,
+                timed_out_after_s=timeout_s if timed_out else None,
             )
         finally:
             self._inflight[handle.conversation_id] -= 1
