@@ -117,7 +117,6 @@ test("an admin is offered administration, which reads the admin projection", asy
       json({
         agents: [ADMIN_AGENT],
         members: [{ id: "m1", email: "member@example.com", admin: true, seated: true }],
-        seats: { limit: 5, included: 3 },
         caps: [],
         deploy: { sandbox_internet: true, extensions: [] },
       }),
@@ -126,7 +125,7 @@ test("an admin is offered administration, which reads the admin projection", asy
   render(<App agents={[AGENT]} subagents={[]} member={{ ...MEMBER, admin: true }} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Administration" }));
-  expect(await screen.findByText("5 seats, 3 included in the plan.")).toBeTruthy();
+  expect(await screen.findByText("Seated")).toBeTruthy();
   expect(screen.getByText("Every member")).toBeTruthy();
   expect(screen.getByText("No spend caps are set.")).toBeTruthy();
   expect(location.hash).toBe("#/admin");
@@ -164,7 +163,6 @@ test("the admin agent row grants and revokes web access by email", async () => {
       json({
         agents: [second],
         members: [],
-        seats: { limit: null, included: null },
         caps: [],
         deploy: { sandbox_internet: false, extensions: [] },
       }),
@@ -182,7 +180,6 @@ test("the admin agent row grants and revokes web access by email", async () => {
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "grant_web_access", email: "new@work.com" });
-  expect(screen.getByText("Seats are not limited on this plan.")).toBeTruthy();
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {
@@ -237,7 +234,6 @@ test("a refused audience change tones the administration notice", async () => {
       json({
         agents: [second],
         members: [],
-        seats: { limit: null, included: null },
         caps: [
           {
             scope: "workspace",

@@ -3043,7 +3043,7 @@ async def test_the_roster_answers_off_the_main_agent_and_narrows_to_self_off_ano
             f"/surface/web/objects/member/{colleague_id}?agent={agent_id}", headers=cookie
         )
         assert read.status_code == 200
-        assert read.json()["spec"] == {"admin": False, "seated": False}
+        assert read.json()["spec"] == {"admin": False, "seated": True}
 
         narrowed = (
             await client.get(f"/surface/web/objects/member?agent={child_agent}", headers=cookie)
@@ -4133,16 +4133,6 @@ async def test_admin_view_reads_the_workspace_shape(
     member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
     await _grant_web_access(workspace_id, second_agent, "member@example.com")
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=5, included_seats=2)
-            .where(tables.workspace.c.id == workspace_id)
-        )
-        await connection.execute(
-            sa.update(tables.member)
-            .values(seated_at=sa.func.now())
-            .where(tables.member.c.id == member_id)
-        )
         for scope, subject, window in (
             ("workspace", None, 86_400),
             ("agent", second_agent, 3_600),
@@ -4174,10 +4164,10 @@ async def test_admin_view_reads_the_workspace_shape(
     assert by_name["ops"]["installations"] == ["slack"]
     assert by_name["ops"]["web_audience"] == ["member@example.com"]
     assert {(m["email"], m["admin"], m["seated"]) for m in payload["members"]} == {
-        ("admin@example.com", True, False),
+        ("admin@example.com", True, True),
         ("member@example.com", False, True),
     }
-    assert payload["seats"] == {"limit": 5, "included": 2}
+    assert "seats" not in payload
     assert [
         (
             cap["scope"],
@@ -4205,27 +4195,25 @@ async def test_admin_view_reads_the_workspace_shape(
     ]
 
 
-async def test_admin_view_reports_ungated_seats(
+async def test_admin_view_reports_a_member_whose_seat_an_admin_revoked(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The default deploy keeps both seat bounds NULL: auto-seating seats every member at
-    creation, so the wire carries null bounds beside seated members — the page drops its seat
-    column on this shape because the bounds, not per-member state, are what gate anything."""
+    """Unseating is the one way an admin removes a person's access, so the page that offers it has
+    to state which members currently hold a seat — a revoked seat that reads the same as a held
+    one leaves the admin with no way to see the act landed."""
     client, workspace_id, _agent_id = web
-    admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    await _seed_member(workspace_id, "member@example.com")
     async with workspace_tx() as connection:
-        await Seats(workspace_id).auto_seat(connection, admin_id)
-        await Seats(workspace_id).auto_seat(connection, member_id)
+        await Seats(workspace_id).revoke(connection, "member@example.com")
     view = await client.get(
         "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert view.status_code == 200
     payload = view.json()
-    assert payload["seats"] == {"limit": None, "included": None}
     assert {(m["email"], m["seated"]) for m in payload["members"]} == {
         ("admin@example.com", True),
-        ("member@example.com", True),
+        ("member@example.com", False),
     }
 
 
@@ -8536,15 +8524,13 @@ async def test_team_view_lists_the_roster_for_every_member(
 
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.member)
-            .where(tables.member.c.id == _member_id)
-            .values(seated_at=sa.func.now())
+            sa.update(tables.member).where(tables.member.c.id == _member_id).values(seated_at=None)
         )
     member_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     body = member_view.json()
     assert [(entry["email"], entry["admin"], entry["seated"]) for entry in body["members"]] == [
-        ("boss@example.com", True, False),
-        ("m@example.com", False, True),
+        ("boss@example.com", True, True),
+        ("m@example.com", False, False),
     ]
     assert "id" not in body["members"][0]
     assert body["can_add"] is False

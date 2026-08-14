@@ -48,8 +48,8 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 
 | Table | Owns |
 |---|---|
-| `workspace` | The team unit: name, config digest, `included_seats` (the silent auto-seat allowance), `seat_limit` (the grantable ceiling) — both NULL = unlimited, the shape every deploy without a billing extension keeps. |
-| `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: auto-seated at creation while an included seat is open, granted beyond that by an admin in chat, gated at admission and per round. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
+| `workspace` | The team unit: name, config digest. Members are unlimited — one flat fee per workspace, nothing bounded or counted here. |
+| `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. Clearing it is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding, bound to one agent — the agent every conversation the surface creates lands on (a new binding lands on the workspace's explicit main agent). Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
 | `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope. Exactly one per workspace is `is_main`: onboarding creates it, unbound surfaces route to it, and it may update any agent's settings without crossing member or audience boundaries. |
 | `connection` | One member-owned broker account identity per `(workspace, provider, account)`. It holds no secret. `shared` controls disclosure and `account_label` names the account. `connect_account` creates or reuses it and refuses to reassign another member's account. Deleting it atomically stops its sources, tombstones their pages, and removes every connector grant. |
@@ -671,19 +671,27 @@ workspace, its initial admin, and its main agent.
 Every model call and tool call meters into `ledger` in the same commit as the step. Realtime
 visibility: live per-turn cost on the stream, workspace/member/agent rollups in CLI and web. Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
-table per model; BYOK usage still meters (visibility without billing). Seats gate who the
-agent answers: `workspace.included_seats` bounds silent auto-seating, `workspace.seat_limit` the
-grantable ceiling; core owns the rules (admission refusal — including a member-surface speaker
-who never resolved to a member, per-round park on revocation, the last seated admin's irrevocable
-seat), and a billing extension's tools drive grants and ask an admin to approve overage seats. The
-core-registered `workspace` kind is the shape itself as one read-only object — one instance per
-workspace, named by its id, listing both bounds beside the member and seated counts and reporting
-those with `billed_overage_seats` and a `roster` naming who holds a seat, which follows the roster
-rule above — whole to a member asking the main agent, the speaker's own row alone to a child
-agent, and nothing at all to an externally shared channel, which reads none of this kind. Its
-spec carries no field, because nothing it reports is authored: both bounds are the plan's, the
-counts are derived, and seating one member is the `member` kind's admin-gated apply, so create,
-update, and delete all refuse.
+table per model; BYOK usage still meters (visibility without billing). Seats decide who the agent
+answers, and nothing bounds how many hold one: the plan is one flat fee per workspace with
+unlimited members, so the daily member count a billing extension ships is for outreach, never
+enforcement. A member holds a seat from creation and an admin revokes it — the `member` kind's
+admin-gated apply — to remove that person's access. Core owns the rules: refusal at admission,
+per-round park on revocation, and the last seated admin's irrevocable seat.
+
+A member surface that could not resolve its speaker to a member is refused outright, on every
+deploy and with nothing to configure. That is the workspace boundary: every member surface resolves
+its speaker (the CLI token is minted for the member `init` creates; Slack, the portal and prepared
+intents each name one), so a speaker none of them could name is a stranger, and answering them
+would run a turn carrying the workspace's own audience for a person the workspace cannot name.
+Making the refusal conditional on anything — a plan, a bound, a column — is how a workspace ends up
+answering the one speaker it should not.
+
+The core-registered `workspace` kind is the shape itself as one read-only object — one instance per
+workspace, named by its id, carrying the member and seated counts and a `roster` naming who holds a
+seat, which follows the roster rule above — whole to a member asking the main agent, the speaker's
+own row alone to a child agent, and nothing at all to an externally shared channel, which reads
+none of this kind. Its spec carries no field, because nothing it reports is authored: the counts
+are derived, so create, update, and delete all refuse.
 
 An external billing vendor is an extension draining the usage-export seam
 (`ctx.pending_usage_exports` / `ctx.ack_usage_exports`): core mints frozen, consumer-keyed delta

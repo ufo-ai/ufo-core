@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -7,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from dbos import EnqueueOptions
 
 from ufo.audience import Audience, conversation_audience, foreign_room_audience
 from ufo.blob import FilesystemBlobStore
@@ -16,8 +18,9 @@ from ufo.members import ADD_MEMBER_TOOL, MEMBER_KIND
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
-from ufo.seats import create_member
+from ufo.schema.records import CANCELLED, Agent, TerminalFrame, Turn
+from ufo.seats import SEAT_REFUSAL_MESSAGE, create_member
+from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -423,19 +426,71 @@ async def test_adding_an_existing_member_refuses_and_leaves_their_role(db: None)
     assert row is not None and row.id == member_id and not row.is_admin
 
 
-async def test_a_member_added_beyond_the_included_allowance_holds_no_seat(db: None) -> None:
+async def test_a_member_an_admin_adds_can_speak_at_once(db: None) -> None:
+    """Nothing bounds the members a workspace has, so adding one seats them and the answer says so.
+    A member added unseated would be a person the admin just invited and the agent then refuses."""
     workspace_id, main_agent, _, admin_id, _ = await _seed()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.workspace)
-            .where(tables.workspace.c.id == workspace_id)
-            .values(included_seats=2)
-        )
     with ws(workspace_id):
         answer = await _add(_context(workspace_id, main_agent, admin_id), email="third@example.com")
     row = await _member_row(workspace_id, "third@example.com")
-    assert row is not None and row.seated_at is None
-    assert "no seat" in answer
+    assert row is not None and row.seated_at is not None
+    assert answer == "third@example.com is a workspace member. They can speak to the agent now."
+
+
+async def test_an_admins_unseat_stops_the_agent_answering_that_member(db: None) -> None:
+    """The whole of removing someone's access, end to end: an admin applies `seated: false` on the
+    member object, and the member's next message through the real admission path is refused instead
+    of answered. The `member` kind refuses delete, so this apply is the only act that does it — if
+    admission still answered them, no supported action would remove that person's access at all."""
+    workspace_id, main_agent, _, admin_id, member_id = await _seed()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=main_agent,
+                surface="cli",
+                queue_key="session",
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    admission = Admission(dbos=_SeatStubDbos(), durable_surfaces=frozenset())
+    before = await admission.admit_member(workspace_id, conversation_id, "still here?", member_id)
+    assert await _turn_terminal(before.turn_id) == ("queued", None)
+
+    with ws(workspace_id):
+        await _text(
+            _tool("object_apply"),
+            _context(workspace_id, main_agent, admin_id),
+            manifest=_manifest(member_id, admin=False, seated=False),
+        )
+
+    after = await admission.admit_member(workspace_id, conversation_id, "hello?", member_id)
+    assert await _turn_terminal(after.turn_id) == (CANCELLED, SEAT_REFUSAL_MESSAGE)
+
+
+@dataclass
+class _SeatStubDbos:
+    enqueued: list[str] = field(default_factory=list)
+
+    async def enqueue_async(self, options: EnqueueOptions, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
+
+
+async def _turn_terminal(turn_id: UUID) -> tuple[str, str | None]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    text = None if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
+    return row.status, text
 
 
 async def test_every_member_lists_the_roster_from_the_main_agent(db: None) -> None:

@@ -14,8 +14,5 @@ from ufo.seats import (
     SeatSnapshot as SeatSnapshot,
 )
 from ufo.seats import (
-    admin_conversation as admin_conversation,
-)
-from ufo.seats import (
     member_workspaces as member_workspaces,
 )

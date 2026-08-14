@@ -2561,7 +2561,6 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for entry in snapshot.members
             ],
-            "seats": {"limit": snapshot.limit, "included": snapshot.included},
             "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
             "deploy": {
                 "sandbox_internet": ctx.deploy_sandbox_internet,

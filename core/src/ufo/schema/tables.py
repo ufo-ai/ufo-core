@@ -18,15 +18,9 @@ workspace = sa.Table(
     "workspace",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
-    sa.Column("seat_limit", sa.Integer, nullable=True),
-    sa.Column("included_seats", sa.Integer, nullable=True),
     sa.Column("page_revision", sa.BigInteger, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.CheckConstraint("seat_limit is null or seat_limit > 0", name="workspace_seat_limit"),
-    sa.CheckConstraint(
-        "included_seats is null or included_seats > 0", name="workspace_included_seats"
-    ),
 )
 
 member = sa.Table(
@@ -36,7 +30,7 @@ member = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("email", sa.Text, nullable=False),
     sa.Column("is_admin", sa.Boolean, nullable=False, server_default=sa.false()),
-    sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True, server_default=sa.func.now()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "email"),

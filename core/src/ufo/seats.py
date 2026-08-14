@@ -1,15 +1,14 @@
-"""Seats: who the agent answers. A seat is a member the agent responds to;
-`workspace.seat_limit` bounds how many can hold one, and `workspace.included_seats` bounds how
-many are handed out silently — auto-seat fills the included allowance and stops, so every seat
-beyond it is an explicit admin grant (the billed-overage consent). Both NULL means unlimited, the
-shape every deploy without a billing extension keeps, where the gate admits everyone and costs
-nothing. Core owns the count, the last seated admin's irrevocable seat, and member creation, so
-the admission gate, per-round enforcement, resume sweep, and a billing extension's tools apply the
-same ones; an extension only decides when to call them. A refused member still exists (identity,
-memory subject): the gate answers their turn with the refusal, and a granted seat simply lets them
-speak again."""
+"""Seats: who the agent answers. A member holds a seat from creation and the agent answers them;
+an admin revokes it to remove that person's access, which is the only way to remove it — the
+`member` kind refuses delete, because the row is an identity and a memory subject that outlives
+the access. Nothing bounds how many members hold one: the workspace pays one flat fee and the
+count is an outreach figure, never a gate. Core owns seating, the last seated admin's irrevocable
+seat, and member creation, so the admission gate, per-round enforcement, resume sweep, and an
+extension's tools apply the same rules; an extension only decides when to call them. An unseated
+member still exists: the gate answers their turn with the refusal, and seating them again simply
+lets them speak."""
 
-import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -24,8 +23,7 @@ from ufo.schema import tables
 from ufo.schema.records import SCHEDULED_ADMISSION, TurnAdmissionSource
 
 SEAT_REFUSAL_MESSAGE = (
-    "This workspace has no open seat for you yet — a workspace admin has been asked to grant "
-    "one; you'll be answered once they do."
+    "A workspace admin removed your seat, so I can't answer you. Ask them to restore it."
 )
 UNRESOLVED_SPEAKER_MESSAGE = (
     "I can only answer workspace members, and I couldn't verify who you are. Make sure your work "
@@ -35,10 +33,6 @@ UNRESOLVED_SPEAKER_MESSAGE = (
 SEAT_REVOKED_MESSAGE = (
     "This turn is parked: the speaker's seat was revoked. It resumes if the seat is granted again."
 )
-
-SEAT_PRESENCE_TTL_SECONDS = 5.0
-SEAT_PRESENCE_CACHE_MAX = 4096
-_no_seat_limit: dict[UUID, float] = {}
 
 
 def gate_member(
@@ -56,27 +50,6 @@ def gate_member(
     if admission_source == SCHEDULED_ADMISSION:
         return on_behalf_of_member_id
     return None
-
-
-def seat_gate_absent(workspace_id: UUID) -> bool:
-    """Connectionless fast-path mirroring `applicable_caps_absent`: True only when a recent read
-    found no seat limit on this workspace, within a short TTL. The per-round enforcement then
-    skips its DB round-trip — the common unlimited deploy pays nothing per round, and a
-    newly-established limit takes effect within the TTL."""
-    expiry = _no_seat_limit.get(workspace_id)
-    return expiry is not None and expiry > time.monotonic()
-
-
-def _note_absent_limit(workspace_id: UUID) -> None:
-    now = time.monotonic()
-    if len(_no_seat_limit) >= SEAT_PRESENCE_CACHE_MAX:
-        for expired in [key for key, expiry in _no_seat_limit.items() if expiry <= now]:
-            del _no_seat_limit[expired]
-    _no_seat_limit[workspace_id] = now + SEAT_PRESENCE_TTL_SECONDS
-
-
-class SeatLimitReached(RuntimeError):
-    """Every seat is taken: granting another needs a revoke first or a raised limit."""
 
 
 class UnknownMember(LookupError):
@@ -97,8 +70,6 @@ class SeatEntry:
 
 @dataclass(frozen=True, slots=True)
 class SeatSnapshot:
-    limit: int | None
-    included: int | None
     members: tuple[SeatEntry, ...]
 
     @property
@@ -114,59 +85,45 @@ class Seats:
 
     workspace_id: UUID
 
-    async def gated(self, connection: AsyncConnection) -> bool:
-        """Whether this workspace enforces seats at all — a limit or an included allowance is
-        set. Ungated workspaces (every deploy without a billing extension) answer everyone,
-        resolvable or not."""
-        row = (
-            await connection.execute(
-                sa.select(tables.workspace.c.seat_limit, tables.workspace.c.included_seats).where(
-                    tables.workspace.c.id == self.workspace_id
-                )
-            )
-        ).one()
-        if row.seat_limit is None and row.included_seats is None:
-            _note_absent_limit(self.workspace_id)
-            return False
-        return True
-
     async def admits(self, connection: AsyncConnection, member_id: UUID) -> bool:
-        """Whether the gate answers this member: an ungated workspace (no limit, no included
-        allowance) admits everyone and primes the fast-path; a gated one, only a seated member."""
+        """Whether the gate answers this member: only while they hold a seat, and never for an id
+        that is not a member of this workspace. One indexed read of the member's own row, paid on
+        every admission, on every round of a running turn, and on every resume — which is what
+        makes an admin's revoke stop the agent answering that person everywhere at once, rather
+        than only at the next thing that happens to re-read the workspace."""
         row = (
             await connection.execute(
-                sa.select(
-                    tables.member.c.seated_at,
-                    tables.workspace.c.seat_limit,
-                    tables.workspace.c.included_seats,
-                )
-                .select_from(
-                    tables.member.join(
-                        tables.workspace,
-                        tables.member.c.workspace_id == tables.workspace.c.id,
-                    )
-                )
-                .where(
+                sa.select(tables.member.c.seated_at).where(
                     tables.member.c.id == member_id,
                     tables.member.c.workspace_id == self.workspace_id,
                 )
             )
         ).one_or_none()
-        if row is None:
-            return False
-        if row.seat_limit is None and row.included_seats is None:
-            _note_absent_limit(self.workspace_id)
-            return True
-        return row.seated_at is not None
+        return row is not None and row.seated_at is not None
 
-    async def snapshot(self, connection: AsyncConnection) -> SeatSnapshot:
-        bounds = (
+    async def all_seated(self, connection: AsyncConnection, member_ids: Collection[UUID]) -> bool:
+        """Whether every one of these members still holds a seat. One indexed read for the whole
+        set, so a turn that absorbed six speakers costs the same round-trip as one — this is the
+        question the per-round check, the parked-fold check, and the dispatch sweep all ask, and
+        each of them asks it about a set. An id that is not a member of this workspace is not
+        seated, exactly as `admits` answers it."""
+        wanted = set(member_ids)
+        if not wanted:
+            return True
+        seated = (
             await connection.execute(
-                sa.select(tables.workspace.c.seat_limit, tables.workspace.c.included_seats).where(
-                    tables.workspace.c.id == self.workspace_id
+                sa.select(sa.func.count())
+                .select_from(tables.member)
+                .where(
+                    tables.member.c.workspace_id == self.workspace_id,
+                    tables.member.c.id.in_(wanted),
+                    tables.member.c.seated_at.is_not(None),
                 )
             )
-        ).one()
+        ).scalar_one()
+        return seated == len(wanted)
+
+    async def snapshot(self, connection: AsyncConnection) -> SeatSnapshot:
         rows = (
             await connection.execute(
                 sa.select(
@@ -180,8 +137,6 @@ class Seats:
             )
         ).all()
         return SeatSnapshot(
-            limit=bounds.seat_limit,
-            included=bounds.included_seats,
             members=tuple(
                 SeatEntry(
                     id=row.id,
@@ -194,25 +149,31 @@ class Seats:
         )
 
     async def grant(self, connection: AsyncConnection, email: str) -> None:
-        """Seat the member with this email. Idempotent for an already-seated member; raises
-        `SeatLimitReached` when every seat is taken. The workspace-row lock serializes concurrent
-        counts."""
-        limit, _ = await self._locked_limits(connection)
+        """Seat the member with this email, restoring access an admin revoked. Idempotent for a
+        member who already holds one."""
         member_id, seated_at, _ = await self._member_by_email(connection, email)
         if seated_at is not None:
             return
-        if limit is not None and await self._seated_count(connection) >= limit:
-            raise SeatLimitReached(
-                f"all {limit} seats are taken — revoke one, or contact us to raise the limit"
-            )
-        await self._seat(connection, member_id)
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=sa.func.now(), updated_at=sa.func.now())
+            .where(tables.member.c.id == member_id)
+        )
 
     async def revoke(self, connection: AsyncConnection, email: str) -> None:
-        """Unseat the member with this email; idempotent. Refuses to unseat the last seated admin.
+        """Unseat the member with this email, removing their access; idempotent. Refuses to unseat
+        the last seated admin, who is the only one left who could seat anyone again. The
+        workspace-row lock serializes two concurrent revokes against that count, so the last two
+        admins cannot each read the other as the second one.
+
         In-flight turns are never touched here — admission refuses the member's next message
         immediately, and the per-round enforcement parks any running turn before its next model
         call."""
-        await self._locked_limits(connection)
+        await connection.execute(
+            sa.select(tables.workspace.c.id)
+            .where(tables.workspace.c.id == self.workspace_id)
+            .with_for_update()
+        )
         member_id, seated_at, is_admin = await self._member_by_email(connection, email)
         if seated_at is None:
             return
@@ -223,55 +184,6 @@ class Seats:
             .values(seated_at=None, updated_at=sa.func.now())
             .where(tables.member.c.id == member_id)
         )
-
-    async def ensure_limit(self, connection: AsyncConnection, limit: int) -> None:
-        """Establish the seat limit once: writes only while it is NULL, so a re-fire or an
-        operator-tuned value is never overwritten."""
-        if limit < 1:
-            raise ValueError(f"seat limit must be positive, got {limit}")
-        await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=limit, updated_at=sa.func.now())
-            .where(
-                tables.workspace.c.id == self.workspace_id,
-                tables.workspace.c.seat_limit.is_(None),
-            )
-        )
-
-    async def ensure_included(self, connection: AsyncConnection, included: int) -> None:
-        """Establish the silent-seat allowance once — the plan's included quantity; writes only
-        while it is NULL, the same establishment rule as the limit."""
-        if included < 1:
-            raise ValueError(f"included seats must be positive, got {included}")
-        await connection.execute(
-            sa.update(tables.workspace)
-            .values(included_seats=included, updated_at=sa.func.now())
-            .where(
-                tables.workspace.c.id == self.workspace_id,
-                tables.workspace.c.included_seats.is_(None),
-            )
-        )
-
-    async def auto_seat(self, connection: AsyncConnection, member_id: UUID) -> None:
-        """Seat a just-created member while a silent seat is open — the included allowance when
-        one is set, else the hard limit. Beyond it, leave them unseated and return: creation
-        always succeeds, the gate answers them with the refusal, and only an explicit admin grant
-        (the billed-overage consent) seats them."""
-        limit, included = await self._locked_limits(connection)
-        bound = included if included is not None else limit
-        if bound is not None and await self._seated_count(connection) >= bound:
-            return
-        await self._seat(connection, member_id)
-
-    async def _locked_limits(self, connection: AsyncConnection) -> tuple[int | None, int | None]:
-        row = (
-            await connection.execute(
-                sa.select(tables.workspace.c.seat_limit, tables.workspace.c.included_seats)
-                .where(tables.workspace.c.id == self.workspace_id)
-                .with_for_update()
-            )
-        ).one()
-        return row.seat_limit, row.included_seats
 
     async def _member_by_email(
         self, connection: AsyncConnection, email: str
@@ -292,16 +204,6 @@ class Seats:
             raise UnknownMember(f"no member with email {email!r} in this workspace")
         return row.id, row.seated_at, row.is_admin
 
-    async def _seated_count(self, connection: AsyncConnection) -> int:
-        return (
-            await connection.execute(
-                sa.select(sa.func.count()).where(
-                    tables.member.c.workspace_id == self.workspace_id,
-                    tables.member.c.seated_at.is_not(None),
-                )
-            )
-        ).scalar_one()
-
     async def _seated_admin_count(self, connection: AsyncConnection) -> int:
         return (
             await connection.execute(
@@ -312,13 +214,6 @@ class Seats:
                 )
             )
         ).scalar_one()
-
-    async def _seat(self, connection: AsyncConnection, member_id: UUID) -> None:
-        await connection.execute(
-            sa.update(tables.member)
-            .values(seated_at=sa.func.now(), updated_at=sa.func.now())
-            .where(tables.member.c.id == member_id)
-        )
 
 
 def email_domain(email: str) -> str:
@@ -379,14 +274,16 @@ async def create_member(
 ) -> UUID:
     """The one member-creation write: every surface that mints a member — onboarding's admin, a
     channel-verified teammate join, hosted onboarding, whatever joins next — inserts through
-    here, so the seat rule is applied structurally rather than remembered per call site. A lost
-    creation race collapses on the member's (workspace_id, email) uniqueness and answers the
-    surviving row, which the racing winner already seated.
+    here, so the shape rule below is applied structurally rather than remembered per call site.
+    Seating is structural in the column itself: `member.seated_at` defaults to now, so a member is
+    seated by the row that creates them whichever statement writes it, and only an admin's revoke
+    ever clears it. A lost creation race collapses on the member's (workspace_id, email) uniqueness
+    and answers the surviving row, which the racing winner already seated.
 
-    The workspace row is locked before the insert, never after: `auto_seat` needs it anyway, and
-    taking it here gives every creation path one lock order. Two creations of one address —
-    a teammate's first channel message and an admin adding them in the same moment — then queue
-    instead of forming a cycle with whichever caller already holds the row.
+    The workspace row is locked before the insert so that every creation path takes one lock
+    order. Two creations of one address — a teammate's first channel message and an admin adding
+    them in the same moment — then queue instead of forming a cycle with whichever caller already
+    holds the row.
 
     The address crosses `email_domain` here, so the shape rule holds for every caller rather than
     for the two that match a domain: a value no sign-in normalizes to and no verified join equals
@@ -422,7 +319,6 @@ async def create_member(
         )
     ).scalar_one_or_none()
     if created is not None:
-        await Seats(workspace_id).auto_seat(connection, created)
         return created
     return (
         await connection.execute(
@@ -432,40 +328,6 @@ async def create_member(
             )
         )
     ).scalar_one()
-
-
-async def admin_conversation(
-    connection: AsyncConnection, workspace_id: UUID
-) -> tuple[UUID, UUID] | None:
-    """Where a workspace-level ask reaches an admin: the most recently active private conversation
-    of a seated admin on the main agent. None before any seated admin's first private conversation
-    with the main agent."""
-    conversation = (
-        await connection.execute(
-            sa.select(tables.conversation.c.id, tables.conversation.c.agent_id)
-            .select_from(
-                tables.conversation.join(
-                    tables.member,
-                    tables.conversation.c.member_id == tables.member.c.id,
-                ).join(
-                    tables.agent,
-                    tables.conversation.c.agent_id == tables.agent.c.id,
-                ),
-            )
-            .where(
-                tables.conversation.c.workspace_id == workspace_id,
-                tables.member.c.workspace_id == workspace_id,
-                tables.member.c.is_admin,
-                tables.member.c.seated_at.is_not(None),
-                tables.agent.c.is_main,
-            )
-            .order_by(tables.conversation.c.updated_at.desc())
-            .limit(1)
-        )
-    ).one_or_none()
-    if conversation is None:
-        return None
-    return conversation.id, conversation.agent_id
 
 
 def member_workspaces() -> WorkspaceCandidates:

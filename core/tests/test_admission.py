@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -457,12 +457,12 @@ async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_
     assert dbos.workflow_ids[1] != str(first.turn_id)
 
 
-async def _set_limit(workspace_id: UUID, limit: int) -> None:
+async def _unseat(member_id: UUID) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=limit, updated_at=sa.func.now())
-            .where(tables.workspace.c.id == workspace_id)
+            sa.update(tables.member)
+            .values(seated_at=None, updated_at=sa.func.now())
+            .where(tables.member.c.id == member_id)
         )
 
 
@@ -490,7 +490,7 @@ async def _turn_row(turn_id: UUID) -> tuple[str, str | None]:
 
 async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 1)
+    await _unseat(member_id)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
     turn_id = (await admission.admit_member(workspace_id, conversation_id, "hi", member_id)).turn_id
@@ -509,10 +509,8 @@ async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> No
     assert writebacks == 1
 
 
-async def test_seated_speaker_enqueues_under_a_limit(db: None) -> None:
+async def test_seated_speaker_enqueues(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 1)
-    await _seat(member_id)
     dbos = StubDbos()
     admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hi", member_id
@@ -524,9 +522,11 @@ async def test_seated_speaker_enqueues_under_a_limit(db: None) -> None:
     assert status == "queued"
 
 
-async def test_internal_invoke_passes_a_seat_limit(db: None) -> None:
-    workspace_id, _, agent_id, conversation_id = await _seed()
-    await _set_limit(workspace_id, 1)
+async def test_internal_invoke_passes_the_seat_gate(db: None) -> None:
+    """An internal turn has no speaker to gate on, so an unseated conversation member never holds
+    up the work the workspace itself asked for."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    await _unseat(member_id)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
         workspace_id, conversation_id, agent_id, "background job"
@@ -536,7 +536,7 @@ async def test_internal_invoke_passes_a_seat_limit(db: None) -> None:
 
 async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(db: None) -> None:
     workspace_id, _member_id, agent_id, conversation_id = await _seed()
-    await _set_limit(workspace_id, 1)
+    await _unseat(_member_id)
     task_id = uuid4()
     next_run_at = datetime.now(UTC)
     async with workspace_tx() as connection:
@@ -592,7 +592,7 @@ async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
-    await _set_limit(workspace_id, 1)
+    await _unseat(member_id)
     second = await admission.admit_member(workspace_id, conversation_id, "second", member_id)
     assert second.turn_id != first.turn_id
     status, text = await _turn_row(second.turn_id)
@@ -605,8 +605,6 @@ async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None
 
 async def test_seated_reply_does_not_resume_a_seat_blocked_parked_turn(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 2)
-    await _seat(member_id)
     second_member = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -646,8 +644,6 @@ async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speake
     db: None,
 ) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 2)
-    await _seat(member_id)
     unseated = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -655,6 +651,7 @@ async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speake
                 id=unseated,
                 workspace_id=workspace_id,
                 email="unseated@example.com",
+                seated_at=None,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -729,7 +726,7 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
                 updated_at=sa.func.now(),
             )
         )
-    await _set_limit(workspace_id, 1)
+    await _unseat(member_id)
     dbos = StubDbos()
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hey", member_id
@@ -753,9 +750,12 @@ async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: Non
     assert timer.status == "queued"
 
 
-async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None) -> None:
+async def test_speakerless_member_message_is_refused(db: None) -> None:
+    """A member surface that could not name its speaker is answering a stranger, whatever else is
+    true of the workspace: there is no seat bound left to make this conditional, and there never
+    was a deploy where a speaker the surface failed to resolve was somebody the agent should
+    answer in a conversation carrying the workspace's own audience."""
     workspace_id, _member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     turn_id = (
         await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
@@ -768,21 +768,8 @@ async def test_speakerless_member_message_is_refused_under_a_seat_limit(db: None
     assert text == UNRESOLVED_SPEAKER_MESSAGE
 
 
-async def test_speakerless_member_message_passes_an_ungated_workspace(db: None) -> None:
-    workspace_id, _member_id, _, conversation_id = await _seed()
-    dbos = StubDbos()
-    turn_id = (
-        await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-            workspace_id, conversation_id, "hello", None
-        )
-    ).turn_id
-    assert dbos.enqueued == [str(turn_id)]
-
-
-async def test_speakerless_member_message_does_not_fold_under_a_seat_limit(db: None) -> None:
+async def test_speakerless_member_message_does_not_fold(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
-    await _set_limit(workspace_id, 2)
-    await _seat(member_id)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
@@ -794,7 +781,7 @@ async def test_speakerless_member_message_does_not_fold_under_a_seat_limit(db: N
     assert await _queued_bodies(conversation_id) == []
 
 
-async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(db: None) -> None:
+async def test_ghost_message_does_not_take_over_a_timer_turn(db: None) -> None:
     workspace_id, _member_id, agent_id, conversation_id = await _seed()
     task_id, timer_turn_id = uuid4(), uuid4()
     due = datetime.now(UTC)
@@ -831,7 +818,6 @@ async def test_ghost_message_does_not_take_over_a_timer_turn_under_a_seat_limit(
                 updated_at=sa.func.now(),
             )
         )
-    await _set_limit(workspace_id, 1)
     dbos = StubDbos()
     refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id, conversation_id, "hey", None
@@ -910,3 +896,57 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
     state = {row.id: (row.status, row.terminal) for row in rows}
     assert state[turned_away][0] == "cancelled"
     assert state[delivered] == ("parked", None)
+
+
+async def test_a_refused_message_leaves_an_armed_pause_for_the_real_speaker(db: None) -> None:
+    """A turn that never runs does not consume the wait it arrived beside. The agent armed a
+    `pause_and_wait` for an approval; a speaker the workspace cannot resolve types into the same
+    conversation and is refused. Their turn must not claim that pause, because claiming it and then
+    dying deletes it — the approver's later reply would find nothing to resume and the paused work
+    would hang until someone noticed."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    task_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.scheduled_task).values(
+                id=task_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                name="await-approval",
+                schedule=ONE_TIME_SCHEDULE,
+                prompt="resume",
+                description="waiting on the approval",
+                next_run_at=datetime.now(UTC) + timedelta(minutes=10),
+                origin_seq=0,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+
+    stranger = await admission.admit_member(workspace_id, conversation_id, "what's this?", None)
+    status, text = await _turn_row(stranger.turn_id)
+    assert (status, text) == ("cancelled", UNRESOLVED_SPEAKER_MESSAGE)
+    assert await _armed_pause(task_id) == (None, False)
+
+    approver = await admission.admit_member(workspace_id, conversation_id, "approved", member_id)
+    resume_turn_id, fires_now = await _armed_pause(task_id)
+    assert resume_turn_id == approver.turn_id
+    assert fires_now
+
+
+async def _armed_pause(task_id: UUID) -> tuple[UUID | None, bool]:
+    """The pause's resume turn, and whether it has been moved up to fire now."""
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.scheduled_task.c.resume_turn_id,
+                    tables.scheduled_task.c.next_run_at,
+                ).where(tables.scheduled_task.c.id == task_id)
+            )
+        ).one_or_none()
+    assert row is not None, "the pause was deleted"
+    return row.resume_turn_id, row.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)

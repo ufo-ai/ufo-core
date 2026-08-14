@@ -146,6 +146,18 @@ class _FirstBlockingDbos(StubDbos):
         self.enqueued.append(turn_id)
 
 
+async def _speaker(workspace_id: UUID) -> UUID:
+    """The workspace's own member. Every member surface resolves its speaker before it admits, so a
+    member message — a pause resume included — always carries one; one that resolved to nobody is
+    refused at admission rather than answered."""
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(tables.member.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+
+
 async def _seed(surface: str = "cli") -> tuple[UUID, UUID, UUID]:
     workspace_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -717,7 +729,7 @@ async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
                 conversation_id,
                 "The approval arrived.",
                 "approval-1",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         async with workspace_tx() as connection:
@@ -773,7 +785,7 @@ async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) ->
                 conversation_id,
                 "new message",
                 "newer-member",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         result = await pause_and_wait(
@@ -864,7 +876,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
                 conversation_id,
                 "The approval arrived.",
                 "approval-redelivery",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         async with workspace_tx() as connection:
@@ -910,7 +922,7 @@ async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: No
                 conversation_id,
                 "The approval arrived.",
                 "approval-redelivery",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         async with workspace_tx() as connection:
@@ -949,7 +961,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
                 conversation_id,
                 "The approval arrived.",
                 "approval-retry",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         async with workspace_tx() as connection:
@@ -969,7 +981,7 @@ async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db:
                 conversation_id,
                 "The approval arrived.",
                 "approval-retry",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         turns = await _turns(conversation_id)
@@ -1013,7 +1025,7 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
                 conversation_id,
                 "The approval arrived.",
                 "approval-ambiguous",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         )
         await dbos.entered.wait()
@@ -1022,7 +1034,7 @@ async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: N
                 conversation_id,
                 "The approval arrived.",
                 "approval-ambiguous",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         dbos.release.set()
@@ -1153,7 +1165,7 @@ async def test_member_admission_wins_against_an_already_claimed_pause(db: None) 
                 conversation_id,
                 "The approval arrived.",
                 "approval-race",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         )
         await dbos.entered.wait()
@@ -1324,7 +1336,7 @@ async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) 
             conversation_id,
             "member reply",
             "member-after-internal",
-            speaker_member_id=None,
+            speaker_member_id=await _speaker(workspace_id),
         )
         member_turn = taken_over.turn_id
         dbos.release.set()
@@ -1383,7 +1395,7 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
                 conversation_id,
                 "first",
                 "member-first",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         )
         await dbos.entered.wait()
@@ -1392,7 +1404,7 @@ async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
                 conversation_id,
                 "second",
                 "member-second",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         ).turn_id
         dbos.release.set()
@@ -1441,7 +1453,7 @@ async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> N
                 conversation_id,
                 "approved",
                 "member-crash",
-                speaker_member_id=None,
+                speaker_member_id=await _speaker(workspace_id),
             )
         )
         await blocked.entered.wait()

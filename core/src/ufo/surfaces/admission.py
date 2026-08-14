@@ -35,8 +35,11 @@ either parks it (held, not enqueued — the resume job re-admits it when the cap
 the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
 way. The seat gate runs first in the same commit: a speaking member without a seat — or a
 scheduled fire into a seatless member's conversation — commits cancelled with the refusal, an
-unseated speaker's message never folds into a live turn, and under a seat limit a member-surface
-message whose speaker never resolved to a member is refused rather than answered as a ghost."""
+unseated speaker's message never folds into a live turn, and a member-surface message whose
+speaker never resolved to a member is refused rather than answered as a ghost — unconditionally,
+because every member surface resolves its speaker, so one that did not is a stranger. A refused
+turn consumes nothing on its way out: it leaves an armed pause for the speaker the agent is
+actually waiting on."""
 
 import asyncio
 from dataclasses import dataclass
@@ -405,9 +408,8 @@ class Admission:
                 if timer_turn is not None:
                     timer_key = firing_key(timer_turn.pause_id, timer_turn.pause_due_at)
                     if timer_turn.idempotency_key == timer_key and (
-                        await Seats(workspace_id).admits(connection, speaker_member_id)
-                        if speaker_member_id is not None
-                        else not await Seats(workspace_id).gated(connection)
+                        speaker_member_id is not None
+                        and await Seats(workspace_id).admits(connection, speaker_member_id)
                     ):
                         taken_over = await connection.execute(
                             sa.update(tables.turn)
@@ -489,20 +491,16 @@ class Admission:
                         .scalars()
                         .all()
                     )
-                parked_seated = True
                 seats = Seats(workspace_id)
-                for parked_member in parked_members:
-                    if parked_member is not None and not await seats.admits(
-                        connection, parked_member
-                    ):
-                        parked_seated = False
-                        break
+                parked_seated = await seats.all_seated(
+                    connection, [member for member in parked_members if member is not None]
+                )
                 fold_admitted = (
                     live_turn is not None
                     and (
                         await seats.admits(connection, speaker_member_id)
                         if speaker_member_id is not None
-                        else pending_pause is None or not await seats.gated(connection)
+                        else pending_pause is None
                     )
                     and parked_seated
                 )
@@ -625,11 +623,7 @@ class Admission:
                 )
                 gate = gate_member(speaker_member_id, admission_source, on_behalf_of_member_id)
                 terminal: TerminalFrame | None
-                if (
-                    gate is None
-                    and pending_pause is not None
-                    and await Seats(workspace_id).gated(connection)
-                ):
+                if gate is None and pending_pause is not None:
                     status, terminal = (
                         CANCELLED,
                         TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
@@ -701,7 +695,11 @@ class Admission:
                             tables.scheduled_task.c.resume_turn_id == turn_id,
                         )
                     )
-            if pending_pause is not None and folded_parked_turn is None:
+            # A refused turn never joined the conversation, so it does not consume the wait it
+            # arrived beside: claiming the pause and then dying on the next line would delete it,
+            # and the member whose reply the agent is actually waiting on would find nothing left
+            # to resume.
+            if pending_pause is not None and folded_parked_turn is None and status != CANCELLED:
                 await connection.execute(
                     sa.update(tables.scheduled_task)
                     .values(

@@ -160,12 +160,9 @@ class TurnDispatcher:
                         .scalars()
                         .all()
                     )
-                    seats = Seats(turn.workspace_id)
-                    seated = True
-                    for member in members:
-                        if member is not None and not await seats.admits(connection, member):
-                            seated = False
-                            break
+                    seated = await Seats(turn.workspace_id).all_seated(
+                        connection, [member for member in members if member is not None]
+                    )
                     decision = await SpendEvaluator(
                         turn.workspace_id, turn.member_id, turn.agent_id
                     ).decide(connection, 0)

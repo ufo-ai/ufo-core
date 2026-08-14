@@ -1,4 +1,4 @@
-# Billing and Seats
+# Billing and Members
 
 ## Who can do billing
 
@@ -31,25 +31,21 @@ Never quote a specific credit amount or predict a numeric total cost. Describe c
 
 A workspace can supply its own Anthropic API key. When it does, model usage is metered for visibility
 but not billed as pass-through. Without it, the platform key is used and model usage bills through.
-The key is always entered through a private prompt, never pasted into chat. Supplying a key does not
-change seat billing.
+The key is always entered through a private prompt, never pasted into chat.
 
-## Seats
+## Members
 
-A seat is what lets a person talk to the agent.
+The plan is one fee per workspace and members are unlimited. Nothing is charged per person and
+nothing is gated on how many there are.
 
-- A new member — one who signs in, or one an admin adds by email — is seated automatically
-  while an included seat is open.
-- Beyond the included allowance, a new member is not seated: their messages are refused and a
-  workspace admin gets a seat approval request.
-- If an admin approves, the extra seat bills as overage on the invoice. Always say that when an admin
-  approves one.
-- There is a hard cap on seats. When it is reached, no more seats can be granted from chat and the
-  team has to be involved.
-- Only an admin can grant or revoke seats. Any member can list who currently holds one.
-
-To an admin approving one: "Approving this adds a seat beyond your included allowance, and it bills as
-overage."
+- A new member — one who signs in, or one an admin adds by email — is answered by the agent
+  straight away. There is no approval step and no per-person line on the invoice.
+- Any member can list who is in the workspace and which of them are admins.
+- To remove someone's access, an admin unseats them in chat. The agent stops answering them, and a
+  turn of theirs still running stops before its next step. Their history and what the agent
+  remembers about them stay, and seating them again restores their access.
+- If a customer asks about a limit, there is none to quote. Members are counted, and past roughly 25
+  the team gets in touch — that is outreach, not a cap, and nothing stops working.
 
 ## Boundaries
 

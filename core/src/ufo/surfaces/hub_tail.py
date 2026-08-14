@@ -19,7 +19,7 @@ from ufo.hub import Hub, LiveFrame, Parked, Terminal
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
-from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member, seat_gate_absent
+from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member
 
 TERMINAL_POLL_SECONDS = 1.0
 PARK_NOTICE = "This turn is parked: over a spend cap. It resumes when the cap is raised."
@@ -104,11 +104,7 @@ async def turn_status_frame(turn_id: UUID) -> LiveFrame | None:
         if row.status != PARKED:
             return None
         gate = gate_member(row.speaker_member_id, row.admission_source, row.on_behalf_of_member_id)
-        if (
-            gate is not None
-            and not seat_gate_absent(row.workspace_id)
-            and not await Seats(row.workspace_id).admits(connection, gate)
-        ):
+        if gate is not None and not await Seats(row.workspace_id).admits(connection, gate):
             return Parked(message=SEAT_REVOKED_MESSAGE)
     return Parked(message=PARK_NOTICE)
 

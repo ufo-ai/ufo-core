@@ -27,15 +27,6 @@ function allowance(allowed: boolean): string {
   return allowed ? "Allowed" : "Blocked";
 }
 
-/** What the plan grants, stated as a line rather than as more words on the section's own heading —
- *  a heading that grew a clause per plan field stops naming the records under it. */
-function seatLine(seats: AdminPayload["seats"]): string {
-  if (seats.limit === null && seats.included === null) return "Seats are not limited on this plan.";
-  const limit = seats.limit === null ? null : seats.limit + " seats";
-  const included = seats.included === null ? null : seats.included + " included in the plan";
-  return [limit, included].filter(Boolean).join(", ") + ".";
-}
-
 export function Admin() {
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -63,7 +54,6 @@ export function Admin() {
     >
       {(payload) => {
         const mainAgent = payload.agents.find((agent) => agent.main);
-        const gated = payload.seats.limit !== null || payload.seats.included !== null;
 
         return (
           <Pane className={FRAME} data-testid="admin">
@@ -87,9 +77,8 @@ export function Admin() {
             </Section>
 
             <Section title="Members">
-              <Hint className="m-0">{seatLine(payload.seats)}</Hint>
               <DataTable
-                columns={gated ? ["Member", "Role", "Seat", ""] : ["Member", "Role", ""]}
+                columns={["Member", "Role", "Seat", ""]}
                 rows={payload.members}
                 rowKey={(member) => member.email}
                 empty="This workspace has no members yet."
@@ -97,7 +86,6 @@ export function Admin() {
                 {(member) => (
                   <MemberRow
                     member={member}
-                    gated={gated}
                     onApply={(spec) =>
                       mainAgent
                         ? intent(mainAgent.id, {
@@ -220,18 +208,16 @@ function AgentRow({
 
 function MemberRow({
   member,
-  gated,
   onApply,
 }: {
   member: Member;
-  gated: boolean;
   onApply: (spec: { admin: boolean; seated: boolean }) => void;
 }) {
   return (
     <>
       <Td>{member.email}</Td>
       <Td>{member.admin ? "Admin" : "Member"}</Td>
-      {gated ? <Td>{member.seated ? "Seated" : "—"}</Td> : null}
+      <Td>{member.seated ? "Seated" : "Unseated"}</Td>
       <Td>
         <div className="flex flex-wrap gap-xs">
           {member.admin ? (

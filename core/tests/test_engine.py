@@ -4394,9 +4394,9 @@ async def test_per_round_seat_revocation_parks_a_running_turn(db: None, tmp_path
             )
         ).scalar_one()
         await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=1, updated_at=sa.func.now())
-            .where(tables.workspace.c.id == turn.workspace_id)
+            sa.update(tables.member)
+            .values(seated_at=None, updated_at=sa.func.now())
+            .where(tables.member.c.workspace_id == turn.workspace_id)
         )
     engine = _engine(turn, EchoModel(), tmp_path)
     engine = replace(engine, turn=engine.turn.model_copy(update={"speaker_member_id": speaker}))
@@ -4424,16 +4424,6 @@ async def test_revoking_an_absorbed_speakers_seat_parks_the_aggregate(
                 )
             )
         ).scalar_one()
-        await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=2, updated_at=sa.func.now())
-            .where(tables.workspace.c.id == turn.workspace_id)
-        )
-        await connection.execute(
-            sa.update(tables.member)
-            .values(seated_at=sa.func.now(), updated_at=sa.func.now())
-            .where(tables.member.c.id == founder)
-        )
         await connection.execute(
             sa.insert(tables.member).values(
                 id=second_member,
@@ -4489,9 +4479,9 @@ async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member
     turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=1, updated_at=sa.func.now())
-            .where(tables.workspace.c.id == turn.workspace_id)
+            sa.update(tables.member)
+            .values(seated_at=None, updated_at=sa.func.now())
+            .where(tables.member.c.workspace_id == turn.workspace_id)
         )
     engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
     with pytest.raises(TurnParked, match="seat was revoked"):

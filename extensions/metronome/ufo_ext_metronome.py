@@ -1,4 +1,4 @@
-"""Ship settled ledger usage and daily seat counts to Metronome, and drive seat changes from chat.
+"""Ship settled ledger usage and daily member counts to Metronome, and set billing up from chat.
 
 The usage job drains, per workspace, the usage-export seam (`ctx.pending_usage_exports`): core
 mints one frozen intent per settled ledger-row delta, and each intent becomes one ingest event
@@ -9,12 +9,11 @@ undercounting. Intents are acknowledged only after Metronome accepts the batch. 
 floor recorded on the first run bounds the initial backfill to `BACKFILL_WINDOW_DAYS`; it never
 moves after, so a settled row ships however long it waited.
 
-The seat job establishes the workspace's seat limit once (core's `ensure_limit` writes only while
-it is NULL) and ships one seat-count snapshot per day under `transaction_id =
+The seat job ships one member-count snapshot per day under `transaction_id =
 "seats:<workspace>:<date>"` — snapshots self-correct on the next day's event, so a lost mark can
-never accumulate an undercount. Seat changes are chat acts: an admin asks and the agent calls
-`grant_seat`/`revoke_seat`; the rules (the count, the limit, the last admin's irrevocable seat) are
-core's — this module only decides when to apply them and what to report back.
+never accumulate an undercount. Nothing is gated on the count: the plan is one flat fee per
+workspace with unlimited members, so nothing here bounds who the agent answers and the count is
+reported for outreach, never enforcement.
 
 Every usage event is labelled `byok`: a workspace holding its own key for the provider serving
 the model — `anthropic_api_key` (declared here so the standard `request_credentials` chat handoff
@@ -64,7 +63,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
 from ufo.sdk.o11y import log
-from ufo.sdk.seats import Seats, SeatSnapshot, admin_conversation, member_workspaces
+from ufo.sdk.seats import Seats, SeatSnapshot, member_workspaces
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "metronome"
@@ -85,19 +84,6 @@ STRIPE_PORTAL_CONFIGURATION_ENV = "STRIPE_BILLING_PORTAL_CONFIGURATION_ID"
 EVENT_TYPE = "ufo_usage"
 ANTHROPIC_KEY_SLOT = "anthropic_api_key"
 SEAT_EVENT_TYPE = "ufo_seats"
-SEAT_LIMIT_DEFAULT = 25
-INCLUDED_SEATS_DEFAULT = 5
-SEAT_APPROVAL_JOB_NAME = "seat_approvals"
-SEAT_APPROVAL_JOB_SCHEDULE = "30 * * * * *"
-SEAT_APPROVAL_KEY_PREFIX = "seat_approval_asked/"
-SEAT_APPROVAL_PROMPT = (
-    "[seat approval request] {email} joined the workspace but every included seat is taken "
-    "({seated} seated, {included} included in the plan). Ask a workspace admin to decide with "
-    "the ask_user tool, question 'Grant {email} a seat? It bills as overage on the invoice.' and "
-    "options 'Grant the seat' and 'Decline'. When they choose Grant, call grant_seat with that "
-    "email and confirm the overage; when they Decline, confirm and take no action — the member "
-    "stays unseated."
-)
 SEAT_SHIPPED_KEY = "seats_shipped_date"
 BATCH_EVENTS = 100
 INGEST_TIMEOUT_SECONDS = 30
@@ -118,37 +104,13 @@ BILLING_ACTIVE_PROMPT = (
     "or the billing portal whenever they want."
 )
 
-GRANT_SEAT_TOOL = "grant_seat"
-REVOKE_SEAT_TOOL = "revoke_seat"
 MANAGE_BILLING_TOOL = "manage_billing"
 
-GRANT_SEAT_DESCRIPTION = (
-    "Grant a workspace seat to a member by email so the agent answers them. Admin-only. A seat "
-    "beyond the plan's included allowance bills as overage on the invoice — say so when the "
-    "admin approves one. Fails when the hard seat limit is reached; raising that is not a chat "
-    "act, contact us."
-)
-REVOKE_SEAT_DESCRIPTION = (
-    "Revoke a member's seat by email. Admin-only; the last seated admin cannot be revoked. The "
-    "member's next message is refused immediately, and a running turn of theirs holds at its "
-    "next model round."
-)
 MANAGE_BILLING_DESCRIPTION = (
     "Set up or inspect the workspace's billing plan. Admin-only. 'setup' returns a short-lived "
     "Stripe link for saving a payment method and records the plan to activate once it is saved; "
     "'status' reports the card and plan as the providers hold them; 'portal' returns a fresh link "
     "for invoices, payment methods, and billing details."
-)
-
-SEATS_SECTION_NAME = "seats"
-SEATS_SECTION_BODY = (
-    "Seats gate who this agent answers. A newly joined member is seated automatically while an "
-    "included seat is open; beyond the included allowance they stay unseated, their messages are "
-    "refused, and an admin receives a seat approval request — if they approve, call "
-    "grant_seat with the member's email and note the seat bills as overage; if they decline, do "
-    "nothing. Only a workspace admin can change seats (grant_seat / revoke_seat); getting the "
-    "`workspace` object shows the limit, the included allowance, billed overage seats, and who "
-    "holds one."
 )
 
 BILLING_SECTION_NAME = "billing"
@@ -250,10 +212,11 @@ async def _ship(ctx: ExtensionContext) -> None:
 
 @dataclass(frozen=True)
 class SeatShipper:
-    """Establish the workspace's seat limit and ship one seat-count snapshot per day. The
-    transaction_id is the workspace-day, so a retry after a failed POST re-sends within
-    Metronome's keep-first dedup, and the next day's snapshot corrects whatever a stale first
-    event froze — snapshots never accumulate an undercount."""
+    """Ship one member-count snapshot per day. The transaction_id is the workspace-day, so a retry
+    after a failed POST re-sends within Metronome's keep-first dedup, and the next day's snapshot
+    corrects whatever a stale first event froze — snapshots never accumulate an undercount. The
+    count is the roster core owns; this establishes no bound, because the plan gates nothing on it.
+    """
 
     ctx: ExtensionContext
     transport: httpx.AsyncBaseTransport | None = None
@@ -265,14 +228,12 @@ class SeatShipper:
             return
         workspace_id = self.ctx.store.workspace_id
         async with self.ctx.transaction() as connection:
-            await Seats(workspace_id).ensure_limit(connection, SEAT_LIMIT_DEFAULT)
-            await Seats(workspace_id).ensure_included(connection, INCLUDED_SEATS_DEFAULT)
             snapshot = await Seats(workspace_id).snapshot(connection)
         await _ingest(token, [self._event(snapshot, today)], self.transport)
         log(
             "metronome.seats_shipped",
             workspace_id=str(workspace_id),
-            seat_count=snapshot.seated,
+            seat_count=len(snapshot.members),
         )
         await self.ctx.store.put(SEAT_SHIPPED_KEY, today)
 
@@ -283,60 +244,12 @@ class SeatShipper:
             "customer_id": workspace_id,
             "event_type": SEAT_EVENT_TYPE,
             "timestamp": _rfc3339(datetime.now(UTC)),
-            "properties": {
-                "seat_count": str(snapshot.seated),
-                "seat_limit": "" if snapshot.limit is None else str(snapshot.limit),
-            },
+            "properties": {"seat_count": str(len(snapshot.members))},
         }
 
 
 async def _ship_seats(ctx: ExtensionContext) -> None:
     await SeatShipper(ctx=ctx, transport=INGEST_TRANSPORT).run()
-
-
-@dataclass(frozen=True)
-class SeatApprovals:
-    """Turn every never-asked unseated member into one approval request in an admin's main-agent
-    conversation: an internal turn says who needs a seat and that granting bills as overage, and
-    the admin's reply drives grant_seat — chat-native consent, no new surface. The ask is marked
-    per member only after the invoke lands, so a fire without an admin conversation
-    retries next tick, and a granted or declined member is never re-asked (the mark is the ask,
-    not the answer; revoke_seat marks too, so an explicitly unseated member is a decision, not a
-    request). Asks fire only while the included allowance is exhausted — an unseated member with
-    a silent seat still open is an admin's own doing, never a request."""
-
-    ctx: ExtensionContext
-
-    async def run(self) -> None:
-        async with self.ctx.transaction() as connection:
-            snapshot = await Seats(self.ctx.store.workspace_id).snapshot(connection)
-        if snapshot.included is None or snapshot.seated < snapshot.included:
-            return
-        pending = [entry for entry in snapshot.members if not entry.seated]
-        for entry in pending:
-            marker = f"{SEAT_APPROVAL_KEY_PREFIX}{entry.email.strip().lower()}"
-            if await self.ctx.store.get(marker) is not None:
-                continue
-            async with self.ctx.transaction() as connection:
-                venue = await admin_conversation(connection, self.ctx.store.workspace_id)
-            if venue is None:
-                return
-            conversation_id, agent_id = venue
-            await self.ctx.invoke(
-                conversation_id,
-                agent_id,
-                SEAT_APPROVAL_PROMPT.format(
-                    email=entry.email,
-                    seated=snapshot.seated,
-                    included=snapshot.included,
-                ),
-                idempotency_key=f"seat-approval:{entry.email}",
-            )
-            await self.ctx.store.put(marker, datetime.now(UTC).isoformat())
-
-
-async def _ask_seat_approvals(ctx: ExtensionContext) -> None:
-    await SeatApprovals(ctx=ctx).run()
 
 
 class BillingConfig(BaseModel):
@@ -476,20 +389,6 @@ def _contract_key(workspace_id: UUID) -> str:
     return f"ufo-contract:{workspace_id}"
 
 
-class GrantSeatInput(BaseModel):
-    email: str = Field(description="Email of the workspace member to seat.")
-    user_description: str = Field(
-        description="Who you are giving access to, in plain language for the activity timeline."
-    )
-
-
-class RevokeSeatInput(BaseModel):
-    email: str = Field(description="Email of the seated member to unseat.")
-    user_description: str = Field(
-        description="Whose access you are removing, in plain language for the activity timeline."
-    )
-
-
 class ManageBillingInput(BaseModel):
     action: Literal["setup", "status", "portal"] = Field(
         description=(
@@ -502,28 +401,6 @@ class ManageBillingInput(BaseModel):
         description="What you are doing with their billing, in plain language for the activity "
         "timeline."
     )
-
-
-async def grant_seat(ctx: ToolContext, args: GrantSeatInput) -> ToolResult:
-    seats = await _admin_seats(ctx)
-    assert ctx.ext is not None
-    async with ctx.ext.transaction() as connection:
-        await seats.grant(connection, args.email)
-        snapshot = await seats.snapshot(connection)
-    return _snapshot_result(snapshot)
-
-
-async def revoke_seat(ctx: ToolContext, args: RevokeSeatInput) -> ToolResult:
-    seats = await _admin_seats(ctx)
-    assert ctx.ext is not None
-    async with ctx.ext.transaction() as connection:
-        await seats.revoke(connection, args.email)
-        snapshot = await seats.snapshot(connection)
-    await ctx.ext.store.put(
-        f"{SEAT_APPROVAL_KEY_PREFIX}{args.email.strip().lower()}",
-        datetime.now(UTC).isoformat(),
-    )
-    return _snapshot_result(snapshot)
 
 
 async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult:
@@ -632,49 +509,10 @@ async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolR
     return _text_result({"portal_url": url})
 
 
-async def _admin_seats(ctx: ToolContext) -> Seats:
-    if ctx.speaker_member_id is None:
-        raise ValueError("seat changes require a speaking member")
-    if not await ctx.speaker_is_admin():
-        raise ValueError("only a workspace admin can change seats")
-    return Seats(ctx.turn.workspace_id)
-
-
-def _snapshot_result(snapshot: SeatSnapshot) -> ToolResult:
-    return _text_result(
-        {
-            "seat_limit": snapshot.limit,
-            "included_seats": snapshot.included,
-            "billed_overage_seats": (
-                max(0, snapshot.seated - snapshot.included) if snapshot.included is not None else 0
-            ),
-            "seated": snapshot.seated,
-            "members": [
-                {"email": entry.email, "seated": entry.seated, "admin": entry.admin}
-                for entry in snapshot.members
-            ],
-        }
-    )
-
-
 def _text_result(payload: dict[str, object]) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(payload)),))
 
 
-GRANT_SEAT_TOOL_DEF = ToolDef(
-    name=GRANT_SEAT_TOOL,
-    description=GRANT_SEAT_DESCRIPTION,
-    input_model=GrantSeatInput,
-    handler=grant_seat,
-    side_effecting=True,
-)
-REVOKE_SEAT_TOOL_DEF = ToolDef(
-    name=REVOKE_SEAT_TOOL,
-    description=REVOKE_SEAT_DESCRIPTION,
-    input_model=RevokeSeatInput,
-    handler=revoke_seat,
-    side_effecting=True,
-)
 MANAGE_BILLING_TOOL_DEF = ToolDef(
     name=MANAGE_BILLING_TOOL,
     description=MANAGE_BILLING_DESCRIPTION,
@@ -939,11 +777,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=(
-            GRANT_SEAT_TOOL_DEF,
-            REVOKE_SEAT_TOOL_DEF,
-            MANAGE_BILLING_TOOL_DEF,
-        ),
+        tools=(MANAGE_BILLING_TOOL_DEF,),
         jobs=(
             JobSpec(
                 name=JOB_NAME,
@@ -958,22 +792,13 @@ def manifest() -> Manifest:
                 candidates=member_workspaces(),
             ),
             JobSpec(
-                name=SEAT_APPROVAL_JOB_NAME,
-                schedule=SEAT_APPROVAL_JOB_SCHEDULE,
-                handler=_ask_seat_approvals,
-                candidates=member_workspaces(),
-            ),
-            JobSpec(
                 name=BILLING_JOB_NAME,
                 schedule=BILLING_JOB_SCHEDULE,
                 handler=_activate_billing,
                 candidates=member_workspaces(),
             ),
         ),
-        prompt_sections=(
-            PromptSection(name=SEATS_SECTION_NAME, body=SEATS_SECTION_BODY),
-            PromptSection(name=BILLING_SECTION_NAME, body=BILLING_SECTION_BODY),
-        ),
+        prompt_sections=(PromptSection(name=BILLING_SECTION_NAME, body=BILLING_SECTION_BODY),),
         credentials=(
             CredentialSlot(
                 name=ANTHROPIC_KEY_SLOT,

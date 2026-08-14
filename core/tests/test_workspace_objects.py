@@ -114,15 +114,6 @@ async def _seed(members: int, seated: int) -> tuple[UUID, UUID, UUID, UUID]:
     )
 
 
-async def _bound(workspace_id: UUID, seat_limit: int, included_seats: int) -> None:
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.workspace)
-            .values(seat_limit=seat_limit, included_seats=included_seats, updated_at=sa.func.now())
-            .where(tables.workspace.c.id == workspace_id)
-        )
-
-
 def _context(
     workspace_id: UUID,
     speaker_id: UUID | None,
@@ -174,32 +165,23 @@ async def test_the_workspace_reads_as_one_object_carrying_its_seat_shape(db: Non
         kinds = json.loads(await _text(_tool("object_list"), ctx))["kinds"]
         assert WORKSPACE_KIND in {row["kind"] for row in kinds}
 
-        ungated = json.loads(await _text(_tool("object_list"), ctx, kind=WORKSPACE_KIND))["objects"]
-        assert ungated == [
+        listed = json.loads(await _text(_tool("object_list"), ctx, kind=WORKSPACE_KIND))["objects"]
+        assert listed == [
             {
                 "name": str(workspace_id),
-                "summary": "3 members, 2 seated, no seat limit",
-                "seat_limit": None,
-                "included_seats": None,
+                "summary": "3 members, 2 seated",
                 "members": 3,
                 "seated": 2,
             }
         ]
-
-        await _bound(workspace_id, seat_limit=5, included_seats=2)
-        gated = json.loads(await _text(_tool("object_list"), ctx, kind=WORKSPACE_KIND))["objects"]
-        assert gated[0]["summary"] == "3 members, 2 seated, seat limit 5"
 
         read = yaml.safe_load(
             await _text(_tool("object_get"), ctx, kind=WORKSPACE_KIND, name=str(workspace_id))
         )
         assert read["spec"] == {}
         assert read["status"] == {
-            "seat_limit": 5,
-            "included_seats": 2,
             "members": 3,
             "seated": 2,
-            "billed_overage_seats": 0,
             "roster": [
                 {"email": "member0@example.com", "seated": True, "admin": True},
                 {"email": "member1@example.com", "seated": True, "admin": False},
@@ -222,7 +204,6 @@ async def test_the_workspace_kind_filters_and_orders_on_its_declared_fields(db: 
     """Every field the kind declares rides its one row, so a caller filters and orders on the seat
     shape without opening the object."""
     workspace_id, speaker_id, main, _ = await _seed(members=4, seated=3)
-    await _bound(workspace_id, seat_limit=6, included_seats=2)
     with ws(workspace_id):
         ctx = _context(workspace_id, speaker_id, main)
         listing = _tool("object_list")
@@ -230,12 +211,7 @@ async def test_the_workspace_kind_filters_and_orders_on_its_declared_fields(db: 
         row = json.loads(await _text(listing, ctx, kind=WORKSPACE_KIND))["objects"][0]
         assert WORKSPACE_OBJECT.list_fields <= set(row)
 
-        for field, value in (
-            ("seat_limit", 6),
-            ("included_seats", 2),
-            ("members", 4),
-            ("seated", 3),
-        ):
+        for field, value in (("members", 4), ("seated", 3)):
             matched = json.loads(
                 await _text(listing, ctx, kind=WORKSPACE_KIND, filters={field: value})
             )
@@ -271,7 +247,7 @@ async def test_every_workspace_mutation_refuses_with_the_path_that_owns_it(db: N
             )
         with pytest.raises(VerbNotSupported, match="never deleted"):
             await _text(_tool("object_delete"), ctx, kind=WORKSPACE_KIND, name=str(workspace_id))
-        with pytest.raises(ValueError, match="seat_limit"):
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
             await _text(
                 _tool("object_apply"),
                 ctx,
@@ -279,19 +255,10 @@ async def test_every_workspace_mutation_refuses_with_the_path_that_owns_it(db: N
                     {
                         "kind": WORKSPACE_KIND,
                         "name": str(workspace_id),
-                        "spec": {"seat_limit": 9},
+                        "spec": {"seated": 9},
                     }
                 ),
             )
-        async with workspace_tx() as connection:
-            bounds = (
-                await connection.execute(
-                    sa.select(
-                        tables.workspace.c.seat_limit, tables.workspace.c.included_seats
-                    ).where(tables.workspace.c.id == workspace_id)
-                )
-            ).one()
-        assert (bounds.seat_limit, bounds.included_seats) == (None, None)
 
 
 async def _member_id(workspace_id: UUID, email: str) -> UUID:
@@ -315,10 +282,8 @@ async def _status(ctx: ToolContext, workspace_id: UUID) -> dict[str, object]:
 
 async def test_a_member_asking_the_main_agent_reads_who_holds_a_seat(db: None) -> None:
     """The hosted corpus tells customers any member can list who currently holds a seat, so a
-    plain member — not just an admin — reads the whole roster on the main agent, and the seats
-    past the included allowance are named beside it because that is what approving one costs."""
+    plain member — not just an admin — reads the whole roster on the main agent."""
     workspace_id, _, main, _child = await _seed(members=3, seated=3)
-    await _bound(workspace_id, seat_limit=5, included_seats=1)
     async with workspace_tx() as connection:
         plain = (
             await connection.execute(
@@ -332,7 +297,6 @@ async def test_a_member_asking_the_main_agent_reads_who_holds_a_seat(db: None) -
     with ws(workspace_id):
         status = await _status(_context(workspace_id, plain.id, main), workspace_id)
 
-    assert status["billed_overage_seats"] == 2
     assert status["roster"] == [
         {"email": "member0@example.com", "seated": True, "admin": True},
         {"email": "member1@example.com", "seated": True, "admin": False},
@@ -378,23 +342,6 @@ async def test_the_roster_holds_the_order_every_other_seat_read_uses(db: None) -
         "zoe@example.com",
         "member0@example.com",
     ]
-
-
-async def test_seats_under_the_included_allowance_bill_no_overage(db: None) -> None:
-    """`billed_overage_seats` is a billing fact a member reads, so an unfilled allowance reports
-    zero rather than a negative count of the seats still free."""
-    workspace_id, speaker_id, main, _child = await _seed(members=2, seated=2)
-    await _bound(workspace_id, seat_limit=9, included_seats=5)
-    with ws(workspace_id):
-        status = await _status(_context(workspace_id, speaker_id, main), workspace_id)
-    assert status["billed_overage_seats"] == 0
-
-
-async def test_an_ungated_workspace_bills_no_overage(db: None) -> None:
-    workspace_id, speaker_id, main, _child = await _seed(members=2, seated=2)
-    with ws(workspace_id):
-        status = await _status(_context(workspace_id, speaker_id, main), workspace_id)
-    assert status["billed_overage_seats"] == 0
 
 
 async def test_an_externally_shared_channel_hears_no_seat_shape(db: None) -> None:

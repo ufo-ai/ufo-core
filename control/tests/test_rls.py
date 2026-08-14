@@ -403,13 +403,6 @@ async def test_shared_create_and_join_write_workspace_and_members(
         assert colleague.workspace_id == workspace_id
         assert not colleague.admin
         assert await _members_in(workspace_id) == ["colleague@sharedco.io", "founder@sharedco.io"]
-        with ws(UUID(workspace_id)):
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.update(tables.workspace)
-                    .values(seat_limit=2, updated_at=sa.func.now())
-                    .where(tables.workspace.c.id == UUID(workspace_id))
-                )
         third_choice = await shared.choices("sharedco.io", "third@sharedco.io")
         third = await shared.join(third_choice[0], "sharedco.io", "third@sharedco.io")
         assert third.workspace_id == workspace_id
@@ -425,7 +418,7 @@ async def test_shared_create_and_join_write_workspace_and_members(
         assert [(row.email, row.seated_at is not None) for row in seated] == [
             ("colleague@sharedco.io", True),
             ("founder@sharedco.io", True),
-            ("third@sharedco.io", False),
+            ("third@sharedco.io", True),
         ]
     finally:
         await pool.close()

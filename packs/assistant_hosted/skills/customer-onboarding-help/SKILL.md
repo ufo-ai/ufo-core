@@ -12,7 +12,7 @@ description: "Load when asked about this agent product (ufo itself), its surface
    team — never reasoning outward from the product's shape to a plausible mechanism. An invented
    onboarding step costs a paying customer their first hour.
 2. **Prefer an action over an instruction.** If you can do the thing — mint the install link, return
-   the billing link, seat the teammate — do it instead of describing where to click. Telling a
+   the billing link, add the teammate — do it instead of describing where to click. Telling a
    customer to go fix a setting in some dashboard is the failure mode this corpus exists to prevent.
 3. **Name what is not available yet.** `references/not-yet.md` lists what a customer may reasonably
    assume exists and does not. Say "not available yet" and do not imply a date.
@@ -29,7 +29,7 @@ Read the one file that matches the question. Do not read all of them.
 | --- | --- |
 | Signup, invite codes, first sign-in, joining an existing workspace | `references/getting-started.md` |
 | Installing UFO into Slack, install states, the shared channel | `references/slack-install.md` |
-| Cost, payment method, when the plan goes live, seats, adding teammates | `references/billing-and-seats.md` |
+| Cost, payment method, when the plan goes live, members, adding teammates | `references/billing-and-seats.md` |
 | What the agent can do, the web portal, connectors, credentials, members and admins, scheduled tasks, memory | `references/capabilities.md` |
 | Something is broken or a step failed | `references/troubleshooting.md` |
 | Whether a thing exists yet | `references/not-yet.md` |

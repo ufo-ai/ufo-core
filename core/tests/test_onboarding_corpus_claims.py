@@ -29,6 +29,7 @@ SLACK_CONNECT = "control/src/ufo_control/gateway_slack_connect.py"
 AUDIENCE = "core/src/ufo/audience.py"
 MEMBERS = "core/src/ufo/members.py"
 SEATS = "core/src/ufo/seats.py"
+TABLES = "core/src/ufo/schema/tables.py"
 WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
 SCHEDULING = "core/src/ufo/scheduling.py"
@@ -181,18 +182,18 @@ CLAIMS = (
         pattern=r"Secrets\s+never\s+enter\s+this\s+chat",
     ),
     Claim(
-        claim="a new member is seated automatically while an included seat is open",
+        claim="a new member is answered straight away, with no approval step",
         corpus="references/billing-and-seats.md",
-        phrase="seated automatically while an included seat is open",
-        source=METRONOME,
-        pattern=r"INCLUDED_SEATS_DEFAULT = \d+",
+        phrase="answered by the agent straight away",
+        source=TABLES,
+        pattern=(r'sa\.Column\(\s*\n?\s*"seated_at".*server_default=sa\.func\.now\(\)'),
     ),
     Claim(
-        claim="seats stop at a hard cap",
+        claim="members are unlimited and the count is only ever reported",
         corpus="references/billing-and-seats.md",
-        phrase="hard cap on seats",
+        phrase="members are unlimited",
         source=METRONOME,
-        pattern=r"SEAT_LIMIT_DEFAULT = \d+",
+        pattern=r'"properties": \{"seat_count": str\(len\(snapshot\.members\)\)\}',
     ),
     Claim(
         claim="plan activation runs on a schedule rather than instantly",
@@ -209,22 +210,9 @@ CLAIMS = (
         pattern=r"async def _admin_billing\(ctx: ToolContext\)",
     ),
     Claim(
-        claim="only an admin can grant or revoke a seat",
+        claim="any member can list who is in the workspace and which of them are admins",
         corpus="references/billing-and-seats.md",
-        phrase="Only an admin can grant or revoke seats",
-        source=METRONOME,
-        pattern=(
-            r"async def grant_seat\(.*\n"
-            r"\s+seats = await _admin_seats\(ctx\)\n"
-            r"(?:.*\n)*?"
-            r"async def revoke_seat\(.*\n"
-            r"\s+seats = await _admin_seats\(ctx\)"
-        ),
-    ),
-    Claim(
-        claim="any member can list who holds a seat",
-        corpus="references/billing-and-seats.md",
-        phrase="Any member can list who currently holds one",
+        phrase="Any member can list who is in the workspace",
         source=WORKSPACE_KIND,
         pattern=(
             r"async def status\(\n"
@@ -279,11 +267,18 @@ CLAIMS = (
         pattern=r"have ever contacted the agent, at any email domain",
     ),
     Claim(
-        claim="a member an admin adds is seated while an included seat is open",
+        claim="an admin removes a person's access by unseating them, and can restore it",
+        corpus="references/billing-and-seats.md",
+        phrase="an admin unseats them in chat",
+        source=SEATS,
+        pattern=r"async def revoke\(.*\n(?:.*\n)*?\s+\.values\(seated_at=None",
+    ),
+    Claim(
+        claim="a member an admin adds is answered without any further step",
         corpus="references/billing-and-seats.md",
         phrase="one an admin adds by email",
-        source=SEATS,
-        pattern=r"await Seats\(workspace_id\)\.auto_seat\(connection, created\)",
+        source=MEMBERS,
+        pattern=r"They can speak to the agent now\.",
     ),
     Claim(
         claim="a private channel carries a room scope of its own",

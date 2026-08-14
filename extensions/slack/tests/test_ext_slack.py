@@ -98,6 +98,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.serve import _mount_shared_surfaces
 from ufo.workspace import ws
 
@@ -267,6 +268,14 @@ def _page(
     return (root if root and root[0] not in page else []) + page
 
 
+DEFAULT_MEMBER_EMAIL = "owner@example.com"
+DEFAULT_SLACK_USER = "U1"
+DEFAULT_TEAM = {
+    DEFAULT_SLACK_USER: DEFAULT_MEMBER_EMAIL,
+    **{f"U{index}": f"member{index}@example.com" for index in range(2, 10)},
+}
+
+
 def _mock_transport(
     recorder: list[httpx.Request],
     users: dict[str, str],
@@ -275,6 +284,13 @@ def _mock_transport(
     messages: tuple[dict[str, object], ...] = (),
     real_name: str = "Bee Jones",
 ) -> httpx.MockTransport:
+    """The numbered users are the workspace's own team unless a caller says otherwise — `U1` its
+    onboarded member and the rest same-domain colleagues who join on first contact. That is what a
+    Slack workspace looks like: the agent answers members, and a speaker it cannot resolve to one
+    is refused. A caller naming any of these ids still overrides it, which is how the tests about
+    an unresolvable speaker state their case."""
+    users = {**DEFAULT_TEAM, **users}
+
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.append(request)
         url = str(request.url).split("?")[0]
@@ -407,7 +423,9 @@ async def _write_identity(
     await blob.put(slack.identity_blob_key(workspace_id), identity.model_dump_json().encode())
 
 
-async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID | None]:
+async def _seed(*, member_email: str | None = DEFAULT_MEMBER_EMAIL) -> tuple[UUID, UUID | None]:
+    """A workspace as every real one exists: holding its onboarded member. `member_email=None`
+    seeds the state before anyone has onboarded, which is the only shape with no member in it."""
     workspace_id, agent_id = uuid4(), uuid4()
     member_id = uuid4() if member_email is not None else None
     async with workspace_tx() as connection:
@@ -1540,7 +1558,17 @@ def _ambient_transport(
         if url == slack.SLACK_CONVERSATIONS_HISTORY_URL:
             return _messages(history)
         if url == slack.SLACK_USERS_INFO_URL:
-            return httpx.Response(200, json={"ok": True, "user": {"profile": {}}})
+            email = DEFAULT_TEAM.get(str(request.url.params.get("user")))
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "profile": {"email": email} if email else {},
+                        "is_email_confirmed": email is not None,
+                    },
+                },
+            )
         if url == slack.SLACK_CONVERSATIONS_INFO_URL:
             channel_id = str(request.url.params.get("channel"))
             return httpx.Response(
@@ -2695,10 +2723,10 @@ async def test_origin_labels_come_from_metadata_the_audience_decision_already_re
 ) -> None:
     """The channel name rides the `conversations.info` the audience decision already fetches, so a
     labelled conversation costs no extra Slack call and a channel kind settled from the event alone
-    carries no label. A DM's label names its kind, never its member: an unresolved Slack user
-    leaves the DM workspace-shared, where a member's name would be a disclosure, and a group DM's
-    Slack name spells out the same members."""
-    workspace_id, _ = await _seed()
+    carries no label. A DM's label names its kind, never its member, because a member's name there
+    would be a disclosure — and a group DM's Slack name spells out the same members. The DM's
+    audience is the member's own, which is what a DM is."""
+    workspace_id, member_id = await _seed()
     recorder: list[httpx.Request] = []
     transport = _mock_transport(
         recorder,
@@ -2769,7 +2797,7 @@ async def test_origin_labels_come_from_metadata_the_audience_decision_already_re
     assert await _loaded_audiences(workspace_id) == {
         "CPUBLIC:1.0": str(SHARED_AUDIENCE),
         "CPRIVATE:2.0": str(room_audience(slack.SURFACE_SLACK, "CPRIVATE")),
-        "D1": str(SHARED_AUDIENCE),
+        "D1": str(conversation_audience(member_id)),
         "CCONNECT:4.0": str(foreign_room_audience(slack.SURFACE_SLACK, "CCONNECT")),
         "GMPIM:5.0": str(room_audience(slack.SURFACE_SLACK, "GMPIM")),
     }
@@ -3155,8 +3183,14 @@ async def test_first_time_same_domain_dm_speaker_joins_as_a_member(
 async def test_dm_without_a_confirmed_same_domain_email_stays_unlinked(
     db: None, tmp_path, monkeypatch, email: str, unconfirmed: frozenset[str]
 ) -> None:
-    """Neither a foreign-domain email nor one Slack has not confirmed grants membership: the DM is
-    admitted as a shared, memberless conversation and no member row appears."""
+    """Neither a foreign-domain email nor one Slack has not confirmed grants membership, and a
+    speaker the workspace cannot resolve to a member is not answered: the turn is cancelled with
+    the unresolved-speaker refusal, no member row appears, and the conversation stays memberless.
+
+    This is the workspace boundary end to end. Somebody on the workspace's Slack team but outside
+    its email domain reaches the agent with a real Slack identity and no membership; answering them
+    would run a turn carrying the workspace's own audience for a person the workspace cannot
+    name."""
     workspace_id, _ = await _seed(member_email="owner@example.com")
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, [], users={"UOUT": email}, unconfirmed=unconfirmed
@@ -3186,21 +3220,22 @@ async def test_dm_without_a_confirmed_same_domain_email_stays_unlinked(
                 )
             )
         ).one()
-        admitted = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
-        ).scalar_one()
+        turn = (
+            await connection.execute(sa.select(tables.turn.c.status, tables.turn.c.terminal))
+        ).one()
     assert members == ["owner@example.com"]
     assert conversation.member_id is None
-    assert admitted == 1
+    assert turn.status == "cancelled"
+    assert TerminalFrame.model_validate(turn.terminal).text == UNRESOLVED_SPEAKER_MESSAGE
 
 
 async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """An unconfirmed email is a retryable state, not a verdict: the first DM lands memberless,
-    and the DM after Slack confirms the address joins the speaker as a member, claims that same
-    conversation — and its memory subject — as theirs, and lands on the live turn's inbound queue
-    carrying them as its speaker."""
+    """An unconfirmed email is a retryable state, not a verdict. The first DM resolves to nobody
+    and is refused, because the workspace answers its members and nothing yet says this speaker is
+    one. The DM after Slack confirms the address joins them as a member, claims that same
+    conversation — and its memory subject — as theirs, and is answered as its speaker."""
     workspace_id, _ = await _seed(member_email="owner@example.com")
     unconfirmed = {"UNEW"}
     _, client, _ = await _mount(
@@ -3237,29 +3272,21 @@ async def test_confirmed_email_claims_the_dm_that_began_unconfirmed(
                 )
             )
         ).one()
-        turn_speakers = (
-            (
-                await connection.execute(
-                    sa.select(tables.turn.c.speaker_member_id).order_by(tables.turn.c.seq)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        queued = (
+        turns = (
             await connection.execute(
                 sa.select(
-                    tables.inbound_message.c.body,
-                    tables.inbound_message.c.speaker_member_id,
-                )
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.status,
+                    tables.turn.c.inbound,
+                ).order_by(tables.turn.c.seq)
             )
-        ).one()
+        ).all()
     assert conversation.member_id == member_id
-    assert turn_speakers == [None]
-    assert (member_message_text(queued.body), queued.speaker_member_id) == (
-        "me again",
-        member_id,
-    )
+    refused, answered = turns
+    assert (refused.speaker_member_id, refused.status) == (None, "cancelled")
+    assert member_message_text(refused.inbound) == "hi"
+    assert (answered.speaker_member_id, answered.status) == (member_id, "queued")
+    assert member_message_text(answered.inbound) == "me again"
 
 
 async def test_unlinked_dm_fails_loud_when_the_sender_read_is_unavailable(
@@ -6219,6 +6246,7 @@ async def _progress_turn(
     recorder: list[httpx.Request],
     hub: InProcessHub,
     channels: dict[str, dict[str, object] | None] | None = None,
+    speaker_email: str = DEFAULT_MEMBER_EMAIL,
 ) -> UUID:
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
     monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 0.1)
@@ -6226,7 +6254,12 @@ async def _progress_turn(
         monkeypatch,
         workspace_id,
         tmp_path,
-        _mock_transport(recorder, {}, frozenset(), channels=channels),
+        _mock_transport(
+            recorder,
+            {DEFAULT_SLACK_USER: speaker_email},
+            frozenset(),
+            channels=channels,
+        ),
         hub=hub,
     )
     mention = _event_body(
@@ -6267,7 +6300,9 @@ async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_r
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
-    turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
+    turn_id = await _progress_turn(
+        monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
+    )
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
@@ -6298,7 +6333,9 @@ async def test_an_unpriced_first_progress_post_carries_the_footers_links_alone(
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
-    turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
+    turn_id = await _progress_turn(
+        monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
+    )
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
@@ -6337,7 +6374,13 @@ async def test_a_first_progress_posts_footer_withholds_the_operator_fields_the_r
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
     turn_id = await _progress_turn(
-        monkeypatch, workspace_id, tmp_path, recorder, hub, channels=channels
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        recorder,
+        hub,
+        channels=channels,
+        speaker_email=member_email,
     )
     task = slack._PROGRESS_TASKS[turn_id]
 

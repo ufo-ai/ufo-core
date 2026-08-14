@@ -16,13 +16,12 @@ second-hand, from an admin asking about someone else.
 | "My teammate messaged it and got nothing back" | A first message resolves by the email Slack confirms for them: a teammate on the workspace's email domain joins from that message alone, someone on another domain does not. Check which address their Slack account carries. |
 | The install link fails after they approve it | Mint a fresh one. Links are short-lived and single-purpose, so one from an earlier message will fail. |
 
-## People and seats
+## People
 
 | Symptom | What to say and do |
 | --- | --- |
-| "My colleague's messages are being refused" | No open seat. An admin approves one, it bills as overage, and you confirm once it is done. |
-| "I can't add another seat at all" | The hard cap is reached. Raising it is not a chat act — say you are passing it to the team. |
-| "We took someone's seat away and they are still working" | Their next message is refused at once, and a turn already running holds at its next step rather than stopping mid-act. |
+| "My colleague's messages are being refused" | Nothing limits how many people a workspace has, so this is about who they resolve to rather than a limit: check that the address their account carries is on a domain the workspace admits. |
+| "How many people can we add?" | As many as they want, at no extra charge. Members are counted but nothing is gated on the count. |
 | An admin asks why a new teammate never got their sign-in code | It goes to the address they typed: check spam and confirm the address. A personal address is refused outright — it has to be a work address. Someone added at another company's domain signs in with that address and chooses the workspace when more than one is available. If the address was right and nothing arrived, say you are raising it. |
 
 ## Memory and context

@@ -59,8 +59,6 @@ export type AgentsPayload = {
   new_agent: NewAgentForm | null;
 };
 
-export type SeatSummary = { limit: number | null; included: number | null };
-
 export type SpendCap = {
   scope: string;
   subject: string | null;
@@ -74,7 +72,6 @@ export type DeployExtension = { name: string; version: string; sandbox_internet:
 export type AdminPayload = {
   agents: AdminAgent[];
   members: Member[];
-  seats: SeatSummary;
   caps: SpendCap[];
   deploy: { sandbox_internet: boolean; extensions: DeployExtension[] };
 };

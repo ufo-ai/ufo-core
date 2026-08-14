@@ -111,7 +111,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.search import SearchProvider
-from ufo.seats import SEAT_REVOKED_MESSAGE, Seats, seat_gate_absent
+from ufo.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, SkillRegistry
 from ufo.tools.context import (
     ImageContent,
@@ -1678,8 +1678,10 @@ class TurnEngine:
 
         The seat gate re-checks every member whose message the turn has absorbed, so revoking any
         speaker's seat stops the aggregate before its next model call. A scheduled turn gates on
-        the member it acts on behalf of. The no-limit fast-path keeps unlimited deploys free of
-        per-round reads."""
+        the member it acts on behalf of. It costs one indexed read per round whatever the turn
+        absorbed, deliberately and with no fast-path: a seat is what an admin revokes to cut someone
+        off, so a cached answer would keep answering them for as long as it was held, and a
+        running turn is the case the revoke most needs to reach."""
         members = {
             message.member_id for message in requesters.values() if message.member_id is not None
         }
@@ -1688,12 +1690,10 @@ class TurnEngine:
             and self.turn.on_behalf_of_member_id is not None
         ):
             members.add(self.turn.on_behalf_of_member_id)
-        if members and not seat_gate_absent(self.turn.workspace_id):
+        if members:
             async with workspace_tx() as connection:
-                seats = Seats(self.turn.workspace_id)
-                for member in members:
-                    if not await seats.admits(connection, member):
-                        raise TurnParked(SEAT_REVOKED_MESSAGE)
+                if not await Seats(self.turn.workspace_id).all_seated(connection, members):
+                    raise TurnParked(SEAT_REVOKED_MESSAGE)
         member_id = audience_member(self.audience)
         if applicable_caps_absent(self.turn.workspace_id, member_id, self.turn.agent_id):
             return

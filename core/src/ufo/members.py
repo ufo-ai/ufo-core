@@ -53,8 +53,9 @@ class MemberSpec(BaseModel):
     seated: bool = Field(
         description=(
             "Whether this member holds a seat — an unseated member's messages are refused at "
-            "admission. Seating counts against the workspace's seat limit; the last seated "
-            "admin cannot be unseated."
+            "admission, which is how a workspace removes someone's access. Every member holds "
+            "one from creation and nothing bounds how many do; the last seated admin cannot be "
+            "unseated."
         )
     )
 
@@ -324,21 +325,11 @@ class AddMember:
             ):
                 raise AdminRequired(ADD_MEMBER_GATE)
             await self._absent(connection, email)
-            member_id = await create_member(
-                connection, ws_current().workspace_id, email, is_admin=args.admin
-            )
-            seated = (
-                await connection.execute(
-                    sa.select(tables.member.c.seated_at).where(tables.member.c.id == member_id)
-                )
-            ).scalar_one() is not None
+            await create_member(connection, ws_current().workspace_id, email, is_admin=args.admin)
         role = "a workspace admin" if args.admin else "a workspace member"
-        seat = (
-            "They can speak to the agent now."
-            if seated
-            else "They hold no seat, so the agent refuses them until an admin grants one."
+        return ToolResult(
+            content=(TextContent(text=f"{email} is {role}. They can speak to the agent now."),)
         )
-        return ToolResult(content=(TextContent(text=f"{email} is {role}. {seat}"),))
 
     async def _absent(self, connection: AsyncConnection, email: str) -> None:
         existing = (
@@ -380,8 +371,9 @@ MEMBER_OBJECT = ObjectKind(
         "the speaker: the roster is internal, and a channel another organization sits in never "
         "hears it. Apply {admin: true|false, seated: "
         "true|false} to an existing member id; only a speaking admin using the main agent may "
-        "change either. Unseating removes access at admission; seating counts against the seat "
-        f"limit. The last admin and last seated admin cannot be removed. Use {ADD_MEMBER_TOOL} to "
+        "change either. Unseating removes access at admission and seating restores it; members "
+        "are unlimited, so nothing is counted. The last admin and last seated admin cannot be "
+        f"removed. Use {ADD_MEMBER_TOOL} to "
         "add someone who has not arrived yet; members also join by themselves through a verified "
         "chat surface. Members cannot be deleted here."
     ),
