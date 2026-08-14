@@ -440,10 +440,11 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   first answer wins the idempotent admit, and `admitted_body` is how the surface confirms which
   landed before rewriting the affordance; a durable surface may also `tail` a turn for live feedback
   while it runs — Slack's native thread status, started by the admission that opened the run, and
-  interim progress posts on an exponentially growing cadence once a turn outlives its first interval,
-  armed inside the turn's own execution so the execution holding its claim is the one narrating it
-  and a resumed run gets its narration back — never for delivery, which stays the poller's terminal
-  reply.
+  interim progress posts on an exponentially growing cadence once a turn outlives its first interval.
+  One armer owns both followers, and the turn's own execution reaches it too, so the execution
+  holding the claim is the one narrating and a resumed run gets its narration back: the status Slack
+  drops two minutes after its last write is stamped again by the instance that took the turn over.
+  Live feedback is never delivery, which stays the poller's terminal reply.
 - **Live** (web; the terminal surface is its directive-stream twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a

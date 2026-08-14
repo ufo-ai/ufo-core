@@ -11,8 +11,8 @@ secret — privately. A surface authenticates to Slack directly, never through t
 proxy, so neither slot carries a wire-injection target.
 
 The surface's thread followers are side-channel tasks in the process that runs the turn, so the
-progress reporter is armed on `user_prompt_submit` — the one event that fires once per execution of
-a turn, which is what puts a reporter back on a run this fleet resumed."""
+status follower and the progress reporter are armed on `user_prompt_submit` — the one event that
+fires once per execution of a turn, which is what puts them back on a run this fleet resumed."""
 
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from ufo_ext_slack.surface import (
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
     attach,
-    follow_turn_progress,
+    follow_turn,
     ingest,
     interactive,
     oauth_callback,
@@ -78,7 +78,7 @@ def manifest() -> Manifest:
                 handler=attribute_connector_send,
                 tools=(CONNECTOR_CALL_TOOL,),
             ),
-            HookSpec(event="user_prompt_submit", handler=follow_turn_progress),
+            HookSpec(event="user_prompt_submit", handler=follow_turn),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

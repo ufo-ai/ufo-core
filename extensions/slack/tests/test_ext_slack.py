@@ -4806,6 +4806,15 @@ def _requests_to(recorder: list[httpx.Request], url: str) -> list[httpx.Request]
     return [r for r in recorder if str(r.url).split("?")[0] == url]
 
 
+def _statuses(recorder: list[httpx.Request]) -> list[str]:
+    """Every status text Slack took, in order. The empty one is the clear, so the line a member is
+    left with reads as the last non-empty entry."""
+    return [
+        str(json.loads(r.content)["status"])
+        for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+    ]
+
+
 SLACK_LOADING_MESSAGE_LIMIT = 50
 """Slack's own ceiling on an `assistant.threads.setStatus` loading message, spelled out here rather
 than read off the surface's constant: a line of 51 characters or more is refused with
@@ -4906,7 +4915,7 @@ async def test_a_message_the_turn_takes_up_restamps_the_status_and_posts_no_prog
             )
         ).scalar_one()
     status_task = slack._STATUS_TASKS[turn_id]
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     progress_task = slack._PROGRESS_TASKS[turn_id]
 
     def _sent() -> list[str]:
@@ -5917,10 +5926,10 @@ def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
     assert writing.report(300.0) == "Preparing the response · 5m in"
 
 
-async def _arm_progress(
+async def _arm_followers(
     workspace_id: UUID, turn_id: UUID, hub: InProcessHub, age: timedelta = timedelta()
 ) -> None:
-    """Arm the turn's reporter the way the turn's own execution does: fire the Slack manifest's
+    """Arm the turn's followers the way the turn's own execution does: fire the Slack manifest's
     `user_prompt_submit` hook through the real chain, with the loop's tailer bound to this hub. The
     chain wants a credential key set; the bot token itself resolves through the bound workspace.
 
@@ -5998,7 +6007,7 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, TextDelta(text="Rerunning the migration against a clean database."))
@@ -6101,7 +6110,7 @@ async def test_a_progress_post_re_stamps_the_status_it_blanked(
             )
         ).scalar_one()
     status_task = slack._STATUS_TASKS[turn_id]
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     progress_task = slack._PROGRESS_TASKS[turn_id]
     applying = slack.STATUS_DESCRIBED_TEXT.format(description="applying the migration")
 
@@ -6149,7 +6158,7 @@ async def test_a_turn_shorter_than_the_first_interval_posts_no_progress(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="a quick look"))
@@ -6184,7 +6193,7 @@ async def test_a_parked_turn_leaves_no_progress_task_behind(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     async with workspace_tx() as connection:
@@ -6244,7 +6253,10 @@ async def test_a_finished_status_follower_releases_the_turn_before_its_next_run(
         started += 1
         if started == 1:
             asyncio.get_running_loop().call_soon(
-                slack._track_status, status.ctx, status.turn_id, "C1:100.5", "100.5"
+                slack._track_status,
+                status.ctx,
+                status.turn_id,
+                slack.MirroredThread(queue_key="C1:100.5", message_ts="100.5"),
             )
             return
         await release.wait()
@@ -6254,7 +6266,9 @@ async def test_a_finished_status_follower_releases_the_turn_before_its_next_run(
     object.__setattr__(ctx, "workspace_id", uuid4())
     turn_id = uuid4()
     writer = (ctx.workspace_id, "C1", "100.5")
-    slack._track_status(ctx, turn_id, "C1:100.5", "100.5")
+    slack._track_status(
+        ctx, turn_id, slack.MirroredThread(queue_key="C1:100.5", message_ts="100.5")
+    )
     first = slack._STATUS_TASKS[turn_id]
 
     await first
@@ -6374,7 +6388,7 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
                     sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
                 )
             ).scalar_one()
-        await _arm_progress(workspace_id, turn_id, hub)
+        await _arm_followers(workspace_id, turn_id, hub)
         reporter = dict(slack._PROGRESS_TASKS)
         assert list(reporter) == [turn_id]
 
@@ -6478,7 +6492,7 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
@@ -6569,7 +6583,7 @@ async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_r
     turn_id = await _progress_turn(
         monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
     )
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
@@ -6603,7 +6617,7 @@ async def test_an_unpriced_first_progress_post_carries_the_footers_links_alone(
     turn_id = await _progress_turn(
         monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
     )
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
@@ -6650,7 +6664,7 @@ async def test_a_first_progress_posts_footer_withholds_the_operator_fields_the_r
         channels=channels,
         speaker_email=member_email,
     )
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
@@ -6693,7 +6707,7 @@ async def test_a_loading_skill_reaches_the_progress_post(db: None, tmp_path, mon
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
@@ -6739,7 +6753,7 @@ async def test_a_tool_free_streaming_turn_still_reports(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     secret = "The answer begins here and runs on for a while."
@@ -6797,7 +6811,7 @@ async def test_a_checkpoint_before_any_activity_skips_instead_of_posting(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     deadline = time.monotonic() + 10
@@ -6855,7 +6869,7 @@ async def test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothin
                     sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
                 )
             ).scalar_one()
-        await _arm_progress(workspace_id, turn_id, hub)
+        await _arm_followers(workspace_id, turn_id, hub)
         await hub.publish(
             turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
         )
@@ -6910,7 +6924,7 @@ async def test_a_dead_tail_abandons_the_progress_task_and_says_which(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
 
     deadline = time.monotonic() + 10
     while not [r for r in caplog.records if r.message == "slack.thread_progress.abandoned"]:
@@ -6969,7 +6983,7 @@ async def test_a_revoked_bot_token_abandons_the_progress_task(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
 
     deadline = time.monotonic() + 10
     while not [r for r in caplog.records if r.message == "slack.thread_progress.abandoned"]:
@@ -7055,7 +7069,7 @@ async def test_a_click_admitted_turn_posts_progress_in_the_clicked_thread(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(
@@ -7117,7 +7131,7 @@ async def test_a_rejected_progress_post_costs_an_update_and_not_the_reply(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(
@@ -7210,12 +7224,13 @@ async def _seed_running_turn(
     return conversation_id, turn_id
 
 
-def test_the_manifest_arms_the_reporter_from_the_turns_own_start() -> None:
-    """Nothing arms a reporter at admission any more, so the hook that arms it inside the turn's own
-    execution is this seam's producer end and the manifest is where it is declared."""
+def test_the_manifest_arms_the_followers_from_the_turns_own_start() -> None:
+    """Nothing arms a reporter at admission any more, and a status follower dies with its process,
+    so the hook that arms both inside the turn's own execution is this seam's producer end and the
+    manifest is where it is declared."""
     assert [(spec.event, spec.handler) for spec in slack_manifest().hooks] == [
         ("pre_tool_use", attribute_connector_send),
-        ("user_prompt_submit", slack.follow_turn_progress),
+        ("user_prompt_submit", slack.follow_turn),
     ]
 
 
@@ -7235,9 +7250,9 @@ async def test_a_slack_admission_leaves_the_reporter_to_the_turns_execution(
 ) -> None:
     """The thread status is state on a thread, so a duplicate writer overwrites it and admission is
     the right line to start one on. A reporter posts messages, so it belongs to the one execution
-    holding the turn's claim instead — and all admission owes it is the thread to post into,
-    mirrored before the turn exists so the execution can read it whichever replica takes the
-    turn."""
+    holding the turn's claim instead — and all admission owes both followers is the thread they
+    write to, mirrored before the turn exists so the execution can read it whichever replica takes
+    the turn."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
@@ -7267,9 +7282,9 @@ async def test_a_slack_admission_leaves_the_reporter_to_the_turns_execution(
         )
     assert list(slack._STATUS_TASKS) == [turn.id]
     assert not slack._PROGRESS_TASKS
-    assert mirrored == "C1:100.5"
+    assert mirrored == {"queue_key": "C1:100.5", "message_ts": "100.5"}
 
-    await _arm_progress(workspace_id, turn.id, hub)
+    await _arm_followers(workspace_id, turn.id, hub)
 
     assert list(slack._PROGRESS_TASKS) == [turn.id]
     await _finish_turn(turn.id, "migrated")
@@ -7290,7 +7305,7 @@ async def test_a_resumed_execution_reports_the_wait_from_the_turns_own_start(
     turn_id = await _progress_turn(
         monkeypatch, workspace_id, tmp_path, recorder, hub, speaker_email=OPERATOR_OWNER_EMAIL
     )
-    await _arm_progress(workspace_id, turn_id, hub, age=timedelta(hours=4))
+    await _arm_followers(workspace_id, turn_id, hub, age=timedelta(hours=4))
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(
@@ -7309,22 +7324,127 @@ async def test_a_resumed_execution_reports_the_wait_from_the_turns_own_start(
     await asyncio.wait_for(task, timeout=10)
 
 
-async def test_a_re_arm_keeps_the_reporter_the_process_already_runs(
+async def test_a_re_arm_keeps_the_followers_the_process_already_runs(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """The hook fires again for every message that arrives mid-turn, in the process already
-    reporting the turn. A second reporter there would double every remaining update, so the arm is a
-    no-op."""
+    """The hook fires again for every message that arrives mid-turn, in the process that already
+    follows the turn. A second reporter there would double every remaining update and a second
+    status task would double the tail work, so the arm is a no-op on both: the per-turn dedupe is
+    what a redelivery meets."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
     turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
+    status_task = slack._STATUS_TASKS[turn_id]
 
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
 
     assert slack._PROGRESS_TASKS[turn_id] is task
+    assert slack._STATUS_TASKS[turn_id] is status_task
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_a_recovered_turn_arms_a_new_status_follower(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """A rolling deploy takes the process holding the follower, which by design leaves the last
+    line standing and sends no clear. Nothing then refreshes it, and Slack drops a status two
+    minutes after its last write — so the instance that takes the turn over arms a follower of its
+    own, which stamps the thread again and narrates the frames the recovered run publishes."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    dying = slack._STATUS_TASKS[turn_id]
+    deadline = time.monotonic() + 10
+    while not _statuses(recorder):
+        assert time.monotonic() < deadline, "admission never stamped the thread"
+        await asyncio.sleep(0.01)
+    dying.cancel()
+    await asyncio.gather(dying, return_exceptions=True)
+    assert turn_id not in slack._STATUS_TASKS
+    assert _statuses(recorder) == [slack.STATUS_THINKING_TEXT]
+
+    await _arm_followers(workspace_id, turn_id, hub, age=timedelta(minutes=30))
+
+    recovered = slack._STATUS_TASKS[turn_id]
+    assert recovered is not dying
+    await hub.publish(
+        turn_id, ToolCall(tool="bash", preview="{}", description="Applying the migration")
+    )
+    working = slack.STATUS_DESCRIBED_TEXT.format(description="Applying the migration")
+    deadline = time.monotonic() + 10
+    while working not in _statuses(recorder):
+        assert time.monotonic() < deadline, "the recovered turn never stamped the thread"
+        await asyncio.sleep(0.01)
+
+    assert _statuses(recorder) == [slack.STATUS_THINKING_TEXT, slack.STATUS_THINKING_TEXT, working]
+    cancelled = [r for r in caplog.records if r.message == "slack.thread_status.cancelled"]
+    assert [r.ufo["turn"] for r in cancelled] == [str(turn_id)]
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(recovered, timeout=10)
+    assert _statuses(recorder)[-1] == slack.STATUS_CLEAR_TEXT
+
+
+async def test_a_recovered_dm_turn_anchors_its_status_to_the_mirrored_message(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A DM conversation is keyed by its channel alone and the status API demands a thread, so the
+    member's own message is the anchor. A hook holds a turn and no event, so that message rides the
+    thread mirror — the one part of a DM's thread its queue key cannot say."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(
+        monkeypatch, workspace_id, tmp_path, recorder, users={"U1": "bee@example.com"}, hub=hub
+    )
+    dm = _event_body(
+        type="message", user="U1", channel="D1", channel_type="im", ts="100.5", text="migrate"
+    )
+    async with client:
+        response = await client.post(EVENTS_PATH, content=dm, headers=_sign(dm, int(time.time())))
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    dying = slack._STATUS_TASKS[turn_id]
+    dying.cancel()
+    await asyncio.gather(dying, return_exceptions=True)
+    del recorder[:]
+
+    await _arm_followers(workspace_id, turn_id, hub, age=timedelta(minutes=30))
+
+    task = slack._STATUS_TASKS[turn_id]
+    deadline = time.monotonic() + 10
+    while not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL):
+        assert time.monotonic() < deadline, "the recovered DM turn never stamped the thread"
+        await asyncio.sleep(0.01)
+
+    stamped = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[0].content)
+    assert (stamped["channel_id"], stamped["thread_ts"]) == ("D1", "100.5")
     await _finish_turn(turn_id, "migrated")
     await asyncio.wait_for(task, timeout=10)
 
@@ -7341,7 +7461,7 @@ async def test_a_reporter_armed_after_the_turn_committed_posts_nothing(
     turn_id = await _progress_turn(monkeypatch, workspace_id, tmp_path, recorder, hub)
     await _finish_turn(turn_id, "migrated")
 
-    await _arm_progress(workspace_id, turn_id, hub, age=timedelta(hours=4))
+    await _arm_followers(workspace_id, turn_id, hub, age=timedelta(hours=4))
 
     await asyncio.wait_for(slack._PROGRESS_TASKS[turn_id], timeout=10)
     assert not _progress_posts(recorder)
@@ -7371,7 +7491,7 @@ async def test_a_dm_reporter_posts_at_the_dm_top_level(db: None, tmp_path, monke
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
-    await _arm_progress(workspace_id, turn_id, hub)
+    await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="migrating"))
@@ -7394,7 +7514,7 @@ async def test_a_turn_outside_this_surface_arms_no_reporter(db: None) -> None:
     workspace_id, _ = await _seed()
     _, turn_id = await _seed_running_turn(workspace_id, "session-1", surface="web")
 
-    await _arm_progress(workspace_id, turn_id, InProcessHub())
+    await _arm_followers(workspace_id, turn_id, InProcessHub())
 
     assert not slack._PROGRESS_TASKS
 
@@ -7408,11 +7528,73 @@ async def test_a_subagent_turn_arms_no_reporter(db: None) -> None:
         workspace_id, "C1:100.5", subagent_profile="coding"
     )
     with ws(workspace_id):
-        await slack._mirror_thread(conversation_id, "C1:100.5")
+        await slack._mirror_thread(
+            conversation_id, slack.MirroredThread(queue_key="C1:100.5", message_ts="100.5")
+        )
 
-    await _arm_progress(workspace_id, turn_id, InProcessHub())
+    await _arm_followers(workspace_id, turn_id, InProcessHub())
 
     assert not slack._PROGRESS_TASKS
+
+
+async def test_a_channel_thread_mirrored_as_its_queue_key_alone_arms_both_followers(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A mirror row outlives the process that wrote it, so a row naming the queue key alone is read
+    as the thread it names. A channel thread carries its root in that key, so the status anchors to
+    it and the turn is followed exactly as a row naming both parts is."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    conversation_id, turn_id = await _seed_running_turn(workspace_id, "C1:100.5")
+    with ws(workspace_id):
+        await slack.ScopedStore(slack.SLACK_EXTENSION).put(
+            slack._thread_mirror_key(conversation_id), "C1:100.5"
+        )
+
+    await _arm_followers(workspace_id, turn_id, hub)
+
+    reporter = slack._PROGRESS_TASKS[turn_id]
+    status = slack._STATUS_TASKS[turn_id]
+    deadline = time.monotonic() + 10
+    while not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL):
+        assert time.monotonic() < deadline, "the mirrored channel thread never stamped a status"
+        await asyncio.sleep(0.01)
+
+    stamped = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[0].content)
+    assert (stamped["channel_id"], stamped["thread_ts"]) == ("C1", "100.5")
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(asyncio.gather(status, reporter), timeout=10)
+
+
+async def test_a_dm_thread_mirrored_without_its_message_reports_and_stamps_nothing(
+    db: None, tmp_path, monkeypatch, caplog
+) -> None:
+    """A DM conversation is keyed by its channel and the status API demands a thread, so a row
+    naming the queue key alone leaves a DM turn no line to write. The reporter posts at the DM top
+    level and needs no anchor, so the turn is still reported — and the event names the thread that
+    got no status."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    conversation_id, turn_id = await _seed_running_turn(workspace_id, "D1")
+    with ws(workspace_id):
+        await slack.ScopedStore(slack.SLACK_EXTENSION).put(
+            slack._thread_mirror_key(conversation_id), "D1"
+        )
+
+    await _arm_followers(workspace_id, turn_id, hub)
+
+    reporter = slack._PROGRESS_TASKS[turn_id]
+    assert turn_id not in slack._STATUS_TASKS
+    unanchored = [r for r in caplog.records if r.message == "slack.thread_status.unanchored"]
+    assert [(r.ufo["turn"], r.ufo["queue_key"]) for r in unanchored] == [(str(turn_id), "D1")]
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(reporter, timeout=10)
+    assert not _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
 
 
 async def test_an_unreadable_thread_mirror_never_denies_the_turn(
@@ -7425,16 +7607,18 @@ async def test_an_unreadable_thread_mirror_never_denies_the_turn(
     workspace_id, _ = await _seed()
     conversation_id, turn_id = await _seed_running_turn(workspace_id, "C1:100.5")
     with ws(workspace_id):
-        await slack._mirror_thread(conversation_id, "C1:100.5")
+        await slack._mirror_thread(
+            conversation_id, slack.MirroredThread(queue_key="C1:100.5", message_ts="100.5")
+        )
 
     async def unreadable(self: slack.ScopedStore, key: str) -> slack.JsonValue | None:
         raise RuntimeError("ext_store unavailable")
 
     monkeypatch.setattr(slack.ScopedStore, "get", unreadable)
-    await _arm_progress(workspace_id, turn_id, InProcessHub())
+    await _arm_followers(workspace_id, turn_id, InProcessHub())
 
     assert not slack._PROGRESS_TASKS
-    unarmed = [r for r in caplog.records if r.message == "slack.thread_progress.unarmed"]
+    unarmed = [r for r in caplog.records if r.message == "slack.thread_followers.unarmed"]
     assert [r.ufo["error_class"] for r in unarmed] == ["RuntimeError"]
     assert unarmed[0].ufo["turn"] == str(turn_id)
 

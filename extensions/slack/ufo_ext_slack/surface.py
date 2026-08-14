@@ -23,6 +23,10 @@ message: a duplicate writer (Slack redelivers events, and every replica runs its
 overwrites it rather than stacking a second indicator, and within a process the newest turn is a
 thread's one writer. It rides the lossy live leg by design: the durable reply is the poller's job,
 so a crashed status task costs a stale status, never a lost answer.
+Slack drops a status two minutes after its last write, so the line lives only as long as something
+keeps stamping it: the follower is armed again from inside the turn's own execution, so a run this
+fleet resumed after the process holding its follower died stamps the thread again instead of going
+dark on that timeout.
 
 A one-line status is enough while a turn takes seconds; a turn taking minutes leaves the member
 unable to tell progress from a stall, so a second per-turn task tails the same frames and posts
@@ -32,14 +36,14 @@ these are messages, so a second reporter doubles the member's updates for the tu
 rather than costing a redundant overwrite: the reporter is armed from inside the turn's own
 execution, on the `user_prompt_submit` hook, so the execution holding the turn's claim is the one
 that reports it — however many deliveries Slack sends into that run and whichever replica takes
-them. That is also what puts a reporter back on a run this fleet resumed after the process that
-started it died: the hook fires again in the execution that took the turn over, and the wait it
-reports is measured from the turn's durable start, so the ladder resumes at the member's real
-elapsed instead of starting again at ten minutes. A hook holds a turn, not a request, so the thread
-to post into is the conversation's queue key, which every Slack request that opens a conversation
-mirrors into this extension's store. These
-are side-channel writes: the turn is never told, so a post neither ends it nor stalls it, and its
-terminal reply still lands through the poller exactly as it does for a turn that never ran long
+them. Every follower goes on through one armer, so that hook is also what puts one back on a run
+this fleet resumed after the process that started it died: it fires again in the execution that took
+the turn over, and the wait it reports is measured from the turn's durable start, so the ladder
+resumes at the member's real elapsed instead of starting again at ten minutes. A hook holds a turn,
+not a request, so the thread to follow is the conversation's queue key and the message a DM's status
+anchors to, which every Slack request that opens a conversation mirrors into this extension's store.
+These are side-channel writes: the turn is never told, so a post neither ends it nor stalls it, and
+its terminal reply still lands through the poller exactly as it does for a turn that never ran long
 enough to post one. Each post carries what the tail saw — the latest completed narration, the step
 it is in, the completed work since the last — and a signalless checkpoint is skipped, never filled.
 The first one a turn delivers also carries the reply's own footer, so the conversation's web link is
@@ -1425,7 +1429,7 @@ async def _admit_inbound(
 ) -> None:
     """Everything an admitted message costs beyond the event ack: the sender, permalink and ambient
     context reads, the member and conversation resolution, the thread mirror the turn's own
-    execution reports progress from, and the admission itself."""
+    execution follows from, and the admission itself."""
     marker = mint_marker()
     names = SlackNames(bot_token)
     sender, context, source, mentioned = await asyncio.gather(
@@ -1439,7 +1443,8 @@ async def _admit_inbound(
     conversation_id = await ctx.conversation_for(
         inbound.queue_key, audience, label=inbound.surface_label
     )
-    await _mirror_thread(conversation_id, inbound.queue_key)
+    thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.ts)
+    await _mirror_thread(conversation_id, thread)
     attachments = (
         files_note(await _download_files(ctx, conversation_id, bot_token, inbound.files))
         if inbound.files
@@ -1455,7 +1460,9 @@ async def _admit_inbound(
         speaker_member_id=member_id,
     )
     if admitted.opened_run:
-        _track_status(ctx, admitted.turn_id, inbound.queue_key, inbound.ts)
+        _arm_followers(
+            ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
+        )
 
 
 _AMBIENT_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -2192,6 +2199,64 @@ def files_note(downloaded: DownloadedFiles) -> str:
     return "\n".join(clauses)
 
 
+class MirroredThread(BaseModel):
+    """The Slack thread one conversation is: the queue key a progress post lands in, and the message
+    a DM's status anchors to. A channel thread anchors to the root its key already carries, so the
+    anchoring message is the one part of a DM's thread the key cannot say."""
+
+    queue_key: str
+    message_ts: str = ""
+
+    @classmethod
+    def read(cls, row: JsonValue) -> "MirroredThread":
+        """One mirror row as a thread. A row names the queue key, and names the anchoring message
+        when it holds one: a row of the key alone is the thread it names without an anchor, so its
+        channel turns anchor a status to the root that key carries and its DM turns run reported and
+        without a status line rather than unfollowed."""
+        return cls(queue_key=row) if isinstance(row, str) else cls.model_validate(row)
+
+
+def _thread_mirror_key(conversation_id: UUID) -> str:
+    return f"{SLACK_THREAD_PREFIX}{conversation_id}"
+
+
+async def _mirror_thread(conversation_id: UUID, thread: MirroredThread) -> None:
+    """Record which Slack thread a conversation is, for the turn executions that follow it. A hook
+    fires holding a turn and no request, so the thread its followers write to has to be durable
+    before the turn can execute: it is written here, ahead of the admission that makes the turn
+    reachable, and the next inbound overwrites it — one row per Slack conversation, needing no
+    cleanup."""
+    await ScopedStore(SLACK_EXTENSION).put(
+        _thread_mirror_key(conversation_id), thread.model_dump(mode="json")
+    )
+
+
+class FollowerContext(Protocol):
+    """What a thread follower needs of a context: the bot token, the turn's frames, the durable
+    terminal read that stops the reporter posting after the reply, and the two reads its footer
+    renders from. A surface's own `SurfaceContext` satisfies it as it stands, and the adapter below
+    reads a hook's scoped context as one — so the turn's own execution arms the same followers,
+    writing the same way."""
+
+    @property
+    def workspace_id(self) -> UUID: ...
+
+    @property
+    def public_base_url(self) -> str | None: ...
+
+    async def credential(self, slot: str) -> str: ...
+
+    def tail(
+        self, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
+
+    async def turn_is_terminal(self, turn_id: UUID) -> bool: ...
+
+    async def conversation_agent(self, conversation_id: UUID) -> UUID | None: ...
+
+    async def is_operator_workspace(self) -> bool: ...
+
+
 @dataclass(frozen=True)
 class ThreadStatus:
     """Live feedback for one running turn through Slack's native channel- and DM-thread loading
@@ -2236,7 +2301,7 @@ class ThreadStatus:
     why, because the text is the only argument that varies between an accepted write and a rejected
     one."""
 
-    ctx: SurfaceContext
+    ctx: FollowerContext
     turn_id: UUID
     channel: str
     thread_ts: str
@@ -2393,22 +2458,24 @@ def _restamp_thread_status(workspace_id: UUID, channel: str, thread_ts: str) -> 
             status.blanked.set()
 
 
-def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None:
-    """Spawn one ThreadStatus task per admitted turn — Slack redelivers events and admission dedupes
-    them to the same turn id, so a redelivery must not double the tail work. The status anchors to
-    the conversation's thread — the root in a channel, the member's own message in a DM (a DM
-    conversation has no root, and the status API demands a thread) — and the new turn takes over as
-    the thread's writer. Best-effort by design: a failure only logs, and the task always ends
-    because the tail ends on the durable terminal state."""
+def _track_status(ctx: FollowerContext, turn_id: UUID, thread: MirroredThread) -> None:
+    """Spawn one ThreadStatus task per turn in this process — Slack redelivers events and admission
+    dedupes them to the same turn id, and the turn's own execution arms the same follower, so
+    neither a redelivery nor an execution this process already follows doubles the tail work. The
+    status anchors to the conversation's thread — the root in a channel, the member's own message in
+    a DM (a DM conversation has no root, and the status API demands a thread) — and the new turn
+    takes over as the thread's writer. A thread naming no root and no message is one no status can
+    address, so that turn runs without a line and the event says which thread got none. Best-effort
+    by design: a failure only logs, and the task always ends because the tail ends on the durable
+    terminal state."""
     if turn_id in _STATUS_TASKS:
         return
-    channel, separator, root_ts = queue_key.partition(":")
-    status = ThreadStatus(
-        ctx=ctx,
-        turn_id=turn_id,
-        channel=channel,
-        thread_ts=root_ts if separator else message_ts,
-    )
+    channel, separator, root_ts = thread.queue_key.partition(":")
+    thread_ts = root_ts if separator else thread.message_ts
+    if not thread_ts:
+        log("slack.thread_status.unanchored", turn=str(turn_id), queue_key=thread.queue_key)
+        return
+    status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=channel, thread_ts=thread_ts)
     _THREAD_WRITERS[status.thread] = turn_id
     _THREAD_STATUSES[turn_id] = status
     task = asyncio.create_task(_run_status(status))
@@ -2529,31 +2596,6 @@ class TurnActivity:
         hours, minutes = divmod(int(elapsed_seconds // 60), 60)
         elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
         return PROGRESS_LINE.format(activity=step, elapsed=elapsed)
-
-
-class FollowerContext(Protocol):
-    """What the progress reporter needs of a context: the bot token, the turn's frames, the durable
-    terminal read that stops it posting after the reply, and the two reads its footer renders from.
-    A surface's own `SurfaceContext` satisfies it as it stands, and the adapter below reads a hook's
-    scoped context as one — so the turn's execution arms the same reporter, posting the same way."""
-
-    @property
-    def workspace_id(self) -> UUID: ...
-
-    @property
-    def public_base_url(self) -> str | None: ...
-
-    async def credential(self, slot: str) -> str: ...
-
-    def tail(
-        self, turn_id: UUID, since: str = ""
-    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
-
-    async def turn_is_terminal(self, turn_id: UUID) -> bool: ...
-
-    async def conversation_agent(self, conversation_id: UUID) -> UUID | None: ...
-
-    async def is_operator_workspace(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -2777,24 +2819,39 @@ async def _run_progress(progress: ThreadProgress) -> None:
         _PROGRESS_TASKS.pop(progress.turn_id, None)
 
 
-def _thread_mirror_key(conversation_id: UUID) -> str:
-    return f"{SLACK_THREAD_PREFIX}{conversation_id}"
+@dataclass(frozen=True)
+class FollowedTurn:
+    """The turn a Slack follower follows. `started_at` is the turn's durable start, which the ladder
+    measures the member's wait from and only the turn's own execution holds: an admission holds the
+    run it just opened and no turn row, so it names none."""
+
+    id: UUID
+    conversation_id: UUID
+    started_at: datetime | None = None
 
 
-async def _mirror_thread(conversation_id: UUID, queue_key: str) -> None:
-    """Record which Slack thread a conversation is, for the turn executions that report progress
-    into it. A hook fires holding a turn and no request, so the thread the reporter posts to has to
-    be durable before the turn can execute: it is written here, ahead of the admission that makes
-    the turn reachable, and the next inbound overwrites it — one row per Slack conversation, needing
-    no cleanup."""
-    await ScopedStore(SLACK_EXTENSION).put(_thread_mirror_key(conversation_id), queue_key)
+def _arm_followers(ctx: FollowerContext, turn: FollowedTurn, thread: MirroredThread) -> None:
+    """Arm every follower a turn gets on the thread it belongs to — the one path an admission and
+    the turn's own execution both reach the followers through, so what goes on the turn follows from
+    what the caller can name about it rather than from which caller it is. Each follower holds its
+    own task per turn, so an arm meets them one at a time: a live one is left alone, and a turn
+    whose status follower died gets a new one while the reporter it kept runs on.
+
+    A reporter measures the member's wait from the turn's durable start, which only the turn's own
+    execution holds, so an admission arms the status alone. The hub is the process's own, so a
+    reporter armed outside the execution publishing the turn's frames would see no signal and post
+    nothing — while the status is thread state the member is owed the moment the turn lands, which
+    one write gives them."""
+    _track_status(ctx, turn.id, thread)
+    if turn.started_at is not None:
+        _track_progress(ctx, turn.id, turn.conversation_id, thread.queue_key, turn.started_at)
 
 
 @dataclass(frozen=True)
 class _HookFollowerContext:
-    """A hook's scoped context read as the reporter's. Everything the reporter needs is on that
-    context already except the bot token, which an extension reads through its declared slots rather
-    than as a surface's own."""
+    """A hook's scoped context read as a follower's. Everything a follower needs is on that context
+    already except the bot token, which an extension reads through its declared slots rather than as
+    a surface's own."""
 
     ext: ExtensionContext
 
@@ -2824,45 +2881,47 @@ class _HookFollowerContext:
         return await self.ext.is_operator_workspace()
 
 
-async def follow_turn_progress(ctx: HookContext) -> HookOutcome:
-    """Arm this turn's progress reporter from the turn's own execution. `user_prompt_submit` fires
-    once per execution, in the process that just won the turn's claim, so the reporter belongs to
-    whichever execution owns the turn: one reporter per turn however many deliveries Slack sent into
-    the run, and a run this fleet resumed after the process that started it died gets its reporter
-    back — measuring the member's wait from the turn's durable start, not from the resume.
+async def follow_turn(ctx: HookContext) -> HookOutcome:
+    """Arm this turn's status follower and progress reporter from the turn's own execution.
+    `user_prompt_submit` fires once per execution, in the process that just won the turn's claim, so
+    both followers belong to whichever execution owns the turn: one of each per turn however many
+    deliveries Slack sent into the run, and a run this fleet resumed after the process that started
+    it died gets both back — the status stamped again before Slack's two-minute timeout collects the
+    line the dead process left standing, the wait measured from the turn's durable start rather than
+    from the resume.
 
-    A subagent turn holds its own conversation on the subagent surface and no Slack thread, and a
-    turn this process is already reporting needs nothing, so both end before any read. Everything
-    else costs one indexed read of the thread mirror, which is absent for every conversation this
-    surface did not open.
+    Admission arms the status too, so the member sees a line the moment the turn lands rather than
+    when it starts executing; the status is thread state, so the two arms converge on one line and
+    the per-turn task each follower keeps holds this process to one of each.
+
+    A subagent turn holds its own conversation on the subagent surface and no Slack thread, so it
+    ends before any read. Everything else costs one indexed read of the thread mirror, which is
+    absent for every conversation this surface did not open.
 
     This is a gating event: a handler that raises or outruns the per-handler timeout denies the
-    turn, and the denial becomes the member's answer. A progress note must never hold that power, so
+    turn, and the denial becomes the member's answer. Live feedback must never hold that power, so
     the read is bounded by a budget of its own and every failure resolves to `None` — a turn that
-    runs unreported, never a turn that does not run."""
+    runs unfollowed, never a turn that does not run."""
     turn = ctx.turn
     if turn is None or turn.subagent_profile is not None:
         return None
-    if turn.id in _PROGRESS_TASKS:
-        return None
     try:
         async with asyncio.timeout(THREAD_MIRROR_READ_SECONDS):
-            mirrored = await ctx.ext.store.get(_thread_mirror_key(turn.conversation_id))
+            row = await ctx.ext.store.get(_thread_mirror_key(turn.conversation_id))
+        if row is None:
+            return None
+        thread = MirroredThread.read(row)
     except Exception as error:
         log(
-            "slack.thread_progress.unarmed",
+            "slack.thread_followers.unarmed",
             turn=str(turn.id),
             error_class=type(error).__name__,
         )
         return None
-    if not isinstance(mirrored, str):
-        return None
-    _track_progress(
+    _arm_followers(
         _HookFollowerContext(ext=ctx.ext),
-        turn.id,
-        turn.conversation_id,
-        mirrored,
-        started_at=turn.created_at,
+        FollowedTurn(id=turn.id, conversation_id=turn.conversation_id, started_at=turn.created_at),
+        thread,
     )
     return None
 
@@ -2968,7 +3027,8 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 f"[Answered by <@{click.slack_user_id}> via button] {click.label}",
                 "",
             )
-            await _mirror_thread(conversation_id, click.queue_key)
+            thread = MirroredThread(queue_key=click.queue_key, message_ts=click.message_ts)
+            await _mirror_thread(conversation_id, thread)
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
             admitted = await ctx.admit(
                 conversation_id,
@@ -2978,7 +3038,9 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 speaker_member_id=member_id,
             )
             if admitted.opened_run:
-                _track_status(ctx, admitted.turn_id, click.queue_key, click.message_ts)
+                _arm_followers(
+                    ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
+                )
             if await ctx.admitted_body(answer_key) == body:
                 _rewrite_in_background(bot_token, click)
     return JSONResponse({"ok": True})
