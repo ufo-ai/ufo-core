@@ -2,9 +2,10 @@ import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
-import { RecordPanel } from "@/kernel/pane";
-import { Table, Td, Th } from "@/components/ui/table";
+import { BANDS, RecordPanel } from "@/kernel/pane";
+import { Td } from "@/components/ui/table";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import { DataTable } from "@/kernel/table";
 import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { TabPanel, TabRow } from "@/kernel/tabs";
@@ -62,7 +63,7 @@ export function SubagentPane({
         label={(name) => TAB_LABELS[name]}
         onPick={onTab}
       />
-      <TabPanel group="subagent" current={tab} className="flex flex-col" data-testid="panel">
+      <TabPanel group="subagent" current={tab} className={BANDS} data-testid="panel">
         {tab === "overview" ? <SubagentOverview base={base} /> : null}
         {tab === "conversations" ? (
           <SubagentConversations
@@ -136,32 +137,22 @@ function SubagentSkills({ base }: { base: string }) {
               under that agent's Skills tab.
             </Hint>
           ) : null}
-          {payload.loads_skills && payload.skills.length ? (
-            <Table>
-              <thead>
-                <tr>
-                  {["Name", "Description"].map((column) => (
-                    <Th key={column}>{column}</Th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {payload.skills.map((skill) => (
-                  <tr key={skill.name}>
-                    <Td>{skill.name}</Td>
-                    <Td>{skill.description}</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+          {payload.loads_skills ? (
+            <DataTable
+              columns={[{ label: "Name", fact: true }, "Description"]}
+              rows={payload.skills}
+              rowKey={(skill) => skill.name}
+              empty="This deploy declares no skills for this subagent."
+            >
+              {(skill) => (
+                <>
+                  <Td>{skill.name}</Td>
+                  <Td>{skill.description}</Td>
+                </>
+              )}
+            </DataTable>
           ) : (
-            <PanelBlank
-              body={
-                payload.loads_skills
-                  ? "This deploy declares no skills for this subagent."
-                  : "This subagent holds no load_skill tool, so it loads no skills."
-              }
-            />
+            <PanelBlank body="This subagent holds no load_skill tool, so it loads no skills." />
           )}
         </Section>
       )}

@@ -2,11 +2,10 @@ import { useEffect, useState } from "react";
 
 import { Search } from "@/components/ui/field";
 import type { Placement } from "@/kernel/pager";
-import { COLUMN, PageHeader, Pane } from "@/kernel/pane";
+import { BANDS, Page, PageHeader, PageToolbar, Pane } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import { TabPanel, TabStrip } from "@/kernel/tabs";
-import { cn } from "@/lib/cn";
+import { TabPanel, TabRow } from "@/kernel/tabs";
 import type { PaneView } from "@/views/registry";
 
 /** A destination the sidebar reaches: a title, a tab array, and one registry. Workspace, Customize
@@ -40,57 +39,50 @@ export function TabbedPane<Tab extends string>({
   });
   const search = views[view].search;
   const headed = views[view].ownsHeader === true;
+  const registered = <Registered key={key} view={view} views={views} place={merged} onPlace={record} />;
   return (
     <Pane>
-      {headed ? null : (
-        <PageHeader
-          aside={
-            search ? (
-              <PaneSearch
-                placeholder={search}
-                query={place.q ?? ""}
-                onSearch={(q) => record({ q: q || undefined, after: undefined })}
-              />
-            ) : null
-          }
-        >
-          <h1 className="m-0 text-title font-strong">{title}</h1>
-        </PageHeader>
-      )}
-      {tabs.length > 1 ? (
-        <>
-          <TabStrip
-            group={group}
-            tabs={tabs}
-            current={view}
-            label={(name) => views[name].label}
-            onPick={(name) => onPlace(name, {}, "push")}
+      <Page>
+        {headed ? null : (
+          <PageHeader
+            title={title}
+            search={
+              search ? (
+                <PaneSearch
+                  placeholder={search}
+                  query={place.q ?? ""}
+                  onSearch={(q) => record({ q: q || undefined, after: undefined })}
+                />
+              ) : null
+            }
           />
-          <TabPanel
-            group={group}
-            current={view}
-            className={cn(
-              COLUMN,
-              "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl",
-              headed && "pt-0",
-            )}
-            data-testid={group}
-          >
-            <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
-          </TabPanel>
-        </>
-      ) : (
-        <div
-          className={cn(
-            COLUMN,
-            "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl",
-            headed && "pt-0",
-          )}
-          data-testid={group}
-        >
-          <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
-        </div>
-      )}
+        )}
+        {tabs.length > 1 ? (
+          <>
+            <PageToolbar>
+              <TabRow
+                group={group}
+                tabs={tabs}
+                current={view}
+                label={(name) => views[name].label}
+                onPick={(name) => onPlace(name, {}, "push")}
+              />
+            </PageToolbar>
+            <TabPanel
+              group={group}
+              current={view}
+              className={BANDS}
+              data-testid={group}
+            >
+              {registered}
+            </TabPanel>
+          </>
+        ) : (
+          <div className={BANDS} data-testid={group}>
+            {registered}
+          </div>
+        )}
+      </Page>
     </Pane>
   );
 }
@@ -116,7 +108,6 @@ function PaneSearch({
       value={typed}
       onChange={(event) => setTyped(event.target.value)}
       onSubmit={() => onSearch(typed.trim())}
-      className="w-(--container-control-row)"
     />
   );
 }

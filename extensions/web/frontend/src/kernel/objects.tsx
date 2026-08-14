@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { IconChevronRight, IconRefresh } from "@tabler/icons-react";
+import { IconRefresh } from "@tabler/icons-react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
@@ -19,8 +19,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Td } from "@/components/ui/table";
+import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
+import { PageHeader, PageToolbar } from "@/kernel/pane";
 import {
   OutcomeNotice,
   Panel,
@@ -32,7 +33,6 @@ import {
 } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { day, isMoment, relativeMoment } from "@/lib/moments";
@@ -141,6 +141,7 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now:
 
 export const OWNER_FIELD = "owner_email";
 const OWNER_HEADING = "Created By";
+const OPEN = "Open";
 
 /** Who made a row, in the member's words — the wire's `owner_email` never renders raw. A row
  *  carrying no creator is the workspace's own. */
@@ -243,9 +244,8 @@ function ObjectIndex({
         if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD });
         columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
         for (const field of led) {
-          columns.push({ label: heading(field, payload.spec_schema), sort: field });
+          columns.push({ label: heading(field, payload.spec_schema), sort: field, fact: true });
         }
-        columns.push("");
         const flags = payload.fields.filter(
           (field) =>
             field !== CONVERSATION_FIELD &&
@@ -254,57 +254,52 @@ function ObjectIndex({
         );
         return (
           <>
-            <div className={cn("pb-6xl", title && "pt-8xl")}>
-              <div className="flex h-(--size-control) items-center gap-md">
-                {title ? <h1 className="m-0 text-title font-strong">{title}</h1> : null}
-                <div className="ml-auto flex items-center gap-sm">
-                  <Search
-                    label={"Search " + noun(payload.kind)}
-                    placeholder="Search"
-                    className="w-(--container-control-row)"
-                    value={typed}
-                    onChange={(event) => setTyped(event.target.value)}
-                    onSubmit={() => {
-                      setCursor("");
-                      setQuery(typed);
-                    }}
-                  />
-                  {acts ? (
-                    <Button variant="send" size="bar" onClick={() => setCreating(true)}>
-                      {"New " + noun(payload.kind)}
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-            <Section
-              bar={
-                <>
-                  {flags.length ? (
-                    <Filter
-                      options={flags.map((field) => ({
-                        label: heading(field, payload.spec_schema),
-                        value: field,
-                      }))}
-                      value={narrowed}
-                      onChange={(field) => {
-                        setCursor("");
-                        setNarrowed(field);
-                      }}
-                    />
-                  ) : null}
-                  <Button
-                    size="icon"
-                    aria-label="Refresh"
-                    className="ml-auto"
-                    onClick={() => setReloads((count) => count + 1)}
-                  >
-                    <IconRefresh className="size-icon" aria-hidden />
-                  </Button>
-                </>
+            <PageHeader
+              title={title}
+              search={
+                <Search
+                  label={"Search " + noun(payload.kind)}
+                  placeholder="Search"
+                  value={typed}
+                  onChange={(event) => setTyped(event.target.value)}
+                  onSubmit={() => {
+                    setCursor("");
+                    setQuery(typed);
+                  }}
+                />
               }
-            >
-              <DataTable
+              action={
+                acts ? (
+                  <Button variant="send" size="bar" onClick={() => setCreating(true)}>
+                    {"New " + noun(payload.kind)}
+                  </Button>
+                ) : null
+              }
+            />
+            <PageToolbar>
+              {flags.length ? (
+                <Filter
+                  options={flags.map((field) => ({
+                    label: heading(field, payload.spec_schema),
+                    value: field,
+                  }))}
+                  value={narrowed}
+                  onChange={(field) => {
+                    setCursor("");
+                    setNarrowed(field);
+                  }}
+                />
+              ) : null}
+              <Button
+                size="icon"
+                aria-label="Refresh"
+                className="ml-auto"
+                onClick={() => setReloads((count) => count + 1)}
+              >
+                <IconRefresh className="size-icon" aria-hidden />
+              </Button>
+            </PageToolbar>
+            <DataTable
                 columns={columns}
                 rows={payload.objects}
                 rowKey={(row) => row.agent_id + "/" + row.name}
@@ -328,6 +323,7 @@ function ObjectIndex({
                     setOrderBy(field);
                   },
                 }}
+                act={() => OPEN}
               >
                 {(row) => (
                   <>
@@ -338,21 +334,18 @@ function ObjectIndex({
                     </Td>
                     {agentId === null ? <Td>{row.agent_name}</Td> : null}
                     {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
-                    <Td className="w-full max-w-0">
+                    <Td>
                       <span className="block truncate">
                         {(prose === "summary" ? row.summary : row[prose]) || "—"}
                       </span>
                     </Td>
                     {led.map((field) => (
-                      <Td key={field}>
-                        <span className="block max-w-(--size-cell) truncate">
+                      <TdFact key={field}>
+                        <span className="block truncate">
                           {cell(field, row[field] ?? null, payload.spec_schema, now)}
                         </span>
-                      </Td>
+                      </TdFact>
                     ))}
-                    <Td className="w-(--size-glyph)">
-                      <IconChevronRight className="size-icon" aria-hidden />
-                    </Td>
                   </>
                 )}
               </DataTable>
@@ -370,7 +363,6 @@ function ObjectIndex({
                   ) : null}
                 </div>
               ) : null}
-            </Section>
             {creating && payload.spec_schema && owner !== null ? (
               <NewObject
                 schema={payload.spec_schema}

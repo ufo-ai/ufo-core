@@ -1,17 +1,16 @@
 import { useState } from "react";
-import { IconChevronRight, IconRefresh } from "@tabler/icons-react";
+import { IconRefresh } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
-import { Table, TableNote, Td, Th } from "@/components/ui/table";
+import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
-import { COLUMN, PageHeader } from "@/kernel/pane";
-import { PanelBlank, Section, outcomeNotice, type NoticeState } from "@/kernel/panel";
-import { rowControl } from "@/kernel/row";
+import { Page, PageHeader, PageToolbar } from "@/kernel/pane";
+import { DataTable } from "@/kernel/table";
+import { outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
@@ -29,21 +28,27 @@ const MODEL_FIELD = "model";
 const MAIN = "The agent this workspace answers with by default.";
 const SPAWNED = "Spawned by an agent for one task. A member does not address it.";
 const INHERITS = "Spawned by an agent for one task, on that agent's model.";
-const COLUMNS = ["Name", "Details"];
+const COLUMNS = ["Name", "Details", { label: "Model", fact: true }];
+const MANAGE = "Manage";
+/** A subagent with no model of its own runs on the model of the agent that spawned it, so the
+ *  column has no id to name and says so rather than standing empty. */
+const INHERITED = "—";
 const FAMILIES = [
   { label: "Agents", value: "agent" },
   { label: "Subagents", value: "subagent" },
 ];
 
 /** One row per thing this workspace runs, whichever family it comes from: an agent a member
- *  addresses, and a subagent an agent spawns. A row says which one it is and what it is for; the
- *  model it runs on, who reaches it, and everything else stand on the record's own page, one press
- *  away. A column for each would be a table read sideways to answer a question nobody asked. */
+ *  addresses, and a subagent an agent spawns. A row says which one it is, what it is for, and the
+ *  model it runs on — the one fact a member compares straight down this list, and the reason they
+ *  open a record when it is not stated here. Who reaches it, what it may touch and the rest of its
+ *  spec stand on the record's own page: a column for each would be a table read sideways. */
 type AgentRow = {
   key: string;
   family: string;
   name: string;
   details: string;
+  model: string;
   open: () => void;
 };
 
@@ -80,6 +85,7 @@ export function Agents({
       family: "agent",
       name: agent.name,
       details: agent.main ? MAIN : "",
+      model: agent.model,
       open: () => onOpen(agent.id),
     })),
     ...subagents.map((subagent) => ({
@@ -87,6 +93,7 @@ export function Agents({
       family: "subagent",
       name: subagent.name,
       details: subagent.model ? SPAWNED : INHERITS,
+      model: subagent.model ?? INHERITED,
       open: () => onOpenSubagent(subagent.name),
     })),
   ];
@@ -108,82 +115,54 @@ export function Agents({
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto scrollbar-gutter-stable">
+    <Page>
       <PageHeader
-        aside={
-          <>
-            <Search
-              label="Search agents"
-              placeholder="Search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            {newAgent && mainAgent ? (
-              <Button variant="send" size="bar" onClick={() => setCreating(true)}>
-                New agent
-              </Button>
-            ) : null}
-          </>
+        title="Agents"
+        search={
+          <Search
+            label="Search agents"
+            placeholder="Search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
         }
+        action={
+          newAgent && mainAgent ? (
+            <Button variant="send" size="bar" onClick={() => setCreating(true)}>
+              New agent
+            </Button>
+          ) : null
+        }
+      />
+      <PageToolbar>
+        <Filter options={FAMILIES} value={family} onChange={setFamily} />
+        <Button size="icon" aria-label="Refresh" className="ml-auto" onClick={onAgents}>
+          <IconRefresh className="size-icon" aria-hidden />
+        </Button>
+      </PageToolbar>
+      <DataTable
+        columns={COLUMNS}
+        rows={found}
+        rowKey={(row) => row.key}
+        empty="No agent is visible to you."
+        note={
+          rows.length
+            ? query
+              ? "No agent matches this search."
+              : "This deploy declares no subagents."
+            : undefined
+        }
+        open={(row) => row.open}
+        act={() => MANAGE}
       >
-        <h1 className="m-0 text-title font-strong">Agents</h1>
-      </PageHeader>
-      <div
-        className={cn(
-          COLUMN,
-          "flex flex-1 flex-col overflow-y-auto scrollbar-gutter-stable p-2xl pt-2xl",
+        {(row) => (
+          <>
+            <Td>{row.name}</Td>
+            <Td>{row.details}</Td>
+            <TdFact>{row.model}</TdFact>
+          </>
         )}
-      >
-        <Section
-          bar={
-            <>
-              <Filter options={FAMILIES} value={family} onChange={setFamily} />
-              <Button size="icon" aria-label="Refresh" className="ml-auto" onClick={onAgents}>
-                <IconRefresh className="size-icon" aria-hidden />
-              </Button>
-            </>
-          }
-        >
-          {rows.length ? (
-            <Table>
-              <thead>
-                <tr>
-                  {COLUMNS.map((column) => (
-                    <Th key={column}>{column}</Th>
-                  ))}
-                  <Th>{""}</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {found.length ? (
-                  found.map((row) => {
-                    const control = rowControl(row.open, true);
-                    return (
-                      <tr
-                        key={row.key}
-                        {...control}
-                        className={cn("hover:bg-fill-hover", control.className)}
-                      >
-                        <Td>{row.name}</Td>
-                        <Td className="w-full max-w-0">{row.details}</Td>
-                        <Td className="w-(--size-glyph)">
-                          <IconChevronRight className="size-icon" aria-hidden />
-                        </Td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <TableNote span={COLUMNS.length + 1}>
-                    {query ? "No agent matches this search." : "This deploy declares no subagents."}
-                  </TableNote>
-                )}
-              </tbody>
-            </Table>
-          ) : (
-            <PanelBlank body="No agent is visible to you." />
-          )}
-        </Section>
-      </div>
+      </DataTable>
       {creating && newAgent && mainAgent ? (
         <SpecDialog
           schema={newAgent.spec_schema}
@@ -197,6 +176,6 @@ export function Agents({
         />
       ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
-    </div>
+    </Page>
   );
 }

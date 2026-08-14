@@ -1,5 +1,5 @@
 import { ObjectPane } from "@/kernel/objects";
-import { RecordPanel } from "@/kernel/pane";
+import { BANDS, RecordPanel } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentConnectors } from "@/views/Connectors";
@@ -50,7 +50,7 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
         label={(name) => TAB_LABELS[name]}
         onPick={onTab}
       />
-      <TabPanel group="agent" current={tab} className="flex flex-col" data-testid="panel">
+      <TabPanel group="agent" current={tab} className={BANDS} data-testid="panel">
         {tab === "overview" ? <Overview agent={agent} /> : null}
         {tab === "scheduled" ? (
           <ObjectPane key={agent.id} agentId={agent.id} kind={SCHEDULED_TASK_KIND} />

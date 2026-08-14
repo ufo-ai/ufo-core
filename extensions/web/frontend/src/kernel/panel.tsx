@@ -196,12 +196,16 @@ export function Notice({
   );
 }
 
-/** The one owner of vertical rhythm on a settings screen. A heading names the block directly
- *  beneath it and its own rule is the join, so a title and the rows it heads read as one object
- *  rather than as two blocks a gap apart. What narrows the records stands `gap-6xl` clear of both,
- *  because a control belongs to neither the name above it nor the row below it, and `mb-5xl`
- *  separates one section from the next. Nothing inside carries a bottom margin — a block that
- *  spaced itself would add to the gap rather than sit in it.
+/** A band of records inside a page, stacked at the page's own rhythm: `Page` sets the gap between
+ *  bands, so a section carries no margin of its own — a block that spaced itself would add to that
+ *  gap rather than sit in it, and the distance between two sections would become a sum of whatever
+ *  bands each happened to hold. It takes the full measure the page leaves for the same reason the
+ *  page does: the act on each row sits at one right edge, and a section that stayed narrow while
+ *  its pane grew would strand that edge in the middle of the screen.
+ *
+ *  A heading is drawn only where it names something the pane does not already say. A screen reached
+ *  by pressing a tab has been named by that tab, and a second heading repeating the word under it
+ *  states there are two things where there is one.
  *
  *  `action` is one act on what the heading names, drawn beside it rather than under it: a fact about
  *  the whole section belongs on the heading line, where `bar` is for the controls that narrow the
@@ -220,22 +224,20 @@ export function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-5xl flex w-full max-w-section flex-col">
+    <section className="flex w-full flex-col gap-6xl">
       {title || note ? (
-        <div className="flex flex-col gap-2xs border-b border-edge-soft pb-md">
+        <div className="flex flex-col gap-2xs">
           {title ? (
             <div className="flex items-baseline gap-md">
-              <h2 className="m-0 text-ui font-strong">{title}</h2>
+              <h2 className="m-0 font-sans text-subtitle font-medium">{title}</h2>
               {action}
             </div>
           ) : null}
-          {note ? <p className="m-0 text-ui text-ink-soft">{note}</p> : null}
+          {note ? <p className="m-0 text-label text-ink-soft">{note}</p> : null}
         </div>
       ) : null}
-      {bar ? (
-        <div className={cn("flex items-stretch gap-sm", (title || note) && "mt-6xl")}>{bar}</div>
-      ) : null}
-      <div className={cn(bar && "mt-6xl")}>{children}</div>
+      {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}
+      <div>{children}</div>
     </section>
   );
 }

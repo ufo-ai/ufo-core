@@ -19,7 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Td } from "@/components/ui/table";
+import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import {
   type NoticeState,
@@ -46,6 +46,8 @@ const ROLES = [
 ];
 
 const BLANK: Draft = { email: "", admin: false };
+
+const COLUMNS = ["Member", { label: "Role", fact: true }, { label: "Seat", fact: true }];
 
 function counted(landed: string[]) {
   return landed.length === 1 ? landed[0] : landed.length + " members added.";
@@ -132,7 +134,6 @@ export function Team({
         return (
           <>
             <Section
-              title="Members"
               bar={
                 <>
                   <Filter options={ROLES} value={role} onChange={setRole} />
@@ -152,19 +153,17 @@ export function Team({
               }
             >
               <DataTable
-                columns={["Member", "Role", "Seat"]}
+                columns={COLUMNS}
                 rows={found}
                 rowKey={(entry) => entry.email}
                 empty="This workspace has no members yet."
-                note={
-                  query || role ? "No member matches this search." : undefined
-                }
+                note={query || role ? "No member matches this search." : undefined}
               >
                 {(entry) => (
                   <>
                     <Td>{entry.email}</Td>
-                    <Td>{entry.admin ? "Admin" : "Member"}</Td>
-                    <Td>{entry.seated ? "Seated" : "No seat"}</Td>
+                    <TdFact>{entry.admin ? "Admin" : "Member"}</TdFact>
+                    <TdFact>{entry.seated ? "Seated" : "No seat"}</TdFact>
                   </>
                 )}
               </DataTable>

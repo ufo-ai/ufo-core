@@ -142,6 +142,41 @@ test("the table falls to its own empty words when it holds no rows", async () =>
   expect(screen.queryByRole("table")).toBeNull();
 });
 
+test("the table states a floor covering every track it declares", async () => {
+  const columns = [
+    { label: "Provider", fact: true },
+    "Account",
+    "Owner",
+    { label: "Access", fact: true },
+    { label: "Connected", fact: true },
+    "",
+  ];
+  const { unmount } = render(
+    <DataTable columns={columns} rows={[{ name: "one" }]} rowKey={() => "one"} empty="none">
+      {() => <Td />}
+    </DataTable>,
+  );
+  expect(screen.getByRole("table").style.minWidth).toBe(
+    "calc(3 * var(--size-fact-column) + 3 * var(--size-prose-column) + 0 * var(--size-act))",
+  );
+  unmount();
+
+  render(
+    <DataTable
+      columns={[{ label: "Schedule", fact: true }, "Name"]}
+      rows={[{ name: "one" }]}
+      rowKey={() => "one"}
+      empty="none"
+      act={() => "Open"}
+    >
+      {() => <Td />}
+    </DataTable>,
+  );
+  expect(screen.getByRole("table").style.minWidth).toBe(
+    "calc(1 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
+});
+
 test("the pager offers only the directions the payload carries", async () => {
   const placed: unknown[] = [];
   const { unmount } = render(

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, test } from "vitest";
 
-import { TabPanel, TabStrip } from "@/kernel/tabs";
+import { TabPanel, TabRow } from "@/kernel/tabs";
 
 const TABS = ["overview", "tasks", "usage"] as const;
 
@@ -11,7 +11,7 @@ function Pane() {
   const [tab, setTab] = useState<(typeof TABS)[number]>("overview");
   return (
     <>
-      <TabStrip
+      <TabRow
         group="pane"
         tabs={TABS}
         current={tab}

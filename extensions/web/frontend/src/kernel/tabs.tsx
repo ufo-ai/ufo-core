@@ -1,8 +1,6 @@
 import type { ComponentProps } from "react";
 
 import { Segmented } from "@/components/ui/filter";
-import { cn } from "@/lib/cn";
-import { COLUMN } from "@/kernel/pane";
 
 function tabId(group: string, tab: string) {
   return group + "-" + tab + "-tab";
@@ -41,21 +39,6 @@ export function TabRow<T extends string>({
       value={current}
       onPick={(value) => onPick(value as T)}
     />
-  );
-}
-
-/** The same row standing on a page: in the pane's column, a band clear of the title above and the
- *  panel below, with its leading pill pulled out to the column's line so the first tab starts
- *  where the title does. */
-export function TabStrip<T extends string>(props: Parameters<typeof TabRow<T>>[0]) {
-  return (
-    <div className="pt-2xl pb-2xl">
-      <div className={cn(COLUMN, "px-2xl")}>
-        <div className="-ml-2xl">
-          <TabRow {...props} />
-        </div>
-      </div>
-    </div>
   );
 }
 

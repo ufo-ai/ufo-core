@@ -1,5 +1,4 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { IconChevronRight } from "@tabler/icons-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,20 +11,18 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
-import { Table, TableNote, Td, Th } from "@/components/ui/table";
+import { Td } from "@/components/ui/table";
 import { Pager, type Placement } from "@/kernel/pager";
 import {
   OutcomeNotice,
   Panel,
-  PanelBlank,
   PanelEmpty,
   QUIET,
   Section,
   usePanelRead,
   type NoticeState,
 } from "@/kernel/panel";
-import { rowControl } from "@/kernel/row";
-import { cn } from "@/lib/cn";
+import { DataTable, type Column } from "@/kernel/table";
 import { day } from "@/lib/moments";
 import { postIntent } from "@/lib/api";
 import { subjectLabel } from "@/lib/audience";
@@ -46,6 +43,13 @@ type MemoryPayload = {
   newer?: string | null;
   older?: string | null;
 };
+
+const COLUMNS: Column[] = [
+  "Memory",
+  { label: "Class", fact: true },
+  { label: "Audience", fact: true },
+  { label: "Added", fact: true },
+];
 
 function kindLabel(kind: string) {
   return kind.charAt(0).toUpperCase() + kind.slice(1);
@@ -81,7 +85,6 @@ export function Memory({
   useEffect(() => setCorrecting(null), [submitted]);
 
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
-  const columns = ["Memory", "Class", "Audience", "Added"];
 
   return (
     <>
@@ -115,55 +118,35 @@ export function Memory({
           }
         >
           {(payload) => {
-            const narrowed = Boolean(submitted) || (Boolean(place.kind) && !payload.matches.length);
-            if (!payload.matches.length && !narrowed) return <PanelBlank body="No memories yet." />;
+            const note = submitted
+              ? "No matches."
+              : place.kind
+                ? payload.kinds.includes(place.kind)
+                  ? "No memories of this kind on this page."
+                  : "That memory class is not available."
+                : undefined;
+            const listed = Boolean(payload.matches.length || note);
             return (
               <>
-                <Table>
-                  <thead>
-                    <tr>
-                      {columns.map((column) => (
-                        <Th key={column}>{column}</Th>
-                      ))}
-                      <Th className="w-(--size-glyph)">{""}</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {payload.matches.length ? (
-                      payload.matches.map((match, index) => {
-                        const control = correctable(match)
-                          ? rowControl(() => setCorrecting(match), true)
-                          : null;
-                        return (
-                          <tr
-                            key={index}
-                            {...control}
-                            className={cn(control && "hover:bg-fill-hover", control?.className)}
-                          >
-                            <Td className="w-full max-w-0">{match.text}</Td>
-                            <Td>{kindLabel(match.kind)}</Td>
-                            <Td>{subjectLabel(match.subject)}</Td>
-                            <Td>{day(match.created_at) ?? "—"}</Td>
-                            <Td className="w-(--size-glyph)">
-                              {control ? (
-                                <IconChevronRight className="size-icon" aria-hidden />
-                              ) : null}
-                            </Td>
-                          </tr>
-                        );
-                      })
-                    ) : (
-                      <TableNote span={columns.length}>
-                        {submitted
-                          ? "No matches."
-                          : place.kind && !payload.kinds.includes(place.kind)
-                            ? "That memory class is not available."
-                            : "No memories of this kind on this page."}
-                      </TableNote>
-                    )}
-                  </tbody>
-                </Table>
-                {submitted ? null : <Pager payload={payload} onPlace={onPlace} />}
+                <DataTable
+                  columns={COLUMNS}
+                  rows={payload.matches}
+                  rowKey={(match) => match.ref ?? match.text}
+                  empty="No memories yet."
+                  note={note}
+                  open={(match) => (correctable(match) ? () => setCorrecting(match) : null)}
+                  act={(match) => (correctable(match) ? "Correct" : null)}
+                >
+                  {(match) => (
+                    <>
+                      <Td>{match.text}</Td>
+                      <Td>{kindLabel(match.kind)}</Td>
+                      <Td>{subjectLabel(match.subject)}</Td>
+                      <Td>{day(match.created_at) ?? "—"}</Td>
+                    </>
+                  )}
+                </DataTable>
+                {submitted || !listed ? null : <Pager payload={payload} onPlace={onPlace} />}
               </>
             );
           }}

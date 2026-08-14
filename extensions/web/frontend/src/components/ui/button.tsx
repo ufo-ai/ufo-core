@@ -14,7 +14,7 @@ export const buttonVariants = cva(
   {
     variants: {
       variant: {
-        send: "bg-primary text-primary-foreground font-strong px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
+        send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline:
           "border border-edge-control bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
         row: "border border-edge-control bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill-hover",
@@ -23,7 +23,7 @@ export const buttonVariants = cva(
       },
       size: {
         default: "",
-        bar: "h-(--size-control) rounded-full px-2xl py-0",
+        bar: "h-(--size-control) rounded-full px-2xl py-0 text-label",
         icon: "size-(--size-control) rounded-full p-0",
       },
     },

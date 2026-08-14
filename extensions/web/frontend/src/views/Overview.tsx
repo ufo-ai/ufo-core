@@ -1,11 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Facts } from "@/components/ui/facts";
+import { Facts, Group } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { type NoticeState, OutcomeNotice, Panel, QUIET, Section, outcomeNotice, usePanelRead } from "@/kernel/panel";
+import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
 import { webAudienceLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
@@ -73,7 +73,7 @@ export function Overview({ agent }: { agent: Agent }) {
         return (
           <>
             <OutcomeNotice state={notice} />
-            <Section title="Agent">
+            <Group title="Agent">
               <Facts
                 rows={[
                   { label: "Role", value: ready.agent.main ? "Main agent" : "Agent" },
@@ -96,9 +96,9 @@ export function Overview({ agent }: { agent: Agent }) {
                     : []),
                 ]}
               />
-            </Section>
+            </Group>
 
-            <Section title="Settings">
+            <Group title="Settings">
               <form onSubmit={save}>
                 <FormFromSchema
                   schema={ready.spec_schema}
@@ -124,15 +124,18 @@ export function Overview({ agent }: { agent: Agent }) {
                   </Button>
                 </div>
               </form>
-            </Section>
+            </Group>
 
-            <Section title="Prompt" note="Prompt changes go through the governed proposal path in chat.">
+            <Group title="Prompt">
+              <p className="m-0 py-md text-label text-ink-soft">
+                Prompt changes go through the governed proposal path in chat.
+              </p>
               <Reveal bare>
-                <pre className="m-0 font-sans text-ink-soft whitespace-pre-wrap wrap-anywhere">
+                <pre className="m-0 font-sans text-label text-ink-soft whitespace-pre-wrap wrap-anywhere">
                   {ready.agent.prompt}
                 </pre>
               </Reveal>
-            </Section>
+            </Group>
           </>
         );
       }}

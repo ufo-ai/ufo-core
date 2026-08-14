@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint, Input } from "@/components/ui/field";
-import { Td } from "@/components/ui/table";
+import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -15,13 +15,38 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { COLUMN, Pane } from "@/kernel/pane";
+import { Page, PageHeader, Pane } from "@/kernel/pane";
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
 
-const FRAME = COLUMN + " overflow-y-auto scrollbar-gutter-stable p-2xl";
+const AGENT_COLUMNS = [
+  "Agent",
+  { label: "Model", fact: true },
+  { label: "Public Internet", fact: true },
+  "Surfaces",
+  "Web Audience",
+  "",
+];
+const MEMBER_COLUMNS = [
+  "Member",
+  { label: "Role", fact: true },
+  { label: "Seat", fact: true },
+  "",
+];
+const CAP_COLUMNS = [
+  { label: "Cap", fact: true },
+  "Subject",
+  { label: "Window", fact: true },
+  { label: "Limit", fact: true },
+  { label: "On Breach", fact: true },
+];
+const EXTENSION_COLUMNS = [
+  "Extension",
+  { label: "Version", fact: true },
+  { label: "Public Internet", fact: true },
+];
 
 function allowance(allowed: boolean): string {
   return allowed ? "Allowed" : "Blocked";
@@ -42,13 +67,17 @@ export function Admin() {
     <Panel
       state={state}
       loading={() => (
-        <Pane data-testid="admin-loading" className={FRAME}>
-          <PanelSkeleton shape="table" />
+        <Pane data-testid="admin-loading">
+          <Page>
+            <PanelSkeleton shape="table" />
+          </Page>
         </Pane>
       )}
       failed={(message) => (
-        <Pane className={FRAME}>
-          <PanelEmpty>{message}</PanelEmpty>
+        <Pane>
+          <Page>
+            <PanelEmpty>{message}</PanelEmpty>
+          </Page>
         </Pane>
       )}
     >
@@ -56,97 +85,99 @@ export function Admin() {
         const mainAgent = payload.agents.find((agent) => agent.main);
 
         return (
-          <Pane className={FRAME} data-testid="admin">
-            <h1 className="m-0 mb-2xl text-title font-strong">Administration</h1>
-            <OutcomeNotice state={notice} />
+          <Pane data-testid="admin">
+            <Page>
+              <PageHeader title="Administration" />
+              <OutcomeNotice state={notice} />
 
-            <Section title="Agents">
-              <DataTable
-                columns={["Agent", "Model", "Public Internet", "Surfaces", "Web Audience", ""]}
-                rows={payload.agents}
-                rowKey={(agent) => agent.id}
-                empty="This workspace has no agents."
-              >
-                {(agent) => (
-                  <AgentRow
-                    agent={agent}
-                    onAudience={(verb, email) => intent(agent.id, { verb, email })}
-                  />
-                )}
-              </DataTable>
-            </Section>
+              <Section title="Agents">
+                <DataTable
+                  columns={AGENT_COLUMNS}
+                  rows={payload.agents}
+                  rowKey={(agent) => agent.id}
+                  empty="This workspace has no agents."
+                >
+                  {(agent) => (
+                    <AgentRow
+                      agent={agent}
+                      onAudience={(verb, email) => intent(agent.id, { verb, email })}
+                    />
+                  )}
+                </DataTable>
+              </Section>
 
-            <Section title="Members">
-              <DataTable
-                columns={["Member", "Role", "Seat", ""]}
-                rows={payload.members}
-                rowKey={(member) => member.email}
-                empty="This workspace has no members yet."
-              >
-                {(member) => (
-                  <MemberRow
-                    member={member}
-                    onApply={(spec) =>
-                      mainAgent
-                        ? intent(mainAgent.id, {
-                            verb: "apply",
-                            kind: "member",
-                            name: member.id,
-                            spec,
-                          })
-                        : undefined
-                    }
-                  />
-                )}
-              </DataTable>
-            </Section>
+              <Section title="Members">
+                <DataTable
+                  columns={MEMBER_COLUMNS}
+                  rows={payload.members}
+                  rowKey={(member) => member.email}
+                  empty="This workspace has no members yet."
+                >
+                  {(member) => (
+                    <MemberRow
+                      member={member}
+                      onApply={(spec) =>
+                        mainAgent
+                          ? intent(mainAgent.id, {
+                              verb: "apply",
+                              kind: "member",
+                              name: member.id,
+                              spec,
+                            })
+                          : undefined
+                      }
+                    />
+                  )}
+                </DataTable>
+              </Section>
 
-            <Section title="Billing">
-              <DataTable
-                columns={["Cap", "Subject", "Window", "Limit", "On Breach"]}
-                rows={payload.caps}
-                rowKey={(cap) => cap.scope + "/" + cap.subject + "/" + cap.window_seconds}
-                empty="No spend caps are set."
-              >
-                {(cap) => (
-                  <>
-                    <Td>{cap.scope}</Td>
-                    <Td>{cap.subject || "—"}</Td>
-                    <Td>{cap.window_seconds / 3600 + "h"}</Td>
-                    <Td>{money(cap.limit_micro_usd)}</Td>
-                    <Td>{cap.on_breach}</Td>
-                  </>
-                )}
-              </DataTable>
-              <Hint className="m-0">
-                The plan, invoices, and payment methods are managed with the agent in chat.
-              </Hint>
-            </Section>
+              <Section title="Billing">
+                <DataTable
+                  columns={CAP_COLUMNS}
+                  rows={payload.caps}
+                  rowKey={(cap) => cap.scope + "/" + cap.subject + "/" + cap.window_seconds}
+                  empty="No spend caps are set."
+                >
+                  {(cap) => (
+                    <>
+                      <TdFact>{cap.scope}</TdFact>
+                      <Td>{cap.subject || "—"}</Td>
+                      <TdFact>{cap.window_seconds / 3600 + "h"}</TdFact>
+                      <TdFact>{money(cap.limit_micro_usd)}</TdFact>
+                      <TdFact>{cap.on_breach}</TdFact>
+                    </>
+                  )}
+                </DataTable>
+                <Hint className="m-0">
+                  The plan, invoices, and payment methods are managed with the agent in chat.
+                </Hint>
+              </Section>
 
-            <Section title="Deploy">
-              <Facts
-                rows={[
-                  {
-                    label: "Sandbox public internet",
-                    value: allowance(payload.deploy.sandbox_internet),
-                  },
-                ]}
-              />
-              <DataTable
-                columns={["Extension", "Version", "Public Internet"]}
-                rows={payload.deploy.extensions}
-                rowKey={(extension) => extension.name}
-                empty="This deploy installs no extensions."
-              >
-                {(extension) => (
-                  <>
-                    <Td>{extension.name}</Td>
-                    <Td>{extension.version}</Td>
-                    <Td>{allowance(extension.sandbox_internet)}</Td>
-                  </>
-                )}
-              </DataTable>
-            </Section>
+              <Section title="Deploy">
+                <Facts
+                  rows={[
+                    {
+                      label: "Sandbox public internet",
+                      value: allowance(payload.deploy.sandbox_internet),
+                    },
+                  ]}
+                />
+                <DataTable
+                  columns={EXTENSION_COLUMNS}
+                  rows={payload.deploy.extensions}
+                  rowKey={(extension) => extension.name}
+                  empty="This deploy installs no extensions."
+                >
+                  {(extension) => (
+                    <>
+                      <Td>{extension.name}</Td>
+                      <TdFact>{extension.version}</TdFact>
+                      <TdFact>{allowance(extension.sandbox_internet)}</TdFact>
+                    </>
+                  )}
+                </DataTable>
+              </Section>
+            </Page>
           </Pane>
         );
       }}
@@ -170,8 +201,8 @@ function AgentRow({
           <span className="ml-xs text-small opacity-(--opacity-muted-strong)">Main</span>
         ) : null}
       </Td>
-      <Td>{agent.model}</Td>
-      <Td>{allowance(agent.internet_access_allowed)}</Td>
+      <TdFact>{agent.model}</TdFact>
+      <TdFact>{allowance(agent.internet_access_allowed)}</TdFact>
       <Td>{agent.installations.join(", ") || "—"}</Td>
       <Td>{agent.main ? "Every member" : agent.web_audience.concat("admins").join(", ")}</Td>
       <Td>
@@ -216,10 +247,10 @@ function MemberRow({
   return (
     <>
       <Td>{member.email}</Td>
-      <Td>{member.admin ? "Admin" : "Member"}</Td>
-      <Td>{member.seated ? "Seated" : "Unseated"}</Td>
-      <Td>
-        <div className="flex flex-wrap gap-xs">
+      <TdFact>{member.admin ? "Admin" : "Member"}</TdFact>
+      <TdFact>{member.seated ? "Seated" : "Unseated"}</TdFact>
+      <TdActs>
+        <div className={ACTS}>
           {member.admin ? (
             <ConfirmButton
               verb="Remove admin"
@@ -246,7 +277,7 @@ function MemberRow({
             </Button>
           )}
         </div>
-      </Td>
+      </TdActs>
     </>
   );
 }

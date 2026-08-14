@@ -1,4 +1,5 @@
 import { Button, ConfirmButton } from "@/components/ui/button";
+import { ACTS } from "@/components/ui/table";
 import type { ListingSpec } from "@/kernel/listing";
 import { ownerLabel } from "@/lib/audience";
 import { day } from "@/lib/moments";
@@ -129,7 +130,7 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     "of the request.",
   actions: (row, { act, busy }) =>
     row.apply === null || row.name === null || !row.own ? null : (
-      <div className="flex flex-wrap gap-xs">
+      <div className={ACTS}>
         <Button
           variant="row"
           disabled={busy}

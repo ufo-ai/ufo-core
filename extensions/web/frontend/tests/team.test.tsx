@@ -190,11 +190,12 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   );
 });
 
-test("the roster and the form each carry a heading naming what they are", async () => {
+test("the tab names the roster, so the section under it repeats no heading", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Members" })).toBeTruthy();
+  expect(await screen.findByRole("tab", { name: "Team", selected: true })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
   await openAdd();
   expect(screen.getByRole("dialog", { name: "Add Members" })).toBeTruthy();
 });

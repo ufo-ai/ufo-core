@@ -144,11 +144,9 @@ test("an index carries the name, the kind's own prose and the one field it leads
   expect(said[4]).toContain("in ");
   expect(screen.queryByText("#general")).toBeNull();
   const rowCells = [...(row?.querySelectorAll("td") ?? [])];
-  expect(rowCells[3].className).toContain("w-full max-w-0");
   expect(rowCells[3].querySelector("span")?.className).toContain("block truncate");
-  expect(rowCells[4].querySelector("span")?.className).toContain(
-    "block max-w-(--size-cell) truncate",
-  );
+  expect(rowCells[4].className).toContain("w-(--size-fact-column)");
+  expect(rowCells[4].querySelector("span")?.className).toContain("block truncate");
 });
 
 test("a record's name is the record's, not a link away from it, and no uuid is a column", async () => {

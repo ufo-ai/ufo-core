@@ -77,7 +77,8 @@ export function Segmented({
                 [next]?.focus();
             }}
             className={cn(
-              "relative h-(--size-control) shrink-0 rounded-full border-0 bg-transparent px-2xl text-ui",
+              "relative h-(--size-control) shrink-0 rounded-full border-0 bg-transparent px-2xl",
+              "text-label",
               "transition-[opacity] duration-100 ease-control motion-reduce:transition-none",
               active ? "opacity-100" : "opacity-(--opacity-muted-soft) hover:opacity-100",
             )}

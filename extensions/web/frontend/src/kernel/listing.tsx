@@ -3,7 +3,7 @@ import { Fragment, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
-import { Table, TableNote, Td, Th } from "@/components/ui/table";
+import { Table, TableNote, Td, TdActs, Th } from "@/components/ui/table";
 import { CardGrid, type CardMark } from "@/kernel/cards";
 import {
   OutcomeNotice,
@@ -248,7 +248,7 @@ export function Listing<Payload, Row>({
                             </Td>
                           ))}
                           {spec.actions ? (
-                            <Td>{spec.actions(row, context)}</Td>
+                            <TdActs>{spec.actions(row, context)}</TdActs>
                           ) : null}
                         </tr>
                       ))

@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
-import { Facts } from "@/components/ui/facts";
+import { Facts, Group } from "@/components/ui/facts";
 import {
   BAR_CONTROL,
   Select,
@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Td } from "@/components/ui/table";
+import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
 import {
   Notice,
   type NoticeState,
@@ -52,6 +52,12 @@ type PoolConnection = Connection & { agents: { id: string; name: string }[] };
 type PoolPayload = { connections: PoolConnection[] };
 type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
+const PROVIDER = { label: "Provider", fact: true };
+const ACCESS = { label: "Access", fact: true };
+const CONNECTED = { label: "Connected", fact: true };
+const POOL_COLUMNS = [PROVIDER, "Account", "Owner", ACCESS, CONNECTED, "Agents", ""];
+const AGENT_COLUMNS = [PROVIDER, "Account", "Owner", ACCESS, CONNECTED, ""];
+
 function matches(entry: Connection | PoolConnection, query: string): boolean {
   const said = [
     entry.provider,
@@ -76,7 +82,6 @@ export function WorkspaceConnectors() {
   const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
   return (
     <Section
-      title="Connectors"
       bar={
         <>
           <Search
@@ -97,7 +102,7 @@ export function WorkspaceConnectors() {
       <Panel state={state}>
         {(payload) => (
           <DataTable
-            columns={["Provider", "Account", "Owner", "Access", "Connected", "Agents", ""]}
+            columns={POOL_COLUMNS}
             rows={payload.connections.filter((entry) => matches(entry, query))}
             rowKey={(entry) => entry.provider + "-" + entry.account_id}
             empty="No connector is connected yet."
@@ -105,15 +110,15 @@ export function WorkspaceConnectors() {
           >
             {(entry) => (
               <>
-                <Td>{entry.provider}</Td>
+                <TdFact>{entry.provider}</TdFact>
                 <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
                 <Td>{entry.owner_email ? ownerLabel(entry.owner_email, viewer) : "—"}</Td>
-                <Td>{entry.shared ? "Workspace" : "Only you"}</Td>
-                <Td>{day(entry.connected_at)}</Td>
+                <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
+                <TdFact>{day(entry.connected_at)}</TdFact>
                 <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
-                <Td>
+                <TdActs>
                   {entry.owner_email ? (
-                    <div className="flex flex-wrap gap-xs">
+                    <div className={ACTS}>
                       <Button
                         variant="row"
                         disabled={!targetAgent}
@@ -158,20 +163,25 @@ export function WorkspaceConnectors() {
                       ) : null}
                     </div>
                   ) : null}
-                </Td>
+                </TdActs>
               </>
             )}
           </DataTable>
         )}
       </Panel>
       {coverage.phase === "ready" ? (
-        <Facts
-          rows={[
-            { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
-            { label: "Git push", value: coverage.payload.git_push ? "Connected" : "Not connected" },
-            { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
-          ]}
-        />
+        <Group title="Coverage">
+          <Facts
+            rows={[
+              { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
+              {
+                label: "Git push",
+                value: coverage.payload.git_push ? "Connected" : "Not connected",
+              },
+              { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
+            ]}
+          />
+        </Group>
       ) : null}
     </Section>
   );
@@ -290,7 +300,6 @@ function ConnectorList({
         </Notice>
       ) : null}
       <Section
-        title="Connectors"
         bar={
           <>
             {picker}
@@ -340,7 +349,7 @@ function ConnectorList({
         <Panel state={state}>
           {(payload) => (
             <DataTable
-              columns={["Provider", "Account", "Owner", "Access", "Connected", ""]}
+              columns={AGENT_COLUMNS}
               rows={payload.connections.filter(
                 (entry) => (!sharedOnly || entry.shared) && matches(entry, query),
               )}
@@ -354,14 +363,14 @@ function ConnectorList({
             >
               {(entry) => (
                 <>
-                  <Td>{entry.provider}</Td>
+                  <TdFact>{entry.provider}</TdFact>
                   <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
                   <Td>{ownerLabel(entry.owner_email, viewer)}</Td>
-                  <Td>{entry.shared ? "Workspace" : "Only you"}</Td>
-                  <Td>{day(entry.connected_at)}</Td>
-                  <Td>
+                  <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
+                  <TdFact>{day(entry.connected_at)}</TdFact>
+                  <TdActs>
                     {entry.own ? (
-                      <div className="flex flex-wrap gap-xs">
+                      <div className={ACTS}>
                         <Button
                           variant="row"
                           onClick={() =>
@@ -392,7 +401,7 @@ function ConnectorList({
                         />
                       </div>
                     ) : null}
-                  </Td>
+                  </TdActs>
                 </>
               )}
             </DataTable>

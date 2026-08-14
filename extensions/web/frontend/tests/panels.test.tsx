@@ -1028,7 +1028,7 @@ test("the agents view lists the deploy's subagents under the agents in one table
   expect(rows[2].cells[1].textContent).toBe(
     "Spawned by an agent for one task, on that agent's model.",
   );
-  expect(screen.queryByText("claude-opus-4-8")).toBeNull();
+  expect(rows.map((row) => row.cells[2].textContent)).toEqual(["opus", "claude-opus-4-8", "—"]);
   expect(rows.every((row) => row.getAttribute("tabindex") === "0")).toBe(true);
 });
 
@@ -1215,4 +1215,20 @@ test("an applied grant change keeps a live consent link on screen", async () => 
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(calls).toBe(2));
   expect(screen.getByRole("link", { name: "Open the provider consent page" })).toBeTruthy();
+});
+
+/** The bands a screen stacks carry no margin of their own, so whatever stacks them states the gap.
+ *  A container that forgets it renders them flush — which is a fault no band can see, and which
+ *  eight sections of Usage shipped past a green suite once already. */
+test("every container that stacks bands states the one gap between them", async () => {
+  wire({ "/workspace/team": () => json({ members: [], can_add: false }) });
+  location.hash = "#/workspace/team";
+  render(
+    <App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+  );
+
+  const panel = await screen.findByRole("tabpanel");
+  expect(panel.className).toContain("gap-6xl");
+  const page = panel.parentElement;
+  expect(page?.className).toContain("gap-6xl");
 });

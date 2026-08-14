@@ -92,7 +92,8 @@ export function Search({
   return (
     <form
       className={cn(
-        "flex h-(--size-control) items-center gap-sm rounded-full bg-fill-subtle px-2xl",
+        "flex h-(--size-control) w-(--container-search) items-center gap-sm rounded-full",
+        "bg-fill-subtle px-lg",
         "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink",
         className,
       )}
@@ -113,7 +114,7 @@ export function Search({
         type="search"
         aria-label={label}
         className={cn(
-          "min-w-0 flex-1 border-0 bg-transparent p-0 font-sans text-ui",
+          "min-w-0 flex-1 border-0 bg-transparent p-0 font-sans text-label",
           "placeholder:opacity-(--opacity-muted) focus-visible:outline-none",
         )}
         {...props}

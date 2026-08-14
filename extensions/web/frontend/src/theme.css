@@ -371,14 +371,30 @@
   --container-empty: 44ch;
   --container-control: 40ch;
   --container-control-row: 20ch;
+  --container-search: 168px;
+  --container-record: min(440px, 45%);
   --container-menu: 160px;
 
   --media-tall: 60vh;
   --media-card: 20rem;
-  --grid-slot: minmax(0, 1fr) minmax(20rem, 40%);
+  --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;
-  --size-cell: 32ch;
+  /* The page's own frame and the pitch its records are read at. A screen is a gutter, a stack of
+     bands a `6xl` apart, and a column of `--size-record` rows; the two narrow columns hold a fact
+     the eye compares straight down, and `--size-act` is the width the row's act is reserved, so
+     every act on every screen lands on one right edge whether or not a row carries one.
+     `--size-prose-column` is the floor a shared column keeps: the tracks are fixed, so a table
+     narrower than the sum of its own tracks would hand the prose columns nothing and print one
+     character per cell. Below that sum the table holds its width and the column it is read in
+     scrolls. */
+  --size-page-gutter: 88px;
+  --size-page-top: 56px;
+  --size-record-gutter: 24px;
+  --size-record: 40px;
+  --size-fact-column: 152px;
+  --size-prose-column: 160px;
+  --size-act: 88px;
   --size-composer: 15em;
   --size-control: 32px;
   --size-fact: 16ch;

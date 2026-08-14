@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
+import { ACTS } from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -107,7 +108,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   },
   empty: "No credential slots are declared.",
   actions: (row, { act, busy }) => (
-    <div className="flex flex-wrap gap-xs">
+    <div className={ACTS}>
       <Button
         variant="row"
         disabled={busy}

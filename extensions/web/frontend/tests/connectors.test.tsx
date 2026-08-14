@@ -59,6 +59,18 @@ test("the workspace tab lists the connection pool", async () => {
   expect(screen.getAllByText("Sources").length).toBeGreaterThan(1);
 });
 
+test("a row's acts neither wrap nor clip, so the row keeps the table's pitch", async () => {
+  location.hash = "#/workspace/connectors";
+  connectors();
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const act = await screen.findByRole("button", { name: "Attach to agent" });
+  const cell = act.closest("td");
+  expect(cell?.className).not.toContain("truncate");
+  expect(cell?.className).toContain("border-edge-faint");
+  expect(act.parentElement?.className).toContain("flex-nowrap");
+});
+
 test("the agent tab reads attached connections", async () => {
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
   const { calls } = connectors();

@@ -298,25 +298,23 @@ export function AgentSkills({ agent }: { agent: Agent }) {
       <OutcomeNotice state={notice} />
       <Section
         bar={
-          <div className="flex w-full flex-col gap-md">
-            <div className="flex items-stretch gap-sm">
-              <Search
-                label="Search skills"
-                placeholder="Search skills"
-                className="flex-1"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onSubmit={() => setSubmitted(query.trim())}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") setSubmitted(query.trim());
-                }}
-              />
-              <Button variant="send" size="bar" onClick={() => setWriting(true)}>
-                New skill
-              </Button>
-            </div>
+          <>
             <Filter all={false} options={NARROWINGS} value={narrowed} onChange={setNarrowed} />
-          </div>
+            <Search
+              label="Search skills"
+              placeholder="Search skills"
+              className="ml-auto w-(--container-control-row)"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onSubmit={() => setSubmitted(query.trim())}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") setSubmitted(query.trim());
+              }}
+            />
+            <Button variant="send" size="bar" onClick={() => setWriting(true)}>
+              New skill
+            </Button>
+          </>
         }
       >
         {browsing ? (
