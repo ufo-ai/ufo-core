@@ -2384,6 +2384,7 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
         "n@example.com",
     }
     assert [entry["label"] for entry in workspace["by_agent"]] == ["assistant"]
+    assert [entry["label"] for entry in workspace["by_origin"]] == ["web"]
     assert {line["dimension"] for line in workspace["by_dimension"]} == {"egress", "tokens"}
     windowed = (
         await client.get(

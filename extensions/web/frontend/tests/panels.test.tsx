@@ -898,6 +898,10 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
           by_agent: [
             { id: AGENT_ID, label: "assistant", tokens: 7_200, priced_micro_usd: 9_000_000 },
           ],
+          by_origin: [
+            { label: "#eng", tokens: 6_000, priced_micro_usd: 7_500_000 },
+            { label: "Workspace jobs", tokens: 1_200, priced_micro_usd: 1_500_000 },
+          ],
           usage: usageDetails(9_000_000, 7_200),
         },
       }),
@@ -915,6 +919,9 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByText("<$0.01")).toBeTruthy();
   expect(screen.getByText("Suspend the turn")).toBeTruthy();
   expect(screen.getByText("member@example.com")).toBeTruthy();
+  expect(screen.getByText("Origins")).toBeTruthy();
+  expect(screen.getByText("#eng")).toBeTruthy();
+  expect(screen.getByText("Workspace jobs")).toBeTruthy();
   expect(screen.getByRole("img", { name: "7.2K tokens across 1 daily buckets" })).toBeTruthy();
   expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
 

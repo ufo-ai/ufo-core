@@ -642,50 +642,112 @@ async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     ]
 
 
+async def _spawn_child_turn(
+    connection: AsyncConnection, workspace_id: UUID, parent_turn_id: UUID
+) -> UUID:
+    parent = (
+        await connection.execute(
+            sa.select(
+                tables.turn.c.agent_id,
+                tables.turn.c.conversation_id,
+                tables.conversation.c.member_id,
+            )
+            .select_from(tables.turn.join(tables.conversation))
+            .where(tables.turn.c.id == parent_turn_id)
+        )
+    ).one()
+    child_conversation, child_turn = uuid4(), uuid4()
+    await connection.execute(
+        sa.insert(tables.conversation).values(
+            id=child_conversation,
+            workspace_id=workspace_id,
+            agent_id=parent.agent_id,
+            surface="subagent",
+            queue_key=str(child_turn),
+            member_id=parent.member_id,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.turn).values(
+            id=child_turn,
+            workspace_id=workspace_id,
+            conversation_id=child_conversation,
+            agent_id=parent.agent_id,
+            seq=1,
+            status="queued",
+            inbound="research",
+            terminal=None,
+            parent_turn_id=parent_turn_id,
+            subagent_profile="research",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return child_turn
+
+
+async def test_spend_by_origin_gathers_a_subagents_burn_under_the_channel(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.workspace_id == workspace_id)
+            .values(surface="slack", surface_label="#eng")
+        )
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
+        grandchild = await _spawn_child_turn(connection, workspace_id, child_turn)
+        await record_turn_usage(connection, workspace_id, child_turn, "claude-opus-4-8", FULL_USAGE)
+        await record_turn_usage(connection, workspace_id, grandchild, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert [(o.surface, o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
+        ("slack", "#eng", 30_000, 289_500)
+    ]
+
+
+async def test_spend_by_origin_counts_a_turn_once_per_ledger_row(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.workspace_id == workspace_id)
+            .values(surface="slack", surface_label="#eng")
+        )
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_turn_usage(
+            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, attempt="resumed"
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert [(o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
+        ("#eng", 20_000, 193_000)
+    ]
+    assert sum(o.priced_micro_usd for o in report.by_origin) == report.total_micro_usd
+
+
+async def test_spend_by_origin_names_an_unlabelled_surface_and_a_turnless_job(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=1000)
+        )
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert [(o.surface, o.label) for o in report.by_origin] == [
+        ("cli", "cli"),
+        (None, "Workspace jobs"),
+    ]
+
+
 async def test_usage_details_report_history_models_execution_and_all_time(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
         await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
-        parent = (
-            await connection.execute(
-                sa.select(
-                    tables.turn.c.agent_id,
-                    tables.turn.c.conversation_id,
-                    tables.conversation.c.member_id,
-                )
-                .select_from(tables.turn.join(tables.conversation))
-                .where(tables.turn.c.id == turn_id)
-            )
-        ).one()
-        child_conversation, child_turn = uuid4(), uuid4()
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=child_conversation,
-                workspace_id=workspace_id,
-                agent_id=parent.agent_id,
-                surface="subagent",
-                queue_key=str(child_turn),
-                member_id=parent.member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=child_turn,
-                workspace_id=workspace_id,
-                conversation_id=child_conversation,
-                agent_id=parent.agent_id,
-                seq=1,
-                status="queued",
-                inbound="research",
-                terminal=None,
-                parent_turn_id=turn_id,
-                subagent_profile="research",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+        child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
         await record_turn_usage(connection, workspace_id, child_turn, "gpt-5.6-terra", FULL_USAGE)
         await connection.execute(
             sa.insert(tables.ledger).values(

@@ -515,6 +515,9 @@ def spend(window_seconds: int) -> None:
     click.echo("by agent:")
     for agent in report.by_agent:
         click.echo(f"  {agent.label:<32}${agent.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
+    click.echo("by origin:")
+    for origin in report.by_origin:
+        click.echo(f"  {origin.label:<32}${origin.priced_micro_usd / MICRO_USD_PER_USD:,.6f}")
     click.echo("by price digest:")
     for entry in report.by_price_digest:
         priced = entry.priced_micro_usd / MICRO_USD_PER_USD

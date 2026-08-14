@@ -2364,6 +2364,14 @@ async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
                 }
                 for subject in rollup.by_agent
             ],
+            "by_origin": [
+                {
+                    "label": origin.label,
+                    "tokens": origin.tokens,
+                    "priced_micro_usd": origin.priced_micro_usd,
+                }
+                for origin in rollup.by_origin
+            ],
             "usage": _usage_payload(rollup),
         }
     return JSONResponse(payload)

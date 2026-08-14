@@ -71,6 +71,7 @@ export type WorkspaceUsageReport = UsageReport & {
     by_dimension: DimensionLine[];
     by_member: BreakdownLine[];
     by_agent: BreakdownLine[];
+    by_origin: BreakdownLine[];
     usage: UsageDetails;
   } | null;
 };
@@ -386,6 +387,9 @@ export function WorkspaceUsage() {
                 </Section>
                 <Section title="Members">
                   <Breakdown heading="Member" rows={payload.workspace.by_member} empty="No member used model tokens in this range." />
+                </Section>
+                <Section title="Origins">
+                  <Breakdown heading="Origin" rows={payload.workspace.by_origin} empty="Nothing in this workspace used model tokens in this range." />
                 </Section>
                 <Section title="Models">
                   <Breakdown heading="Model" rows={report.by_model} empty="No models were used in this range." />

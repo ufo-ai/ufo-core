@@ -729,6 +729,18 @@ class PriceDigestTotal:
 
 
 @dataclass(frozen=True, slots=True)
+class OriginTotal:
+    """Spend gathered under the place a member started it — the surface's own name for the origin
+    (`surface_label`, a Slack channel's `#eng`) where the surface names one, else the surface
+    itself, because a `queue_key` is a wire identifier no member reads."""
+
+    surface: str | None
+    label: str
+    tokens: int
+    priced_micro_usd: int
+
+
+@dataclass(frozen=True, slots=True)
 class UsageTotal:
     tokens: int
     token_micro_usd: int
@@ -764,13 +776,14 @@ class UsageDetails:
 @dataclass(frozen=True, slots=True)
 class SpendReport:
     """A selected range and all-time workspace ledger, with daily, execution, model, dimension,
-    member, agent, and price-table totals."""
+    member, agent, origin, and price-table totals."""
 
     window_seconds: int | None
     total_micro_usd: int
     by_dimension: tuple[DimensionTotal, ...]
     by_member: tuple[SubjectTotal, ...]
     by_agent: tuple[SubjectTotal, ...]
+    by_origin: tuple[OriginTotal, ...]
     by_price_digest: tuple[PriceDigestTotal, ...]
     usage: UsageDetails
 
@@ -805,6 +818,7 @@ class MemberSpendReport:
 
 
 TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
+WORKSPACE_JOB_LABEL = "Workspace jobs"
 
 
 def _token_sum() -> sa.ColumnElement[int]:
@@ -1021,7 +1035,7 @@ class SpendRollup:
         by_agent = tuple(
             SubjectTotal(
                 row.agent_id,
-                row.name if row.agent_id is not None else "Workspace jobs",
+                row.name if row.agent_id is not None else WORKSPACE_JOB_LABEL,
                 int(row.tokens),
                 int(row.priced),
             )
@@ -1054,6 +1068,7 @@ class SpendRollup:
                 .order_by(tables.ledger.c.price_digest)
             )
         )
+        by_origin = await self._by_origin(connection, window)
         usage = await _usage_details(
             connection,
             tables.ledger.outerjoin(tables.turn),
@@ -1067,8 +1082,76 @@ class SpendRollup:
             by_dimension,
             by_member,
             by_agent,
+            by_origin,
             by_price_digest,
             usage,
+        )
+
+    async def _by_origin(
+        self, connection: AsyncConnection, window: sa.ColumnElement[bool]
+    ) -> tuple[OriginTotal, ...]:
+        """Token spend gathered under the conversation that started it, climbing `parent_turn_id`
+        so a subagent's burn lands on the origin that spawned it rather than on the private
+        conversation it ran in — which carries no surface a member ever saw. Half of a chat
+        surface's spend is that fan-out, so the ungathered sum answers a question nobody asked.
+
+        The climb seeds on the turns the window's own ledger names, so it walks what actually spent
+        rather than the workspace's whole history, and each step is a primary-key lookup on the
+        parent. It seeds one row per turn and not one per ledger row: a turn holds a token row per
+        dimension and per resumed attempt, and seeding on the rows themselves would pair each of
+        them with every root the turn contributed, multiplying the origin's total by their count. A
+        turn-less row (a background job) reaches no conversation and gathers under `Workspace jobs`,
+        as it does per agent."""
+        turn = tables.turn
+        spent = sa.select(tables.ledger.c.turn_id).where(
+            window,
+            tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS),
+            tables.ledger.c.turn_id.isnot(None),
+        )
+        chain = (
+            sa.select(
+                turn.c.id.label("turn_id"),
+                turn.c.parent_turn_id.label("parent"),
+                turn.c.conversation_id.label("conversation_id"),
+            )
+            .where(turn.c.id.in_(spent))
+            .cte("spend_origin_chain", recursive=True)
+        )
+        ancestor = turn.alias("origin_ancestor")
+        chain = chain.union_all(
+            sa.select(
+                chain.c.turn_id,
+                ancestor.c.parent_turn_id,
+                ancestor.c.conversation_id,
+            ).select_from(chain.join(ancestor, ancestor.c.id == chain.c.parent))
+        )
+        roots = (
+            sa.select(chain.c.turn_id, chain.c.conversation_id)
+            .where(chain.c.parent.is_(None))
+            .subquery("spend_origin_root")
+        )
+        conversation = tables.conversation.alias("origin_conversation")
+        label = sa.func.coalesce(
+            conversation.c.surface_label, conversation.c.surface, WORKSPACE_JOB_LABEL
+        ).label("label")
+        return tuple(
+            OriginTotal(row.surface, row.label, int(row.tokens), int(row.priced))
+            for row in await connection.execute(
+                sa.select(
+                    conversation.c.surface,
+                    label,
+                    _token_sum().label("tokens"),
+                    _token_cost_sum().label("priced"),
+                )
+                .select_from(
+                    tables.ledger.outerjoin(
+                        roots, roots.c.turn_id == tables.ledger.c.turn_id
+                    ).outerjoin(conversation, conversation.c.id == roots.c.conversation_id)
+                )
+                .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
+                .group_by(conversation.c.surface, label)
+                .order_by(sa.desc("priced"))
+            )
         )
 
     async def read_agent(
