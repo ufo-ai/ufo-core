@@ -68,6 +68,18 @@ inside the container — Chrome's DevTools port, a dev-server preview — would 
 inside it. Exempting loopback grants no reach a raw socket does not already have."""
 
 
+PROBE_TOKEN_KIND = "ufo-probe"
+
+
+def _basic_username(header: str) -> str:
+    """The username inside a `Proxy-Authorization: Basic` header, where every token class rides: a
+    sandbox client is handed a proxy URL and nothing else, so userinfo is the only channel."""
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        raise ValueError("proxy authorization is not basic auth")
+    return base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
+
+
 @dataclass(frozen=True, slots=True)
 class RunToken:
     """The turn and member authority attributed to one sandbox process tree."""
@@ -96,11 +108,8 @@ class RunTokenCodec:
         return sign_token(self.secret, payload)
 
     def from_proxy_auth(self, header: str) -> RunToken:
-        scheme, _, encoded = header.partition(" ")
-        if scheme.lower() != "basic" or not encoded:
-            raise ValueError("proxy authorization is not basic auth")
+        username = _basic_username(header)
         try:
-            username = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)[0]
             kind, workspace, turn, member = verify_token(username, self.secret).decode().split("/")
             if kind != "ufo-run":
                 raise ValueError("invalid run token domain")
@@ -111,6 +120,65 @@ class RunTokenCodec:
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeToken:
+    """The conversation and member authority attributed to one off-turn sandbox exec, until it
+    expires.
+
+    A turn's egress is authorized by the turn: the proxy admits a CONNECT while the DB still reports
+    that turn running. A probe runs off every turn, so there is no row whose status answers whether
+    it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
+    and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
+
+    `acting_member_id` is the member the probe acts as: whoever armed the watch this exec serves, so
+    a command that reached their own connected account in the arming turn keeps reaching it on every
+    probe after it. Unset means nobody, and then only connections shared with the whole workspace
+    are forwarded — the same authority a turn's own sandbox open carries before a tool call
+    re-authorizes it for its speaker."""
+
+    workspace_id: UUID
+    conversation_id: UUID
+    probe_id: UUID
+    expires_at: int
+    acting_member_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeTokenCodec:
+    """Sign the per-probe proxy username and recover only probes minted by this deployment. It holds
+    the same deploy secret `RunTokenCodec` does, and each class names its own domain inside the
+    signed payload — so a run token presented as a probe (or the reverse) is refused as firmly as a
+    forgery, and neither codec can be made to read the other's token as its own."""
+
+    secret: bytes
+
+    def encode(self, probe: ProbeToken) -> str:
+        member = "-" if probe.acting_member_id is None else str(probe.acting_member_id)
+        payload = (
+            f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
+            f"/{probe.probe_id}/{member}/{probe.expires_at}"
+        ).encode()
+        return sign_token(self.secret, payload)
+
+    def from_proxy_auth(self, header: str) -> ProbeToken:
+        username = _basic_username(header)
+        try:
+            kind, workspace, conversation, probe, member, expires = (
+                verify_token(username, self.secret).decode().split("/")
+            )
+            if kind != PROBE_TOKEN_KIND:
+                raise ValueError("invalid probe token domain")
+            return ProbeToken(
+                workspace_id=UUID(workspace),
+                conversation_id=UUID(conversation),
+                probe_id=UUID(probe),
+                expires_at=int(expires),
+                acting_member_id=None if member == "-" else UUID(member),
+            )
+        except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
+            raise ValueError("invalid signed probe token") from error
 
 
 EGRESS_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"

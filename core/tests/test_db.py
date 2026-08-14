@@ -464,13 +464,15 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "objectives_0002",
         "memory_0012",
         "sample_ext_note_0001",
+        "scheduled_tasks_0001",
+        "monitors_0001",
         "skill_create_0002",
         "coding_0003",
         "eval_env_0001",
         "sites_0002",
         "web_0001",
     } <= set(heads)
-    assert len(heads) == 11
+    assert len(heads) == 13
 
 
 @pytest.mark.parametrize("graph_installed", [False, True])
@@ -2211,3 +2213,49 @@ def test_an_owner_dsn_that_already_names_its_driver_is_untouched() -> None:
         assert ufo.db._owner_url == "postgresql+asyncpg://ufo_owner:secret@db.internal:5432/ufo"
     finally:
         ufo.db._owner_url = None
+
+
+def test_the_pause_migration_takes_its_rows_with_the_columns(tmp_path: Path) -> None:
+    """The pause left core, so 0085 drops the columns that carried a member's wait and the rows that
+    used them: a `@once` row left behind would be a task whose schedule no cron parser accepts, and
+    nothing later would ever delete it. Recurring rows keep firing. Run over SQLite because that is
+    the dialect where dropping a column rebuilds the table, taking the table's indexes with it."""
+    database = tmp_path / "pause.db"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database}")
+    command.upgrade(config, "0084")
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(database) as connection:
+        for name, schedule, origin_seq in (
+            ("@pause:one", "@once", 3),
+            ("daily", "0 9 * * *", None),
+        ):
+            connection.execute(
+                "insert into scheduled_task (id, workspace_id, conversation_id, agent_id, name, "
+                "schedule, prompt, description, next_run_at, origin_seq, paused, created_at, "
+                "updated_at) values (?, ?, ?, ?, ?, ?, 'resume', '', ?, ?, 0, ?, ?)",
+                (
+                    str(uuid4()),
+                    str(uuid4()),
+                    str(uuid4()),
+                    str(uuid4()),
+                    name,
+                    schedule,
+                    now,
+                    origin_seq,
+                    now,
+                    now,
+                ),
+            )
+
+    command.upgrade(config, "0085")
+
+    with sqlite3.connect(database) as connection:
+        surviving = [row[0] for row in connection.execute("select name from scheduled_task")]
+        columns = {row[1] for row in connection.execute("pragma table_info(scheduled_task)")}
+        indexes = {row[1] for row in connection.execute("pragma index_list(scheduled_task)")}
+    assert surviving == ["daily"]
+    assert not {"origin_seq", "resume_turn_id"} & columns
+    assert "scheduled_task_pause" not in indexes
+    assert "scheduled_task_due" in indexes

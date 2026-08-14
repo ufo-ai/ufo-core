@@ -51,6 +51,7 @@ from ufo.connectors import UnknownBrokerTool
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
+    ConversationProbes,
     ExtensionContext,
     ScopedStore,
     SourceReader,
@@ -66,6 +67,7 @@ from ufo.ext.loader import (
     load_manifests,
     memory_search,
     skill_registry,
+    turn_hooks,
     turn_subagent_grants,
     turn_subagents,
     turn_tools,
@@ -85,10 +87,12 @@ from ufo.models.interface import Message, ModelRequest, TextDelta
 from ufo.models.registry import model_registry
 from ufo.onboarding import run_onboarding_steps
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     ExecResult,
+    ProbeTokenCodec,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -260,6 +264,12 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         image_ref=SANDBOX_IMAGE_REF,
         proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
+    )
+
+
+def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
+    return ConversationProbes(
+        sandboxes, ProbeTokenCodec(b"conformance-probe-secret"), ProbeEnv().exports
     )
 
 
@@ -1023,6 +1033,31 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
         await context.credentials.get(sample.UNDECLARED_SLOT)
 
 
+async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: Path) -> None:
+    """A job's context carries the off-turn exec. A tool's and a turn hook's do not: those run
+    inside a turn that already holds its sandbox, and a probe there would open a second,
+    unattributed exec beside it. The absence is structural — those roles never pass the seam to
+    `context_for` — so it reads as no capability at all rather than a disabled one.
+
+    The capability a job does hold is one verb. No carrier, no handle, no session: a handler cannot
+    widen a bounded command into arbitrary reach into the container."""
+    manifest = _sample_manifest()
+    probes = _probes(_sandboxes(tmp_path / "workspaces"))
+    jobs_role = context_for(sample.NAME, frozenset(), probes=probes)
+
+    assert jobs_role.probes is probes
+    assert {name for name in dir(probes) if not name.startswith("_")} == {"run"}
+
+    _, ext_by_tool = turn_tools(
+        (manifest,), _credential_store(), audience=conversation_audience(None)
+    )
+    hooks = turn_hooks((manifest,), _credential_store(), audience=conversation_audience(None))
+    bound = [hook.ext for event in hooks.hooks.values() for hook in event]
+    assert bound
+    for context in (ext_by_tool[sample.TOOL_NAME], *bound):
+        assert context.probes is None
+
+
 async def test_context_confines_the_credential_handle(db: None) -> None:
     """The credential handle a context carries exposes only its gated methods: no raw
     CredentialStore field to read an undeclared slot. The same confinement holds whether the context
@@ -1206,7 +1241,10 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     workspace_root = tmp_path / "workspaces"
     agent_id = await _seed_trajectory(workspace_id, blob)
     runner = JobRunner(
-        bindings=bindings_from((manifest,), ()), blob=blob, sandboxes=_sandboxes(workspace_root)
+        bindings=bindings_from((manifest,), ()),
+        blob=blob,
+        sandboxes=_sandboxes(workspace_root),
+        probes=_probes(_sandboxes(workspace_root)),
     )
     with ws(workspace_id):
         for workspace_id in await runner.candidates(f"{manifest.name}:{sample.JOB_NAME}"):
@@ -1217,6 +1255,10 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
         conversation_id = await _sole_conversation()
         assert await scoped.get(sample.JOB_WORKSPACE_KEY) == {
             "path": f"/workspace/{sample.JOB_WORKSPACE_REL}"
+        }
+        assert await scoped.get(sample.JOB_PROBE_KEY) == {
+            "stdout": sample.JOB_WORKSPACE_BODY,
+            "exit_code": 0,
         }
         landed = workspace_root / str(conversation_id) / sample.JOB_WORKSPACE_REL
         assert landed.read_text() == sample.JOB_WORKSPACE_BODY

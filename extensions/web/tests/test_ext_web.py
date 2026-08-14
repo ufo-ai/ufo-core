@@ -27,6 +27,13 @@ from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
+from ufo_ext_scheduled_tasks.schedules import (
+    ScheduledTask,
+    ScheduleStore,
+    TaskInspection,
+    scheduled_task,
+)
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import site_object_name
@@ -124,7 +131,6 @@ from ufo.objects import OBJECT_LIST_PAGE
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.scheduling import ScheduledTask, ScheduleStore, TaskInspection
 from ufo.schema import tables
 from ufo.schema.records import (
     SUBAGENT_RESULT_KEY_PREFIX,
@@ -153,6 +159,12 @@ from ufo.workspace import ws
 from ufo.workspace_changes import WorkspaceChange, WorkspaceChanges
 
 SECRET = "artifact-signing-secret"
+
+
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
 
 
 def _png() -> bytes:
@@ -5420,9 +5432,9 @@ async def _task_row(workspace_id: UUID, name: str) -> sa.Row | None:
     async with workspace_tx() as connection:
         return (
             await connection.execute(
-                sa.select(tables.scheduled_task).where(
-                    tables.scheduled_task.c.workspace_id == workspace_id,
-                    tables.scheduled_task.c.name == name,
+                sa.select(scheduled_task).where(
+                    scheduled_task.c.workspace_id == workspace_id,
+                    scheduled_task.c.name == name,
                 )
             )
         ).one_or_none()
@@ -5474,7 +5486,7 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
     assert row.prompt == "write the daily brief"
     with ws(workspace_id), bind_agent(agent_id):
         due_at = row.next_run_at.replace(tzinfo=UTC) + timedelta(seconds=1)
-        assert await ScheduleStore().claim_due(due_at, 300) == ()
+        assert await _schedule_store().claim_due(due_at, 300) == ()
 
     resumed = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -5491,7 +5503,7 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
     assert row.paused is False
     with ws(workspace_id), bind_agent(agent_id):
         due_at = row.next_run_at.replace(tzinfo=UTC) + timedelta(seconds=1)
-        [claimed] = await ScheduleStore().claim_due(due_at, 300)
+        [claimed] = await _schedule_store().claim_due(due_at, 300)
         assert claimed.name == "daily-brief"
 
     removed = await client.post(
@@ -8217,7 +8229,7 @@ async def test_automations_slot_follows_the_conversation_audience(
     long_schedule = ",".join(str(minute) for minute in range(60)) + " 9 * * *"
     long_response = "r" * 401
     with ws(workspace_id), bind_agent(agent_id):
-        task = await ScheduleStore().create(
+        task = await _schedule_store().create(
             conversation_id=conversation_id,
             name="daily-brief",
             schedule="0 9 * * *",
@@ -8226,7 +8238,7 @@ async def test_automations_slot_follows_the_conversation_audience(
             next_run_at=datetime(2026, 8, 8, 9, tzinfo=UTC),
             created_by_member_id=creator_id,
         )
-        ownerless = await ScheduleStore().create(
+        ownerless = await _schedule_store().create(
             conversation_id=conversation_id,
             name="system-cleanup",
             schedule="0 3 * * 0",
@@ -8235,7 +8247,7 @@ async def test_automations_slot_follows_the_conversation_audience(
             next_run_at=datetime(2026, 8, 9, 3, tzinfo=UTC),
             created_by_member_id=None,
         )
-        bounded = await ScheduleStore().create(
+        bounded = await _schedule_store().create(
             conversation_id=conversation_id,
             name="bounded-output",
             schedule=long_schedule,
@@ -8260,8 +8272,8 @@ async def test_automations_slot_follows_the_conversation_audience(
     )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.scheduled_task)
-            .where(tables.scheduled_task.c.id.in_((task.id, ownerless.id)))
+            sa.update(scheduled_task)
+            .where(scheduled_task.c.id.in_((task.id, ownerless.id)))
             .values(
                 last_run_at=datetime(2026, 8, 7, 9, tzinfo=UTC),
                 last_turn_id=last_turn_id,
@@ -8275,8 +8287,8 @@ async def test_automations_slot_follows_the_conversation_audience(
             )
         )
         await connection.execute(
-            sa.update(tables.scheduled_task)
-            .where(tables.scheduled_task.c.id == bounded.id)
+            sa.update(scheduled_task)
+            .where(scheduled_task.c.id == bounded.id)
             .values(
                 last_run_at=datetime(2026, 8, 7, 10, tzinfo=UTC),
                 last_turn_id=bounded_turn_id,
@@ -8382,7 +8394,7 @@ async def test_automations_slot_follows_the_conversation_audience(
         member_id=creator_id,
     )
     with ws(workspace_id), bind_agent(agent_id):
-        await ScheduleStore().create(
+        await _schedule_store().create(
             conversation_id=private_conversation,
             name="private-cadence",
             schedule="0 6 * * *",

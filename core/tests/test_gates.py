@@ -231,13 +231,21 @@ def test_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
             "class ScheduleStore:\n"
             "    async def create(self, conversation_id, on_behalf_of_agent_id):\n"
             "        pass\n"
-            "    async def _upsert(self, conversation_id, selected_agent):\n"
+            "    async def cancel(self, expected, selected_agent):\n"
             "        pass\n"
         )
     }
     failures = gates._schedule_authority_failures(trees)
     assert len(failures) == 2
     assert all("ambient" in failure for failure in failures)
+
+
+def test_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
+    """The store moves — out of core, and later wherever it goes next. A gate that answers green
+    when its module is absent would follow that move by silently checking nothing."""
+    failures = gates._schedule_authority_failures({})
+    assert len(failures) == 1
+    assert "repoint" in failures[0]
 
 
 def test_schedule_authority_gate_allows_ambient_agent_selection() -> None:

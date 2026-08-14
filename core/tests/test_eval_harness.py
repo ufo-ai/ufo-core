@@ -914,8 +914,18 @@ class StubWorker:
         return await self.invoke(conversation_id, agent_id, message, idempotency_key or "")
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
-    ) -> UUID:
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         self.idempotency_keys.append(idempotency_key)
         if self.order is not None:
             self.order.append("invoke")

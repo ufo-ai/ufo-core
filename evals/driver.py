@@ -315,8 +315,8 @@ class WorkspaceDriver:
         speaker_key: str | None = None,
     ) -> UUID:
         """Admit one case message as the member who speaks it, through the same `MemberAdmission`
-        every surface admits through — so a case exercises the member path it is written as, pause
-        consumption included.
+        every surface admits through — so a case exercises the member path it is written as, seat
+        gate and mid-turn folding included.
 
         `speaker_key` is that member's email, carried by the case rather than read off the
         conversation: a shared room is unowned (`member_id` is null) yet still has someone talking

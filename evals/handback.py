@@ -16,6 +16,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
+from ufo_ext_scheduled_tasks.schedules import ScheduleStore
+
 from evals.harness.arc import (
     ArcCase,
     ArcObservation,
@@ -23,7 +26,7 @@ from evals.harness.arc import (
     ArcVerdict,
 )
 from evals.harness.capability import WorkspaceFile
-from ufo.scheduling import ScheduleStore
+from ufo.ext.context import context_for
 
 HEARTBEAT_NONCE = "NONCE-8f2ac41d"
 ASSIGNMENT_NONCE = "NONCE-5b73e0c9"
@@ -37,13 +40,19 @@ WATCH_EXPIRY_SECONDS = 180.0
 PERTURBATION_DELAY_SECONDS = 45.0
 
 
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
+
+
 async def _seed_late_file_watch(
     workspace_id: UUID, conversation_id: UUID, member_id: UUID | None
 ) -> None:
     """Plant the recurring check the arc measures. The arc's opening turn is admitted `internal`
     and so carries no speaker, while creating a scheduled task requires a member requester — asking
     the agent for one would measure that refusal instead of the wake."""
-    await ScheduleStore().create(
+    await _schedule_store().create(
         conversation_id=conversation_id,
         name="late-file-watch",
         schedule=EVERY_MINUTE,

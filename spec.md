@@ -58,12 +58,14 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `source_grant` | One source → agent recall edge. Registration grants the agent it names, whether the feed is new or already live and syncing; removing the source deletes every edge. The main agent may read an owned source without an edge only while that source's exact owner is the live speaker; a scheduled run or subagent carries its initiator's authority but never this exception. |
 | `credential` | BYOK secrets, encrypted at rest. Slots are declared by extensions; values are workspace-scoped. |
 | `conversation` | Surface context ↔ queue key (Slack thread, CLI session, web session), permanently bound to one agent at creation — its surface's installation binding, else the workspace's main agent. Admission derives every turn's agent from that binding; a caller-supplied agent id is an assertion admission refuses on mismatch. Its persisted `Audience` atom is `shared`, `member:<uuid>`, `room:<surface>:<room>`, or sealed `foreign:<surface>:<room>` and is carried unchanged through the turn. `surface_label` is the origin in the surface's own grammar (Slack: `#general`, `Direct message`), written by the surface that owns the encoding and never parsed by core; a surface that names none leaves it null, and a rename corrects on the next message that carries the name. The `conversation` object exposes it as a spec field and a filter/order field, under the same audience gate as the row. |
-| `turn`, `transcript` | The loop's durable log: lifecycle, per-member-inbound `speaker_member_id` distinct from the conversation's `Audience`, full-conversation transcript + compaction records. A turn's speaker attributes its founding message; authority binds per inbound message. Timer, system, and subagent turns carry no speaker. `on_behalf_of_member_id` is the initiating member a speakerless scheduled fire or subagent acts on behalf of for capability use — distinct from message attribution and conversation audience; scheduled fires derive it from `scheduled_task.created_by_member_id`, subagents copy the bound requester at spawn, a turn woken by a delivered subagent result carries forward the one its child held, and a member takeover clears it. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
+| `turn`, `transcript` | The loop's durable log: lifecycle, per-member-inbound `speaker_member_id` distinct from the conversation's `Audience`, full-conversation transcript + compaction records. A turn's speaker attributes its founding message; authority binds per inbound message. Timer, system, and subagent turns carry no speaker. `on_behalf_of_member_id` is the initiating member a speakerless scheduled fire or subagent acts on behalf of for capability use — distinct from message attribution and conversation audience; scheduled fires derive it from `scheduled_task.created_by_member_id`, subagents copy the bound requester at spawn, and a turn woken by a delivered subagent result carries forward the one its child held. Sub-turn steps — each model round, tool call, and compaction — are DBOS's own `operation_outputs` step log, memoized so a crash-recovery re-run replays completed work instead of redoing it. |
 | `memory_item` (memory extension) | Memory scoped to one exact audience subject. The memory extension owns this table via its own migration; the index backend owns `chunk`. |
+| `monitor` (monitors extension) | A durable watch: a shell probe run in the conversation's sandbox on an interval, whose changed output, failure streak, or deadline fires exactly one arrival; retired on fire, re-armed explicitly, read back as the `monitor` kind. The extension owns the table via its own migration. |
+| `pause` (scheduled_tasks extension) | A workflow wait: one per conversation, fired as a scheduled turn unless a member message arrived past its arming watermarks. The extension owns the table via its own migration. |
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, turn dispatch, subagent result delivery, extension jobs). |
-| `scheduled_task` | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. Creation binds the executor and its reporting conversation; updates never move either. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. One-time workflow pauses keep their raw resume prompt. |
+| `scheduled_task` (scheduled_tasks extension) | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. The extension owns the table — core migrations created it and it was adopted in place; fires ride the internal `invoke` capability as scheduled turns. Creation binds the executor and its reporting conversation; updates never move either. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. |
 
 ## Agent loop
 
@@ -193,7 +195,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   removal is the verb's ordinary absent-or-present case, not a lost race — while every kind
   rechecks visibility after a disclosure read.
   Each object kind declares its supported cross-agent verbs: `conversation` list/get, `artifact`
-  list/get/delete, `scheduled_task` list/get/update/delete; workspace-scoped kinds declare none.
+  list/get/delete, `monitor` list/get/delete, `scheduled_task` list/get/update/delete;
+  workspace-scoped kinds declare none.
   Apply resolves create or update from the current object and requires that exact declaration.
   Omission means the executing agent. Crossing that boundary requires the configured main agent,
   a non-subagent turn, and an exact live requesting message. The target is task-local to the object
@@ -214,7 +217,9 @@ its parent, and co-residency is the cost: session state at fixed paths, one serv
 An off-cluster carrier reaches the proxy only over TLS; the proxy token is never sent on plaintext
 transport. Each tool command gets a deployment-signed token naming its turn and acting member;
 unbound commands name no member. Descendants retain the launching command's environment while later
-commands may carry another member. Every CONNECT also requires the named turn to remain running.
+commands may carry another member. Every CONNECT also requires the named turn to remain running, or,
+for a probe token — the off-turn exec a jobs-role handler runs, which names a conversation and the
+member whose work armed it, and resolves no deployment model key — its own deadline to be unspent.
 This is process attribution, not isolation between cooperating processes sharing a sandbox UID. A
 process-wide connection ceiling bounds proxy state; a per-workspace share keeps one workspace from
 consuming it. Meter records cross a bounded, backpressured queue and write aggregated per run in
@@ -388,8 +393,8 @@ rationale, alternatives, and open questions; this section is the settled model.
 Core owns **one surface seam**, not every surface. A surface is trusted infrastructure — it asserts
 a member's identity and admits turns as that member — so its `SurfaceContext` is deliberately
 privileged (distinct from the scoped extension context): **admit** an inbound message onto the
-durable turn queue through the member-only admission capability, consuming any pending one-time
-pause, with its ambient `TurnContext` — the sender, IANA timezone, and source the surface knows,
+durable turn queue through the member-only admission capability, with its ambient `TurnContext` —
+the sender, IANA timezone, and source the surface knows,
 which the engine renders as the `<context>` tag (stable message ref; the admission moment, local
 when a timezone is known; sender; source) before each member inbound, a surface that can name a
 source doing so in the form it has — a chat surface the message's own permalink, the portal a
@@ -411,8 +416,11 @@ path), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
 `memory_available`/`search_memory`. An extension registers a `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. The seam supports two delivery modes; a surface uses only the subset it needs:
 
-Jobs and evals receive the separate internal `invoke` capability, which never consumes a member's
-pause. Both capabilities delegate to the same admission workflow, so spend enforcement, turn
+Jobs and evals receive the separate internal `invoke` capability, which never speaks as a member. It
+carries the admission meanings a fire needs — a scheduled stamp, the member a turn acts for, parking
+work the ledger already booked, and refusal when a member has spoken past a named turn sequence — so
+an extension that waits or fires on a schedule keeps its own rows and needs no state inside
+admission. Both capabilities delegate to the same admission workflow, so spend enforcement, turn
 allocation, delivery registration, and enqueue recovery remain one implementation.
 
 - **Durable** (Slack) — the member is elsewhere; declaring `post` is what marks the surface

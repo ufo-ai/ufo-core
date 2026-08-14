@@ -6,8 +6,8 @@ trajectory corpus), a surface context carries privileged capabilities a scoped e
 hold: admit a member turn onto the durable queue, resolve an external id to a member and a
 conversation (linking a `surface_identity` on first contact — and joining a channel-verified email
 whose domain is the workspace's own as a new member), and read the workspace's credential slots
-in-process. Member admission consumes a pending one-time pause; the `invoke` capability held by
-scheduled tasks and evals cannot.
+in-process. Only this seam admits a turn as a member; the `invoke` capability held by scheduled
+tasks and evals admits internal turns and can never name a speaker.
 
 One `SurfaceSpec`/`SurfaceContext` expresses both shapes of surface, differing only in how the reply
 gets back and thus in how much of the one context each uses:
@@ -282,7 +282,7 @@ class Admitted:
 
 
 class MemberAdmitter(Protocol):
-    """Admit a member message and consume the conversation's pending one-time pause."""
+    """Admit a member message as the member who spoke it."""
 
     async def admit(
         self,

@@ -24,11 +24,11 @@ writeback row atomically with its turn row, so the poller delivers the reply no 
 it — a surface ingest, a scheduled fire, or an extension invoke. A live surface's conversations
 register nothing; their members tail the hub.
 
-A pause records its originating conversation sequence and the one turn accepted to resume it.
-Member admission and the timer choose that turn under the conversation lock; a queued timer turn
-can become the member's turn instead of producing two resumptions. The row stays as durable
-recovery until the worker claims that turn, so a crash or ambiguous enqueue response retries the
-same identity. Internal invocation never consumes a member's pause.
+A caller waiting on a member asks that question here rather than keeping a row of its own: an
+invoke carrying the two member watermarks — one per sequence a member message can take, its own turn
+or the live turn's arrival queue — is refused under the same conversation lock when a member has
+spoken since the wait began, so a timer's fire and the member's own reply can never both resume one
+wait.
 
 The inbound spend decision routes the turn before it is enqueued: allow queues it; a breached cap
 either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
@@ -37,13 +37,10 @@ way. The seat gate runs first in the same commit: a speaking member without a se
 scheduled fire into a seatless member's conversation — commits cancelled with the refusal, an
 unseated speaker's message never folds into a live turn, and a member-surface message whose
 speaker never resolved to a member is refused rather than answered as a ghost — unconditionally,
-because every member surface resolves its speaker, so one that did not is a stranger. A refused
-turn consumes nothing on its way out: it leaves an armed pause for the speaker the agent is
-actually waiting on."""
+because every member surface resolves its speaker, so one that did not is a stranger."""
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -53,7 +50,6 @@ from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted
 from ufo.o11y import log
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, firing_key
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -79,13 +75,7 @@ QUEUED: TurnStatus = "queued"
 CANCELLED: TerminalStatus = "cancelled"
 
 
-@dataclass(frozen=True)
-class _PendingPause:
-    workspace_id: UUID
-    conversation_id: UUID
-
-
-class _ScheduledInvocationSuperseded(Exception):
+class _SupersededByMember(Exception):
     pass
 
 
@@ -130,8 +120,7 @@ class Admission:
             speaker_member_id,
             idempotency_key,
             context,
-            _PendingPause(workspace_id, conversation_id),
-            None,
+            member_admission=True,
             intent=intent,
         )
 
@@ -196,66 +185,60 @@ class Admission:
         context: TurnContext | None = None,
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
-    ) -> UUID:
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         """Admit an internal turn. `on_behalf_of_member_id` carries forward the authority the work
         already held — a subagent hands its result back to the conversation that delegated it, and
         a turn woken to read that result must not be able to do less than the turn that spawned it,
-        or the shortfall surfaces later as a refusal no member can place."""
-        admitted = await self._admit(
-            workspace_id,
-            conversation_id,
-            agent_id,
-            body,
-            None,
-            idempotency_key,
-            context,
-            None,
-            None,
-            on_behalf_of_member_id,
-            holds_work_already_done=holds_work_already_done,
-        )
-        return admitted.turn_id
+        or the shortfall surfaces later as a refusal no member can place.
 
-    async def invoke_scheduled(
-        self,
-        workspace_id: UUID,
-        task: ScheduledTask,
-        runtime_instruction: str | None = None,
-    ) -> UUID | None:
-        if task.claim_id is None:
-            raise ValueError("an unclaimed scheduled task cannot be invoked")
-        if task.schedule == ONE_TIME_SCHEDULE and runtime_instruction is not None:
-            raise ValueError("a one-time workflow pause cannot carry a runtime instruction")
-        scheduled_fire_iso = task.next_run_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        fire_key = firing_key(task.id, task.next_run_at)
-        inbound = task.prompt
-        if task.schedule != ONE_TIME_SCHEDULE:
-            inbound = (
-                "<scheduled_task>\n"
-                f"scheduled_fire: {scheduled_fire_iso}\n"
-                "</scheduled_task>\n"
-                f"{task.prompt}"
-            )
-            if runtime_instruction is not None:
-                inbound += (
-                    "\n<scheduled_task_instruction>\n"
-                    f"{runtime_instruction}\n"
-                    "</scheduled_task_instruction>"
-                )
+        `as_scheduled` gives the turn a scheduled fire's meaning without a scheduled row: it founds
+        its own turn beside a live one instead of folding, and it is seat-gated on the member it
+        acts for, so an unseated member's fire is refused wherever it lands.
+
+        The two `unless_member_*` watermarks refuse the admission and answer None when a member has
+        spoken since a caller began waiting on them — the question asked under admission's own lock,
+        so the member who got there first wins the race. They arrive as a pair because a member
+        message becomes one of two different things: it founds a turn when nothing is live, and
+        otherwise lands on the live turn's arrival queue. Those two carry independent
+        per-conversation sequences, so one cannot bound both: `unless_member_since` is a `turn.seq`
+        and `unless_member_arrival_since` an `inbound_message.seq`, each compared only against its
+        own space, and passing one without the other raises rather than silently leaving half the
+        question unasked.
+
+        A founded turn must be strictly past its watermark, since the turn that armed the wait is
+        the origin rather than a reply to it. An arrival must be strictly past its own, which is
+        what separates a message the agent absorbed BEFORE arming — history it had already read, and
+        which would otherwise refuse every fire forever, because a pre-arm fold lands on the arming
+        turn itself — from one that arrived after and genuinely ended the wait. Consumption does not
+        enter it: the engine stamps an arrival the moment it drains, and a wait that ended must stay
+        ended after that.
+
+        A turn this gate itself refused does not count: it never joined the conversation and
+        nothing will answer it, so an unseated member or a breached cap cannot end someone else's
+        wait by arriving beside it. A message a hook denied at drain time does still count, because
+        the wait ends where the message is admitted and this gate runs before any hook can see it.
+        Nothing is written on the refusal. Only a caller passing these can be answered None, and a
+        redelivery under an idempotency key that already admitted keeps answering its turn rather
+        than flipping to the refusal."""
         try:
             admitted = await self._admit(
                 workspace_id,
-                task.conversation_id,
-                task.agent_id,
-                inbound,
+                conversation_id,
+                agent_id,
+                body,
                 None,
-                fire_key,
-                None,
-                None,
-                task,
-                task.created_by_member_id,
+                idempotency_key,
+                context,
+                on_behalf_of_member_id=on_behalf_of_member_id,
+                holds_work_already_done=holds_work_already_done,
+                as_scheduled=as_scheduled,
+                unless_member_since=unless_member_since,
+                unless_member_arrival_since=unless_member_arrival_since,
             )
-        except _ScheduledInvocationSuperseded:
+        except _SupersededByMember:
             return None
         return admitted.turn_id
 
@@ -268,12 +251,16 @@ class Admission:
         speaker_member_id: UUID | None,
         idempotency_key: str | None,
         context: TurnContext | None,
-        pending_pause: _PendingPause | None,
-        scheduled_task: ScheduledTask | None,
         on_behalf_of_member_id: UUID | None = None,
+        member_admission: bool = False,
         intent: ToolIntent | None = None,
         holds_work_already_done: bool = False,
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
     ) -> Admitted:
+        if (unless_member_since is None) != (unless_member_arrival_since is None):
+            raise ValueError("waiting on a member takes both watermarks, turn and arrival")
         dispatch_now = False
         opened_run = False
         folded_parked_turn: UUID | None = None
@@ -306,52 +293,8 @@ class Admission:
                 ).one_or_none()
                 if speaker is None:
                     raise ValueError("turn speaker is not a member of this workspace")
-            resumed_turn_id: UUID | None = None
-            if scheduled_task is not None:
-                claimed = (
-                    await connection.execute(
-                        sa.select(
-                            tables.scheduled_task.c.id,
-                            tables.scheduled_task.c.resume_turn_id,
-                        )
-                        .where(
-                            tables.scheduled_task.c.workspace_id == workspace_id,
-                            tables.scheduled_task.c.id == scheduled_task.id,
-                            tables.scheduled_task.c.conversation_id == conversation_id,
-                            tables.scheduled_task.c.agent_id == agent_id,
-                            tables.scheduled_task.c.schedule == scheduled_task.schedule,
-                            tables.scheduled_task.c.claimed_by == scheduled_task.claim_id,
-                        )
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if claimed is None:
-                    raise _ScheduledInvocationSuperseded
-                resumed_turn_id = (
-                    claimed.resume_turn_id if scheduled_task.schedule == ONE_TIME_SCHEDULE else None
-                )
             deduped = None
-            if resumed_turn_id is not None:
-                deduped = (
-                    await connection.execute(
-                        sa.select(
-                            tables.turn.c.id,
-                            tables.turn.c.status,
-                            tables.turn.c.seq,
-                            tables.turn.c.running_attempt,
-                        )
-                        .where(
-                            tables.turn.c.id == resumed_turn_id,
-                            tables.turn.c.workspace_id == workspace_id,
-                            tables.turn.c.conversation_id == conversation_id,
-                            tables.turn.c.agent_id == agent_id,
-                        )
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if deduped is None:
-                    raise RuntimeError("scheduled pause references no matching turn")
-            elif idempotency_key is not None:
+            if idempotency_key is not None:
                 deduped = (
                     await connection.execute(
                         sa.select(
@@ -421,80 +364,37 @@ class Admission:
                 if deduped is not None:
                     if deduped.conversation_id != conversation_id or deduped.agent_id != agent_id:
                         raise RuntimeError("idempotency key reused for a different turn")
-            if deduped is None and pending_pause is not None:
-                later_turn = tables.turn.alias("later_turn")
-                timer_turn = (
+            if (
+                deduped is None
+                and unless_member_since is not None
+                and unless_member_arrival_since is not None
+            ):
+                superseded = (
                     await connection.execute(
                         sa.select(
-                            tables.turn.c.id,
-                            tables.turn.c.status,
-                            tables.turn.c.seq,
-                            tables.turn.c.idempotency_key,
-                            tables.turn.c.running_attempt,
-                            tables.scheduled_task.c.id.label("pause_id"),
-                            tables.scheduled_task.c.next_run_at.label("pause_due_at"),
-                        )
-                        .select_from(
-                            tables.scheduled_task.join(
-                                tables.turn,
-                                tables.turn.c.id == tables.scheduled_task.c.resume_turn_id,
+                            sa.exists(
+                                sa.select(tables.turn.c.id).where(
+                                    tables.turn.c.workspace_id == workspace_id,
+                                    tables.turn.c.conversation_id == conversation_id,
+                                    tables.turn.c.speaker_member_id.is_not(None),
+                                    tables.turn.c.status != CANCELLED,
+                                    tables.turn.c.seq > unless_member_since,
+                                )
+                            )
+                            | sa.exists(
+                                sa.select(tables.inbound_message.c.id).where(
+                                    tables.inbound_message.c.workspace_id == workspace_id,
+                                    tables.inbound_message.c.conversation_id == conversation_id,
+                                    tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                                    tables.inbound_message.c.seq > unless_member_arrival_since,
+                                )
                             )
                         )
-                        .where(
-                            tables.scheduled_task.c.workspace_id == workspace_id,
-                            tables.scheduled_task.c.conversation_id == conversation_id,
-                            tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE,
-                            tables.turn.c.status == QUEUED,
-                            ~sa.exists(
-                                sa.select(later_turn.c.id).where(
-                                    later_turn.c.workspace_id == workspace_id,
-                                    later_turn.c.conversation_id == conversation_id,
-                                    later_turn.c.seq > tables.turn.c.seq,
-                                )
-                            ),
-                        )
-                        .with_for_update()
                     )
-                ).one_or_none()
-                if timer_turn is not None:
-                    timer_key = firing_key(timer_turn.pause_id, timer_turn.pause_due_at)
-                    if timer_turn.idempotency_key == timer_key and (
-                        speaker_member_id is not None
-                        and await Seats(workspace_id).admits(connection, speaker_member_id)
-                    ):
-                        taken_over = await connection.execute(
-                            sa.update(tables.turn)
-                            .values(
-                                inbound=body,
-                                admission_source=MEMBER_ADMISSION,
-                                speaker_member_id=speaker_member_id,
-                                on_behalf_of_member_id=None,
-                                context=None
-                                if context is None
-                                else context.model_dump(mode="json"),
-                                idempotency_key=idempotency_key,
-                                created_at=sa.func.now(),
-                                updated_at=sa.func.now(),
-                            )
-                            .where(
-                                tables.turn.c.id == timer_turn.id,
-                                tables.turn.c.status == QUEUED,
-                            )
-                        )
-                        if taken_over.rowcount == 1:
-                            opened_run = True
-                            await connection.execute(
-                                sa.update(tables.scheduled_task)
-                                .values(
-                                    next_run_at=sa.func.now(),
-                                    claimed_by=None,
-                                    claim_expires_at=None,
-                                    updated_at=sa.func.now(),
-                                )
-                                .where(tables.scheduled_task.c.id == timer_turn.pause_id)
-                            )
-                            deduped = timer_turn
-            if deduped is None and scheduled_task is None and intent is None:
+                ).scalar_one()
+                if superseded:
+                    raise _SupersededByMember
+            if deduped is None and not as_scheduled and intent is None:
                 live_turn = (
                     await connection.execute(
                         sa.select(
@@ -551,7 +451,7 @@ class Admission:
                     and (
                         await seats.admits(connection, speaker_member_id)
                         if speaker_member_id is not None
-                        else pending_pause is None
+                        else not member_admission
                     )
                     and parked_seated
                 )
@@ -583,9 +483,7 @@ class Admission:
                             seq=message_seq,
                             body=body,
                             admission_source=(
-                                MEMBER_ADMISSION
-                                if pending_pause is not None
-                                else INTERNAL_ADMISSION
+                                MEMBER_ADMISSION if member_admission else INTERNAL_ADMISSION
                             ),
                             context=None if context is None else context.model_dump(mode="json"),
                             speaker_member_id=speaker_member_id,
@@ -594,24 +492,6 @@ class Admission:
                             created_at=admitted_at if admitted_at is not None else sa.func.now(),
                         )
                     )
-                    if pending_pause is not None:
-                        await connection.execute(
-                            sa.update(tables.scheduled_task)
-                            .values(
-                                resume_turn_id=live_turn.id,
-                                next_run_at=sa.func.now(),
-                                claimed_by=None,
-                                claim_expires_at=None,
-                                updated_at=sa.func.now(),
-                            )
-                            .where(
-                                tables.scheduled_task.c.workspace_id == workspace_id,
-                                tables.scheduled_task.c.conversation_id == conversation_id,
-                                tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE,
-                                tables.scheduled_task.c.origin_seq <= live_turn.seq,
-                                tables.scheduled_task.c.resume_turn_id.is_(None),
-                            )
-                        )
                     if live_turn.status != PARKED:
                         return Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id)
                     await connection.execute(
@@ -631,25 +511,6 @@ class Admission:
                 if retry_enqueue and deduped.running_attempt is not None:
                     redispatch_workflow_id = uuid4().hex
                 if not retry_enqueue:
-                    if (
-                        scheduled_task is not None
-                        and scheduled_task.schedule == ONE_TIME_SCHEDULE
-                        and deduped.status != PARKED
-                    ):
-                        await connection.execute(
-                            sa.delete(tables.scheduled_task).where(
-                                tables.scheduled_task.c.workspace_id == workspace_id,
-                                tables.scheduled_task.c.id == scheduled_task.id,
-                                tables.scheduled_task.c.resume_turn_id == turn_id,
-                            )
-                        )
-                    if pending_pause is not None:
-                        await connection.execute(
-                            sa.delete(tables.scheduled_task).where(
-                                tables.scheduled_task.c.workspace_id == workspace_id,
-                                tables.scheduled_task.c.resume_turn_id == turn_id,
-                            )
-                        )
                     return Admitted(turn_id, opened_run=False)
                 status = QUEUED
             if deduped is None and folded_parked_turn is None:
@@ -667,14 +528,14 @@ class Admission:
                     INTENT_ADMISSION
                     if intent is not None
                     else MEMBER_ADMISSION
-                    if pending_pause is not None
+                    if member_admission
                     else SCHEDULED_ADMISSION
-                    if scheduled_task is not None
+                    if as_scheduled
                     else INTERNAL_ADMISSION
                 )
                 gate = gate_member(speaker_member_id, admission_source, on_behalf_of_member_id)
                 terminal: TerminalFrame | None
-                if gate is None and pending_pause is not None:
+                if gate is None and member_admission:
                     status, terminal = (
                         CANCELLED,
                         TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
@@ -719,60 +580,6 @@ class Admission:
                             status=WRITEBACK_PENDING,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
-                        )
-                    )
-            if (
-                scheduled_task is not None
-                and scheduled_task.schedule == ONE_TIME_SCHEDULE
-                and resumed_turn_id is None
-            ):
-                linked = await connection.execute(
-                    sa.update(tables.scheduled_task)
-                    .values(resume_turn_id=turn_id, updated_at=sa.func.now())
-                    .where(
-                        tables.scheduled_task.c.workspace_id == workspace_id,
-                        tables.scheduled_task.c.id == scheduled_task.id,
-                        tables.scheduled_task.c.claimed_by == scheduled_task.claim_id,
-                        tables.scheduled_task.c.resume_turn_id.is_(None),
-                    )
-                )
-                if linked.rowcount == 0:
-                    raise _ScheduledInvocationSuperseded
-                if status not in (QUEUED, PARKED):
-                    await connection.execute(
-                        sa.delete(tables.scheduled_task).where(
-                            tables.scheduled_task.c.workspace_id == workspace_id,
-                            tables.scheduled_task.c.id == scheduled_task.id,
-                            tables.scheduled_task.c.resume_turn_id == turn_id,
-                        )
-                    )
-            # A refused turn never joined the conversation, so it does not consume the wait it
-            # arrived beside: claiming the pause and then dying on the next line would delete it,
-            # and the member whose reply the agent is actually waiting on would find nothing left
-            # to resume.
-            if pending_pause is not None and folded_parked_turn is None and status != CANCELLED:
-                await connection.execute(
-                    sa.update(tables.scheduled_task)
-                    .values(
-                        resume_turn_id=turn_id,
-                        next_run_at=sa.func.now(),
-                        claimed_by=None,
-                        claim_expires_at=None,
-                        updated_at=sa.func.now(),
-                    )
-                    .where(
-                        tables.scheduled_task.c.workspace_id == pending_pause.workspace_id,
-                        tables.scheduled_task.c.conversation_id == pending_pause.conversation_id,
-                        tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE,
-                        tables.scheduled_task.c.origin_seq < turn_seq,
-                        tables.scheduled_task.c.resume_turn_id.is_(None),
-                    )
-                )
-                if status != QUEUED:
-                    await connection.execute(
-                        sa.delete(tables.scheduled_task).where(
-                            tables.scheduled_task.c.workspace_id == workspace_id,
-                            tables.scheduled_task.c.resume_turn_id == turn_id,
                         )
                     )
             if folded_parked_turn is None and status == QUEUED:
@@ -857,7 +664,7 @@ class Admission:
 @dataclass(frozen=True)
 class AdmissionInvoker:
     """Internal turn invocation bound to one workspace. Jobs and extension workflows receive only
-    this capability, so they cannot consume a member's pending pause."""
+    this capability, so a turn they admit can never claim to have been spoken by a member."""
 
     admission: Admission
     workspace_id: UUID
@@ -871,7 +678,10 @@ class AdmissionInvoker:
         context: TurnContext | None = None,
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
-    ) -> UUID:
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,
             conversation_id,
@@ -881,18 +691,16 @@ class AdmissionInvoker:
             context=context,
             on_behalf_of_member_id=on_behalf_of_member_id,
             holds_work_already_done=holds_work_already_done,
+            as_scheduled=as_scheduled,
+            unless_member_since=unless_member_since,
+            unless_member_arrival_since=unless_member_arrival_since,
         )
-
-    async def invoke_scheduled(
-        self, task: ScheduledTask, runtime_instruction: str | None = None
-    ) -> UUID | None:
-        return await self.admission.invoke_scheduled(self.workspace_id, task, runtime_instruction)
 
 
 @dataclass(frozen=True)
 class MemberAdmission:
     """Member turn admission bound to one workspace. Surfaces receive only this capability, so
-    every admitted member message consumes the pending one-time pause."""
+    every turn they admit is a member's message, gated on that member's seat."""
 
     admission: Admission
     workspace_id: UUID

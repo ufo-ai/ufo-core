@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
+from ufo_ext_scheduled_tasks.schedules import ScheduleStore
 from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT, SUMMARY_MAX
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
@@ -52,7 +54,6 @@ from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
-from ufo.scheduling import ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
@@ -69,6 +70,12 @@ CREATOR_EMAIL = "creator@example.com"
 OTHER_EMAIL = "other@example.com"
 NEXT_RUN = datetime(2027, 1, 1, tzinfo=UTC)
 EXPIRES = datetime(2027, 6, 1, tzinfo=UTC)
+
+
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
 
 
 class StubDbos:
@@ -264,7 +271,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     with ws(workspace_id):
         conversation_id = await _seed_conversation(workspace_id, agent_a, creator_id)
         with bind_agent(agent_a):
-            await ScheduleStore().create(
+            await _schedule_store().create(
                 conversation_id,
                 "daily-brief",
                 "0 9 * * *",
@@ -274,7 +281,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
                 created_by_member_id=creator_id,
                 expires_at=EXPIRES,
             )
-            await ScheduleStore().create(
+            await _schedule_store().create(
                 conversation_id,
                 "creatorless-sweep",
                 "0 3 * * *",
@@ -331,7 +338,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     with ws(workspace_id):
         shared_conversation = await _seed_conversation(workspace_id, agent_a)
         with bind_agent(agent_a):
-            await ScheduleStore().create(
+            await _schedule_store().create(
                 shared_conversation,
                 "channel-digest",
                 "0 8 * * *",
@@ -352,7 +359,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     sprawling = "Weekly customer and prospect signal digest, proposals only. " * 6
     with ws(workspace_id):
         with bind_agent(agent_a):
-            await ScheduleStore().create(
+            await _schedule_store().create(
                 shared_conversation,
                 "long-digest",
                 "0 7 * * *",
@@ -402,7 +409,7 @@ async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> 
         ):
             conversation_id = await _seed_conversation(workspace_id, agent_id)
             with bind_agent(agent_id):
-                await ScheduleStore().create(
+                await _schedule_store().create(
                     conversation_id,
                     name,
                     schedule,

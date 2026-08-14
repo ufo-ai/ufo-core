@@ -2,7 +2,7 @@ import base64
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -11,6 +11,8 @@ from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     ExecResult,
+    ProbeToken,
+    ProbeTokenCodec,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
@@ -22,6 +24,7 @@ from ufo.tools.builtins import BashInput, bash_handler
 from ufo.tools.context import SpawnResult, ToolContext
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
+PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
 
 
 def _basic(username: str) -> str:
@@ -60,6 +63,65 @@ def test_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
         RUN_TOKENS.from_proxy_auth(_basic(forged))
+
+
+def _probe(expires_at: int = 1_800_000_000, member: UUID | None = None) -> ProbeToken:
+    return ProbeToken(
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        probe_id=uuid4(),
+        expires_at=expires_at,
+        acting_member_id=member,
+    )
+
+
+def test_probe_token_round_trips_encode_then_proxy_auth() -> None:
+    probe = _probe()
+    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(probe))) == probe
+
+
+def test_probe_token_round_trips_its_acting_member() -> None:
+    """The member a probe acts as is signed with it, so the proxy reads an authority this deployment
+    granted rather than one the sandbox could name for itself. Absent is a distinct value, not a
+    zero: it means nobody, and the wire keeps the two apart."""
+    acting = _probe(member=uuid4())
+    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(acting))) == acting
+    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(_probe()))).acting_member_id is (
+        None
+    )
+
+
+def test_encoded_probe_token_is_url_safe_userinfo() -> None:
+    encoded = PROBE_TOKENS.encode(_probe())
+    assert all(char.isalnum() or char in "-_." for char in encoded)
+
+
+def test_probe_from_proxy_auth_rejects_non_basic_scheme() -> None:
+    with pytest.raises(ValueError, match="basic"):
+        PROBE_TOKENS.from_proxy_auth("Bearer " + PROBE_TOKENS.encode(_probe()))
+
+
+def test_probe_from_proxy_auth_rejects_a_malformed_probe_token() -> None:
+    with pytest.raises(ValueError):
+        PROBE_TOKENS.from_proxy_auth(_basic("not-a-probe-token"))
+
+
+def test_probe_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
+    forged = ProbeTokenCodec(b"other-deployment").encode(_probe())
+    with pytest.raises(ValueError, match="signed"):
+        PROBE_TOKENS.from_proxy_auth(_basic(forged))
+
+
+def test_neither_codec_reads_the_other_domain_under_one_secret() -> None:
+    """Both classes are signed with the one deploy secret, so only the domain inside the payload
+    keeps them apart: a run token presented where a probe token is expected must be refused as
+    firmly as a forgery, else a turn's token would authorize egress with no turn read behind it."""
+    run = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
+    probe = PROBE_TOKENS.encode(_probe())
+    with pytest.raises(ValueError, match="probe token"):
+        PROBE_TOKENS.from_proxy_auth(_basic(run))
+    with pytest.raises(ValueError, match="run token"):
+        RUN_TOKENS.from_proxy_auth(_basic(probe))
 
 
 def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:

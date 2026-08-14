@@ -25,6 +25,7 @@ EXTENSIONS = (
     "objectives",
     "sites",
     "scheduled_tasks",
+    "monitors",
     "research",
     "repl",
     "memory",

@@ -1,13 +1,12 @@
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.ext.surface import Admitted
 from ufo.loop.engine import _claim_turn
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, TurnContext
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
@@ -534,59 +533,6 @@ async def test_internal_invoke_passes_the_seat_gate(db: None) -> None:
     assert dbos.enqueued == [str(turn_id)]
 
 
-async def test_scheduled_fire_into_an_unseated_members_conversation_is_refused(db: None) -> None:
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
-    await _unseat(_member_id)
-    task_id = uuid4()
-    next_run_at = datetime.now(UTC)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.scheduled_task).values(
-                id=task_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                name="daily",
-                schedule="0 9 * * *",
-                prompt="run the report",
-                description="daily report",
-                next_run_at=next_run_at,
-                claimed_by="claim-1",
-                created_by_member_id=_member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    task = ScheduledTask(
-        id=task_id,
-        conversation_id=conversation_id,
-        agent_id=agent_id,
-        name="daily",
-        schedule="0 9 * * *",
-        prompt="run the report",
-        description="daily report",
-        next_run_at=next_run_at,
-        last_run_at=None,
-        expires_at=None,
-        origin_seq=None,
-        resume_turn_id=None,
-        claim_id="claim-1",
-        paused=False,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-        created_by_member_id=_member_id,
-    )
-    dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke_scheduled(
-        workspace_id, task
-    )
-    assert turn_id is not None
-    assert dbos.enqueued == []
-    status, text = await _turn_row(turn_id)
-    assert status == "cancelled"
-    assert text == SEAT_REFUSAL_MESSAGE
-
-
 async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
@@ -689,67 +635,6 @@ async def test_seated_reply_does_not_resume_an_aggregate_with_an_unseated_speake
     assert await _queued_bodies(conversation_id) == ["pending"]
 
 
-async def test_unseated_speakers_message_does_not_take_over_a_timer_turn(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    task_id, timer_turn_id = uuid4(), uuid4()
-    due = datetime.now(UTC)
-    timer_key = f"{task_id}:{due.isoformat()}"
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=timer_turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="queued",
-                inbound="resume the plan",
-                admission_source="scheduled",
-                idempotency_key=timer_key,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.scheduled_task).values(
-                id=task_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                name="resume",
-                schedule=ONE_TIME_SCHEDULE,
-                prompt="resume the plan",
-                description="one-time resume",
-                next_run_at=due,
-                resume_turn_id=timer_turn_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    await _unseat(member_id)
-    dbos = StubDbos()
-    refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, "hey", member_id
-    )
-    assert refused.turn_id != timer_turn_id
-    status, text = await _turn_row(refused.turn_id)
-    assert status == "cancelled"
-    assert text == SEAT_REFUSAL_MESSAGE
-    async with workspace_tx() as connection:
-        timer = (
-            await connection.execute(
-                sa.select(
-                    tables.turn.c.inbound,
-                    tables.turn.c.speaker_member_id,
-                    tables.turn.c.status,
-                ).where(tables.turn.c.id == timer_turn_id)
-            )
-        ).one()
-    assert timer.inbound == "resume the plan"
-    assert timer.speaker_member_id is None
-    assert timer.status == "queued"
-
-
 async def test_speakerless_member_message_is_refused(db: None) -> None:
     """A member surface that could not name its speaker is answering a stranger, whatever else is
     true of the workspace: there is no seat bound left to make this conditional, and there never
@@ -779,63 +664,6 @@ async def test_speakerless_member_message_does_not_fold(db: None) -> None:
     assert status == "cancelled"
     assert text == UNRESOLVED_SPEAKER_MESSAGE
     assert await _queued_bodies(conversation_id) == []
-
-
-async def test_ghost_message_does_not_take_over_a_timer_turn(db: None) -> None:
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
-    task_id, timer_turn_id = uuid4(), uuid4()
-    due = datetime.now(UTC)
-    timer_key = f"{task_id}:{due.isoformat()}"
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=timer_turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="queued",
-                inbound="resume the plan",
-                admission_source="scheduled",
-                idempotency_key=timer_key,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.scheduled_task).values(
-                id=task_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                name="resume-ghost",
-                schedule=ONE_TIME_SCHEDULE,
-                prompt="resume the plan",
-                description="one-time resume",
-                next_run_at=due,
-                resume_turn_id=timer_turn_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    dbos = StubDbos()
-    refused = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, "hey", None
-    )
-    assert refused.turn_id != timer_turn_id
-    status, text = await _turn_row(refused.turn_id)
-    assert status == "cancelled"
-    assert text == UNRESOLVED_SPEAKER_MESSAGE
-    async with workspace_tx() as connection:
-        timer = (
-            await connection.execute(
-                sa.select(tables.turn.c.inbound, tables.turn.c.status).where(
-                    tables.turn.c.id == timer_turn_id
-                )
-            )
-        ).one()
-    assert timer.inbound == "resume the plan"
-    assert timer.status == "queued"
 
 
 async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None) -> None:
@@ -898,58 +726,426 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
     assert state[delivered] == ("parked", None)
 
 
-async def test_a_refused_message_leaves_an_armed_pause_for_the_real_speaker(db: None) -> None:
-    """A turn that never runs does not consume the wait it arrived beside. The agent armed a
-    `pause_and_wait` for an approval; a speaker the workspace cannot resolve types into the same
-    conversation and is refused. Their turn must not claim that pause, because claiming it and then
-    dying deletes it — the approver's later reply would find nothing to resume and the paused work
-    would hang until someone noticed."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    task_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.scheduled_task).values(
-                id=task_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                name="await-approval",
-                schedule=ONE_TIME_SCHEDULE,
-                prompt="resume",
-                description="waiting on the approval",
-                next_run_at=datetime.now(UTC) + timedelta(minutes=10),
-                origin_seq=0,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-
-    stranger = await admission.admit_member(workspace_id, conversation_id, "what's this?", None)
-    status, text = await _turn_row(stranger.turn_id)
-    assert (status, text) == ("cancelled", UNRESOLVED_SPEAKER_MESSAGE)
-    assert await _armed_pause(task_id) == (None, False)
-
-    approver = await admission.admit_member(workspace_id, conversation_id, "approved", member_id)
-    resume_turn_id, fires_now = await _armed_pause(task_id)
-    assert resume_turn_id == approver.turn_id
-    assert fires_now
-
-
-async def _armed_pause(task_id: UUID) -> tuple[UUID | None, bool]:
-    """The pause's resume turn, and whether it has been moved up to fire now."""
+async def _admission_stamp(turn_id: UUID) -> tuple[str, UUID | None, UUID | None]:
+    """What the turn says about who admitted it: its source, its speaker, the member it acts for."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
                 sa.select(
-                    tables.scheduled_task.c.resume_turn_id,
-                    tables.scheduled_task.c.next_run_at,
-                ).where(tables.scheduled_task.c.id == task_id)
+                    tables.turn.c.admission_source,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.on_behalf_of_member_id,
+                ).where(tables.turn.c.id == turn_id)
             )
-        ).one_or_none()
-    assert row is not None, "the pause was deleted"
-    return row.resume_turn_id, row.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)
+        ).one()
+    return row.admission_source, row.speaker_member_id, row.on_behalf_of_member_id
+
+
+async def test_an_as_scheduled_fire_founds_its_own_turn_beside_a_live_one(db: None) -> None:
+    """A fire asserting the scheduled meaning gets it without a scheduled row: its own turn while
+    another runs, stamped scheduled, speakerless, acting for the member who armed it."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    live = await admission.invoke(workspace_id, conversation_id, agent_id, "background job")
+    assert live is not None
+    assert await _claim_turn(live, str(live))
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "run the report",
+        "task:fire-1",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+    )
+
+    assert fired is not None
+    assert fired != live
+    assert await _turn_count(conversation_id) == 2
+    assert await _queued_bodies(conversation_id) == []
+    assert await _admission_stamp(fired) == ("scheduled", None, member_id)
+    status, _ = await _turn_row(fired)
+    assert status == "queued"
+    assert str(fired) in dbos.enqueued
+
+
+async def test_an_as_scheduled_fire_is_seat_gated_on_the_member_it_acts_for(db: None) -> None:
+    """The same gate a scheduled row's fire meets: an unseated creator's fire is refused, and held
+    instead of discarded when it carries work the ledger already booked."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    await _unseat(member_id)
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+
+    refused = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "run the report",
+        "task:fire-1",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+    )
+    held = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<probe_result …>",
+        "task:fire-2",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+        holds_work_already_done=True,
+    )
+
+    assert refused is not None
+    assert held is not None
+    assert await _turn_row(refused) == ("cancelled", SEAT_REFUSAL_MESSAGE)
+    assert await _turn_row(held) == ("parked", None)
+    assert dbos.enqueued == []
+
+
+async def test_a_member_turn_past_the_armed_seq_supersedes_a_fire(db: None) -> None:
+    """The member got there first, so the fire is refused and writes nothing — no turn to answer
+    and no arrival waiting for one."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    spoke = await admission.admit_member(workspace_id, conversation_id, "never mind", member_id)
+
+    superseded = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+
+    assert superseded is None
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == []
+    assert dbos.enqueued == [str(spoke.turn_id)]
+
+
+async def test_a_refused_message_does_not_supersede_a_fire(db: None) -> None:
+    """A turn this gate refused never joined the conversation: nothing will answer it, so it cannot
+    end the wait the fire belongs to. Otherwise a member whose seat an admin removed could kill a
+    paused workflow by typing once, and a stranger the surface could not resolve could do it too —
+    the work would hang with nobody left to resume it."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    await _unseat(member_id)
+    refused = await admission.admit_member(workspace_id, conversation_id, "let me in", member_id)
+    stranger = await admission.admit_member(workspace_id, conversation_id, "who am i", None)
+    assert await _turn_row(refused.turn_id) == ("cancelled", SEAT_REFUSAL_MESSAGE)
+    assert await _turn_row(stranger.turn_id) == ("cancelled", UNRESOLVED_SPEAKER_MESSAGE)
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+
+    assert fired is not None
+    status, _ = await _turn_row(fired)
+    assert status == "queued"
+
+
+async def _drain_arrivals(turn_id: UUID) -> None:
+    """What the engine's drain leaves behind: the pending rows stamped consumed by the turn that
+    absorbed them."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.inbound_message)
+            .values(consumed_turn_id=turn_id)
+            .where(tables.inbound_message.c.consumed_turn_id.is_(None))
+        )
+
+
+async def test_a_member_message_the_live_turn_absorbed_supersedes_a_fire(db: None) -> None:
+    """The fold window. A member message arriving while the arming turn is still live founds no turn
+    of its own — it lands on that turn's queue — and stops being queued the moment the engine drains
+    it. Read only as a turn or as a pending row, the member would have spoken and left no trace by
+    the time the timer came due, and the agent would resume a workflow the member already resumed.
+    The trace is the turn the message folded into."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    arming = await admission.invoke(workspace_id, conversation_id, agent_id, "the arming work")
+    assert arming is not None
+    folded = await admission.admit_member(
+        workspace_id, conversation_id, "actually, do this instead", member_id
+    )
+    assert folded.turn_id == arming
+    await _drain_arrivals(arming)
+
+    superseded = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=1,
+        unless_member_arrival_since=0,
+    )
+
+    assert superseded is None
+    assert await _turn_count(conversation_id) == 1
+
+
+async def test_a_member_message_absorbed_before_the_arm_never_refuses_the_timer(db: None) -> None:
+    """The inverse of the fold window, and the sharper failure of the two. A member message that
+    folded into the arming turn BEFORE the wait was armed is history the agent had already read when
+    it decided to wait — and it lands on the arming turn itself, so a rule that asks which turn a
+    fold joined can never tell it apart from a reply that arrived afterwards. Counted, it refuses
+    every fire this wait will ever have: the runner retires the row on the refusal and the workflow
+    is left unfinished with nothing scheduled to finish it. The arrival watermark is what separates
+    them, because it was taken when the wait was armed."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    arming = await admission.invoke(workspace_id, conversation_id, agent_id, "the arming work")
+    assert arming is not None
+    folded = await admission.admit_member(
+        workspace_id, conversation_id, "one more thing before you start", member_id
+    )
+    assert folded.turn_id == arming
+    await _drain_arrivals(arming)
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        as_scheduled=True,
+        unless_member_since=1,
+        unless_member_arrival_since=1,
+    )
+
+    assert fired is not None
+    assert fired != arming
+    status, _ = await _turn_row(fired)
+    assert status == "queued"
+
+
+async def test_a_wait_takes_both_watermarks_or_neither(db: None) -> None:
+    """Half the question is worse than none of it: a caller passing only the turn watermark would
+    read as guarded while every folded reply passed straight through it, which is the defect this
+    pair replaced."""
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+
+    for watermarks in ({"unless_member_since": 0}, {"unless_member_arrival_since": 0}):
+        with pytest.raises(ValueError, match="both watermarks"):
+            await admission.invoke(
+                workspace_id, conversation_id, agent_id, "resume the plan", "pause:1", **watermarks
+            )
+
+    assert await _turn_count(conversation_id) == 0
+
+
+async def test_an_absorbed_internal_arrival_does_not_supersede_a_fire(db: None) -> None:
+    """Only a member ends a wait on a member. Internal work folding into the same live turn — a
+    subagent's result, another job's invoke — is the system talking to itself."""
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    arming = await admission.invoke(workspace_id, conversation_id, agent_id, "the arming work")
+    assert arming is not None
+    assert await admission.invoke(workspace_id, conversation_id, agent_id, "more work") == arming
+    await _drain_arrivals(arming)
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        as_scheduled=True,
+        unless_member_since=1,
+        unless_member_arrival_since=0,
+    )
+
+    assert fired is not None
+    assert fired != arming
+    assert await _turn_count(conversation_id) == 2
+
+
+async def test_a_member_message_absorbed_before_the_wait_does_not_supersede_it(db: None) -> None:
+    """A fold that landed on an earlier turn than the one that armed the wait is history the agent
+    had already read when it armed. Counting it would refuse every fire in a conversation a member
+    had ever folded a message into."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    earlier = await admission.invoke(workspace_id, conversation_id, agent_id, "earlier work")
+    assert earlier is not None
+    folded = await admission.admit_member(workspace_id, conversation_id, "a note", member_id)
+    assert folded.turn_id == earlier
+    await _drain_arrivals(earlier)
+    await _finish(earlier)
+    arming = await admission.invoke(workspace_id, conversation_id, agent_id, "the arming work")
+    assert arming is not None
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        as_scheduled=True,
+        unless_member_since=2,
+        unless_member_arrival_since=1,
+    )
+
+    assert fired is not None
+    assert await _turn_count(conversation_id) == 3
+
+
+async def test_a_queued_member_message_supersedes_a_fire(db: None) -> None:
+    """A member message already waiting for the live turn is a resume in flight, whatever the turn
+    sequence says."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    live = await admission.invoke(workspace_id, conversation_id, agent_id, "internal work")
+    assert live is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body="waiting on you",
+                admission_source="member",
+                speaker_member_id=member_id,
+                admitted_turn_id=live,
+                created_at=sa.func.now(),
+            )
+        )
+
+    superseded = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=1,
+        unless_member_arrival_since=0,
+    )
+
+    assert superseded is None
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["waiting on you"]
+
+
+async def test_a_quiet_conversation_admits_a_guarded_fire(db: None) -> None:
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    fired = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+
+    assert fired is not None
+    status, _ = await _turn_row(fired)
+    assert status == "queued"
+    assert dbos.enqueued == [str(fired)]
+
+
+async def test_the_armed_seq_itself_does_not_supersede_a_fire(db: None) -> None:
+    """The member turn the wait was armed from is the origin, not a reply that overtook it."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    origin = await admission.admit_member(workspace_id, conversation_id, "watch this", member_id)
+    await _finish(origin.turn_id)
+
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        unless_member_since=1,
+        unless_member_arrival_since=0,
+    )
+
+    assert fired is not None
+    assert fired != origin.turn_id
+    assert await _turn_count(conversation_id) == 2
+
+
+async def test_a_redelivered_fire_keeps_its_turn_after_a_member_speaks(db: None) -> None:
+    """A crash between fire and retire re-fires the same identity, and it must converge on the
+    first outcome: the key already admitted a turn, so the redelivery answers that turn rather than
+    reading the member who spoke afterwards and refusing."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+    assert fired is not None
+    folded = await admission.admit_member(workspace_id, conversation_id, "never mind", member_id)
+    assert folded.turn_id == fired
+
+    redelivered = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+
+    assert redelivered == fired
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["never mind"]
+
+
+async def test_a_guarded_scheduled_fire_is_superseded_the_same_way(db: None) -> None:
+    """The pause fire's shape: scheduled meaning plus the guard. The member's own turn resumed the
+    work, so the fire adds nothing and is refused."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    await admission.admit_member(workspace_id, conversation_id, "never mind", member_id)
+
+    superseded = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "resume the plan",
+        "pause:1",
+        on_behalf_of_member_id=member_id,
+        as_scheduled=True,
+        unless_member_since=0,
+        unless_member_arrival_since=0,
+    )
+
+    assert superseded is None
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == []
 
 
 async def _cancel_turn_row(turn_id: UUID) -> None:

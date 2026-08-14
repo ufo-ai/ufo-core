@@ -32,7 +32,7 @@ SEATS = "core/src/ufo/seats.py"
 TABLES = "core/src/ufo/schema/tables.py"
 WORKSPACE_KIND = "core/src/ufo/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
-SCHEDULING = "core/src/ufo/scheduling.py"
+SCHEDULING = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py"
 SLACK_SURFACE = "extensions/slack/ufo_ext_slack/surface.py"
 BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
@@ -342,9 +342,9 @@ CLAIMS = (
         pattern=(
             r"if task\.expires_at is None or task\.expires_at > now:\n"
             r"\s+return False\n"
-            r"\s+async with workspace_tx\(\) as connection:\n"
+            r"\s+async with self\.ctx\.transaction\(\) as connection:\n"
             r"\s+await connection\.execute\(\n"
-            r"\s+sa\.delete\(tables\.scheduled_task\)"
+            r"\s+sa\.delete\(scheduled_task\)"
         ),
     ),
 )

@@ -58,6 +58,7 @@ keyed_connectors = "ufo_ext_keyed_connectors:manifest"
 mcp = "ufo_ext_mcp:manifest"
 memory = "ufo_ext_memory.manifest:manifest"
 metronome = "ufo_ext_metronome:manifest"
+monitors = "ufo_ext_monitors.manifest:manifest"
 objectives = "ufo_ext_objectives.manifest:manifest"
 openrouter = "ufo_ext_openrouter:manifest"
 pipedream = "ufo_ext_pipedream.manifest:manifest"
@@ -144,6 +145,7 @@ packages = [
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",
     "extensions/memory/ufo_ext_memory",
+    "extensions/monitors/ufo_ext_monitors",
     "extensions/pipedream/ufo_ext_pipedream",
     "extensions/redis_hub/ufo_ext_redis_hub",
     "extensions/repl/ufo_ext_repl",

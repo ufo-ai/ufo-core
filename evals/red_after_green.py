@@ -28,10 +28,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
+from ufo_ext_scheduled_tasks.schedules import ScheduleStore
+
 from evals.harness.arc import ArcCase, ArcObservation, ArcPerturbation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
 from evals.objective_record import recorded_objective
-from ufo.scheduling import ScheduleStore
+from ufo.ext.context import context_for
 
 LIMITS_FILE = "svc/limits.py"
 TEST_FILE = "tests/test_limits.py"
@@ -71,10 +74,16 @@ OTHER_COMMIT_SECONDS = 75.0
 WATCH_EXPIRY_SECONDS = 300.0
 
 
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
+
+
 async def _seed_health_check(
     workspace_id: UUID, conversation_id: UUID, member_id: UUID | None
 ) -> None:
-    await ScheduleStore().create(
+    await _schedule_store().create(
         conversation_id=conversation_id,
         name="service-health",
         schedule=EVERY_MINUTE,

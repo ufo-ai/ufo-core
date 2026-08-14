@@ -803,10 +803,29 @@ class _RecordingInvoker:
         self.admission = Admission(dbos=_StubDbos(), durable_surfaces=frozenset())
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
-    ) -> UUID:
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         return await self.admission.invoke(
-            self.workspace_id, conversation_id, agent_id, message, idempotency_key
+            self.workspace_id,
+            conversation_id,
+            agent_id,
+            message,
+            idempotency_key,
+            on_behalf_of_member_id=on_behalf_of_member_id,
+            holds_work_already_done=holds_work_already_done,
+            as_scheduled=as_scheduled,
+            unless_member_since=unless_member_since,
+            unless_member_arrival_since=unless_member_arrival_since,
         )
 
 

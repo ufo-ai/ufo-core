@@ -112,8 +112,19 @@ async def reset_postgres_database(name: str) -> None:
         host=url.host, port=url.port, user=url.username, password=url.password, database="ufo"
     )
     try:
-        await admin.execute(f'drop database if exists "{name}"')
+        await admin.execute(f'drop database if exists "{name}" with (force)')
         await admin.execute(f'create database "{name}"')
+    finally:
+        await admin.close()
+
+
+async def drop_postgres_database(name: str) -> None:
+    url = make_url(POSTGRES_TEST_URL)
+    admin = await asyncpg.connect(
+        host=url.host, port=url.port, user=url.username, password=url.password, database="ufo"
+    )
+    try:
+        await admin.execute(f'drop database if exists "{name}" with (force)')
     finally:
         await admin.close()
 
@@ -121,21 +132,28 @@ async def reset_postgres_database(name: str) -> None:
 @pytest.fixture(scope="session", params=["sqlite", "postgres"])
 def database_url(
     request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, worker_id: str
-) -> str:
+) -> Iterator[str]:
+    """One database per pytest process: the pid suffix keeps concurrent runners — serial runs and
+    xdist workers alike — from resetting one shared name out from under each other; the session
+    drops its own database on the way out."""
     if request.param == "sqlite":
         url = f"sqlite+aiosqlite:///{tmp_path_factory.mktemp('db') / 'ufo_test.db'}"
         apply_cached_migrations(url)
-        return url
+        yield url
+        return
     if not integration_dependency_available(
         postgres_reachable(), "Postgres service is not reachable"
     ):
         pytest.skip("Postgres service is not reachable")
     base = make_url(POSTGRES_TEST_URL)
-    url = base.set(database=f"{base.database}_{worker_id}")
+    name = f"{base.database}_{worker_id}_{os.getpid()}"
+    url = base.set(database=name)
     dsn = url.render_as_string(hide_password=False)
-    asyncio.run(reset_postgres_database(url.database))
+    asyncio.run(reset_postgres_database(name))
     apply_migrations(dsn)
-    return dsn
+    yield dsn
+    asyncio.run(drop_postgres_database(f"{name}_dbos"))
+    asyncio.run(drop_postgres_database(name))
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +180,7 @@ async def db(
     the session DBOS worker holds that slot across this test's `begin immediate`, and its late
     rows land in tables the wipe just reset. Each test instead gets its own copy of the session's
     migrated template: the copy's writer population is this test alone, and no wipe is needed.
-    Postgres (MVCC, one database per xdist worker) keeps the shared database and the wipe."""
+    Postgres (MVCC, one database per pytest process) keeps the shared database and the wipe."""
     if database_url.startswith("sqlite"):
         private = tmp_path / "private.db"
         shutil.copy(make_url(database_url).database, private)

@@ -22,9 +22,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
+from ufo_ext_scheduled_tasks.schedules import ScheduleStore
+
 from evals.harness.arc import ArcCase, ArcObservation, ArcPerturbation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
-from ufo.scheduling import ScheduleStore
+from ufo.ext.context import context_for
 
 STATS_FILE = "experiment/stats.json"
 PROTOCOL_FILE = "experiment/protocol.md"
@@ -64,10 +67,16 @@ and `stop` to end it. Write a line on every check, including ones where nothing 
 """
 
 
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
+
+
 async def _seed_experiment_watch(
     workspace_id: UUID, conversation_id: UUID, member_id: UUID | None
 ) -> None:
-    await ScheduleStore().create(
+    await _schedule_store().create(
         conversation_id=conversation_id,
         name="experiment-check",
         schedule=EVERY_MINUTE,

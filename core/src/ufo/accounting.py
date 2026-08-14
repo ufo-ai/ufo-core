@@ -241,6 +241,35 @@ async def record_egress_request(
     )
 
 
+async def record_probe_egress_request(
+    connection: AsyncConnection, workspace_id: UUID, amount: int = 1
+) -> None:
+    """Meter an off-turn probe's sandbox egress under the same `egress` dimension a turn's is: a
+    request COUNT priced at zero, on a row whose `turn_id` is NULL because a probe runs off every
+    turn. Reaching the network from a conversation's sandbox is one act with one meaning whether a
+    turn or a probe made it, so it is one dimension — the NULL FK is what separates them, and it
+    separates them the way a background job's model spend is separated from a turn's
+    (`record_workspace_usage`): the row lands in the workspace total and every workspace-scoped cap
+    window, and drops out of per-member and per-agent attribution, which join through `turn`.
+
+    The row carries a fresh id rather than a key derived from the probe, so each flushed batch bills
+    once and nothing accumulates onto a key a later probe could reuse; the proxy sums a batch per
+    principal before writing, so a probe's several CONNECTs in one window are one row."""
+    await connection.execute(
+        sa.insert(tables.ledger).values(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            turn_id=None,
+            dimension=EGRESS_DIMENSION,
+            amount=amount,
+            priced_micro_usd=0,
+            model="",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+
+
 async def record_sandbox_tokens(
     connection: AsyncConnection,
     workspace_id: UUID,

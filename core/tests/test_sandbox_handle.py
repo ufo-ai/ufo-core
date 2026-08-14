@@ -31,11 +31,7 @@ from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import (
-    CONVERSATION_ID_ENV,
-    GIT_PROXY_AUTH_CONFIG,
     SandboxAuthorizer,
-    _git_config_env,
-    _grant_cli_env,
     _open_sandbox,
 )
 from ufo.loop.subagents import SubagentRegistry, Subagents
@@ -46,6 +42,12 @@ from ufo.sandbox.conversation import (
     WORKSPACE_ROOT_SETTING,
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
+)
+from ufo.sandbox.exec_env import (
+    CONVERSATION_ID_ENV,
+    GIT_PROXY_AUTH_CONFIG,
+    _git_config_env,
+    _grant_cli_env,
 )
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (

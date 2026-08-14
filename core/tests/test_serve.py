@@ -168,6 +168,8 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         registry=registry,
         sandboxes=object(),
         subagents=object(),
+        run_tokens=RunTokenCodec(b"launch-jobs-test-secret"),
+        credentials=None,
     )
 
     def page_change_runner(**kwargs: object) -> object:
@@ -198,6 +200,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
     assert captured["launched"] is True
+    assert captured["page"]["probes"] is captured["jobs"]["probes"]
 
 
 async def test_serve_lifespan_waits_for_background_shutdown(

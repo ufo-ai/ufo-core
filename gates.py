@@ -24,8 +24,8 @@ COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py")
 ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.jobs", "ufo.sandbox.proxy")
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
-SCHEDULING_MODULE = CORE_SRC / "scheduling.py"
-AMBIENT_SCHEDULE_METHODS = frozenset({"create", "pause", "_upsert", "cancel", "list", "inspect"})
+SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
+AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
 PORTAL_ENTRY = PORTAL_SOURCE / "main.tsx"
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
@@ -477,10 +477,12 @@ def _job_selector_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """Schedule member paths and their write primitive accept no agent selector."""
+    """Schedule member paths and their write primitive accept no agent selector. A missing module is
+    a failure, not a pass: the store this reads is free to move, and a stale path would leave the
+    gate reading nothing while reporting green."""
     tree = trees.get(SCHEDULING_MODULE)
     if tree is None:
-        return []
+        return [f"{SCHEDULING_MODULE}: the schedule store is not here — repoint the authority gate"]
     failures = []
     for node in tree.body:
         if not isinstance(node, ast.ClassDef) or node.name != "ScheduleStore":

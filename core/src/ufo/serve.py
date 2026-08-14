@@ -43,7 +43,7 @@ from ufo.db import (
     verify_db_reachable,
 )
 from ufo.durability import ReplaySafeSerializer, replay_safe_client
-from ufo.ext.context import CredentialAccess, ModelAccess
+from ufo.ext.context import ConversationProbes, CredentialAccess, ModelAccess
 from ufo.ext.context import context_for as extension_context_for
 from ufo.ext.conversation_slots import BoundConversationSlot
 from ufo.ext.loader import (
@@ -114,6 +114,7 @@ from ufo.runtime_instance import (
     record_fleet_seat,
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.proxy.rules import (
     connector_transfer_hosts,
     derive_artifact_store_rules,
@@ -121,7 +122,12 @@ from ufo.sandbox.proxy.rules import (
 )
 from ufo.sandbox.proxy.server import EgressProxy, PerAgentRules, generate_ca
 from ufo.sandbox.select import select_carrier
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, ProxyEndpoint, RunTokenCodec
+from ufo.sandbox.session import (
+    EGRESS_CA_CERT_ENV,
+    ProbeTokenCodec,
+    ProxyEndpoint,
+    RunTokenCodec,
+)
 from ufo.sandbox.terminal import Terminals, TerminalTransport
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
@@ -397,6 +403,16 @@ def _launch_jobs(
     launch so the system store is live. Registration is the synchronous DBOS API (off the loop, at
     startup); a handler may read a declared credential or the deploy index/embed backends or the
     page feed, so once any job is registered the credential key must be set."""
+    probes = ConversationProbes(
+        runtime.sandboxes,
+        ProbeTokenCodec(secret=runtime.run_tokens.secret),
+        ProbeEnv(
+            grants=GrantStore() if runtime.credentials is not None else None,
+            clis=connector_clis(runtime.manifests),
+            credentials=runtime.credentials,
+            slots=injecting_slots(runtime.manifests),
+        ).exports,
+    )
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,
@@ -406,6 +422,7 @@ def _launch_jobs(
         blob=runtime.blob,
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
+        probes=probes,
     )
     bindings = bindings_from(
         runtime.manifests,
@@ -425,6 +442,7 @@ def _launch_jobs(
         blob=runtime.blob,
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
+        probes=probes,
     ).launch()
 
 

@@ -19,9 +19,6 @@ from ufo.connectors import CliCredential, ConnectorRegistry
 from ufo.credentials import (
     CredentialRequests,
     CredentialStore,
-    HostChoice,
-    credential_host,
-    slot_is_set,
 )
 from ufo.db import workspace_tx
 from ufo.ext.context import TurnInvoker
@@ -34,7 +31,7 @@ from ufo.ext.loader import (
 )
 from ufo.ext.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.ext.surface import TurnTailer
-from ufo.grants import GrantStore, grant_sentinel
+from ufo.grants import GrantStore
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.compaction import Compaction
@@ -55,8 +52,16 @@ from ufo.loop.subagents import (
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemorySearch
 from ufo.models.registry import ModelRegistry
-from ufo.o11y import emit_metric, formatted_stack, log, log_error, turn_profile, warn
+from ufo.o11y import emit_metric, formatted_stack, log, log_error, turn_profile
 from ufo.sandbox.conversation import ConversationSandbox
+from ufo.sandbox.exec_env import (
+    CONVERSATION_ID_ENV,
+    GIT_PROXY_AUTH_CONFIG,
+    _git_config_env,
+    _git_credential_config,
+    _grant_cli_env,
+    _keyed_provider_env,
+)
 from ufo.sandbox.session import (
     RunToken,
     RunTokenCodec,
@@ -80,8 +85,6 @@ from ufo.tools.context import Spawn
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.workspace import ws
 
-GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
-CONVERSATION_ID_ENV = "UFO_CONVERSATION_ID"
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
@@ -659,99 +662,6 @@ async def _open_sandbox(
     )
 
 
-def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
-    """git's own env channel for configuration, which is how the turn reaches a git it never
-    writes a config file for: one indexed key/value pair per setting, and the count git reads."""
-    env = {"GIT_CONFIG_COUNT": str(len(settings))}
-    for index, (key, value) in enumerate(settings):
-        env[f"GIT_CONFIG_KEY_{index}"] = key
-        env[f"GIT_CONFIG_VALUE_{index}"] = value
-    return env
-
-
-async def _git_credential_config(
-    credentials: CredentialStore | None,
-    slots: tuple[CredentialSlot, ...],
-    workspace_id: UUID,
-) -> tuple[tuple[str, str], ...]:
-    """Each git host this workspace holds a credential for, as an `extraheader` carrying the slot's
-    sentinel — never the secret, which the egress proxy swaps for `Basic` on the wire. git has no
-    env var to read auth from, so a header it is; the proxy admits and MITMs the host off the same
-    slot, which is why a slot with nothing stored must configure nothing: the sentinel would reach
-    the provider verbatim over an opaque tunnel, failing a clone anonymous git would serve."""
-    if credentials is None:
-        return ()
-    settings: list[tuple[str, str]] = []
-    for slot in slots:
-        target = slot.injection
-        if target is None or target.git_basic_user is None:
-            continue
-        try:
-            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
-                continue
-            host = await credential_host(credentials, workspace_id, target.host)
-        except Exception as error:
-            warn(
-                "sandbox.credential_slot_failed",
-                slot=slot.name,
-                error_class=type(error).__name__,
-                error=str(error),
-            )
-            continue
-        if host is None:
-            warn("sandbox.git_host_unavailable", slot=slot.name)
-            continue
-        settings.append(
-            (f"http.https://{host}/.extraheader", f"{target.header}: {target.sentinel}")
-        )
-    return tuple(settings)
-
-
-async def _keyed_provider_env(
-    credentials: CredentialStore | None,
-    slots: tuple[CredentialSlot, ...],
-    workspace_id: UUID,
-) -> dict[str, str]:
-    """Each keyed provider this workspace has a secret for, as the sandbox sees it: the declared env
-    var set to the slot's sentinel — never the secret, which the egress proxy swaps in on the wire —
-    and the resolved provider host, so the agent's own client authenticates and addresses the right
-    region without holding or guessing either. A slot with nothing stored exports nothing, so the
-    agent finds no half-usable variable for a provider the member has not keyed yet. A selection the
-    declaration does not offer exports nothing and warns here as well as at the proxy, because the
-    two roles withhold at different moments — the export when the sandbox opens, the egress when a
-    request is made — and the member would otherwise see a variable that never appeared."""
-    if credentials is None:
-        return {}
-    env: dict[str, str] = {}
-    for slot in slots:
-        target = slot.injection
-        if target is None:
-            continue
-        host_env = target.host.env if isinstance(target.host, HostChoice) else None
-        if target.env is None and host_env is None:
-            continue
-        try:
-            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
-                continue
-            host = await credential_host(credentials, workspace_id, target.host)
-        except Exception as error:
-            warn(
-                "sandbox.credential_slot_failed",
-                slot=slot.name,
-                error_class=type(error).__name__,
-                error=str(error),
-            )
-            continue
-        if host is None:
-            warn("sandbox.keyed_host_unavailable", slot=slot.name)
-            continue
-        if target.env is not None:
-            env[target.env] = target.sentinel
-        if host_env is not None:
-            env[host_env] = host
-    return env
-
-
 @dataclass(frozen=True)
 class SandboxAuthorizer:
     sandbox: SandboxSession
@@ -773,47 +683,3 @@ class SandboxAuthorizer:
             frozenset(cli.env for cli in self.clis.values()),
             await _grant_cli_env(self.grants, self.clis, acting_member_id, self.turn.id),
         )
-
-
-async def _grant_cli_env(
-    grants: GrantStore | None,
-    clis: Mapping[str, CliCredential],
-    acting_member_id: UUID | None,
-    turn_id: UUID,
-) -> dict[str, str]:
-    """Each connector-declared CLI env var whose provider this process may use — its member's
-    own grant preferred, one shared with the agent's audience as the fallback — set to that
-    grant's sentinel, so the CLI inside the sandbox authenticates and the proxy forwards by the
-    same sentinel. A static env var names no account, so two accounts in the
-    winning tier cannot be disambiguated per request: rather than silently pick one —
-    `connector_account` fails loud on the same ambiguity — the export is skipped and logged,
-    so the CLI fails visibly to authenticate instead of acting as an unintended account."""
-    if grants is None or not clis:
-        return {}
-    granted = await grants.active_grants()
-    env: dict[str, str] = {}
-    for provider, cli in clis.items():
-        private = sorted(
-            grant.account_id
-            for grant in granted
-            if grant.provider == provider
-            and not grant.connection_shared
-            and grant.owner_member_id == acting_member_id
-        )
-        shared = sorted(
-            grant.account_id
-            for grant in granted
-            if grant.provider == provider and grant.connection_shared
-        )
-        accounts = private or shared
-        if len(accounts) > 1:
-            log(
-                "sandbox.cli_grant_ambiguous",
-                provider=provider,
-                turn_id=str(turn_id),
-                accounts=len(accounts),
-            )
-            continue
-        if accounts:
-            env[cli.env] = grant_sentinel(accounts[0])
-    return env

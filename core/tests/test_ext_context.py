@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,21 +8,30 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo.agent_scope import agent
 from ufo.audience import SHARED_AUDIENCE
 from ufo.blob import FilesystemBlobStore
+from ufo.connectors import CliCredential, ForwardedResponse
 from ufo.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import (
+    PROBE_TIMEOUT_MAX_SECONDS,
+    ConversationFacts,
     ConversationFiles,
+    ConversationProbes,
     CredentialAccess,
     ScopedStore,
+    TurnOutcome,
     UndeclaredCredentialSlot,
     context_for,
+    conversation_agent_id,
 )
+from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.ext.surface import (
     SurfaceInstallationConflict,
     UndeclaredSurface,
 )
+from ufo.grants import GrantStore, grant_sentinel
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
     Message,
@@ -39,9 +48,12 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
+from ufo.sandbox import terminal
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.sandbox.session import SENTINEL_MODEL_KEY, ProbeTokenCodec, ProxyEndpoint
+from ufo.sandbox.terminal import TerminalGone
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.sources.sync import CorePageFeed
@@ -600,7 +612,11 @@ async def test_set_source_subject_flips_every_stream_of_a_binding_in_one_transac
 async def _conversation(workspace_id: UUID) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
-        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
         await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
@@ -616,6 +632,191 @@ async def _conversation(workspace_id: UUID) -> UUID:
     return conversation_id
 
 
+async def _seed_turn(
+    workspace_id: UUID, conversation_id: UUID, seq: int, status: str, terminal: dict | None
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status=status,
+                inbound="hi",
+                terminal=terminal,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:
+    """A member-facing listing decides visibility from the audience of the conversation each row
+    reports into, and names its origin from that conversation's surface label. Both come back for a
+    whole page at once, and both are read live: an audience never moves, but a renamed channel would
+    leave a snapshotted label describing a place that no longer answers to it."""
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    with ws(workspace_id):
+        shared, private = await _conversation(workspace_id), await _conversation(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email="listing@x.test",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.update(tables.conversation)
+                .values(
+                    audience=member_subject(member_id),
+                    member_id=member_id,
+                    surface_label="#eng",
+                )
+                .where(tables.conversation.c.id == private)
+            )
+        facts = await context_for("sample", frozenset()).conversation_facts((shared, private))
+
+    assert facts[shared] == ConversationFacts(audience=SHARED_AUDIENCE, surface_label=None)
+    assert facts[private] == ConversationFacts(
+        audience=member_subject(member_id), surface_label="#eng"
+    )
+
+
+async def test_conversation_facts_omits_what_it_cannot_vouch_for(db: None) -> None:
+    """An unknown id and another tenant's id are both absent from the mapping rather than defaulted.
+    A caller deciding disclosure has to read that absence as "not visible" — standing in a shared
+    audience would publish a row nothing vouched for, and it is the same absence either way, so a
+    borrowed id leaks nothing about whether it exists elsewhere."""
+    workspace_id, other = await _workspace(), await _workspace()
+    with ws(other):
+        foreign = await _conversation(other)
+    with ws(workspace_id):
+        mine = await _conversation(workspace_id)
+        context = context_for("sample", frozenset())
+        facts = await context.conversation_facts((mine, foreign, uuid4()))
+        assert await context.conversation_facts(()) == {}
+
+    assert set(facts) == {mine}
+
+
+async def _arrival(
+    workspace_id: UUID, conversation_id: UUID, seq: int, source: str, turn_id: UUID
+) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=seq,
+                body="hi",
+                admission_source=source,
+                admitted_turn_id=turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+
+
+async def test_conversation_arrival_seq_watermarks_member_arrivals_only(db: None) -> None:
+    """The watermark work compares against to tell "a member spoke before I armed" from "a member
+    spoke after". It is the highest member `seq`, so it must ignore three things that would each
+    corrupt that comparison: an internal arrival (work the system posted to itself — counting it
+    would let a watcher be woken by its own effects), another conversation's arrivals, and another
+    workspace's. Zero is a real answer meaning no member has spoken."""
+    workspace_id, other_workspace = await _workspace(), await _workspace()
+    with ws(other_workspace):
+        elsewhere = await _conversation(other_workspace)
+        await _arrival(
+            other_workspace,
+            elsewhere,
+            99,
+            "member",
+            await _seed_turn(other_workspace, elsewhere, 1, "running", None),
+        )
+    with ws(workspace_id):
+        watched = await _conversation(workspace_id)
+        neighbour = await _conversation(workspace_id)
+        context = context_for("sample", frozenset())
+        assert await context.conversation_arrival_seq(watched) == 0
+
+        turn_id = await _seed_turn(workspace_id, watched, 1, "running", None)
+        await _arrival(workspace_id, watched, 1, "member", turn_id)
+        await _arrival(workspace_id, watched, 2, "member", turn_id)
+        assert await context.conversation_arrival_seq(watched) == 2
+
+        await _arrival(workspace_id, watched, 3, "internal", turn_id)
+        assert await context.conversation_arrival_seq(watched) == 2
+
+        await _arrival(
+            workspace_id,
+            neighbour,
+            50,
+            "member",
+            await _seed_turn(workspace_id, neighbour, 1, "running", None),
+        )
+        assert await context.conversation_arrival_seq(watched) == 2
+        assert await context.conversation_arrival_seq(neighbour) == 50
+
+
+async def test_turn_outcomes_reads_status_and_terminal_text(db: None) -> None:
+    """The last-run line of a status rendering: what the turn's status is, and what its terminal
+    frame said. A running turn and a turn that ended saying nothing both answer None for the text,
+    so a renderer has one absence to handle rather than two."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        spoke = await _seed_turn(
+            workspace_id, conversation_id, 1, "done", {"status": "done", "text": "ok"}
+        )
+        silent = await _seed_turn(workspace_id, conversation_id, 2, "done", {"status": "done"})
+        running = await _seed_turn(workspace_id, conversation_id, 3, "running", None)
+        outcomes = await context_for("sample", frozenset()).turn_outcomes((spoke, silent, running))
+
+    assert outcomes[spoke] == TurnOutcome(status="done", text="ok")
+    assert outcomes[silent] == TurnOutcome(status="done", text=None)
+    assert outcomes[running] == TurnOutcome(status="running", text=None)
+
+
+async def test_turn_outcomes_omits_a_turn_that_is_no_longer_there(db: None) -> None:
+    """A row can point at a turn that has since gone. That reads as an absent key, never a raise:
+    the status line renders it exactly as it renders a row that has not fired yet, which is what the
+    outer join it replaces did."""
+    workspace_id, other = await _workspace(), await _workspace()
+    with ws(other):
+        foreign = await _seed_turn(other, await _conversation(other), 1, "done", {"text": "theirs"})
+    with ws(workspace_id):
+        context = context_for("sample", frozenset())
+        outcomes = await context.turn_outcomes((foreign, uuid4()))
+        assert await context.turn_outcomes(()) == {}
+
+    assert outcomes == {}
+
+
+@dataclass(frozen=True)
+class _UnusedForwarder:
+    """A real `RequestForwarder` the export path never calls — forwarding happens at the proxy, not
+    when the sentinel is written into the environment. It raises rather than recording, so a probe
+    that somehow reached the broker fails loudly instead of passing quietly."""
+
+    async def forward(
+        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
+    ) -> ForwardedResponse:
+        raise AssertionError("the probe environment must not forward through the broker")
+
+
 def _sandboxes(root: Path) -> ConversationSandbox:
     return ConversationSandbox(
         carrier=LocalCarrier(),
@@ -624,6 +825,12 @@ def _sandboxes(root: Path) -> ConversationSandbox:
         image_ref=SANDBOX_IMAGE_REF,
         proxy=ProxyEndpoint(port=1, ca_cert="test-ca"),
         workspace_root=root,
+    )
+
+
+def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
+    return ConversationProbes(
+        sandboxes, ProbeTokenCodec(b"probe-token-test-secret"), ProbeEnv().exports
     )
 
 
@@ -649,6 +856,220 @@ async def test_conversation_files_write_lands_in_the_conversation_workspace(
 
     assert path == "/workspace/.sources/acme/now.jsonl"
     assert (root / str(conversation_id) / ".sources/acme/now.jsonl").read_bytes() == b"{}\n"
+
+
+async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: Path) -> None:
+    """A probe reads what the conversation's workspace holds — the same `/workspace` the agent's
+    file tools see — and hands back the command's own stdout and exit code."""
+    workspace_id = await _workspace()
+    root = tmp_path / "workspaces"
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        sandboxes = _sandboxes(root)
+        await _files(sandboxes).write(conversation_id, "ci/status.txt", b"queued\n")
+        result = await _probes(sandboxes).run(conversation_id, "cat /workspace/ci/status.txt")
+
+    assert (result.stdout, result.exit_code) == ("queued\n", 0)
+
+
+async def test_a_probes_nonzero_exit_is_a_result_not_a_raise(db: None, tmp_path: Path) -> None:
+    """Reading what a command reports is the point, so a failing command answers its exit code and
+    stderr rather than raising: the caller decides whether a failure is news."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
+            conversation_id, "echo nope >&2; exit 3"
+        )
+
+    assert (result.exit_code, result.stdout, result.stderr.strip()) == (3, "", "nope")
+
+
+async def test_a_probe_names_its_conversation_in_the_environment(db: None, tmp_path: Path) -> None:
+    """Work a probe leaves outside the workspace joins back to the record that produced it through
+    the same variable a turn states it in."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
+            conversation_id, f"printenv {CONVERSATION_ID_ENV}"
+        )
+
+    assert result.stdout.strip() == str(conversation_id)
+
+
+async def test_a_probe_runs_under_the_jobs_role_binding_production_provides(
+    db: None, tmp_path: Path
+) -> None:
+    """A job binds a workspace and no agent — nothing has an agent to bind, since a probe answers to
+    no turn — yet the connector-CLI export reads the bound agent's grants. Every deploy whose pack
+    declares a CLI credential therefore takes that branch on every probe, so this binds exactly what
+    `JobRunner.fire` binds and nothing more: `ws()` alone, a real `GrantStore`, and a non-empty
+    connector CLI map. The probe must run and its environment must carry that grant's sentinel."""
+    workspace_id = await _workspace()
+    root = tmp_path / "workspaces"
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        agent_id = await conversation_agent_id(workspace_id, conversation_id)
+        assert agent_id is not None
+        member_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email="armer@x.test",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        with agent(agent_id):
+            await GrantStore().record(
+                provider="hub",
+                account_id="acct-1",
+                host="api.hub.test",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=True,
+            )
+        probes = ConversationProbes(
+            _sandboxes(root),
+            ProbeTokenCodec(b"probe-token-test-secret"),
+            ProbeEnv(
+                grants=GrantStore(),
+                clis={
+                    "hub": CliCredential(
+                        env="HUB_TOKEN", header="authorization", forward=_UnusedForwarder()
+                    )
+                },
+            ).exports,
+        )
+        result = await probes.run(conversation_id, "printenv HUB_TOKEN")
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == grant_sentinel("acct-1")
+
+
+async def test_a_probes_acting_member_reaches_the_environment_and_the_token(
+    db: None, tmp_path: Path
+) -> None:
+    """The member a probe acts as has to reach both ends or it buys nothing: the signed token, so
+    the proxy derives that member's forwards, and the environment, so the CLI inside the sandbox has
+    a sentinel to send. This pins the second — the first is the proxy's own test — by recording what
+    the env derivation was asked for."""
+    asked: list[tuple[UUID, UUID | None]] = []
+
+    async def env(
+        conversation_id: UUID, probe_id: UUID, acting_member_id: UUID | None = None
+    ) -> dict[str, str]:
+        asked.append((probe_id, acting_member_id))
+        return {}
+
+    workspace_id = await _workspace()
+    member_id = uuid4()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        probes = ConversationProbes(
+            _sandboxes(tmp_path / "workspaces"), ProbeTokenCodec(b"probe-token-test-secret"), env
+        )
+        await probes.run(conversation_id, "true", acting_member_id=member_id)
+        await probes.run(conversation_id, "true")
+
+    assert [member for _, member in asked] == [member_id, None]
+    assert len({probe_id for probe_id, _ in asked}) == 2
+
+
+async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_key(
+    db: None,
+) -> None:
+    """A watch on a keyed provider needs that provider's sentinel — the proxy holds the matching
+    injection rule either way, so withholding the variable would leave the rule inert and 401 every
+    probe. The deployment's own model key is the one thing withheld, and it is withheld where it
+    lives: the platform sentinel rides the carrier's environment and the proxy declines its rule, so
+    nothing here has to name it. A BYOK model key declares no injection target at all, so this
+    derivation never sees one."""
+    workspace_id = await _workspace()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await store.put(workspace_id, "datadog_api_key", "dd-real")
+    slots = (
+        CredentialSlot(
+            name="datadog_api_key",
+            description="datadog key",
+            injection=InjectionTarget(
+                host="api.datadoghq.com",
+                header="dd-api-key",
+                sentinel="UFO_SENTINEL_DATADOG_API_KEY",
+                env="DD_API_KEY",
+            ),
+        ),
+    )
+    with ws(workspace_id):
+        exports = await ProbeEnv(credentials=store, slots=slots).exports(uuid4(), uuid4())
+        bare = await ProbeEnv().exports(uuid4(), uuid4())
+
+    assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
+    assert "dd-real" not in exports.values()
+    assert SENTINEL_MODEL_KEY not in exports.values()
+    assert SENTINEL_MODEL_KEY not in bare.values()
+    assert set(bare) == {
+        CONVERSATION_ID_ENV,
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    }
+
+
+async def test_a_probe_refuses_another_workspaces_conversation(db: None, tmp_path: Path) -> None:
+    """The conversation is resolved through `workspace_tx` before anything is opened, so a handler
+    holding another tenant's conversation id runs no command in it."""
+    root = tmp_path / "workspaces"
+    other = await _workspace()
+    with ws(other):
+        foreign = await _conversation(other)
+    with ws(await _workspace()):
+        with pytest.raises(ValueError, match="not in this workspace"):
+            await _probes(_sandboxes(root)).run(foreign, "echo reached")
+
+
+async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Path) -> None:
+    """The token's deadline is the timeout, so an unbounded one would be an off-turn exec holding
+    egress for as long as it liked."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        probes = _probes(_sandboxes(tmp_path / "workspaces"))
+        with pytest.raises(ValueError, match="outside"):
+            await probes.run(conversation_id, "true", timeout_s=PROBE_TIMEOUT_MAX_SECONDS + 1)
+        with pytest.raises(ValueError, match="outside"):
+            await probes.run(conversation_id, "true", timeout_s=0)
+
+
+async def test_a_probe_says_so_when_the_bound_terminal_is_gone(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conversation whose workspace is a member's own terminal has nowhere to run a probe while
+    that terminal is disconnected, and the refusal reaches the caller rather than reading as an
+    empty result: a tick that could not probe is not a tick that found nothing, and only the caller
+    knows which of those is worth reporting."""
+    monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .values(sandbox_handle="client:/Users/member/proj")
+                .where(tables.conversation.c.id == conversation_id)
+            )
+        with pytest.raises(TerminalGone):
+            await _probes(_sandboxes(tmp_path / "workspaces")).run(conversation_id, "echo hi")
+
+
+def test_a_context_wired_without_probe_deps_has_no_probes() -> None:
+    """Every role builds its context through `context_for`, and only the deploy sites holding the
+    probe seam pass it — so a tool or in-turn hook context carries None, not a probe it can run."""
+    assert context_for("sample", frozenset()).probes is None
+    assert context_for("sample", frozenset(), sandboxes=_sandboxes(Path("/tmp"))).probes is None
 
 
 @pytest.mark.parametrize("rel", ["../messages.json.lz4", "/etc/passwd", "a/../../escape"])

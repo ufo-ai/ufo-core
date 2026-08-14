@@ -5,8 +5,8 @@ import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
 
 from ufo.ext.loader import skill_registry
-from ufo.loop.queue import CONVERSATION_ID_ENV
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
+from ufo.sandbox.exec_env import CONVERSATION_ID_ENV
 from ufo.tools.builtins import BUILTIN_TOOLS
 
 TOOL_NARRATION = "connecting their GitHub"

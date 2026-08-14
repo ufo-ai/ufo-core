@@ -7,6 +7,9 @@ from ufo.credentials import (
     CredentialSlotUnset as CredentialSlotUnset,
 )
 from ufo.ext.context import (
+    ConversationFacts as ConversationFacts,
+)
+from ufo.ext.context import (
     CredentialAccess as CredentialAccess,
 )
 from ufo.ext.context import (
@@ -35,6 +38,9 @@ from ufo.ext.context import (
 )
 from ufo.ext.context import (
     Trajectory as Trajectory,
+)
+from ufo.ext.context import (
+    TurnOutcome as TurnOutcome,
 )
 from ufo.ext.context import (
     UndeclaredCredentialSlot as UndeclaredCredentialSlot,

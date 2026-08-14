@@ -15,7 +15,9 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 import yaml
 from ufo_ext_scheduled_tasks.cron import next_fire
+from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION
+from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore, scheduled_task
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import (
@@ -29,7 +31,7 @@ from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.scheduling import ScheduledTask, ScheduleStore
+from ufo.ext.context import context_for
 from ufo.schema import tables
 
 KIND = "scheduled_task"
@@ -59,6 +61,12 @@ SATISFIED_INSTRUCTION = (
 )
 
 
+def _schedule_store() -> ScheduleStore:
+    """The relocated store, which now reads its workspace and object agent off the context the
+    extension's own callers hand it."""
+    return ScheduleStore(context_for(SCHEDULED_TASKS_NAME, frozenset()))
+
+
 def _task_manifests(output: CapabilityOutput) -> tuple[dict[str, object], ...]:
     documents: list[dict[str, object]] = []
     for call in output.calls:
@@ -83,7 +91,7 @@ def _no_jargon() -> Grader:
 
 
 async def _rows_about(*terms: str) -> tuple[ScheduledTask, ...]:
-    rows = await ScheduleStore().list()
+    rows = await _schedule_store().list()
     return tuple(
         row
         for row in rows
@@ -398,9 +406,9 @@ def _seeded(*names: str):
         conversation_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.delete(tables.scheduled_task).where(
-                    tables.scheduled_task.c.workspace_id == workspace_id,
-                    tables.scheduled_task.c.agent_id == agent_id,
+                sa.delete(scheduled_task).where(
+                    scheduled_task.c.workspace_id == workspace_id,
+                    scheduled_task.c.agent_id == agent_id,
                 )
             )
             await connection.execute(
@@ -415,7 +423,7 @@ def _seeded(*names: str):
                 )
             )
         with agent(agent_id):
-            store = ScheduleStore()
+            store = _schedule_store()
             for name in names:
                 prompt, schedule = SEEDED[name]
                 await store.create(
@@ -431,7 +439,7 @@ def _seeded(*names: str):
 
 
 async def _graded_update(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = await ScheduleStore().list()
+    rows = await _schedule_store().list()
     if len(rows) != 1 or rows[0].name != DIGEST_NAME:
         return CapabilityVerdict(
             False, f"expected exactly {DIGEST_NAME!r}, found {[row.name for row in rows]}"
@@ -452,7 +460,7 @@ def _spoken(text: str) -> str:
 
 
 async def _graded_listing(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = await ScheduleStore().list()
+    rows = await _schedule_store().list()
     if {row.name for row in rows} != set(LISTED_NAMES):
         return CapabilityVerdict(
             False, f"a read-only ask changed the rows: {[row.name for row in rows]}"
@@ -483,7 +491,7 @@ async def _graded_inspect(outcome: ScenarioOutcome) -> CapabilityVerdict:
 
 
 async def _graded_scoped_delete(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    names = {row.name for row in await ScheduleStore().list()}
+    names = {row.name for row in await _schedule_store().list()}
     if DIGEST_NAME in names:
         return CapabilityVerdict(False, f"{DIGEST_NAME!r} still exists")
     if WATCH_NAME not in names:
@@ -494,7 +502,7 @@ async def _graded_scoped_delete(outcome: ScenarioOutcome) -> CapabilityVerdict:
 
 
 async def _graded_ambiguous_update(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = {row.name: row for row in await ScheduleStore().list()}
+    rows = {row.name: row for row in await _schedule_store().list()}
     if set(rows) != {DIGEST_NAME, OUTREACH_NAME}:
         return CapabilityVerdict(False, f"expected both investor tasks, found {sorted(rows)}")
     digest_fields = rows[DIGEST_NAME].schedule.split()
@@ -519,7 +527,7 @@ MORNING_BRIEF_ASKS = (
 
 
 async def _graded_multi_create(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = await ScheduleStore().list()
+    rows = await _schedule_store().list()
     for term, accepts in MORNING_BRIEF_ASKS:
         matched = [row for row in rows if term in f"{row.name} {row.prompt}".lower()]
         if not matched:
@@ -535,7 +543,7 @@ async def _graded_multi_create(outcome: ScenarioOutcome) -> CapabilityVerdict:
 
 
 async def _graded_missing_delete(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    rows = await ScheduleStore().list()
+    rows = await _schedule_store().list()
     if rows:
         return CapabilityVerdict(False, f"a delete ask created rows: {[row.name for row in rows]}")
     if not outcome.stopped:

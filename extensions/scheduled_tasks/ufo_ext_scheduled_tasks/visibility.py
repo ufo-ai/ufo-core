@@ -1,7 +1,7 @@
 from uuid import UUID
 
-from ufo.sdk.scheduling import ListedTask
 from ufo.sdk.subjects import member_subject, subject_shared
+from ufo_ext_scheduled_tasks.schedules import ListedTask
 
 
 def task_content_visible(listed: ListedTask, member_id: UUID | None) -> bool:

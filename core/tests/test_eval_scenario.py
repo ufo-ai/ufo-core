@@ -112,8 +112,18 @@ class ScriptedWorker:
         return turn_id
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
-    ) -> UUID:
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         return await self.admit(conversation_id, message, idempotency_key)
 
 

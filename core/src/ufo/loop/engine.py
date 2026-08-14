@@ -218,14 +218,6 @@ async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
                 .returning(tables.turn.c.workspace_id)
             )
         ).scalar_one_or_none()
-        if workspace_id is not None:
-            await connection.execute(
-                sa.delete(tables.scheduled_task).where(
-                    tables.scheduled_task.c.workspace_id == workspace_id,
-                    tables.scheduled_task.c.resume_turn_id == turn_id,
-                    tables.scheduled_task.c.schedule == "@once",
-                )
-            )
     return workspace_id is not None
 
 

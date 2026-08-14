@@ -7,16 +7,16 @@ from ufo.sdk.manifest import (
     ConversationSlotContext,
     ConversationSlotProvider,
 )
-from ufo.sdk.scheduling import ScheduledTask, ScheduleStore
+from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
 
 LATEST_STATUS_MAX_CHARS = 40
 LATEST_RESPONSE_MAX_CHARS = 400
 
 
 def _scheduler(ctx: ConversationSlotContext) -> ScheduleStore:
-    if ctx.ext.scheduler is None:
-        raise RuntimeError("automations slot needs the scheduled-task store")
-    return ctx.ext.scheduler
+    if ctx.ext is None:
+        raise RuntimeError("automations slot needs the scheduled-tasks ExtensionContext")
+    return ScheduleStore(ctx.ext)
 
 
 async def _conversation(ctx: ConversationSlotContext) -> tuple[ScheduledTask, ...]:

@@ -34,7 +34,11 @@ from ufo.credentials import CredentialStore, HostChoice
 from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.grants import GrantStore, grant_sentinel
-from ufo.loop.queue import GIT_PROXY_AUTH_CONFIG, _git_config_env, _git_credential_config
+from ufo.sandbox.exec_env import (
+    GIT_PROXY_AUTH_CONFIG,
+    _git_config_env,
+    _git_credential_config,
+)
 from ufo.sandbox.proxy.rules import (
     OPENAI_HOST,
     REQUEST_METER_DIMENSION,
@@ -45,12 +49,14 @@ from ufo.sandbox.proxy.rules import (
     ScopeRule,
     derive_credential_rules,
     derive_manifest_rules,
+    derive_model_rules,
 )
 from ufo.sandbox.proxy.server import (
     MAX_FORWARD_BODY_BYTES,
     MAX_HEADER_BYTES,
     MAX_REFUSAL_DRAIN_BYTES,
     RELAY_CHUNK_BYTES,
+    EgressPrincipal,
     EgressProxy,
     HttpTokenUsage,
     PerAgentRules,
@@ -64,7 +70,13 @@ from ufo.sandbox.proxy.server import (
     _relay,
     generate_ca,
 )
-from ufo.sandbox.session import RunToken, RunTokenCodec
+from ufo.sandbox.session import (
+    SENTINEL_MODEL_KEY,
+    ProbeToken,
+    ProbeTokenCodec,
+    RunToken,
+    RunTokenCodec,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.workspace import ws, ws_current
@@ -79,6 +91,7 @@ FULL_TOKEN_USAGE = Usage(
     cache_write_1h_tokens=4000,
 )
 RUN_TOKENS = RunTokenCodec(b"proxy-test-run-token-secret")
+PROBE_TOKENS = ProbeTokenCodec(secret=RUN_TOKENS.secret)
 STOP_DEADLINE_SECONDS = 5
 GRACE_WINDOW_SECONDS = 1
 ORPHAN_CLEANUP_SECONDS = 0.2
@@ -1002,8 +1015,8 @@ async def test_meter_worker_continues_after_any_failed_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     proxy = _egress(_fixed())
-    first = _EgressMeter(RunToken(uuid4(), uuid4()))
-    second = _EgressMeter(RunToken(uuid4(), uuid4()))
+    first = _EgressMeter(uuid4(), uuid4())
+    second = _EgressMeter(uuid4(), uuid4())
     attempts: list[list[object]] = []
 
     async def write(records: list[object]) -> None:
@@ -1028,8 +1041,8 @@ async def test_failed_meter_run_does_not_drop_other_runs(db: None) -> None:
     proxy = _egress(_fixed())
     await proxy._write_meter_batch(
         [
-            _EgressMeter(RunToken(workspace_id, uuid4())),
-            _EgressMeter(RunToken(workspace_id, turn_id)),
+            _EgressMeter(workspace_id, uuid4()),
+            _EgressMeter(workspace_id, turn_id),
         ]
     )
     async with workspace_tx() as connection:
@@ -1054,11 +1067,11 @@ async def test_meter_queue_applies_backpressure_at_its_bound(
         await release.wait()
 
     monkeypatch.setattr(proxy, "_write_meter_batch", write)
-    run = RunToken(uuid4(), uuid4())
-    await proxy._enqueue_meter(_EgressMeter(run))
+    metered = _EgressMeter(uuid4(), uuid4())
+    await proxy._enqueue_meter(metered)
     await entered.wait()
-    await proxy._enqueue_meter(_EgressMeter(run))
-    blocked = asyncio.create_task(proxy._enqueue_meter(_EgressMeter(run)))
+    await proxy._enqueue_meter(metered)
+    blocked = asyncio.create_task(proxy._enqueue_meter(metered))
     await asyncio.sleep(0)
     assert proxy._meter_queue.full()
     assert not blocked.done()
@@ -1701,6 +1714,164 @@ async def test_tunnel_meters_a_granted_host(db: None) -> None:
             )
         ).one()
     assert (row.dimension, int(row.amount)) == ("egress", 1)
+
+
+def _probe(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    ttl_seconds: int = 60,
+    member: UUID | None = None,
+) -> ProbeToken:
+    return ProbeToken(
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        probe_id=uuid4(),
+        expires_at=int(datetime.now(UTC).timestamp()) + ttl_seconds,
+        acting_member_id=member,
+    )
+
+
+async def test_a_probe_tunnel_meters_an_egress_row_that_names_no_turn(db: None) -> None:
+    """A probe reaches an admitted host through the same opaque tunnel a turn does, and the reach is
+    metered under the same `egress` dimension — on a row naming no turn, because a probe runs off
+    every turn. The workspace owes it, which is where a background job's spend is owed."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+
+    async def upstream(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    stub = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    granted_host = "127.0.0.1"
+    stub_port = stub.sockets[0].getsockname()[1]
+    rules = (
+        ScopeRule(allowed_hosts=frozenset({granted_host})),
+        MeterRule(host=granted_host, dimension=REQUEST_METER_DIMENSION),
+    )
+    cert, key = await generate_ca()
+    proxy = _egress(_fixed(rules), ca_cert=cert, ca_key=key)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    token = PROBE_TOKENS.encode(_probe(seeded.workspace_id, seeded.conversation_id))
+    try:
+        assert await _connect(endpoint.port, granted_host, token, stub_port) == 200
+    finally:
+        await proxy.stop()
+        stub.close()
+        await stub.wait_closed()
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.turn_id,
+                    tables.ledger.c.priced_micro_usd,
+                ).where(tables.ledger.c.workspace_id == seeded.workspace_id)
+            )
+        ).one()
+    assert (row.dimension, int(row.amount), row.turn_id, int(row.priced_micro_usd)) == (
+        "egress",
+        1,
+        None,
+        0,
+    )
+
+
+async def test_an_expired_probe_token_is_refused_before_rule_resolution() -> None:
+    """A probe's deadline is its whole liveness, so it is checked where a turn's running status is —
+    per CONNECT, ahead of rule resolution. An expired probe therefore costs no resolution and can
+    draw no injected credential, and nothing renews it."""
+    resolutions = 0
+
+    async def resolve(_principal: ProbeToken | RunToken | None) -> tuple:
+        nonlocal resolutions
+        resolutions += 1
+        return (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    workspace_id, conversation_id = uuid4(), uuid4()
+    try:
+        expired = _probe(workspace_id, conversation_id, ttl_seconds=-1)
+        assert await _connect(endpoint.port, MODEL_HOST, PROBE_TOKENS.encode(expired)) == 403
+        assert await proxy._authorized(expired) is False
+        assert await proxy._authorized(_probe(workspace_id, conversation_id)) is True
+    finally:
+        await proxy.stop()
+    assert resolutions == 0
+
+
+async def test_a_forged_probe_token_is_rejected_before_rule_resolution() -> None:
+    calls = 0
+
+    async def resolve(_principal: ProbeToken | RunToken | None) -> tuple:
+        nonlocal calls
+        calls += 1
+        return (ScopeRule(allowed_hosts=frozenset({MODEL_HOST})),)
+
+    cert, key = await generate_ca()
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert=cert,
+        ca_key=key,
+        run_tokens=RUN_TOKENS,
+    )
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    forged = ProbeTokenCodec(b"attacker").encode(_probe(uuid4(), uuid4()))
+    try:
+        assert await _connect(endpoint.port, MODEL_HOST, forged) == 403
+    finally:
+        await proxy.stop()
+    assert calls == 0
+
+
+async def test_probe_rules_derive_through_the_conversations_own_agent(db: None) -> None:
+    """A probe names a conversation where a turn names a turn, and the rules come off the same two
+    columns: the conversation's agent and that agent's snapshotted internet policy. An agent
+    narrowed off the internet refuses a probe exactly as it refuses its own turns, and a
+    conversation in another workspace resolves nothing — the predicate scopes it, not the RLS
+    tier."""
+    async with workspace_tx() as connection:
+        allowed = await _seed_turn(connection)
+        refused = await _seed_turn(connection, internet_access_allowed=False)
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+    proxy = _egress(resolver)
+    endpoint = await proxy.start(bind_host="127.0.0.1")
+    try:
+        probe = _probe(allowed.workspace_id, allowed.conversation_id)
+        assert await resolver.resolve(probe) == (InternetRule(),)
+        assert await resolver.resolve(_probe(refused.workspace_id, refused.conversation_id)) == ()
+        foreign = _probe(allowed.workspace_id, refused.conversation_id)
+        assert await resolver.resolve(foreign) == ()
+        assert await resolver.resolve(_probe(allowed.workspace_id, uuid4())) == ()
+        assert await _connect(endpoint.port, "169.254.169.254", PROBE_TOKENS.encode(probe)) == 403
+        assert await _connect(endpoint.port, "8.8.8.8", PROBE_TOKENS.encode(foreign)) == 403
+    finally:
+        await proxy.stop()
+
+
+async def test_a_probe_resolves_no_model_key_injection(db: None) -> None:
+    """Every carrier's base environment exports the model sentinel, so withholding the deployment's
+    model key from an unattended exec cannot rest on what the sandbox carries: the injection rule is
+    not resolved for a probe at all. The same agent's turn still resolves it — this withholds from
+    probes, it does not turn the model host off."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    resolver = PerAgentRules(base=derive_model_rules("claude-opus-4-8", "REAL-KEY"), grants=None)
+    turn_rules = await resolver.resolve(RunToken(seeded.workspace_id, seeded.turn_id))
+    probe_rules = await resolver.resolve(_probe(seeded.workspace_id, seeded.conversation_id))
+    assert [rule.real for rule in turn_rules if isinstance(rule, InjectionRule)] == ["REAL-KEY"]
+    assert not [rule for rule in probe_rules if isinstance(rule, InjectionRule)]
+    assert [type(rule) for rule in probe_rules] == [ScopeRule, MeterRule]
+    assert SENTINEL_MODEL_KEY not in str(probe_rules)
 
 
 def _candidates() -> list[InjectionRule]:
@@ -2631,6 +2802,80 @@ async def test_resolve_derives_forward_rules_for_the_acting_member(db: None) -> 
     assert forward.account_id == "acct-1"
     silent = await resolver.resolve(RunToken(spoken.workspace_id, spoken.turn_id))
     assert not any(isinstance(rule, ForwardRule) for rule in silent)
+
+
+async def test_resolve_derives_forward_rules_for_a_probes_acting_member(db: None) -> None:
+    """A probe acts as whoever armed it, so a command reaching that member's own connected account
+    in the arming turn keeps reaching it on every probe after — the way a scheduled fire keeps its
+    initiator's private connectors. A memberless probe forwards only what is shared with the
+    workspace, so an unattended exec is never silently promoted to a member's authority."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = GrantStore()
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        await store.record(
+            provider="hub",
+            account_id="acct-private",
+            host=FORWARD_HOST,
+            grantor_member_id=seeded.member_id,
+            conversation_id=seeded.conversation_id,
+            shared=False,
+        )
+    cli = CliCredential(env="HUB_TOKEN", header="authorization", forward=_RecordingForwarder())
+    resolver = PerAgentRules(base=(), grants=store, clis={"hub": cli})
+
+    armed = await resolver.resolve(
+        _probe(seeded.workspace_id, seeded.conversation_id, member=seeded.member_id)
+    )
+    forward = next(rule for rule in armed if isinstance(rule, ForwardRule))
+    assert (forward.sentinel, forward.account_id) == (
+        grant_sentinel("acct-private"),
+        "acct-private",
+    )
+
+    unattended = await resolver.resolve(_probe(seeded.workspace_id, seeded.conversation_id))
+    assert not [rule for rule in unattended if isinstance(rule, ForwardRule)]
+
+    stranger = await resolver.resolve(
+        _probe(seeded.workspace_id, seeded.conversation_id, member=uuid4())
+    )
+    assert not [rule for rule in stranger if isinstance(rule, ForwardRule)]
+
+
+async def test_two_probes_of_one_watch_share_one_rule_resolution(db: None) -> None:
+    """A probe token is minted per exec, so keying the cache on it would make every entry
+    single-use — a monitor fleet would churn the shared cache and evict live turns for rules nothing
+    reads again. Rules depend on the workspace, the conversation and the member, so two execs of one
+    watch resolve once, while a different member on the same conversation resolves for itself."""
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    resolutions = 0
+
+    async def resolve(_principal: EgressPrincipal | None) -> tuple:
+        nonlocal resolutions
+        resolutions += 1
+        return (InternetRule(),)
+
+    proxy = EgressProxy(
+        resolve=resolve,
+        authorize=_fixed().turn_live,
+        ca_cert="x",
+        ca_key="x",
+        run_tokens=RUN_TOKENS,
+    )
+    member = seeded.member_id
+    assert await proxy._rules_for(
+        _probe(seeded.workspace_id, seeded.conversation_id, member=member)
+    )
+    assert await proxy._rules_for(
+        _probe(seeded.workspace_id, seeded.conversation_id, member=member)
+    )
+    assert resolutions == 1
+    assert len(proxy._rule_cache) == 1
+
+    assert await proxy._rules_for(_probe(seeded.workspace_id, seeded.conversation_id))
+    assert resolutions == 2
+    assert len(proxy._rule_cache) == 2
 
 
 async def test_proxy_turn_reads_bind_the_run_workspace(

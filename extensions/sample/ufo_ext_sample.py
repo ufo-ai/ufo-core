@@ -156,6 +156,8 @@ PROPOSAL_KEY = "job:proposal"
 JOB_WORKSPACE_KEY = "job:workspace_file"
 JOB_WORKSPACE_REL = "sample-job/tick.txt"
 JOB_WORKSPACE_BODY = "the sample job wrote this off-turn"
+JOB_PROBE_KEY = "job:probe"
+JOB_PROBE_COMMAND = f"cat {WORKSPACE_DIR}/{JOB_WORKSPACE_REL}"
 ROUTE_KEY = "route:hit"
 ONBOARDING_KEY = "onboarding:done"
 CONNECTOR_EXECUTE_KEY = "connector:executed"
@@ -319,6 +321,10 @@ async def _tick(ctx: ExtensionContext) -> None:
         target.conversation_id, JOB_WORKSPACE_REL, JOB_WORKSPACE_BODY.encode()
     )
     await ctx.store.put(JOB_WORKSPACE_KEY, {"path": path})
+    if ctx.probes is None:
+        return
+    probed = await ctx.probes.run(target.conversation_id, JOB_PROBE_COMMAND)
+    await ctx.store.put(JOB_PROBE_KEY, {"stdout": probed.stdout, "exit_code": probed.exit_code})
 
 
 async def _hook(ctx: ExtensionContext, request: Request) -> Response:

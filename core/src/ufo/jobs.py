@@ -32,13 +32,12 @@ from ufo.accounting import ALLOW, SpendEvaluator
 from ufo.blob import BlobStore
 from ufo.candidates import WorkspaceCandidates
 from ufo.db import owner_tx, workspace_tx
-from ufo.ext.context import ExtensionContext, TurnInvoker, context_for
+from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import HookContext, HookSpec, JobSpec, Manifest, PageChangeBatch
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import log, log_error, warn
 from ufo.sandbox.conversation import ConversationSandbox
-from ufo.scheduling import ScheduleInvoker
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -59,10 +58,6 @@ from ufo.sources.sync import (
 from ufo.workspace import ws, ws_current
 
 
-class JobInvoker(TurnInvoker, ScheduleInvoker, Protocol):
-    pass
-
-
 class ResultDeliverer(Protocol):
     """The subagent hand-back sweep as this role sees it. The work is the turn loop's — it reads a
     finished child and posts its arrival — so it lives there, and the jobs role names and schedules
@@ -73,7 +68,7 @@ class ResultDeliverer(Protocol):
     async def candidate_workspaces(self) -> tuple[UUID, ...]: ...
 
 
-InvokerFactory = Callable[[UUID], JobInvoker]
+InvokerFactory = Callable[[UUID], TurnInvoker]
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
@@ -344,6 +339,7 @@ class PageChangeRunner:
     blob: BlobStore | None = None
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
+    probes: ConversationProbes | None = None
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
         consumers: list[PageChangeConsumer] = []
@@ -480,6 +476,7 @@ class PageChangeRunner:
             self.sandboxes,
             invoker,
             self.registry,
+            probes=self.probes,
         )
 
 
@@ -612,6 +609,7 @@ class JobRunner:
     blob: BlobStore | None = None
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
+    probes: ConversationProbes | None = None
 
     def launch(self) -> None:
         global _firing
@@ -680,7 +678,7 @@ class JobRunner:
                 self.sandboxes,
                 invoker,
                 self.registry,
-                schedule_invoker=invoker,
+                probes=self.probes,
             )
             try:
                 await binding.spec.handler(context)

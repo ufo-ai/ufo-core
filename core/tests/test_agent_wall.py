@@ -29,7 +29,6 @@ from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
-from ufo.scheduling import ScheduledTask
 from ufo.schema import tables
 from ufo.schema.records import Turn
 from ufo.surfaces.admission import Admission, MemberAdmission
@@ -182,53 +181,25 @@ async def test_invoke_refuses_a_conversation_bound_to_another_agent(db: None) ->
     assert turns == 0
 
 
-async def test_scheduled_fire_refuses_a_task_bound_to_another_agent(db: None) -> None:
+async def test_a_scheduled_fire_refuses_a_conversation_bound_to_another_agent(db: None) -> None:
+    """The wall holds for a fire the same way it holds for a member message: the caller asserts the
+    agent it believes the conversation is bound to, and admission refuses the mismatch before any
+    turn row exists. Whoever owns the schedule, a stored binding can never fire into another
+    agent's conversation."""
     workspace_id, _, second_agent = await _workspace_with_two_agents()
     admission = Admission(dbos=_StubDbos(), durable_surfaces=frozenset())
     with ws(workspace_id):
         context = _context(workspace_id, "cli")
         conversation_id = await context.conversation_for("session", conversation_audience(None))
-        task_id = uuid4()
-        fire_at = datetime(2026, 7, 25, tzinfo=UTC)
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.scheduled_task).values(
-                    id=task_id,
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    agent_id=second_agent,
-                    name="cross-agent",
-                    schedule="0 9 * * *",
-                    prompt="run",
-                    description="",
-                    next_run_at=fire_at,
-                    claimed_by="claim-1",
-                    claim_expires_at=fire_at,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        task = ScheduledTask(
-            id=task_id,
-            conversation_id=conversation_id,
-            agent_id=second_agent,
-            name="cross-agent",
-            schedule="0 9 * * *",
-            prompt="run",
-            description="",
-            next_run_at=fire_at,
-            last_run_at=None,
-            expires_at=None,
-            origin_seq=None,
-            resume_turn_id=None,
-            claim_id="claim-1",
-            paused=False,
-            created_at=fire_at,
-            updated_at=fire_at,
-            created_by_member_id=None,
-        )
         with pytest.raises(ValueError, match="bound to another agent"):
-            await admission.invoke_scheduled(workspace_id, task)
+            await admission.invoke(
+                workspace_id,
+                conversation_id,
+                second_agent,
+                "run",
+                "task:cross-agent",
+                as_scheduled=True,
+            )
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(

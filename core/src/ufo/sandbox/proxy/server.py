@@ -1,15 +1,18 @@
 """The sandbox proxy: scoped egress for every agent process.
 
 Agent processes reach the network solely through this proxy (their HTTP(S)_PROXY). The rule set is
-resolved from the deployment-signed run token in the `Proxy-Authorization` header — the turn,
-hence the turn's agent and acting member — so a sandbox sees only its own agent's egress: the
-workspace's model and credential rules plus that agent's OAuth grants. An unsigned, unknown, or
-ended run reaches no host.
+resolved from the deployment-signed token in the `Proxy-Authorization` header — a run token naming
+the turn, hence the turn's agent and acting member, or a probe token naming a conversation and
+carrying its own deadline — so a sandbox sees only its own agent's egress: the workspace's model and
+credential rules plus that agent's OAuth grants. An unsigned, unknown, ended, or expired principal
+reaches no host, and a probe resolves no model-key injection: an unattended exec is not the
+deployment's model spend to make.
 
 Default-deny is a CONNECT the proxy refuses: ScopeRule admits exact model and grant hosts.
 InternetRule admits a live turn's globally routable IPv4 after resolving and pinning DNS;
 tokenless, ended-turn, private, and IPv6 destinations are refused. Every admitted host requires a
-turn the DB still reports running. An admitted host carrying an InjectionRule or ForwardRule is
+turn the DB still reports running, or an unspent probe deadline. An admitted host carrying an
+InjectionRule or ForwardRule is
 MITM'd; the injection swaps in the real model or credential key. Authorized, the proxy terminates
 TLS with a leaf minted from the per-process CA (in the container's trust store) and dispatches on
 what the request carries: a grant sentinel in a
@@ -21,10 +24,11 @@ untouched) and the request re-originates over its own verified TLS, so the raw k
 the sandbox. An admitted host with neither rule kind is tunnelled
 opaquely — a grant injects nothing, so its host is reached opaquely yet still counted. Each metered
 host emits an egress metric and, off the relay path, writes an `egress` request row to the ledger
-keyed to the turn — per CONNECT for a tunnelled host, per MITM'd request otherwise — except the
+keyed to the principal — per CONNECT for a tunnelled host, per MITM'd request otherwise — except the
 model host, whose teed SSE response is parsed for its token usage and metered under
 `sandbox_tokens`, disjoint from the host turn loop's terminal `tokens` bill (which runs the model
-host-side and never touches the proxy)."""
+host-side and never touches the proxy). A probe's `egress` row names no turn: it is billed to its
+workspace, where a background job's spend is billed."""
 
 import asyncio
 import ipaddress
@@ -36,6 +40,7 @@ import time
 import zlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Protocol
@@ -45,10 +50,12 @@ import dns.asyncresolver
 import dns.exception
 import dns.name
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import (
     TOKENS_DIMENSION,
     record_egress_request,
+    record_probe_egress_request,
     record_sandbox_tokens,
 )
 from ufo.agent_scope import agent
@@ -59,7 +66,7 @@ from ufo.ext.manifest import CredentialSlot
 from ufo.grants import GrantStore
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_metric, log, log_error
+from ufo.o11y import emit_metric, log, log_error, warn
 from ufo.sandbox.containment import contained_file, contained_leaf
 from ufo.sandbox.proxy.rules import (
     ANTHROPIC_HOST,
@@ -76,7 +83,14 @@ from ufo.sandbox.proxy.rules import (
     derive_credential_rules,
     derive_grant_rules,
 )
-from ufo.sandbox.session import ProxyEndpoint, RunToken, RunTokenCodec
+from ufo.sandbox.session import (
+    SENTINEL_MODEL_KEY,
+    ProbeToken,
+    ProbeTokenCodec,
+    ProxyEndpoint,
+    RunToken,
+    RunTokenCodec,
+)
 from ufo.schema import tables
 from ufo.schema.records import RUNNING, Usage
 from ufo.workspace import ws
@@ -108,9 +122,32 @@ MAX_REFUSAL_DRAIN_BYTES = 8 * 1_048_576
 REFUSAL_DRAIN_TIMEOUT_SECONDS = 5
 EGRESS_AUTHORIZATION_UNAVAILABLE = "egress authorization unavailable"
 
-RuleResolver = Callable[["RunToken | None"], Awaitable[tuple[Rule, ...]]]
+EgressPrincipal = RunToken | ProbeToken
+"""What a CONNECT presents itself as: a turn's run token, or one probe exec's own token. Both are
+signed by the one deploy secret and name their own domain, so the wire cannot pass one as the
+other."""
+
+RuleResolver = Callable[["EgressPrincipal | None"], Awaitable[tuple[Rule, ...]]]
 TurnAuthorizer = Callable[["RunToken"], Awaitable[bool]]
 PublicAddressResolver = Callable[[str, int], Awaitable[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProbeRuleKey:
+    """What a probe's rule set actually depends on. A probe token is minted per exec, so keying the
+    cache on the token itself would make every entry single-use — a monitor fleet would churn the
+    shared cache and evict live turns to store rules nothing looks up again. Its `probe_id` and
+    deadline reach no rule: the agent comes from the conversation and the forwards from the member,
+    and both are here. Authorization is unaffected, being re-decided per CONNECT from the token."""
+
+    workspace_id: UUID
+    conversation_id: UUID
+    acting_member_id: UUID | None
+
+
+_RuleKey = RunToken | _ProbeRuleKey
+"""What the rule cache is keyed on. A run token is its own key — workspace, turn and member are
+exactly what its rules derive from."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +158,17 @@ class _CachedRules:
 
 @dataclass(frozen=True, slots=True)
 class _EgressMeter:
-    run: RunToken
+    """One metered request, and who owes it: the workspace, and the turn that made it — None for a
+    probe, which runs off every turn and bills its workspace directly."""
+
+    workspace_id: UUID
+    turn_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
 class _TokenMeter:
-    run: RunToken
+    workspace_id: UUID
+    turn_id: UUID
     model: str
     usage: Usage
 
@@ -184,9 +226,19 @@ async def _openssl(*argv: str) -> None:
         raise RuntimeError(f"openssl {argv[0]} failed: {stderr.decode().strip()}")
 
 
+@dataclass(frozen=True, slots=True)
+class _Authority:
+    """Whose egress a principal carries: the agent whose rules derive, that agent's snapshotted
+    internet policy, and the member whose private grants its CLI forwards may draw on."""
+
+    agent_id: UUID
+    internet_access_allowed: bool
+    acting_member_id: UUID | None
+
+
 @dataclass(frozen=True)
 class PerAgentRules:
-    """Resolve the proxy's rule set for one turn's agent, derived from the run token each call: the
+    """Resolve the proxy's rule set for one principal's agent, derived from its token each call: the
     workspace-wide model base, that workspace's own keyed-credential rules, and that agent's own
     OAuth grant rules. Per-agent authentication is the wire's isolation — agent A's turn resolves
     only A's grants, so A cannot inject or forward through another agent's account — and
@@ -195,7 +247,10 @@ class PerAgentRules:
     key. A run with no or unknown token yields the base alone; a resolution error raises to the
     proxy, which returns service unavailable without caching it — never a policy denial, broad
     allow, or another workspace's secret. Deriving each call (not once at boot) is the liveness: a
-    grant recorded or a slot filled mid-serve is live for the next turn."""
+    grant recorded or a slot filled mid-serve is live for the next turn.
+
+    A probe token resolves the same chain under the same agent, reached through its conversation
+    rather than a turn, minus the deployment's model key."""
 
     base: tuple[Rule, ...]
     grants: GrantStore | None
@@ -207,33 +262,40 @@ class PerAgentRules:
     )
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
 
-    async def resolve(self, run: RunToken | None) -> tuple[Rule, ...]:
-        if run is None:
+    async def resolve(self, principal: EgressPrincipal | None) -> tuple[Rule, ...]:
+        if principal is None:
             return self.base
-        with ws(run.workspace_id):
-            turn = await self._turn_of(run)
-            if turn is None:
+        with ws(principal.workspace_id):
+            match principal:
+                case RunToken():
+                    authority = await self._turn_of(principal)
+                case ProbeToken():
+                    authority = await self._conversation_of(principal)
+            if authority is None:
                 return self.base
-            agent_id, internet_access_allowed = turn
-            with agent(agent_id):
-                rules = (*self.base, *self.internet) if internet_access_allowed else self.base
+            with agent(authority.agent_id):
+                rules = (
+                    (*self.base, *self.internet) if authority.internet_access_allowed else self.base
+                )
                 if self.credentials is not None and self.slots:
                     rules = (
                         *rules,
                         *await derive_credential_rules(
-                            self.slots, run.workspace_id, self.credentials
+                            self.slots, principal.workspace_id, self.credentials
                         ),
                     )
-                if self.grants is None:
-                    return rules
-                granted = await self.grants.active_grants()
-                return (
-                    *rules,
-                    *derive_grant_rules(granted, self.transfer_hosts),
-                    *derive_cli_rules(granted, run.acting_member_id, self.clis),
-                )
+                if self.grants is not None:
+                    granted = await self.grants.active_grants()
+                    rules = (
+                        *rules,
+                        *derive_grant_rules(granted, self.transfer_hosts),
+                        *derive_cli_rules(granted, authority.acting_member_id, self.clis),
+                    )
+                if isinstance(principal, ProbeToken):
+                    return self._without_the_model_key(rules)
+                return rules
 
-    async def _turn_of(self, run: RunToken) -> tuple[UUID, bool] | None:
+    async def _turn_of(self, run: RunToken) -> _Authority | None:
         """The turn's agent and snapshotted internet policy in one indexed read."""
         async with workspace_tx() as connection:
             row = (
@@ -257,7 +319,51 @@ class PerAgentRules:
             ).one_or_none()
         if row is None:
             return None
-        return row.agent_id, row.internet_access_allowed
+        return _Authority(row.agent_id, row.internet_access_allowed, run.acting_member_id)
+
+    async def _conversation_of(self, probe: ProbeToken) -> _Authority | None:
+        """The probed conversation's agent and snapshotted internet policy — the same two columns
+        a turn's read answers, reached through the conversation because a probe names no turn. The
+        member comes off the token rather than a row: whoever armed the work this exec serves, so a
+        command that reached their own connected account in the arming turn keeps reaching it, the
+        way a scheduled fire keeps its initiator's private connectors. A memberless probe forwards
+        only what is shared with the workspace."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.agent_id,
+                        tables.agent.c.internet_access_allowed,
+                    )
+                    .select_from(
+                        tables.conversation.join(
+                            tables.agent,
+                            tables.agent.c.id == tables.conversation.c.agent_id,
+                        )
+                    )
+                    .where(
+                        tables.conversation.c.id == probe.conversation_id,
+                        tables.conversation.c.workspace_id == probe.workspace_id,
+                        tables.agent.c.workspace_id == probe.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        return _Authority(row.agent_id, row.internet_access_allowed, probe.acting_member_id)
+
+    def _without_the_model_key(self, rules: tuple[Rule, ...]) -> tuple[Rule, ...]:
+        """`rules` minus the deployment's own model-key injection. A probe's environment exports
+        no model sentinel, but a carrier's base environment does, so the withholding is made true
+        at the enforcement point rather than left to what a sandbox happens to carry: a probe that
+        reaches a model host reaches it unauthenticated. Everything else derives as a turn's does —
+        the workspace's keyed credentials, so a `git fetch` probe still authenticates, and the
+        agent's grants, so a `gh run view` probe still forwards through the broker."""
+        return tuple(
+            rule
+            for rule in rules
+            if not (isinstance(rule, InjectionRule) and SENTINEL_MODEL_KEY in rule.sentinel)
+        )
 
     async def turn_live(self, run: RunToken) -> bool:
         """The egress-authorization gate: True only while the run token names a turn the DB still
@@ -299,10 +405,17 @@ class EgressProxy:
         default_factory=lambda: asyncio.Queue(maxsize=METER_QUEUE_MAX), init=False
     )
     _meter_worker: asyncio.Task[None] | None = field(default=None, init=False)
-    _rule_cache: dict[RunToken, _CachedRules] = field(default_factory=dict, init=False)
-    _rule_tasks: dict[RunToken, asyncio.Task[tuple[Rule, ...]]] = field(
+    _rule_cache: dict[_RuleKey, _CachedRules] = field(default_factory=dict, init=False)
+    _rule_tasks: dict[_RuleKey, asyncio.Task[tuple[Rule, ...]]] = field(
         default_factory=dict, init=False
     )
+
+    @property
+    def probe_tokens(self) -> ProbeTokenCodec:
+        """The codec for the other token class this proxy admits, derived from the run codec's
+        secret rather than wired beside it: both are the one deploy secret's tokens, and a deploy
+        that could wire them to different keys would sign probes nothing verifies."""
+        return ProbeTokenCodec(secret=self.run_tokens.secret)
 
     async def start(
         self, bind_host: str = PROXY_BIND_HOST, port: int = 0, public_url: str | None = None
@@ -409,26 +522,26 @@ class EgressProxy:
             if not MIN_CONNECT_PORT <= port <= MAX_CONNECT_PORT:
                 await _respond(writer, 400, "invalid CONNECT port")
                 return
-            run = self._run_token(proxy_auth)
-            if run is None:
+            principal = self._principal(proxy_auth)
+            if principal is None:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
             try:
-                authorized = await self._turn_authorized(run)
+                authorized = await self._authorized(principal)
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
                 return
             if not authorized:
                 await _respond(writer, 403, f"egress to {host} is not permitted")
                 return
-            workspace_connections = self._workspace_connections.get(run.workspace_id, 0)
+            workspace_connections = self._workspace_connections.get(principal.workspace_id, 0)
             if workspace_connections >= MAX_PROXY_CONNECTIONS_PER_WORKSPACE:
                 await _respond(writer, 429, "workspace proxy connection capacity reached")
                 return
-            self._workspace_connections[run.workspace_id] = workspace_connections + 1
-            workspace_connection = run.workspace_id
+            self._workspace_connections[principal.workspace_id] = workspace_connections + 1
+            workspace_connection = principal.workspace_id
             try:
-                rules = await self._rules_for(run)
+                rules = await self._rules_for(principal)
             except Exception:
                 await _respond(writer, 503, EGRESS_AUTHORIZATION_UNAVAILABLE)
                 return
@@ -454,10 +567,10 @@ class EgressProxy:
             forwards = [r for r in rules if isinstance(r, ForwardRule) and r.host == host]
             if not injections and not forwards:
                 await self._tunnel(
-                    reader, writer, host, port, run, rules, connect_host=connect_host
+                    reader, writer, host, port, principal, rules, connect_host=connect_host
                 )
             else:
-                await self._mitm(reader, writer, host, port, injections, forwards, run, rules)
+                await self._mitm(reader, writer, host, port, injections, forwards, principal, rules)
         finally:
             writer.close()
             if workspace_connection is not None:
@@ -468,6 +581,18 @@ class EgressProxy:
                     self._workspace_connections[workspace_connection] = workspace_connections
             self._active_connections -= 1
             self._connection_tasks.discard(task)
+
+    async def _authorized(self, principal: EgressPrincipal) -> bool:
+        """The egress-authorization gate, decided fresh per CONNECT. A run token is authorized
+        while the DB still reports its turn running, so a key injected for a turn cannot be drawn
+        once that turn ends. A probe token names no turn to read: it carries its own deadline, is
+        authorized until that deadline passes, and nothing renews it — so a probe's egress can never
+        outlive the one exec it was minted for, and the check costs a comparison, not a query."""
+        match principal:
+            case ProbeToken():
+                return principal.expires_at > int(datetime.now(UTC).timestamp())
+            case RunToken():
+                return await self._turn_authorized(principal)
 
     async def _turn_authorized(self, run: RunToken) -> bool:
         """The turn-liveness gate, whose fault is recorded here and raised on. Both authorization
@@ -484,53 +609,62 @@ class EgressProxy:
             )
             raise
 
-    async def _rules_for(self, run: RunToken | None) -> tuple[Rule, ...]:
-        """The resolved rule set for this turn's agent, bounded and refreshed before an injected
-        short-lived credential can expire. Concurrent misses for one run share one resolution. A
+    async def _rules_for(self, principal: EgressPrincipal | None) -> tuple[Rule, ...]:
+        """The resolved rule set for this principal's agent, bounded and refreshed before an
+        injected short-lived credential can expire. Concurrent misses for one principal share one
+        resolution. A
         resolution error fails closed with a service error, is not cached, and is recorded once by
         that shared resolution rather than once per connection waiting on it."""
-        if run is None:
+        if principal is None:
             return await self.resolve(None)
-        hit = self._rule_cache.get(run)
+        key = _rule_key(principal)
+        hit = self._rule_cache.get(key)
         if hit is not None and hit.expires_at > time.monotonic():
             return hit.rules
         if hit is not None:
-            del self._rule_cache[run]
-        task = self._rule_tasks.get(run)
+            del self._rule_cache[key]
+        task = self._rule_tasks.get(key)
         if task is None:
-            task = asyncio.create_task(self._resolve_rules(run))
+            task = asyncio.create_task(self._resolve_rules(key, principal))
             task.add_done_callback(_read_fault)
-            self._rule_tasks[run] = task
+            self._rule_tasks[key] = task
         return await asyncio.shield(task)
 
-    async def _resolve_rules(self, run: RunToken) -> tuple[Rule, ...]:
+    async def _resolve_rules(self, key: _RuleKey, principal: EgressPrincipal) -> tuple[Rule, ...]:
         task = asyncio.current_task()
         try:
             try:
-                rules = await self.resolve(run)
+                rules = await self.resolve(principal)
             except Exception as error:
                 log_error(
                     "egress.resolve_failed",
-                    workspace_id=str(run.workspace_id),
-                    turn=str(run.turn_id),
+                    workspace_id=str(principal.workspace_id),
+                    turn="" if isinstance(principal, ProbeToken) else str(principal.turn_id),
                     error_class=type(error).__name__,
                 )
                 raise
             if len(self._rule_cache) >= RULE_CACHE_MAX:
                 del self._rule_cache[next(iter(self._rule_cache))]
-            self._rule_cache[run] = _CachedRules(
+            self._rule_cache[key] = _CachedRules(
                 expires_at=time.monotonic() + RULE_CACHE_TTL_SECONDS, rules=rules
             )
             return rules
         finally:
-            if self._rule_tasks.get(run) is task:
-                del self._rule_tasks[run]
+            if self._rule_tasks.get(key) is task:
+                del self._rule_tasks[key]
 
-    def _run_token(self, proxy_auth: str) -> RunToken | None:
+    def _principal(self, proxy_auth: str) -> EgressPrincipal | None:
+        """The signed identity this CONNECT carries, or None when it carries none this deployment
+        made. Each codec refuses the other's domain, so a run token presented where a probe token
+        would be — or either one forged — is no principal at all and reaches no host."""
         if not proxy_auth:
             return None
         try:
             return self.run_tokens.from_proxy_auth(proxy_auth)
+        except ValueError:
+            pass
+        try:
+            return self.probe_tokens.from_proxy_auth(proxy_auth)
         except ValueError:
             return None
 
@@ -574,15 +708,16 @@ class EgressProxy:
         writer: asyncio.StreamWriter,
         host: str,
         port: int,
-        run: RunToken,
+        principal: EgressPrincipal,
         rules: tuple[Rule, ...],
         connect_host: str,
     ) -> None:
         """An admitted host with no key to inject (a grant holds its token server-side): relay bytes
         opaquely, never terminating TLS. A MeterRule host is counted once the tunnel is
         established — the proxy cannot see individual requests inside the opaque TLS, so egress to a
-        granted host is metered at CONNECT granularity, the metric and the `egress` ledger row keyed
-        to the turn off the relay path. A connection that never opens (502) is not counted."""
+        granted host is metered at CONNECT granularity, the metric and the `egress` ledger row
+        written off the relay path against whichever identity the principal names. A connection that
+        never opens (502) is not counted."""
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(connect_host, port),
@@ -594,7 +729,7 @@ class EgressProxy:
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await writer.drain()
         self._meter(host, rules)
-        await self._meter_ledger(host, run, rules)
+        await self._meter_ledger(host, principal, rules)
         await _relay(reader, writer, upstream_reader, upstream_writer)
 
     async def _mitm(
@@ -605,7 +740,7 @@ class EgressProxy:
         port: int,
         injections: list[InjectionRule],
         forwards: list[ForwardRule],
-        run: RunToken,
+        principal: EgressPrincipal,
         rules: tuple[Rule, ...],
     ) -> None:
         """Terminate the sandbox's TLS with a minted leaf and dispatch on what the request carries:
@@ -629,7 +764,7 @@ class EgressProxy:
         matched = _forward_match(request[1], forwards)
         if matched is not None:
             await self._forward_broker(
-                client_reader, client_writer, matched, request, host, run, rules
+                client_reader, client_writer, matched, request, host, principal, rules
             )
             return
         try:
@@ -645,7 +780,7 @@ class EgressProxy:
         upstream_writer.write(b"\r\n")
         await upstream_writer.drain()
         self._meter(host, rules)
-        await self._meter_ledger(host, run, rules)
+        await self._meter_ledger(host, principal, rules)
         tokens_metered = any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension == TOKENS_DIMENSION
             for rule in rules
@@ -657,7 +792,7 @@ class EgressProxy:
         await _relay(
             client_reader, client_writer, upstream_reader, upstream_writer, accumulator.feed
         )
-        await self._meter_tokens(run, accumulator)
+        await self._meter_tokens(principal, accumulator)
 
     async def _forward_broker(
         self,
@@ -666,7 +801,7 @@ class EgressProxy:
         rule: ForwardRule,
         request: tuple[bytes, list[bytes]],
         host: str,
-        run: RunToken,
+        principal: EgressPrincipal,
         rules: tuple[Rule, ...],
     ) -> None:
         """Execute one sentinel-carrying request through the grant's broker instead of
@@ -686,7 +821,7 @@ class EgressProxy:
             await _drain_refused_body(client_reader, body.pending)
             return
         self._meter(host, rules)
-        await self._meter_ledger(host, run, rules)
+        await self._meter_ledger(host, principal, rules)
         try:
             response = await rule.forward.forward(
                 rule.account_id,
@@ -769,21 +904,40 @@ class EgressProxy:
             if isinstance(rule, MeterRule) and rule.host == host:
                 emit_metric("sandbox_egress_total", host=host, dimension=rule.dimension)
 
-    async def _meter_ledger(self, host: str, run: RunToken, rules: tuple[Rule, ...]) -> None:
+    async def _meter_ledger(
+        self, host: str, principal: EgressPrincipal, rules: tuple[Rule, ...]
+    ) -> None:
         if not any(
             isinstance(rule, MeterRule) and rule.host == host and rule.dimension != TOKENS_DIMENSION
             for rule in rules
         ):
             return
-        await self._enqueue_meter(_EgressMeter(run))
+        turn_id = principal.turn_id if isinstance(principal, RunToken) else None
+        await self._enqueue_meter(_EgressMeter(principal.workspace_id, turn_id))
 
-    async def _meter_tokens(self, run: RunToken, accumulator: "HttpTokenUsage") -> None:
+    async def _meter_tokens(
+        self, principal: EgressPrincipal, accumulator: "HttpTokenUsage"
+    ) -> None:
+        """Bill the model call this exchange carried to its turn. A probe cannot have made one: it
+        exports no model sentinel and resolves no model-key injection, so its request to a model
+        host goes upstream unauthenticated and reports no usage. Reaching here with a probe would
+        mean the deployment's key was spent off every turn, which is recorded rather than billed to
+        a turn that does not exist."""
+        if isinstance(principal, ProbeToken):
+            warn(
+                "egress.probe_model_usage",
+                host=accumulator.host,
+                probe_id=str(principal.probe_id),
+            )
+            return
         parsed = accumulator.usage()
         if parsed is None:
             log("egress.tokens_usage_absent", host=accumulator.host)
             return
         model, usage = parsed
-        await self._enqueue_meter(_TokenMeter(run, model, usage))
+        await self._enqueue_meter(
+            _TokenMeter(principal.workspace_id, principal.turn_id, model, usage)
+        )
 
     async def _enqueue_meter(self, record: _MeterRecord) -> None:
         worker = self._meter_worker
@@ -829,17 +983,18 @@ class EgressProxy:
                 return
 
     async def _write_meter_batch(self, records: list[_MeterRecord]) -> None:
-        egress: dict[RunToken, int] = {}
-        tokens: dict[RunToken, dict[str, Usage]] = {}
-        record_counts: dict[RunToken, int] = {}
+        egress: dict[tuple[UUID, UUID | None], int] = {}
+        tokens: dict[tuple[UUID, UUID | None], dict[str, Usage]] = {}
+        record_counts: dict[tuple[UUID, UUID | None], int] = {}
         for record in records:
+            billed = (record.workspace_id, record.turn_id)
             match record:
-                case _EgressMeter(run=run):
-                    egress[run] = egress.get(run, 0) + 1
-                case _TokenMeter(run=run, model=model, usage=usage):
-                    run_tokens = tokens.setdefault(run, {})
-                    previous = run_tokens.get(model, Usage())
-                    run_tokens[model] = Usage(
+                case _EgressMeter():
+                    egress[billed] = egress.get(billed, 0) + 1
+                case _TokenMeter(model=model, usage=usage):
+                    billed_tokens = tokens.setdefault(billed, {})
+                    previous = billed_tokens.get(model, Usage())
+                    billed_tokens[model] = Usage(
                         input_tokens=previous.input_tokens + usage.input_tokens,
                         output_tokens=previous.output_tokens + usage.output_tokens,
                         cache_read_tokens=previous.cache_read_tokens + usage.cache_read_tokens,
@@ -850,33 +1005,63 @@ class EgressProxy:
                             previous.cache_write_1h_tokens + usage.cache_write_1h_tokens
                         ),
                     )
-            record_counts[run] = record_counts.get(run, 0) + 1
-        for run, count in record_counts.items():
+            record_counts[billed] = record_counts.get(billed, 0) + 1
+        for (workspace_id, turn_id), count in record_counts.items():
             try:
-                with ws(run.workspace_id):
+                with ws(workspace_id):
                     async with workspace_tx() as connection:
-                        amount = egress.get(run)
-                        if amount is not None:
-                            await record_egress_request(
-                                connection, run.workspace_id, run.turn_id, amount=amount
-                            )
-                        for model, usage in tokens.get(run, {}).items():
-                            await record_sandbox_tokens(
-                                connection,
-                                run.workspace_id,
-                                run.turn_id,
-                                model,
-                                usage,
-                                self.pricing,
-                            )
+                        await self._write_billed(
+                            connection,
+                            workspace_id,
+                            turn_id,
+                            egress.get((workspace_id, turn_id)),
+                            tokens.get((workspace_id, turn_id), {}),
+                        )
             except Exception as error:
                 log_error(
                     "egress.meter_run_failed",
-                    workspace_id=str(run.workspace_id),
-                    turn_id=str(run.turn_id),
+                    workspace_id=str(workspace_id),
+                    turn_id="" if turn_id is None else str(turn_id),
                     records=count,
                     error_class=type(error).__name__,
                 )
+
+    async def _write_billed(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        turn_id: UUID | None,
+        requests: int | None,
+        tokens: dict[str, Usage],
+    ) -> None:
+        """One billed identity's rows for this batch. A turn-less identity is a probe: it owes its
+        request count on a NULL-turn `egress` row and never model tokens, which `_meter_tokens`
+        refuses to enqueue for it — so the shape holds here as well as there."""
+        if turn_id is None:
+            if requests is not None:
+                await record_probe_egress_request(connection, workspace_id, amount=requests)
+            return
+        if requests is not None:
+            await record_egress_request(connection, workspace_id, turn_id, amount=requests)
+        for model, usage in tokens.items():
+            await record_sandbox_tokens(
+                connection, workspace_id, turn_id, model, usage, self.pricing
+            )
+
+
+def _rule_key(principal: EgressPrincipal) -> _RuleKey:
+    """The cache key for one principal's rule set: a run token keys on itself, a probe on the three
+    things its rules derive from, so two execs of one watch share the resolution their tokens would
+    otherwise each pay for."""
+    match principal:
+        case RunToken():
+            return principal
+        case ProbeToken():
+            return _ProbeRuleKey(
+                workspace_id=principal.workspace_id,
+                conversation_id=principal.conversation_id,
+                acting_member_id=principal.acting_member_id,
+            )
 
 
 def _read_fault(task: asyncio.Task[tuple[Rule, ...]]) -> None:

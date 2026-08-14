@@ -4,9 +4,12 @@ A scheduled task is a workspace object (RFC 0017): the agent creates, updates, l
 recurring tasks through the generic object verbs, and this module supplies the kind — spec model,
 store handlers over the scoped `ScheduleStore`, cron validation on every apply. Creation binds the
 applying turn's conversation and agent; updates preserve both, so every fire re-enters the original
-conversation as its executor. Pause rows (`@once`) are workflow internals, never objects —
-`ScheduleStore.list` excludes them, and `pause_and_wait` stays a plain tool that converges member
-ingress and timer expiry on one resume turn."""
+conversation as its executor.
+
+`pause_and_wait` is a plain tool, not a kind: a paused workflow is a thing happening rather than a
+thing a member manages, so a pause is a row in this extension's own `pause` table and reaches no
+object surface. It converges member ingress and timer expiry on one resume turn exactly as before —
+the arbitration simply moved to where the race is, into the fire's `unless_member_since` guard."""
 
 import json
 from dataclasses import dataclass
@@ -34,10 +37,11 @@ from ufo.sdk.objects import (
     object_page,
     owner_emails,
 )
-from ufo.sdk.scheduling import ListedTask, ScheduledTask, ScheduleStore
 from ufo.sdk.subjects import subject_shared
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
+from ufo_ext_scheduled_tasks.pauses import PauseStore
+from ufo_ext_scheduled_tasks.schedules import ListedTask, ScheduledTask, ScheduleStore
 from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 SCHEDULED_TASK_KIND = "scheduled_task"
@@ -54,10 +58,6 @@ MAX_WAIT_MINUTES = 10_080
 PAUSE_DIRECTIVE = (
     "Reply with `ai_response`, then end your turn. The workflow resumes when a new message arrives "
     "or the durable timer fires."
-)
-MEMBER_RESUME_DIRECTIVE = (
-    "A newer member message has already been admitted, so no timer was armed. Reply with "
-    "`ai_response`, then end your turn; that message resumes the workflow."
 )
 
 
@@ -124,9 +124,13 @@ class PauseAndWaitInput(BaseModel):
 
 
 def _require_scheduler(ext: ExtensionContext | None) -> ScheduleStore:
-    if ext is None or ext.scheduler is None:
-        raise RuntimeError("scheduled tasks require the scheduled-tasks ExtensionContext and store")
-    return ext.scheduler
+    return ScheduleStore(_require_ext(ext))
+
+
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
+    if ext is None:
+        raise RuntimeError("scheduled tasks require the scheduled-tasks ExtensionContext")
+    return ext
 
 
 def _summary(task: ScheduledTask) -> str:
@@ -436,7 +440,17 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
 
 
 async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResult:
-    scheduler = _require_scheduler(ctx.ext)
+    """Arm the conversation's durable pause and hand the turn its directive.
+
+    The arm is unconditional. Whether a member has spoken since is not asked here — a message
+    landing between this write and the timer would make any answer stale — so the row records where
+    the conversation had got to and the fire asks admission, under the conversation lock, in the one
+    moment the answer cannot change underneath it.
+
+    Two marks in two counter spaces, because one cannot answer the question. A member message that
+    folds into the arming turn leaves that turn's sequence unchanged, so turn sequence alone cannot
+    separate a fold the agent had already read from one that landed after it armed — and those two
+    must end opposite ways. The arrival watermark is what separates them."""
     resume_at = datetime.now(UTC) + timedelta(minutes=args.wait_minutes)
     wakeup = {
         "resuming": "timer",
@@ -444,25 +458,17 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         "next_steps": args.next_steps,
         "metadata": args.metadata,
     }
-    pause = await scheduler.pause(
+    ext = _require_ext(ctx.ext)
+    await PauseStore(ext).arm(
         conversation_id=ctx.turn.conversation_id,
-        prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
-        description=args.reason,
-        next_run_at=resume_at,
+        agent_id=ctx.turn.agent_id,
+        resume_at=resume_at,
         origin_seq=ctx.turn.seq,
+        origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
+        prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
+        user_description=args.user_description,
         created_by_member_id=ctx.acting_member_id,
     )
-    if pause is None or pause.resume_turn_id is not None:
-        payload = {
-            "awaiting": "member",
-            "ai_response": args.ai_response,
-            "next_steps": args.next_steps,
-            "reason": args.reason,
-            "metadata": args.metadata,
-        }
-        return ToolResult(
-            content=(TextContent(text=f"{MEMBER_RESUME_DIRECTIVE}\n{json.dumps(payload)}"),)
-        )
     payload = {
         "awaiting": "timer",
         "ai_response": args.ai_response,

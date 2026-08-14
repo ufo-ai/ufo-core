@@ -10,7 +10,7 @@ index/embed backends, a transaction over the extension's own tables, governed pr
 invoke, without reshaping what handlers already hold."""
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,8 +29,8 @@ from ufo.accounting import (
     mint_usage_exports,
     read_pending_usage_exports,
 )
-from ufo.agent_scope import agent_current
-from ufo.audience import SHARED_AUDIENCE, Audience
+from ufo.agent_scope import agent, agent_current
+from ufo.audience import SHARED_AUDIENCE, Audience, parse_audience
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.candidates import WorkspaceCandidates, owner_candidates
 from ufo.credentials import (
@@ -66,9 +66,9 @@ from ufo.models.interface import (
 from ufo.models.pricing import Pricing
 from ufo.o11y import log
 from ufo.sandbox.conversation import ConversationSandbox
-from ufo.scheduling import ScheduleInvoker, ScheduleStore
+from ufo.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import AgentChange, ProposalRef, Usage
+from ufo.schema.records import MEMBER_ADMISSION, AgentChange, ProposalRef, Usage
 from ufo.seats import workspace_domain
 from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
@@ -389,10 +389,11 @@ class ConversationFiles:
     """Write a file into one conversation's agent-visible workspace, off-turn. The workspace lives
     in the conversation's sandbox, so a write goes through the carrier — the same `/workspace` the
     agent's file tools read on its next turn — and the sandbox seam stays module-private
-    (`_sandboxes`): the only operations exposed are a scoped write and a scoped prune, never an
-    arbitrary exec. Every operation resolves the conversation against the ambient workspace first,
-    so a handler holding another tenant's conversation id writes nothing — the scoping is in the
-    predicate, not left to the RLS tier."""
+    (`_sandboxes`): the only operations exposed are a scoped write and a scoped prune. Running a
+    command in that sandbox is a capability of its own (`ConversationProbes`), wired into a
+    different set of roles. Every operation resolves the conversation against the ambient workspace
+    first, so a handler holding another tenant's conversation id writes nothing — the scoping is in
+    the predicate, not left to the RLS tier."""
 
     _sandboxes: ConversationSandbox
 
@@ -408,6 +409,110 @@ class ConversationFiles:
         off-turn writer that appends unattended. Names sort lexically, so a timestamp-named file
         sorts chronologically."""
         await self._sandboxes.prune(conversation_id, rel_prefix, keep)
+
+
+async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UUID | None:
+    """The agent a conversation is permanently bound to, or None when the id names no conversation
+    in this workspace. One read behind both askers: the handler resolving an opaque id to an agent
+    wall, and an off-turn exec deciding whose scope it runs under."""
+    async with workspace_tx() as connection:
+        found = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.id == conversation_id,
+                )
+            )
+        ).one_or_none()
+    return None if found is None else found.agent_id
+
+
+PROBE_TIMEOUT_SECONDS = 60
+PROBE_TIMEOUT_MAX_SECONDS = 120
+
+ProbeEnvironment = Callable[[UUID, UUID, UUID | None], Awaitable[dict[str, str]]]
+"""What a probe's sandbox open exports, answered for one conversation, one probe id and the member
+the probe acts as: the git proxy-auth and credential config, that member's connector CLI sentinels,
+and the conversation's own id. The derivation reads the deploy's declared credential slots, so it is
+wired in by the deploy that holds them rather than reached from here."""
+
+
+@dataclass(frozen=True)
+class ConversationProbes:
+    """Run one bounded command in a conversation's sandbox, off every turn.
+
+    This is the capability no extension can express. A turn's egress is authorized by that turn, so
+    work meant to outlive its arming turn loses the network the moment the turn commits, and a
+    container the carrier suspended has nothing left running to ask. A probe re-enters the
+    conversation's own sandbox — the same `/workspace` the agent's files live in, resumed on touch —
+    under a token this deployment signs for that one exec, and hands back what the command reported.
+
+    Its authority is the authority a turn's own sandbox open has: the conversation's agent, that
+    agent's snapshotted internet policy, the workspace's keyed credentials, the grants shared with
+    the agent's audience, and — when `acting_member_id` names the member who armed the work — that
+    member's private connections, exactly as their own turn would forward them. The one thing it
+    deliberately lacks is the deployment's model key: no sentinel is exported and the proxy
+    resolves no injection for it, so an unattended exec cannot spend the deployment's model
+    budget.
+
+    A conversation bound to a member's terminal raises `TerminalGone` when that terminal is not
+    connected. That reaches the caller rather than reading as an empty result: a probe that could
+    not run is not a probe that found nothing."""
+
+    _sandboxes: ConversationSandbox
+    _probe_tokens: ProbeTokenCodec
+    _env: ProbeEnvironment
+
+    async def run(
+        self,
+        conversation_id: UUID,
+        command: str,
+        timeout_s: int = PROBE_TIMEOUT_SECONDS,
+        acting_member_id: UUID | None = None,
+    ) -> ExecResult:
+        """Run `command` under `bash -lc` in the conversation's sandbox and return its captured
+        stdout, stderr, and exit code. A nonzero exit is a result, not an error — reading what a
+        command reports is the whole point of running it.
+
+        `acting_member_id` is the member this exec acts as: the one who armed the work it serves, so
+        a command reaching their own connected account keeps reaching it off-turn, the way a
+        scheduled fire keeps its initiator's private connectors. Passing nobody forwards only the
+        connections shared with the whole workspace — safe, and the reason an unattended exec is
+        never silently promoted to a member's authority.
+
+        The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
+        nothing has an agent to bind, since a probe answers to no turn — yet the environment is
+        derived from that agent's connector grants, and the proxy resolves this probe's rules under
+        the same agent. Binding it here is what makes those two agree, and what keeps an
+        agent-scoped read anywhere under this call from failing on an unbound scope.
+
+        The token's deadline is this timeout, minted before the sandbox is opened, so the probe's
+        egress window is bounded by the exec it belongs to and closes with nothing having to revoke
+        it. Raises on a conversation outside the ambient workspace, and on a timeout over
+        `PROBE_TIMEOUT_MAX_SECONDS`: an unattended exec able to hold a sandbox open longer than that
+        is a wait with no end rather than a probe."""
+        if not 0 < timeout_s <= PROBE_TIMEOUT_MAX_SECONDS:
+            raise ValueError(
+                f"a probe timeout of {timeout_s}s is outside 1..{PROBE_TIMEOUT_MAX_SECONDS}s"
+            )
+        workspace_id = ws_current().workspace_id
+        agent_id = await conversation_agent_id(workspace_id, conversation_id)
+        if agent_id is None:
+            raise ValueError(f"conversation {conversation_id} is not in this workspace")
+        probe = ProbeToken(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            probe_id=uuid4(),
+            expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
+            acting_member_id=acting_member_id,
+        )
+        with agent(agent_id):
+            session = await self._sandboxes.open(
+                conversation_id,
+                self._probe_tokens.encode(probe),
+                await self._env(conversation_id, probe.probe_id, acting_member_id),
+            )
+            return await session.bash(command, timeout_s=timeout_s)
 
 
 def trajectory_workspaces() -> WorkspaceCandidates:
@@ -467,7 +572,10 @@ class TurnInvoker(Protocol):
         *,
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
-    ) -> UUID: ...
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None: ...
 
 
 class ModelResolver(Protocol):
@@ -656,6 +764,28 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationFacts:
+    """What a member-facing listing must know about a conversation its rows report into: the
+    disclosure audience that decides who may see a row, and the surface's own name for where that
+    conversation lives. Read live rather than snapshotted onto the rows — an audience never changes,
+    but a surface label does when a channel is renamed, and a stale name in an `origin` column is a
+    listing telling a member about a place that no longer goes by that name."""
+
+    audience: Audience
+    surface_label: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TurnOutcome:
+    """How one turn ended, as a status line renders it: the status it holds, and the text of its
+    terminal frame once it has committed one. `text` is None for a turn still running, and for one
+    that ended without saying anything."""
+
+    status: str
+    text: str | None
+
+
 @dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
@@ -669,7 +799,7 @@ class ExtensionContext:
     pages: PageFeed | None = None
     corpus: TrajectoryCorpus | None = None
     files: ConversationFiles | None = None
-    scheduler: ScheduleStore | None = None
+    probes: ConversationProbes | None = None
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
     key_slot_for: Callable[[str], str | None] | None = None
@@ -731,15 +861,42 @@ class ExtensionContext:
             yield connection
 
     async def invoke(
-        self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str
-    ) -> UUID:
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None = None,
+        holds_work_already_done: bool = False,
+        as_scheduled: bool = False,
+        unless_member_since: int | None = None,
+        unless_member_arrival_since: int | None = None,
+    ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
         `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
-        agent's conversation. Fails loud when no invoker is wired rather than silently dropping
-        the invocation."""
+        agent's conversation. `on_behalf_of_member_id` is the member the woken turn acts on behalf
+        of; `holds_work_already_done` parks the turn on a spend breach instead of cancelling it,
+        for work already performed and metered; `as_scheduled` stamps the turn as a scheduled
+        fire — its own turn, never folded, seat-gated on the on-behalf member;
+        `unless_member_since` and `unless_member_arrival_since` — a pair, refused half-set —
+        refuse the admission with None when a member turn past the turn watermark exists or a
+        member arrival past the arrival watermark does (each watermark compares only its own
+        counter space) — None is reachable only for a caller that passed them. Fails loud when
+        no invoker is wired rather than silently dropping the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
-        return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
+        return await self.invoker.invoke(
+            conversation_id,
+            agent_id,
+            message,
+            idempotency_key,
+            on_behalf_of_member_id=on_behalf_of_member_id,
+            holds_work_already_done=holds_work_already_done,
+            as_scheduled=as_scheduled,
+            unless_member_since=unless_member_since,
+            unless_member_arrival_since=unless_member_arrival_since,
+        )
 
     def tail(
         self, turn_id: UUID, since: str = ""
@@ -772,16 +929,101 @@ class ExtensionContext:
         """The agent this workspace's conversation is permanently bound to, or None when the id
         names no conversation here — how a handler resolves an opaque conversation id to the agent
         wall a member-facing link addresses."""
+        return await conversation_agent_id(self.workspace_id, conversation_id)
+
+    async def conversation_facts(
+        self, conversation_ids: tuple[UUID, ...]
+    ) -> dict[UUID, ConversationFacts]:
+        """The audience and surface label of each named conversation in this workspace — the pair a
+        member-facing listing answers visibility and origin from. One query for a whole page, so a
+        listing never pays a read per row, and workspace-scoped in the predicate, so a borrowed id
+        from another tenant resolves to nothing rather than leaking where it reports.
+
+        An id naming no conversation here is absent from the mapping rather than defaulted, and a
+        caller deciding visibility must read that absence as "not visible": the fact that decides
+        disclosure is missing, and standing in a shared audience for it would publish a row nothing
+        vouched for. That absence is tenant isolation, not robustness — a row whose conversation was
+        deleted is not reachable, since the rows that name one hold a foreign key to it, so the
+        absence a caller actually meets is an id belonging to another workspace, satisfying its
+        foreign key perfectly while resolving to nothing here."""
+        if not conversation_ids:
+            return {}
         async with workspace_tx() as connection:
-            found = (
+            rows = (
                 await connection.execute(
-                    sa.select(tables.conversation.c.agent_id).where(
+                    sa.select(
+                        tables.conversation.c.id,
+                        tables.conversation.c.audience,
+                        tables.conversation.c.surface_label,
+                    ).where(
                         tables.conversation.c.workspace_id == self.workspace_id,
-                        tables.conversation.c.id == conversation_id,
+                        tables.conversation.c.id.in_(conversation_ids),
                     )
                 )
-            ).one_or_none()
-        return None if found is None else found.agent_id
+            ).all()
+        return {
+            row.id: ConversationFacts(
+                audience=parse_audience(row.audience), surface_label=row.surface_label
+            )
+            for row in rows
+        }
+
+    async def conversation_arrival_seq(self, conversation_id: UUID) -> int:
+        """How far this conversation's member arrivals have got: the highest `seq` a member-sourced
+        inbound message holds, or 0 when no member has spoken into it yet.
+
+        A watermark, not a count. Work that arms itself to be woken later records this at arm time,
+        so whoever decides whether to wake it can tell a member message that landed *before* the arm
+        — already accounted for by the turn that armed it — from one that landed after, which is the
+        thing the arm was waiting on. Comparing counts could not separate those two, because the
+        question is ordering rather than volume.
+
+        Only member arrivals count: an internal arrival is work the system posted to itself, and a
+        watcher woken by its own effects is the loop this watermark exists to prevent. Zero is
+        therefore a real answer meaning "no member has spoken", and any later member arrival exceeds
+        it."""
+        async with workspace_tx() as connection:
+            return int(
+                (
+                    await connection.execute(
+                        sa.select(
+                            sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0)
+                        ).where(
+                            tables.inbound_message.c.workspace_id == self.workspace_id,
+                            tables.inbound_message.c.conversation_id == conversation_id,
+                            tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                        )
+                    )
+                ).scalar_one()
+            )
+
+    async def turn_outcomes(self, turn_ids: tuple[UUID, ...]) -> dict[UUID, TurnOutcome]:
+        """How each named turn in this workspace ended — the read a status line renders the last
+        run's outcome from. Batched and workspace-scoped for the same two reasons
+        `conversation_facts` is.
+
+        A turn id naming no turn here is absent from the mapping rather than an error: a row may
+        point at a turn since compacted away, and a status line reads that absence exactly as it
+        reads a row that has never fired."""
+        if not turn_ids:
+            return {}
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.status,
+                        tables.turn.c.terminal,
+                    ).where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.id.in_(turn_ids),
+                    )
+                )
+            ).all()
+        return {
+            row.id: TurnOutcome(status=row.status, text=(row.terminal or {}).get("text"))
+            for row in rows
+        }
 
     async def is_operator_workspace(self) -> bool:
         """Whether the bound workspace is the fleet operator's own, by the same domain read the
@@ -1451,11 +1693,11 @@ def context_for(
     sandboxes: ConversationSandbox | None = None,
     invoker: TurnInvoker | None = None,
     model_resolver: ModelResolver | None = None,
-    schedule_invoker: ScheduleInvoker | None = None,
     surfaces: frozenset[str] = frozenset(),
     credential_sources: tuple[tuple[str, CredentialSource], ...] = (),
     credential_store: CredentialStore | None = None,
     tailer: TurnTailer | None = None,
+    probes: ConversationProbes | None = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
@@ -1467,7 +1709,8 @@ def context_for(
     to that same workspace. `public_base_url` is the deploy's externally reachable base, which a
     kind listing rows a member opens needs and cannot reach any other way. A `tailer` lets a handler
     firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
-    reads the loop through."""
+    reads the loop through. `probes` is the off-turn sandbox exec, wired only where a handler runs
+    outside every turn: a tool or in-turn hook already holds the turn's own sandbox."""
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(
@@ -1482,7 +1725,7 @@ def context_for(
         pages=pages,
         corpus=None if blob is None else TrajectoryCorpus(blob),
         files=None if sandboxes is None else ConversationFiles(sandboxes),
-        scheduler=ScheduleStore(schedule_invoker),
+        probes=probes,
         invoker=invoker,
         model=None if model_resolver is None else ModelAccess(model_resolver),
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,

@@ -19,6 +19,7 @@ from ufo.accounting import (
     read_turn_cost,
     record_egress_request,
     record_image_usage,
+    record_probe_egress_request,
     record_sandbox_tokens,
     record_turn_usage,
     record_video_usage,
@@ -378,6 +379,42 @@ async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
             )
         ).one()
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("egress", 10, 0)
+
+
+async def test_probe_egress_bills_the_workspace_on_a_turnless_row(db: None) -> None:
+    """An off-turn probe's egress shares the turn path's dimension and its zero price, and names no
+    turn: it lands in the workspace total and every workspace-scoped cap window, and drops out of
+    the per-member and per-agent rollups, which reach a member or agent through `turn`. Each write
+    is its own row, so a probe row can never accumulate onto a key a later probe reuses."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_egress_request(connection, workspace_id, turn_id)
+        await record_probe_egress_request(connection, workspace_id, amount=3)
+        await record_probe_egress_request(connection, workspace_id)
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                )
+                .where(
+                    tables.ledger.c.workspace_id == workspace_id,
+                    tables.ledger.c.dimension == "egress",
+                    tables.ledger.c.turn_id.is_(None),
+                )
+                .order_by(tables.ledger.c.amount)
+            )
+        ).all()
+        report = await SpendRollup(workspace_id=workspace_id).read(connection, None)
+
+    assert [(int(row.amount), int(row.priced_micro_usd)) for row in rows] == [(1, 0), (3, 0)]
+    assert [
+        (total.dimension, total.amount)
+        for total in report.by_dimension
+        if total.dimension == "egress"
+    ] == [("egress", 5)]
+    assert not [subject for subject in report.by_member if subject.subject_id is not None]
 
 
 async def test_egress_never_double_counts_the_token_cost(db: None) -> None:

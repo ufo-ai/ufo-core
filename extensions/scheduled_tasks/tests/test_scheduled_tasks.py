@@ -17,15 +17,25 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from sqlalchemy.exc import IntegrityError
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
-from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION, ScheduledTaskRunner
+from ufo_ext_scheduled_tasks.runner import (
+    FINAL_FIRE_INSTRUCTION,
+    ScheduledTaskRunner,
+    fire_body,
+)
+from ufo_ext_scheduled_tasks.schedules import (
+    ScheduledTask,
+    ScheduleStore,
+    due_task_workspaces,
+)
+from ufo_ext_scheduled_tasks.schedules import scheduled_task as schedule_table
 from ufo_ext_scheduled_tasks.tools import (
     SCHEDULE_MAX,
     SCHEDULED_TASK_KIND,
     SUMMARY_MAX,
-    PauseAndWaitInput,
     ScheduledTaskObjects,
     ScheduledTaskSpec,
     pause_and_wait,
@@ -46,10 +56,8 @@ from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.ext.loader import skill_registry, turn_tools
 from ufo.jobs import JobRunner, bindings_from
-from ufo.loop.engine import _claim_turn
 from ufo.loop.queue import _load_turn
 from ufo.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
-from ufo.scheduling import ONE_TIME_SCHEDULE, ScheduledTask, ScheduleStore, due_task_workspaces
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.sdk.audience import (
@@ -58,7 +66,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -229,7 +237,7 @@ async def test_list_reported_carries_audience_and_surface_label(db: None) -> Non
             )
         )
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             private_conversation,
             "private",
             DAILY_9AM,
@@ -238,7 +246,7 @@ async def test_list_reported_carries_audience_and_surface_label(db: None) -> Non
             datetime.now(UTC),
             created_by_member_id=creator,
         )
-        await ScheduleStore().create(
+        await _store().create(
             shared_conversation,
             "shared",
             DAILY_9AM,
@@ -247,7 +255,7 @@ async def test_list_reported_carries_audience_and_surface_label(db: None) -> Non
             datetime.now(UTC),
             created_by_member_id=creator,
         )
-        listed = await ScheduleStore().list_reported()
+        listed = await _store().list_reported()
 
     by_name = {row.task.name: row for row in listed}
     assert by_name["shared"].audience == "shared"
@@ -287,7 +295,7 @@ async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: N
             )
         )
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             private_conversation,
             "orphan-private",
             DAILY_9AM,
@@ -295,7 +303,7 @@ async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: N
             "private task",
             datetime.now(UTC),
         )
-        await ScheduleStore().create(
+        await _store().create(
             shared_conversation,
             "orphan-shared",
             DAILY_9AM,
@@ -303,7 +311,7 @@ async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: N
             "shared task",
             datetime.now(UTC),
         )
-        listed = await ScheduleStore().list_reported()
+        listed = await _store().list_reported()
 
     by_name = {row.task.name: row for row in listed}
     assert by_name["orphan-private"].task.created_by_member_id is None
@@ -371,12 +379,13 @@ def _tool_ctx(workspace_id: UUID, conversation_id: UUID, agent_id: UUID) -> Tool
 
 
 def _runner_ctx(invoker: AdmissionInvoker | None) -> ExtensionContext:
-    return context_for(
-        NAME,
-        frozenset(),
-        invoker=invoker,
-        schedule_invoker=invoker,
-    )
+    return context_for(NAME, frozenset(), invoker=invoker)
+
+
+def _store() -> ScheduleStore:
+    """The extension's own schedule store over the ambient workspace — the store is the
+    extension's now, so a caller hands it a context rather than finding one on core."""
+    return ScheduleStore(context_for(NAME, frozenset()))
 
 
 async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
@@ -418,7 +427,7 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
                 }
             ),
         )
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "standing",
             DAILY_9AM,
@@ -426,7 +435,7 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
             "nightly sweep",
             datetime(2026, 8, 8, 9, tzinfo=UTC),
         )
-        tasks = {task.name: task for task in await ScheduleStore().list()}
+        tasks = {task.name: task for task in await _store().list()}
         listed = json.loads(await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND))
         admin_ctx = replace(ctx, speaker_member_id=await _member(workspace_id, is_admin=True))
         admin_listed = json.loads(await _dispatch(listing, admin_ctx, kind=SCHEDULED_TASK_KIND))
@@ -469,7 +478,7 @@ async def test_malformed_conversation_filter_still_validates_the_list_query() ->
 async def test_automations_slot_rejects_a_recreated_task_generation(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     with ws(workspace_id), agent(agent_id):
-        store = ScheduleStore()
+        store = _store()
         original = await store.create(
             conversation_id,
             "daily",
@@ -518,7 +527,7 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
             "name": "investor-replies",
             "result": "created",
         }
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
         fetched = yaml.safe_load(
             await _dispatch(
                 _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="investor-replies"
@@ -538,9 +547,9 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     fired_at = datetime(2026, 12, 25, 9, 0, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.scheduled_task)
+            sa.update(schedule_table)
             .values(last_run_at=fired_at)
-            .where(tables.scheduled_task.c.id == tasks[0].id)
+            .where(schedule_table.c.id == tasks[0].id)
         )
     with ws(workspace_id), agent(agent_id):
         refetched = yaml.safe_load(
@@ -560,960 +569,7 @@ async def test_applied_task_requires_a_member_requester(db: None) -> None:
                 _tool_ctx(workspace_id, conversation_id, agent_id),
                 manifest=_task_manifest("digest", DAILY_9AM, "check the inbox"),
             )
-        assert await ScheduleStore().list() == ()
-
-
-async def test_pause_and_wait_runs_tool_to_timer_to_resumed_turn(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        result = await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="I'll wait for the verification email.",
-                wait_minutes=10,
-                next_steps="Read the code and continue onboarding.",
-                reason="verification email",
-                metadata={"account": "member@example.com"},
-            ),
-        )
-        payload = json.loads(result.content[0].text.split("\n", 1)[1])
-        assert payload["awaiting"] == "timer"
-        assert payload["metadata"] == {"account": "member@example.com"}
-        async with workspace_tx() as connection:
-            waiting = (
-                (
-                    await connection.execute(
-                        sa.select(tables.scheduled_task).where(
-                            tables.scheduled_task.c.conversation_id == conversation_id
-                        )
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            await connection.execute(
-                sa.update(tables.scheduled_task)
-                .where(tables.scheduled_task.c.id == waiting["id"])
-                .values(next_run_at=datetime.now(UTC) - timedelta(seconds=1))
-            )
-        assert waiting["schedule"] == ONE_TIME_SCHEDULE
-        assert waiting["origin_seq"] == 0
-        assert waiting["resume_turn_id"] is None
-        assert "Read the code and continue onboarding." in waiting["prompt"]
-        assert "verification email" in waiting["prompt"]
-        assert await ScheduleStore().list() == ()
-
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        assert len(turns) == 1
-        assert turns[0]["agent_id"] == agent_id
-        assert turns[0]["inbound"] == waiting["prompt"]
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert resume_turn_id == turns[0]["id"]
-        assert await _claim_turn(turns[0]["id"], "timer-resume") is True
-        async with workspace_tx() as connection:
-            remaining = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-        assert remaining == 0
-        assert dbos.enqueued == [str(turns[0]["id"])]
-
-
-async def test_rejected_timer_resume_removes_its_one_time_pause(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    spent_turn_id = uuid4()
-    async with workspace_tx() as connection:
-        member_id = (
-            await connection.execute(
-                sa.select(tables.conversation.c.member_id).where(
-                    tables.conversation.c.id == conversation_id
-                )
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=spent_turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="earlier work",
-                admission_source="internal",
-                terminal=TerminalFrame(status="done").model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=spent_turn_id,
-                dimension="tokens",
-                amount=10,
-                priced_micro_usd=100,
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.spend_cap).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                scope="member",
-                subject_id=member_id,
-                window_seconds=3600,
-                limit_micro_usd=50,
-                on_breach="reject",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().pause(
-            conversation_id,
-            "resume",
-            "resume",
-            datetime.now(UTC) - timedelta(minutes=1),
-            1,
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert [turn["status"] for turn in turns] == ["done", "cancelled"]
-    assert pauses == 0
-    assert dbos.enqueued == []
-
-
-async def test_new_message_resumes_pause_and_cancels_timer(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        turn_id = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-1",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-            source = (
-                await connection.execute(
-                    sa.select(tables.turn.c.admission_source).where(tables.turn.c.id == turn_id)
-                )
-            ).scalar_one()
-        assert resume_turn_id == turn_id
-        assert await _claim_turn(turn_id, "member-resume") is True
-        async with workspace_tx() as connection:
-            remaining = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-        assert remaining == 0
-        assert source == "member"
-        assert dbos.enqueued == [str(turn_id)]
-
-
-async def test_pause_does_not_arm_after_a_newer_member_was_admitted(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    base = _tool_ctx(workspace_id, conversation_id, agent_id)
-    origin = base.turn.model_copy(update={"id": uuid4(), "seq": 1})
-    ctx = replace(base, turn=origin)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=origin.id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=origin.seq,
-                status="running",
-                inbound=origin.inbound,
-                admission_source="internal",
-                terminal=None,
-                created_at=origin.created_at,
-                updated_at=sa.func.now(),
-            )
-        )
-    member_admission = MemberAdmission(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        member_turn_id = (
-            await member_admission.admit(
-                conversation_id,
-                "new message",
-                "newer-member",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        result = await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        payload = json.loads(result.content[0].text.split("\n", 1)[1])
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-            queued_bodies = (
-                (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
-            )
-    assert member_turn_id == origin.id
-    assert queued_bodies == ["new message"]
-    assert payload["awaiting"] == "member"
-    assert pauses == 0
-
-
-async def test_internal_arrivals_do_not_block_the_pause_timer(db: None) -> None:
-    """A pending internal invocation is not a member reply: the pause still arms its timer."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    base = _tool_ctx(workspace_id, conversation_id, agent_id)
-    origin = base.turn.model_copy(update={"id": uuid4(), "seq": 1})
-    ctx = replace(base, turn=origin)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=origin.id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=origin.seq,
-                status="running",
-                inbound=origin.inbound,
-                admission_source="internal",
-                terminal=None,
-                created_at=origin.created_at,
-                updated_at=sa.func.now(),
-            )
-        )
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        background_turn_id = await invoker.invoke(conversation_id, agent_id, "background note")
-        result = await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        payload = json.loads(result.content[0].text.split("\n", 1)[1])
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert background_turn_id == origin.id
-    assert payload["awaiting"] == "timer"
-    assert pauses == 1
-
-
-async def test_redelivered_terminal_message_does_not_cancel_a_later_pause(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    base = _tool_ctx(workspace_id, conversation_id, agent_id)
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        turn_id = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-redelivery",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .where(tables.turn.c.id == turn_id)
-                .values(
-                    status="done",
-                    terminal=TerminalFrame(status="done", text="handled").model_dump(mode="json"),
-                    updated_at=sa.func.now(),
-                )
-            )
-            origin = base.turn.model_copy(
-                update={"id": uuid4(), "seq": 2, "created_at": datetime.now(UTC)}
-            )
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=origin.id,
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    agent_id=agent_id,
-                    seq=origin.seq,
-                    status="running",
-                    inbound=origin.inbound,
-                    admission_source="internal",
-                    terminal=None,
-                    created_at=origin.created_at,
-                    updated_at=sa.func.now(),
-                )
-            )
-        await pause_and_wait(
-            replace(base, turn=origin),
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting again.",
-                wait_minutes=10,
-                next_steps="Continue later.",
-                reason="later approval",
-            ),
-        )
-        redelivered = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-redelivery",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count())
-                    .select_from(tables.scheduled_task)
-                    .where(tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE)
-                )
-            ).scalar_one()
-    assert redelivered == turn_id
-    assert pauses == 1
-    assert dbos.enqueued == [str(turn_id)]
-
-
-async def test_failed_member_enqueue_preserves_pause_for_the_same_turn_retry(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    dbos = StubDbos(failures_remaining=1)
-    member_admission = MemberAdmission(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        accepted = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-retry",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        async with workspace_tx() as connection:
-            pause = (
-                await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.claimed_by,
-                        tables.scheduled_task.c.claim_expires_at,
-                        tables.scheduled_task.c.origin_seq,
-                        tables.scheduled_task.c.resume_turn_id,
-                    ).where(tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE)
-                )
-            ).one()
-        [failed] = await _turns(conversation_id)
-        retried = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-retry",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert resume_turn_id == retried
-        assert await _claim_turn(retried, "member-retry") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert tuple(pause) == (None, None, 0, failed["id"])
-    assert accepted == failed["id"]
-    assert failed["status"] == "queued"
-    assert failed["terminal"] is None
-    assert [turn["id"] for turn in turns] == [retried]
-    assert dbos.enqueued == [str(retried)]
-    assert pauses == 0
-
-
-async def test_redundant_enqueue_survives_an_ambiguous_failure_until_claim(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    dbos = _FirstBlockingDbos(fail_call=1)
-    member_admission = MemberAdmission(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().pause(
-            conversation_id,
-            "resume",
-            "approval",
-            datetime.now(UTC) + timedelta(minutes=10),
-            0,
-        )
-        first = asyncio.create_task(
-            member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-ambiguous",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        )
-        await dbos.entered.wait()
-        redundant = (
-            await member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-ambiguous",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        dbos.release.set()
-        accepted = (await first).turn_id
-        [turn] = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            pause = (
-                await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.resume_turn_id,
-                        tables.scheduled_task.c.next_run_at,
-                        tables.scheduled_task.c.claimed_by,
-                    )
-                )
-            ).one()
-        assert pause.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)
-        assert pause.claimed_by is None
-        assert turn["id"] == redundant
-        assert accepted == redundant
-        assert turn["status"] == "queued"
-        assert turn["terminal"] is None
-        assert turn["dispatch_enqueued_at"] is None
-        assert pause.resume_turn_id == redundant
-        assert dbos.enqueued == [str(redundant)]
-        assert await _claim_turn(redundant, "ambiguous-enqueue") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert pauses == 0
-
-
-async def test_background_turn_does_not_cancel_pause(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        await ScheduleStore().create(
-            conversation_id,
-            "scheduled-check",
-            DAILY_9AM,
-            "check something else",
-            "check something else",
-            datetime.now(UTC) - timedelta(minutes=1),
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count())
-                    .select_from(tables.scheduled_task)
-                    .where(tables.scheduled_task.c.schedule == ONE_TIME_SCHEDULE)
-                )
-            ).scalar_one()
-    assert pauses == 1
-    assert len(await _turns(conversation_id)) == 1
-
-
-async def test_internal_invoke_does_not_cancel_pause(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="Waiting.",
-                wait_minutes=10,
-                next_steps="Continue.",
-                reason="approval",
-            ),
-        )
-        turn_id = await invoker.invoke(conversation_id, agent_id, "internal work", "internal-1")
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-            source = (
-                await connection.execute(
-                    sa.select(tables.turn.c.admission_source).where(tables.turn.c.id == turn_id)
-                )
-            ).scalar_one()
-    assert pauses == 1
-    assert source == "internal"
-
-
-async def test_member_admission_wins_against_an_already_claimed_pause(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = _BlockingDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    store = ScheduleStore(invoker)
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        await store.pause(
-            conversation_id,
-            "resume",
-            "resume",
-            due_at,
-            0,
-        )
-        [claimed] = await store.claim_due(datetime.now(UTC), 300)
-        member_turn = asyncio.create_task(
-            member_admission.admit(
-                conversation_id,
-                "The approval arrived.",
-                "approval-race",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        )
-        await dbos.entered.wait()
-        try:
-            fire_at = datetime.now(UTC)
-            assert await runner._fire(store, claimed, fire_at, fire_at) is None
-        finally:
-            dbos.release.set()
-        turn_id = (await member_turn).turn_id
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert resume_turn_id == turn_id
-        assert await _claim_turn(turn_id, "member-wins") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert [turn["id"] for turn in turns] == [turn_id]
-    assert dbos.enqueued == [str(turn_id)]
-    assert pauses == 0
-
-
-async def test_rearmed_pause_rejects_the_old_claim(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore()
-    now = datetime.now(UTC)
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        original = await store.pause(
-            conversation_id,
-            "resume old",
-            "old",
-            now - timedelta(minutes=1),
-            1,
-        )
-        [claimed] = await store.claim_due(now, 300)
-        rearmed = await store.pause(
-            conversation_id,
-            "resume new",
-            "new",
-            now + timedelta(minutes=10),
-            2,
-        )
-        assert rearmed.id == original.id
-        assert await invoker.invoke_scheduled(claimed) is None
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.prompt,
-                        tables.scheduled_task.c.next_run_at,
-                        tables.scheduled_task.c.claimed_by,
-                    ).where(tables.scheduled_task.c.id == rearmed.id)
-                )
-            ).one()
-    assert row.prompt == "resume new"
-    assert row.next_run_at.replace(tzinfo=UTC) == rearmed.next_run_at
-    assert row.claimed_by is None
-    assert await _turns(conversation_id) == []
-
-
-async def test_one_time_pause_rejects_runtime_instruction(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    now = datetime.now(UTC)
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().pause(
-            conversation_id,
-            "resume workflow",
-            "waiting",
-            now - timedelta(minutes=1),
-            1,
-        )
-        [claimed] = await ScheduleStore().claim_due(now, 300)
-        with pytest.raises(ValueError, match="one-time workflow pause"):
-            await invoker.invoke_scheduled(claimed, "unexpected")
-
-
-async def test_member_message_takes_over_a_timer_waiting_to_enqueue(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    member_id = await _member(workspace_id)
-    now = datetime.now(UTC)
-    dbos = _FirstBlockingDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    store = ScheduleStore(invoker)
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        await store.pause(
-            conversation_id,
-            "timer resume",
-            "timer",
-            now - timedelta(minutes=1),
-            0,
-            created_by_member_id=member_id,
-        )
-        [claimed] = await store.claim_due(now, 300)
-        timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
-        await dbos.entered.wait()
-        taken_over = await member_admission.admit(
-            conversation_id,
-            "The approval arrived.",
-            "approval-after-timer",
-            speaker_member_id=member_id,
-        )
-        turn_id = taken_over.turn_id
-        dbos.release.set()
-        assert await timer_fire is None
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert resume_turn_id == turn_id
-        assert taken_over.opened_run
-        assert await _claim_turn(turn_id, "timer-takeover") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert [(turn["id"], turn["inbound"]) for turn in turns] == [(turn_id, "The approval arrived.")]
-    assert turns[0]["speaker_member_id"] == member_id
-    assert turns[0]["on_behalf_of_member_id"] is None
-    assert dbos.enqueued == [str(turn_id), str(turn_id)]
-    assert pauses == 0
-
-
-async def test_member_takes_over_the_timer_while_internal_work_queues(db: None) -> None:
-    """One live turn absorbs everything that arrives around a firing timer: the internal message
-    lands on its inbound queue, and the member's reply still takes the queued timer turn over."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    now = datetime.now(UTC)
-    dbos = _FirstBlockingDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    store = ScheduleStore(invoker)
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        await store.pause(
-            conversation_id,
-            "timer resume",
-            "timer",
-            now - timedelta(minutes=1),
-            0,
-        )
-        [claimed] = await store.claim_due(now, 300)
-        timer_fire = asyncio.create_task(runner._fire(store, claimed, now, now))
-        await dbos.entered.wait()
-        internal_turn = await invoker.invoke(
-            conversation_id, agent_id, "internal work", "internal-between"
-        )
-        taken_over = await member_admission.admit(
-            conversation_id,
-            "member reply",
-            "member-after-internal",
-            speaker_member_id=await _speaker(workspace_id),
-        )
-        member_turn = taken_over.turn_id
-        dbos.release.set()
-        assert await timer_fire is None
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-            queued_bodies = (
-                (
-                    await connection.execute(
-                        sa.select(tables.inbound_message.c.body).order_by(
-                            tables.inbound_message.c.seq
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        [turn] = turns
-        assert turn["inbound"] == "member reply"
-        assert turn["status"] == "queued"
-        assert turn["admission_source"] == "member"
-        assert internal_turn == turn["id"]
-        assert member_turn == turn["id"]
-        assert taken_over.opened_run
-        assert queued_bodies == ["internal work"]
-        assert resume_turn_id == turn["id"]
-        assert dbos.enqueued == [str(turn["id"]), str(turn["id"])]
-        assert await _claim_turn(turn["id"], "ordered-timer") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert pauses == 0
-
-
-async def test_later_member_joins_the_first_queued_turn(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    dbos = _FirstBlockingDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().pause(
-            conversation_id,
-            "timer resume",
-            "timer",
-            datetime.now(UTC) + timedelta(minutes=10),
-            0,
-        )
-        first = asyncio.create_task(
-            member_admission.admit(
-                conversation_id,
-                "first",
-                "member-first",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        )
-        await dbos.entered.wait()
-        second_turn = (
-            await member_admission.admit(
-                conversation_id,
-                "second",
-                "member-second",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        ).turn_id
-        dbos.release.set()
-        first_turn = (await first).turn_id
-        turns = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert resume_turn_id == first_turn
-        assert await _claim_turn(first_turn, "concurrent-member") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert second_turn == first_turn
-    [turn] = turns
-    assert turn["status"] == "queued"
-    assert turn["inbound"] == "first"
-    async with workspace_tx() as connection:
-        queued_bodies = (
-            (await connection.execute(sa.select(tables.inbound_message.c.body))).scalars().all()
-        )
-    assert queued_bodies == ["second"]
-    assert dbos.enqueued == [str(first_turn)]
-    assert pauses == 0
-
-
-async def test_pause_recovers_the_member_turn_after_process_death(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    blocked = _BlockingDbos()
-    admission = Admission(dbos=blocked, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().pause(
-            conversation_id,
-            "timer resume",
-            "timer",
-            datetime.now(UTC) + timedelta(minutes=10),
-            0,
-        )
-        member = asyncio.create_task(
-            member_admission.admit(
-                conversation_id,
-                "approved",
-                "member-crash",
-                speaker_member_id=await _speaker(workspace_id),
-            )
-        )
-        await blocked.entered.wait()
-        member.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await member
-        [turn] = await _turns(conversation_id)
-        async with workspace_tx() as connection:
-            pause = (
-                await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.resume_turn_id,
-                        tables.scheduled_task.c.next_run_at,
-                        tables.scheduled_task.c.claimed_by,
-                    )
-                )
-            ).one()
-        assert pause.resume_turn_id == turn["id"]
-        assert pause.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)
-        assert pause.claimed_by is None
-        recovered_dbos = StubDbos()
-        recovered_invoker = AdmissionInvoker(
-            admission=Admission(dbos=recovered_dbos, durable_surfaces=frozenset()),
-            workspace_id=workspace_id,
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(recovered_invoker)).run()
-        async with workspace_tx() as connection:
-            recovered_pause = (
-                await connection.execute(
-                    sa.select(
-                        tables.scheduled_task.c.resume_turn_id,
-                        tables.scheduled_task.c.claimed_by,
-                        tables.scheduled_task.c.claim_expires_at,
-                    )
-                )
-            ).one()
-        assert recovered_pause.resume_turn_id == turn["id"]
-        assert recovered_pause.claimed_by is not None
-        assert await _claim_turn(turn["id"], "recovered-member") is True
-        async with workspace_tx() as connection:
-            pauses = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert recovered_dbos.enqueued == [str(turn["id"])]
-    assert len(await _turns(conversation_id)) == 1
-    assert pauses == 0
-
-
-@pytest.mark.parametrize("wait_minutes", (0, 10_081))
-def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
-    with pytest.raises(ValueError):
-        PauseAndWaitInput(
-            user_description=TOOL_NARRATION,
-            ai_response="Waiting.",
-            wait_minutes=wait_minutes,
-            next_steps="Continue.",
-            reason="approval",
-        )
+        assert await _store().list() == ()
 
 
 async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> None:
@@ -1537,7 +593,7 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
                 {"kind": SCHEDULED_TASK_KIND, "name": "digest", "spec": {"paused": True}}
             ),
         )
-        [task] = await ScheduleStore().list()
+        [task] = await _store().list()
         assert task.paused is True
         assert task.prompt == "assemble the digest"
         fetched = yaml.safe_load(
@@ -1548,7 +604,7 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
         assert fetched["spec"]["paused"] is True
         assert fetched["status"]["paused"] is True
         due_at = task.next_run_at + timedelta(seconds=1)
-        assert await ScheduleStore().claim_due(due_at, 300) == ()
+        assert await _store().claim_due(due_at, 300) == ()
         await _dispatch(
             _object_tool("object_apply"),
             ctx,
@@ -1560,14 +616,14 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
                 }
             ),
         )
-        [still_paused] = await ScheduleStore().list()
+        [still_paused] = await _store().list()
         assert still_paused.paused is True
         overdue = datetime.now(UTC) - timedelta(minutes=5)
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.scheduled_task)
+                sa.update(schedule_table)
                 .values(next_run_at=overdue)
-                .where(tables.scheduled_task.c.id == still_paused.id)
+                .where(schedule_table.c.id == still_paused.id)
             )
     assert workspace_id not in await due_task_workspaces()()
     with ws(workspace_id), agent(agent_id):
@@ -1578,15 +634,15 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
                 {"kind": SCHEDULED_TASK_KIND, "name": "digest", "spec": {"paused": False}}
             ),
         )
-        [resumed] = await ScheduleStore().list()
+        [resumed] = await _store().list()
         assert resumed.paused is False
-        [claimed] = await ScheduleStore().claim_due(resumed.next_run_at + timedelta(seconds=1), 300)
+        [claimed] = await _store().claim_due(resumed.next_run_at + timedelta(seconds=1), 300)
         assert claimed.name == "digest"
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.scheduled_task)
+                sa.update(schedule_table)
                 .values(next_run_at=overdue, claimed_by=None, claim_expires_at=None)
-                .where(tables.scheduled_task.c.id == resumed.id)
+                .where(schedule_table.c.id == resumed.id)
             )
     assert workspace_id in await due_task_workspaces()()
 
@@ -1603,7 +659,7 @@ async def test_reapplied_name_updates_in_place(db: None) -> None:
                 ctx=ctx, tool=apply, manifest=_task_manifest("report", "0 17 * * 1", "weekly")
             )
         )
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
     assert second["result"] == "updated"
     assert len(tasks) == 1
     assert tasks[0].schedule == "0 17 * * 1"
@@ -1631,7 +687,7 @@ async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None
                 updated_at=sa.func.now(),
             )
         )
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) + timedelta(minutes=10)
     with ws(workspace_id), agent(agent_id):
         outcomes = await asyncio.gather(
@@ -1665,7 +721,7 @@ async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None
 async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     dbos = StubDbos()
     invoker = AdmissionInvoker(
@@ -1740,7 +796,7 @@ async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> N
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    store = ScheduleStore(invoker)
+    store = _store()
     with ws(workspace_id), agent(agent_id):
         await store.create(
             conversation_id,
@@ -1816,7 +872,7 @@ async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "expired-digest",
             DAILY_9AM,
@@ -1826,7 +882,7 @@ async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
             expires_at=datetime.now(UTC) - timedelta(seconds=1),
         )
         await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
     assert tasks == ()
     assert await _turns(conversation_id) == []
     assert dbos.enqueued == []
@@ -1840,7 +896,7 @@ async def test_expiry_after_claim_cancels_before_invoking(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    store = ScheduleStore(invoker)
+    store = _store()
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
     with ws(workspace_id), agent(agent_id):
         await store.create(
@@ -1863,7 +919,7 @@ async def test_expiry_after_claim_cancels_before_invoking(db: None) -> None:
 async def test_unclaimed_task_cannot_be_retired(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
-    store = ScheduleStore()
+    store = _store()
     with ws(workspace_id), agent(agent_id):
         task = await store.create(
             conversation_id,
@@ -1885,7 +941,7 @@ async def test_future_expiry_allows_claimed_task_to_invoke(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    store = ScheduleStore(invoker)
+    store = _store()
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
     with ws(workspace_id), agent(agent_id):
         await store.create(
@@ -1914,7 +970,7 @@ async def test_batch_backlog_does_not_skip_next_cron_occurrence(db: None) -> Non
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
-    store = ScheduleStore(invoker)
+    store = _store()
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
     with ws(workspace_id), agent(agent_id):
         await store.create(
@@ -1942,7 +998,7 @@ async def test_expired_stale_claim_never_invokes(db: None) -> None:
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    store = ScheduleStore(invoker)
+    store = _store()
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
     with ws(workspace_id), agent(agent_id):
         await store.create(
@@ -1967,7 +1023,7 @@ async def test_expired_task_with_future_fire_is_a_workspace_candidate(db: None) 
     workspace_id, agent_id, conversation_id = await _seed()
     now = datetime.now(UTC)
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "expired-before-next-fire",
             DAILY_9AM,
@@ -1977,8 +1033,8 @@ async def test_expired_task_with_future_fire_is_a_workspace_candidate(db: None) 
             expires_at=now - timedelta(seconds=1),
         )
         assert await due_task_workspaces()() == (workspace_id,)
-        assert await ScheduleStore().claim_due(now, 300) == ()
-        tasks = await ScheduleStore().list()
+        assert await _store().claim_due(now, 300) == ()
+        tasks = await _store().list()
     assert tasks == ()
 
 
@@ -2022,7 +1078,7 @@ async def test_update_from_another_conversation_keeps_reporting_home(db: None) -
                 manifest=_task_manifest("report", "0 17 * * 1", "weekly"),
             )
         )
-        rows = await ScheduleStore().list()
+        rows = await _store().list()
     assert updated["result"] == "updated"
     assert len(rows) == 1
     assert rows[0].schedule == "0 17 * * 1"
@@ -2034,7 +1090,7 @@ async def test_claim_due_caps_a_sweep_at_its_batch_limit(db: None) -> None:
     next sweep claims it — a workspace with a task pileup makes bounded progress per tick instead
     of claiming more than one lease can cover."""
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore()
+    store = _store()
     older = datetime.now(UTC) - timedelta(minutes=10)
     newer = datetime.now(UTC) - timedelta(minutes=5)
     with ws(workspace_id), agent(agent_id):
@@ -2050,7 +1106,7 @@ async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: N
     """A scheduled fire and member ingress use distinct capabilities over the same admission
     workflow, so a task in a Slack thread still registers its writeback with the turn."""
     workspace_id, agent_id, conversation_id = await _seed(surface="slack")
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     invoker = AdmissionInvoker(
         admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
@@ -2081,7 +1137,7 @@ async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: N
 
 async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     dbos = StubDbos()
     ctx = _runner_ctx(
@@ -2112,7 +1168,7 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
     )
     runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
     with ws(workspace_id), agent(agent_id):
-        task = await ScheduleStore().create(
+        task = await _store().create(
             conversation_id,
             "scheduled-daily",
             DAILY_9AM,
@@ -2123,9 +1179,9 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
         await runner.run()
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.scheduled_task)
+                sa.update(schedule_table)
                 .values(next_run_at=datetime.now(UTC) - timedelta(seconds=1))
-                .where(tables.scheduled_task.c.id == task.id)
+                .where(schedule_table.c.id == task.id)
             )
         await runner.run()
         turns = await _turns(conversation_id)
@@ -2151,7 +1207,7 @@ async def test_deleted_task_stops_and_leaves_the_listing(db: None) -> None:
         )
         assert deleted["deleted"] is True
         assert deleted["spec"]["schedule"] == DAILY_9AM
-        assert await ScheduleStore().list() == ()
+        assert await _store().list() == ()
         listing = json.loads(
             await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
         )
@@ -2172,26 +1228,6 @@ async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
         await apply.handler(ctx, args)
 
 
-async def test_pause_rows_never_surface_as_objects(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    ctx = _tool_ctx(workspace_id, conversation_id, agent_id)
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(
-            ctx,
-            PauseAndWaitInput(
-                user_description=TOOL_NARRATION,
-                ai_response="waiting",
-                wait_minutes=5,
-                next_steps="continue",
-                reason="approval",
-            ),
-        )
-        listing = json.loads(
-            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
-        )
-    assert listing["objects"] == []
-
-
 def test_task_scheduling_skill_parses_and_indexes() -> None:
     registry = skill_registry((manifest(),))
     index = dict(registry.index())
@@ -2206,7 +1242,7 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
     for _ in range(BOUNDED_INFORMATIONAL_FIRES - 1):
         final_fire = next_fire(DAILY_9AM, final_fire)
     expires_at = next_fire(DAILY_9AM, final_fire)
-    store = ScheduleStore()
+    store = _store()
     with ws(workspace_id), agent(agent_id):
         task = await store.create(
             conversation_id,
@@ -2243,7 +1279,7 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
 async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
-    store = ScheduleStore()
+    store = _store()
     with ws(workspace_id), agent(agent_id):
         task = await store.create(
             conversation_id,
@@ -2385,7 +1421,7 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "scheduled-daily",
             DAILY_9AM,
@@ -2414,109 +1450,13 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
 
 async def test_invoke_without_invoker_fails_loud(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) - timedelta(minutes=1)
     ctx = _runner_ctx(None)
     with ws(workspace_id), agent(agent_id):
         await store.create(conversation_id, "scheduled-x", DAILY_9AM, "do it", "do it", due_at)
         with pytest.raises(RuntimeError, match="scheduled task fires failed"):
             await ScheduledTaskRunner(ctx=ctx).run()
-
-
-async def test_failed_pause_resume_keeps_its_one_time_timer(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    with ws(workspace_id), agent(agent_id):
-        task = await ScheduleStore().pause(
-            conversation_id,
-            "resume",
-            "resume",
-            due_at,
-            1,
-        )
-        with pytest.raises(RuntimeError, match="scheduled task fires failed"):
-            await ScheduledTaskRunner(ctx=context_for(NAME, frozenset())).run()
-        async with workspace_tx() as connection:
-            remaining = (
-                await connection.execute(
-                    sa.select(tables.scheduled_task.c.id).where(
-                        tables.scheduled_task.c.id == task.id
-                    )
-                )
-            ).scalar_one()
-    assert remaining == task.id
-
-
-async def test_pause_resume_retries_the_same_turn_after_enqueue_failure(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed(surface="slack")
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = StubDbos(failures_remaining=1)
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset({"slack"})),
-        workspace_id=workspace_id,
-    )
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        task = await ScheduleStore().pause(
-            conversation_id,
-            "resume",
-            "resume",
-            due_at,
-            1,
-        )
-        await runner.run()
-        failed = (await _turns(conversation_id))[0]
-        assert failed["status"] == "queued"
-        assert failed["terminal"] is None
-        assert failed["dispatch_enqueued_at"] is None
-        async with workspace_tx() as connection:
-            resume_turn_id = (
-                await connection.execute(
-                    sa.select(tables.scheduled_task.c.resume_turn_id).where(
-                        tables.scheduled_task.c.id == task.id
-                    )
-                )
-            ).scalar_one()
-            assert resume_turn_id == failed["id"]
-            await connection.execute(
-                sa.update(tables.scheduled_task)
-                .where(tables.scheduled_task.c.id == task.id)
-                .values(claim_expires_at=datetime.now(UTC) - timedelta(seconds=1))
-            )
-
-        await runner.run()
-        resumed = await _turns(conversation_id)
-        assert len(resumed) == 1
-        assert resumed[0]["id"] == failed["id"]
-        assert resumed[0]["status"] == "queued"
-        assert resumed[0]["terminal"] is None
-        assert resumed[0]["dispatch_enqueued_at"] is not None
-        async with workspace_tx() as connection:
-            writeback = (
-                await connection.execute(
-                    sa.select(
-                        tables.writeback.c.status,
-                        tables.writeback.c.reply_ref,
-                        tables.writeback.c.claimed_by,
-                        tables.writeback.c.claim_expires_at,
-                        tables.writeback.c.last_error,
-                    ).where(tables.writeback.c.turn_id == failed["id"])
-                )
-            ).one()
-            persisted_resume_turn_id = (
-                await connection.execute(sa.select(tables.scheduled_task.c.resume_turn_id))
-            ).scalar_one()
-        assert persisted_resume_turn_id == failed["id"]
-        assert await _claim_turn(failed["id"], "scheduled-retry") is True
-        async with workspace_tx() as connection:
-            remaining = (
-                await connection.execute(
-                    sa.select(sa.func.count()).select_from(tables.scheduled_task)
-                )
-            ).scalar_one()
-    assert remaining == 0
-    assert tuple(writeback) == (WRITEBACK_PENDING, None, None, None, None)
-    assert dbos.enqueued == [str(failed["id"])]
 
 
 async def _member(
@@ -2549,7 +1489,7 @@ async def test_apply_captures_the_creating_member(db: None) -> None:
             ctx,
             manifest=_task_manifest("digest", DAILY_9AM, "send the digest"),
         )
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
     assert len(tasks) == 1
     assert tasks[0].created_by_member_id == creator
 
@@ -2565,7 +1505,7 @@ async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "digest",
             DAILY_9AM,
@@ -2657,7 +1597,7 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
                 ),
             )
         creators_view = json.loads(await _dispatch(listing, creator_ctx, kind=SCHEDULED_TASK_KIND))
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
     assert [row["name"] for row in creators_view["objects"]] == ["digest"]
     assert len(tasks) == 1
     assert tasks[0].prompt == "Check my oncology portal and summarize the biopsy result."
@@ -2729,7 +1669,7 @@ async def test_a_task_reporting_into_a_shared_conversation_is_read_but_not_chang
                 manifest=_task_manifest(name, DAILY_9AM, f"run {name}", name),
             )
         walled = json.loads(await _dispatch(listing, colleague_ctx, kind=SCHEDULED_TASK_KIND))
-        surviving = await ScheduleStore().list()
+        surviving = await _store().list()
 
     assert [row["name"] for row in seen["objects"]] == ["digest"]
     assert [row["summary"] for row in seen["objects"]] == [f"{DAILY_9AM} — the digest"]
@@ -2744,7 +1684,7 @@ async def test_a_task_reporting_into_a_shared_conversation_is_read_but_not_chang
 async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None) -> None:
     workspace_id, first_agent, first_conversation = await _seed()
     second_agent, second_conversation = await _second_agent(workspace_id)
-    store = ScheduleStore()
+    store = _store()
     due_at = datetime.now(UTC) + timedelta(hours=1)
 
     with ws(workspace_id):
@@ -2767,14 +1707,6 @@ async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None
                     "crossed",
                     "crossed",
                     due_at,
-                )
-            with pytest.raises(ValueError, match="bound to its executing agent"):
-                await store.pause(
-                    second_conversation,
-                    "crossed",
-                    "crossed",
-                    due_at,
-                    0,
                 )
         with agent(second_agent):
             assert await store.inspect(first) is None
@@ -2825,7 +1757,7 @@ async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> No
 
     with ws(workspace_id):
         with agent(first_agent):
-            await ScheduleStore().create(
+            await _store().create(
                 first_conversation,
                 "digest",
                 DAILY_9AM,
@@ -2834,7 +1766,7 @@ async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> No
                 due_at,
             )
         with agent(second_agent):
-            await ScheduleStore().create(
+            await _store().create(
                 second_conversation,
                 "digest",
                 DAILY_9AM,
@@ -2858,7 +1790,7 @@ async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> No
 async def test_update_preserves_the_original_creator(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id)
-    store = ScheduleStore()
+    store = _store()
     when = datetime.now(UTC)
     with ws(workspace_id), agent(agent_id):
         first = await store.create(
@@ -2936,9 +1868,9 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
             )
         )
         await entered.wait()
-        [original] = await ScheduleStore().list()
-        await ScheduleStore().cancel(original)
-        replacement = await ScheduleStore().create(
+        [original] = await _store().list()
+        await _store().cancel(original)
+        replacement = await _store().create(
             conversation_id,
             "digest",
             DAILY_9AM,
@@ -2950,7 +1882,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
         release.set()
         with pytest.raises(ValueError, match="changed while editing"):
             await editing
-        [remaining] = await ScheduleStore().list()
+        [remaining] = await _store().list()
 
     assert remaining.id == replacement.id
     assert remaining.created_by_member_id == bob
@@ -2970,7 +1902,7 @@ async def test_object_apply_refuses_a_generation_change_after_its_snapshot(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
     real_get = ScheduledTaskObjects.get
     replacement: ScheduledTask | None = None
 
@@ -3035,7 +1967,7 @@ async def test_object_get_rechecks_generation_after_status(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
 
     with ws(workspace_id), agent(agent_id):
         original = await scheduler.create(
@@ -3099,7 +2031,7 @@ async def test_object_delete_refuses_a_replacement_after_its_detail_snapshot(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
     real_delete = ScheduledTaskObjects.delete
     replacement: ScheduledTask | None = None
 
@@ -3156,7 +2088,7 @@ async def test_task_read_refuses_a_same_named_replacement(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
     objects = ScheduledTaskObjects()
     real_owner = ScheduledTaskObjects._owner
 
@@ -3204,7 +2136,7 @@ async def test_task_status_refuses_replacement_during_inspection(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
     real_inspect = ScheduleStore.inspect
 
     with ws(workspace_id), agent(agent_id):
@@ -3249,7 +2181,7 @@ async def test_task_create_refuses_a_row_created_after_absence_check(
     workspace_id, agent_id, conversation_id = await _seed()
     alice = await _member(workspace_id)
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = ScheduleStore()
+    scheduler = _store()
     real_owner = ScheduledTaskObjects._owner
 
     async def create_after_absence(
@@ -3316,7 +2248,7 @@ async def test_cancel_cannot_delete_a_task_recreated_after_authorization(
             replace(requester_ctx, speaker_member_id=alice),
             manifest=_task_manifest("digest", DAILY_9AM, "Alice's digest"),
         )
-        [original] = await ScheduleStore().list()
+        [original] = await _store().list()
         deleting = asyncio.create_task(
             _dispatch(
                 delete,
@@ -3326,8 +2258,8 @@ async def test_cancel_cannot_delete_a_task_recreated_after_authorization(
             )
         )
         await entered.wait()
-        await real_cancel(ScheduleStore(), original)
-        replacement = await ScheduleStore().create(
+        await real_cancel(_store(), original)
+        replacement = await _store().create(
             conversation_id,
             "digest",
             DAILY_9AM,
@@ -3339,7 +2271,7 @@ async def test_cancel_cannot_delete_a_task_recreated_after_authorization(
         release.set()
         with pytest.raises(ValueError, match="changed while cancelling"):
             await deleting
-        [remaining] = await ScheduleStore().list()
+        [remaining] = await _store().list()
 
     assert remaining.id == replacement.id
     assert remaining.created_by_member_id == bob
@@ -3355,7 +2287,7 @@ async def test_admin_edits_a_task_no_member_created(db: None) -> None:
     admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
     apply = _object_tool("object_apply")
     with ws(workspace_id), agent(agent_id):
-        await ScheduleStore().create(
+        await _store().create(
             conversation_id,
             "intel",
             DAILY_9AM,
@@ -3365,7 +2297,7 @@ async def test_admin_edits_a_task_no_member_created(db: None) -> None:
             created_by_member_id=None,
         )
         await _dispatch(apply, admin_ctx, manifest=_task_manifest("intel", "0 17 * * 1", "v2"))
-        tasks = await ScheduleStore().list()
+        tasks = await _store().list()
     assert tasks[0].prompt == "v2"
     assert tasks[0].schedule == "0 17 * * 1"
     assert tasks[0].created_by_member_id is None
@@ -3398,7 +2330,7 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                 private_description,
             ),
         )
-        [task] = await ScheduleStore().list()
+        [task] = await _store().list()
         completed_turn_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(
@@ -3420,8 +2352,8 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                 )
             )
             await connection.execute(
-                sa.update(tables.scheduled_task)
-                .where(tables.scheduled_task.c.id == task.id)
+                sa.update(schedule_table)
+                .where(schedule_table.c.id == task.id)
                 .values(
                     last_run_at=sa.func.now(),
                     last_turn_id=completed_turn_id,
@@ -3472,11 +2404,11 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                 }
             ),
         )
-        after_edit = await ScheduleStore().list()
+        after_edit = await _store().list()
         admin_delete = json.loads(
             await _dispatch(delete, admin_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
         )
-        after_delete = await ScheduleStore().list()
+        after_delete = await _store().list()
     admin_rendered = json.dumps((admin_listing, admin_get, admin_delete))
     assert private_prompt not in admin_rendered
     assert private_description not in admin_rendered
@@ -3553,7 +2485,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                     private_description,
                 ),
             )
-            [task] = await ScheduleStore().list()
+            [task] = await _store().list()
             completed_turn_id = uuid4()
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -3576,8 +2508,8 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                     )
                 )
                 await connection.execute(
-                    sa.update(tables.scheduled_task)
-                    .where(tables.scheduled_task.c.id == task.id)
+                    sa.update(schedule_table)
+                    .where(schedule_table.c.id == task.id)
                     .values(last_run_at=sa.func.now(), last_turn_id=completed_turn_id)
                 )
         with agent(main_agent):
@@ -3688,7 +2620,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                 agent=child_name,
             )
         with agent(child_agent):
-            remaining = await ScheduleStore().list()
+            remaining = await _store().list()
 
     assert listed["agent"] == child_name
     assert [row["name"] for row in listed["objects"]] == ["digest"]
@@ -3841,7 +2773,7 @@ async def test_main_cross_agent_task_create_is_not_supported(
                 agent=child_name,
             )
         with agent(child_agent):
-            assert await ScheduleStore().list() == ()
+            assert await _store().list() == ()
 
 
 async def test_parallel_main_targets_keep_their_agent_namespaces_isolated(db: None) -> None:
@@ -3940,3 +2872,211 @@ def test_a_description_past_the_listing_line_is_still_a_spec_this_model_reads() 
     description still lists at `SUMMARY_MAX`."""
     sprawling = "d" * (SUMMARY_MAX * 3)
     assert ScheduledTaskSpec(description=sprawling).description == sprawling
+
+
+async def test_a_cancel_inside_the_lease_window_does_not_fire(db: None) -> None:
+    """A lease is seconds wide and a member can cancel inside it. The fire revalidates its claim
+    against the row's whole identity first, so the cancelled task does not get one last fire —
+    idempotency would not have caught this, because the key only collapses repeat deliveries of a
+    fire and never asks whether the task still exists."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    store = _store()
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id), agent(agent_id):
+        created = await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "check inbox",
+            "digest",
+            due_at,
+            created_by_member_id=creator,
+        )
+        [claimed] = await store.claim_due(datetime.now(UTC), 300)
+        assert await store.claim_holds(claimed) is True
+        await store.cancel(created)
+        assert await store.claim_holds(claimed) is False
+        assert await runner._fire(store, claimed, due_at, due_at) is None
+        turns = await _turns(conversation_id)
+        remaining = await store.list()
+
+    assert turns == []
+    assert remaining == ()
+    assert dbos.enqueued == []
+
+
+async def test_an_edit_inside_the_lease_window_does_not_fire_the_old_claim(db: None) -> None:
+    """An edit rewrites what the task says and releases its claim, so the version a tick leased is
+    no longer the version that exists. The old claim fires nothing and the edited row waits for its
+    own next occurrence."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    store = _store()
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
+    with ws(workspace_id), agent(agent_id):
+        created = await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "check inbox",
+            "digest",
+            due_at,
+            created_by_member_id=creator,
+        )
+        [claimed] = await store.claim_due(datetime.now(UTC), 300)
+        await store.update(
+            created,
+            "0 17 * * 1",
+            "read the weekly instead",
+            "weekly",
+            datetime.now(UTC) + timedelta(days=1),
+            paused=False,
+        )
+        assert await store.claim_holds(claimed) is False
+        assert await runner._fire(store, claimed, due_at, due_at) is None
+        turns = await _turns(conversation_id)
+        [edited] = await store.list()
+
+    assert turns == []
+    assert dbos.enqueued == []
+    assert edited.prompt == "read the weekly instead"
+    assert edited.schedule == "0 17 * * 1"
+    assert edited.claim_id is None
+
+
+async def test_a_refire_of_the_same_occurrence_collapses_to_one_turn(db: None) -> None:
+    """The dedupe contract across a deploy roll, and the precision trap inside it.
+
+    A roll can kill the process after admission and before the reschedule commits, leaving the same
+    occurrence due again. The key is the task and that exact occurrence, so the re-fire settles on
+    the turn already admitted rather than firing the task twice.
+
+    The occurrence carries microseconds on purpose: `isoformat()` renders them, so a key derived
+    from a recomputed or rounded due time would differ from the one the pre-roll turn carries and
+    would dedupe against nothing. This pins that the key comes from the claimed row's stored value.
+    """
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    store = _store()
+    due_at = (datetime.now(UTC) - timedelta(minutes=1)).replace(microsecond=123456)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id), agent(agent_id):
+        created = await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "check inbox",
+            "digest",
+            due_at,
+            created_by_member_id=creator,
+        )
+        _, key = fire_body(created, None)
+        assert key == f"{created.id}:{due_at.isoformat()}"
+        assert ".123456+00:00" in key
+        assert str(created.id) == str(created.id).lower()
+
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        [fired] = await _turns(conversation_id)
+        assert fired["idempotency_key"] == key
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(schedule_table)
+                .where(schedule_table.c.id == created.id)
+                .values(
+                    next_run_at=due_at,
+                    last_run_at=None,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                )
+            )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        turns = await _turns(conversation_id)
+
+    assert [turn["id"] for turn in turns] == [fired["id"]]
+
+
+async def test_a_task_pointing_at_another_workspaces_conversation_is_not_listed(db: None) -> None:
+    """The reachable shape of a task whose conversation cannot be read.
+
+    A dangling conversation id is impossible — `scheduled_task_conversation_id_fkey` enforces that
+    the row exists — but existing is not the same as being *this* workspace's, and the facts read is
+    workspace-scoped in its predicate. So a task pointing at another tenant's conversation resolves
+    to no audience at all, and the page must omit it rather than default it: standing in a shared
+    audience for a fact nobody vouched for would publish one workspace's task to another's members.
+    """
+    workspace_id, agent_id, conversation_id = await _seed()
+    _, _, other_conversation = await _seed()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "check inbox",
+            "digest",
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        assert len(await store.list_reported()) == 1
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(schedule_table)
+                .where(schedule_table.c.conversation_id == conversation_id)
+                .values(conversation_id=other_conversation)
+            )
+        borrowed = await store.list_reported()
+        still_a_row = await store.list()
+
+    assert borrowed == ()
+    assert len(still_a_row) == 1
+    assert still_a_row[0].conversation_id == other_conversation
+
+
+async def test_a_conversation_holding_a_task_cannot_be_deleted(db: None) -> None:
+    """Why `list_reported` can never meet a task whose conversation row is simply gone.
+
+    `scheduled_task_conversation_id_fkey` has no cascade, so the conversation cannot be deleted
+    out from under a live task and the task's conversation id cannot be pointed at a row that does
+    not exist. The database enforces that half. What the store must still handle is a conversation
+    that exists and is not *readable here* — a borrowed cross-workspace id — which is the case
+    `test_a_task_pointing_at_another_workspaces_conversation_is_not_listed` covers."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            "check inbox",
+            "digest",
+            datetime.now(UTC) + timedelta(hours=1),
+        )
+        with pytest.raises(IntegrityError):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.conversation).where(
+                        tables.conversation.c.id == conversation_id
+                    )
+                )
+        with pytest.raises(IntegrityError):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(schedule_table)
+                    .where(schedule_table.c.conversation_id == conversation_id)
+                    .values(conversation_id=uuid4())
+                )
+        assert len(await store.list_reported()) == 1
