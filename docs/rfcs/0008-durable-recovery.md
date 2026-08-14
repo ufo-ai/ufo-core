@@ -49,6 +49,17 @@ one seam metalcraft had and selfhost dropped: a per-tool `idempotency_key`.
 - **`preemptible=True` + cancellation:** on `DBOSWorkflowCancelledError` the step records **no**
   outcome and re-runs on resume (`_core.py:1771-1774`). A hard crash likewise leaves the in-flight
   step unrecorded → re-executed on recovery.
+- **Adoption yields to guidance:** an execution that re-claims its own running turn
+  (`_claim_turn`'s adopted branch) opens an `AdoptionReplay` window that the first live arrival
+  drain closes. Inside it, a dispatch body that actually executes is the crashed attempt's
+  in-flight work re-running, chosen by a model that cannot have seen anything queued since — so
+  when a member message is pending it records an unexecuted error result instead of redoing the
+  call, the next round's drain folds the message, and the model decides whether the call still
+  applies. Step ids stay contiguous (the yield records into the same slot); with nothing pending
+  the in-flight step re-executes in full, exactly as above. A side-effecting tool is never
+  preempted: its re-execution dedups through the call's idempotency key (a spawn reattaches to its
+  running child, a send dedups at the provider), so skipping it would strand that keyed work while
+  a re-issued call duplicated it under a fresh call id — only an unkeyed redo yields.
 
 **The current turn.** `turn_workflow` (`@DBOS.workflow`, `queue.py:234`) awaits a single
 `_execute_turn` (`@DBOS.step(preemptible=True)`, `queue.py:103`). That step is the whole turn — load

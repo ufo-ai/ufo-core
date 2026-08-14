@@ -63,6 +63,7 @@ from ufo.loop.compaction import (
     Compaction,
 )
 from ufo.loop.engine import (
+    ADOPTED_CLAIM,
     ASK_USER_TOOL,
     FINISH_ALONE,
     FINISH_DESCRIPTION,
@@ -70,6 +71,7 @@ from ufo.loop.engine import (
     FINISH_TOOL,
     FORCE_FINAL_PROMPT,
     FORCE_FINISH_PROMPT,
+    FRESH_CLAIM,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
@@ -91,6 +93,7 @@ from ufo.loop.engine import (
     TurnParked,
     _bounded,
     _BoundToolCall,
+    _claim_turn,
     _claim_turn_with_handoff,
     _dispatch_segments,
     _final_act,
@@ -1225,6 +1228,100 @@ async def test_a_main_turn_claims_member_and_internal_rows_alike(db: None, tmp_p
         await _queue_arrival(turn, "child result", admission_source="internal")
         claimed = await engine._claim_arrivals(())
         assert [_arrival_body(arrival) for arrival in claimed] == ["member text", "child result"]
+
+
+async def test_claim_turn_names_the_branch_that_matched(db: None) -> None:
+    """A queued or parked turn claims fresh; the same attempt re-claiming its own running turn is
+    an adoption; a different attempt loses the claim."""
+    turn = await _seed_turn("queued", None)
+    assert await _claim_turn(turn.id, "wf-1") == FRESH_CLAIM
+    assert await _claim_turn(turn.id, "wf-1") == ADOPTED_CLAIM
+    assert await _claim_turn(turn.id, "wf-2") is None
+
+
+async def test_a_live_drain_closes_the_adoption_replay_window(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("running", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        engine.adoption.replaying = True
+        await engine._claim_arrivals(())
+        assert engine.adoption.replaying is False
+
+
+async def test_pending_member_guidance_sees_only_untaken_member_rows(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("running", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, object(), tmp_path)
+        assert await engine._pending_member_guidance() is False
+        await _queue_arrival(turn, "child result", admission_source="internal")
+        assert await engine._pending_member_guidance() is False
+        await _queue_arrival(turn, "guidance", admission_source="member")
+        assert await engine._pending_member_guidance() is True
+        await engine._claim_arrivals(())
+        assert await engine._pending_member_guidance() is False
+
+
+async def test_a_side_effecting_tool_is_never_preempted_by_queued_guidance(
+    db: None, tmp_path: Path
+) -> None:
+    """A side-effecting tool's cross-attempt re-execution dedups through the call's idempotency
+    key (a spawn reattaches to its child, a connector send dedups at the provider), so it must run
+    even inside an open adoption window — a preempted skip strands that keyed work, and a re-issued
+    call would duplicate it under a fresh call id. An unkeyed redo yields."""
+    ran: list[str] = []
+
+    async def keyed(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        ran.append("keyed")
+        return ToolResult(content=(TextContent(text="reattached"),))
+
+    async def redo(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        ran.append("redo")
+        return ToolResult(content=(TextContent(text="redone"),))
+
+    turn = await _seed_turn("running", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="keyed",
+                    description="d",
+                    input_model=_NoArgs,
+                    handler=keyed,
+                    side_effecting=True,
+                ),
+                ToolDef(name="redoing", description="d", input_model=_NoArgs, handler=redo),
+            )
+        ),
+    )
+    engine.adoption.replaying = True
+    with ws(turn.workspace_id):
+        await _queue_arrival(turn, "stop, do X instead", admission_source="member")
+        keyed_result = await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="keyed", input={})
+        )
+        preempted = await _dispatch_step(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c2", name="redoing", input={})
+        )
+    assert not keyed_result.is_error
+    assert keyed_result.text == "reattached"
+    assert preempted.is_error
+    assert "restarted" in preempted.text
+    assert ran == ["keyed"]
+
+
+async def test_preemptibility_reads_the_builtin_declarations(db: None, tmp_path: Path) -> None:
+    """bash — the long command the preemption exists for — stays preemptible; the delegation
+    builtins that key children on `ctx.idempotency_key` are spared; an unknown name never
+    dispatches, so there is nothing to preempt."""
+    turn = await _seed_turn("running", None)
+    engine = _engine(turn, object(), tmp_path)
+    assert engine._redoes_on_replay("bash") is True
+    assert engine._redoes_on_replay("spawn_subagent") is False
+    assert engine._redoes_on_replay("message_subagent") is False
+    assert engine._redoes_on_replay("unknown") is False
 
 
 async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
@@ -2796,7 +2893,7 @@ async def test_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id(db: 
             )
         )
     claimed, handoff = await _claim_turn_with_handoff(turn.id, str(turn.id))
-    assert claimed is True
+    assert claimed == FRESH_CLAIM
     assert handoff is not None
     assert handoff.id == next_id
     assert handoff.workflow_id != str(next_id)

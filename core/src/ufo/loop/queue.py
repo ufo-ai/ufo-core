@@ -36,7 +36,9 @@ from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
+    ADOPTED_CLAIM,
     MAIN_ROUND_LIMIT,
+    AdoptionReplay,
     TranscriptRepair,
     TurnEngine,
     TurnParked,
@@ -294,8 +296,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     try:
         attempt = DBOS.workflow_id or turn_id
         with span("turn.claim"):
-            claimed, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
-        if not claimed:
+            claim, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
+        if claim is None:
             turn, _, _ = await _load_turn(UUID(turn_id))
             await TranscriptRepair(
                 turn=turn,
@@ -475,6 +477,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             skills=skills,
             preload=preload,
             output_model=output_model,
+            adoption=AdoptionReplay(
+                replaying=claim == ADOPTED_CLAIM
+                and turn.subagent_profile is None
+                and turn.admission_source != INTENT_ADMISSION
+            ),
         )
         run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
         frame = await run()

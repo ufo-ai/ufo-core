@@ -8,7 +8,11 @@ engine walls such a result in a data-only span so the model never reads it as in
 an MCP call, a local durable write): the engine folds a per-call `idempotency_key` onto the context
 such a handler receives, so a cross-attempt resume can dedup the external effect at the provider. A
 deterministic read (a bash read, a search, a page read) leaves it `False` and gets no key — DBOS
-step memoization already makes re-executing it harmless. `ToolRegistry` is the frozen set the engine
+step memoization already makes re-executing it harmless. The same declaration decides an adopted
+turn's guidance preemption: a keyed re-execution dedups (a spawn reattaches to its child, a send
+dedups at the provider) and must run, since skipping it strands the keyed work and a re-issued
+call would duplicate it under a fresh call id; only an unkeyed redo yields to queued member
+guidance. `ToolRegistry` is the frozen set the engine
 dispatches against — it rejects a duplicate name at construction and fails loud on an unknown
 lookup."""
 

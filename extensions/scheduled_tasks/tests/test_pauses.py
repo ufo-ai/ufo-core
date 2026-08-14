@@ -33,7 +33,7 @@ from ufo.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
-from ufo.loop.engine import _claim_turn
+from ufo.loop.engine import FRESH_CLAIM, _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
@@ -715,7 +715,7 @@ async def test_a_fired_resume_claims_like_any_turn(db: None) -> None:
         await _due_now(row["id"])
         await PauseRunner(ctx=_runner_ctx(_invoker(workspace_id, StubDbos()))).run()
         [turn] = await _turns(conversation_id)
-        assert await _claim_turn(turn["id"], "timer-resume") is True
+        assert await _claim_turn(turn["id"], "timer-resume") == FRESH_CLAIM
         assert await _rows(workspace_id) == []
 
 

@@ -51,7 +51,7 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.sandbox.session import ExecResult, ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 
@@ -398,6 +398,175 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
         assert terminal.status == "done"
         assert terminal.text == "recovered"
         assert binds == 4
+    finally:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        loop_queue._runtime.dbos.destroy()
+        loop_queue.reset_runtime()
+        if saved is not None:
+            loop_queue.init_runtime(saved)
+
+
+GUIDANCE_PROBE = "guidance-probe"
+
+
+@dataclass(frozen=True)
+class _GuidanceProbeModel:
+    """Round one launches the probe command, whose dispatch kills the worker mid-command. The
+    closing round reports what the window shows: `redirected` when the in-flight call came back
+    unexecuted and the member's follow-up is present, `recovered` when the call was redone clean
+    with no follow-up queued, `wrong` otherwise."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        results = tuple(
+            block
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            for block in message.content
+            if isinstance(block, ToolResultBlock)
+        )
+        if not results:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(
+                id="c1",
+                partial_json=json.dumps(
+                    {"command": f"echo {GUIDANCE_PROBE}", "user_description": "a long command"}
+                ),
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        guidance = any(
+            isinstance(message.content, str) and "do X instead" in message.content
+            for message in request.messages
+        )
+        (result,) = results
+        if guidance:
+            skipped = result.is_error and "restarted" in str(result.content)
+            yield TextDelta(text="redirected" if skipped else "wrong")
+        else:
+            yield TextDelta(text="recovered" if not result.is_error else "wrong")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+def _guidance_probe_registry() -> ModelRegistry:
+    return ModelRegistry(
+        specs={
+            spec.id: replace(
+                spec,
+                client=lambda spec, key: _GuidanceProbeModel(),
+                key_slot="",
+                key_env="",
+            )
+            for spec in CORE_MODEL_SPECS
+        },
+        pricing=CORE_PRICING,
+        auto_model="claude-opus-4-8",
+    )
+
+
+def _crash_once_exec(probe_execs: list[tuple[str, ...]]):
+    original = LocalCarrier.exec
+
+    async def exec_(
+        self: LocalCarrier, handle: object, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        if not any(GUIDANCE_PROBE in arg for arg in argv):
+            return await original(self, handle, argv, timeout_s)
+        probe_execs.append(argv)
+        if len(probe_execs) == 1:
+            raise _WorkerCrash("killed mid command")
+        return ExecResult(stdout=GUIDANCE_PROBE, stderr="", exit_code=0)
+
+    return exec_
+
+
+async def _admit_member_arrival(
+    workspace_id: UUID, conversation_id: UUID, turn_id: UUID, body: str
+) -> UUID:
+    message_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=message_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=1,
+                body=body,
+                admission_source="member",
+                admitted_turn_id=turn_id,
+                created_at=sa.func.now(),
+            )
+        )
+    return message_id
+
+
+@pytest.mark.serial
+async def test_guidance_queued_during_the_crash_window_preempts_the_inflight_redo(
+    db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member message durable before recovery reaches the model ahead of the in-flight step's
+    re-execution: the adopted dispatch records an unexecuted result instead of redoing the command,
+    the next round folds the message, and the model answers it."""
+    workspace_id, conversation_id, turn_id = await _seed_turn()
+    probe_execs: list[tuple[str, ...]] = []
+    monkeypatch.setattr(LocalCarrier, "exec", _crash_once_exec(probe_execs))
+    saved = loop_queue._runtime
+    loop_queue.reset_runtime()
+    _install_runtime(dbos_launched, _guidance_probe_registry(), tmp_path / "workspaces")
+    try:
+        with SetWorkflowID(str(turn_id)):
+            with pytest.raises(_WorkerCrash):
+                await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
+        assert len(probe_execs) == 1
+
+        guidance_id = await _admit_member_arrival(
+            workspace_id, conversation_id, turn_id, "stop, do X instead"
+        )
+        DBOS._recover_pending_workflows(["local"])
+        terminal = await _await_terminal(turn_id)
+
+        assert terminal.status == "done"
+        assert terminal.text == "redirected"
+        assert len(probe_execs) == 1
+        async with workspace_tx() as connection:
+            consumed = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.consumed_turn_id).where(
+                        tables.inbound_message.c.id == guidance_id
+                    )
+                )
+            ).scalar_one()
+        assert consumed == turn_id
+    finally:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        loop_queue._runtime.dbos.destroy()
+        loop_queue.reset_runtime()
+        if saved is not None:
+            loop_queue.init_runtime(saved)
+
+
+@pytest.mark.serial
+async def test_adoption_with_nothing_queued_redoes_the_inflight_step(
+    db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no member message pending, adoption keeps durable execution's contract: the in-flight
+    step re-executes in full and the turn completes on its result."""
+    workspace_id, _, turn_id = await _seed_turn()
+    probe_execs: list[tuple[str, ...]] = []
+    monkeypatch.setattr(LocalCarrier, "exec", _crash_once_exec(probe_execs))
+    saved = loop_queue._runtime
+    loop_queue.reset_runtime()
+    _install_runtime(dbos_launched, _guidance_probe_registry(), tmp_path / "workspaces")
+    try:
+        with SetWorkflowID(str(turn_id)):
+            with pytest.raises(_WorkerCrash):
+                await loop_queue.turn_workflow(str(workspace_id), str(turn_id))
+
+        DBOS._recover_pending_workflows(["local"])
+        terminal = await _await_terminal(turn_id)
+
+        assert terminal.status == "done"
+        assert terminal.text == "recovered"
+        assert len(probe_execs) == 2
     finally:
         asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         loop_queue._runtime.dbos.destroy()

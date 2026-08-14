@@ -15,7 +15,7 @@ import json
 import time
 from base64 import b64decode, b64encode
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from html import escape
 from io import BytesIO
@@ -184,16 +184,29 @@ SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 _NOTHING_SPENT = TurnCost(tokens=0, micro_usd=0, model="", cache_percent=0)
 
 
-async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
+FRESH_CLAIM = "fresh"
+ADOPTED_CLAIM = "adopted"
+
+
+async def _claim_turn(turn_id: UUID, attempt: str) -> str | None:
+    """Claim the turn for this attempt and name which branch matched: FRESH_CLAIM took a queued or
+    parked turn, ADOPTED_CLAIM re-took a turn already running under this same attempt — a DBOS
+    crash-recovery replay resuming its own turn — and None lost the claim. The branch is meaningful
+    to a workflow's first claim; the engine's in-loop re-claim always reads as adopted because the
+    queue claimed ahead of it."""
     async with workspace_tx() as connection:
-        conversation_id = (
+        prior = (
             await connection.execute(
-                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+                sa.select(
+                    tables.turn.c.conversation_id,
+                    tables.turn.c.status,
+                    tables.turn.c.running_attempt,
+                ).where(tables.turn.c.id == turn_id)
             )
-        ).scalar_one()
+        ).one()
         await connection.execute(
             sa.select(tables.conversation.c.id)
-            .where(tables.conversation.c.id == conversation_id)
+            .where(tables.conversation.c.id == prior.conversation_id)
             .with_for_update()
         )
         workspace_id = (
@@ -218,7 +231,11 @@ async def _claim_turn(turn_id: UUID, attempt: str) -> bool:
                 .returning(tables.turn.c.workspace_id)
             )
         ).scalar_one_or_none()
-    return workspace_id is not None
+    if workspace_id is None:
+        return None
+    if prior.status == RUNNING and prior.running_attempt == attempt:
+        return ADOPTED_CLAIM
+    return FRESH_CLAIM
 
 
 @dataclass(frozen=True)
@@ -229,9 +246,12 @@ class _TurnHandoff:
     workflow_id: str
 
 
-async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _TurnHandoff | None]:
-    if not await _claim_turn(turn_id, attempt):
-        return False, None
+async def _claim_turn_with_handoff(
+    turn_id: UUID, attempt: str
+) -> tuple[str | None, _TurnHandoff | None]:
+    claim = await _claim_turn(turn_id, attempt)
+    if claim is None:
+        return None, None
     async with workspace_tx() as connection:
         turn_scope = (
             await connection.execute(
@@ -263,7 +283,7 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
             )
         ).one_or_none()
         if next_turn is None or next_turn.dispatch_enqueued_at is not None:
-            return True, None
+            return claim, None
         stamped = (
             await connection.execute(
                 sa.update(tables.turn)
@@ -277,7 +297,7 @@ async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[bool, _
             )
         ).scalar_one_or_none()
     return (
-        True,
+        claim,
         None
         if stamped is None
         else _TurnHandoff(
@@ -301,6 +321,11 @@ OFFLOAD_NOTICE = (
     "(jq, grep, sed) or read it with offset/limit; reading it whole offloads again]"
 )
 TRUNCATION_NOTICE = RESULT_CUT_MARKER + "truncated {dropped} of {total} chars]"
+GUIDANCE_PREEMPTED_NOTICE = (
+    "Not executed: the server restarted while this call was running, and member messages arrived "
+    "in the meantime — they follow. Work the call did before the restart may have partially "
+    "applied. Re-issue it after reading them if it still applies."
+)
 
 
 class StreamResult(BaseModel):
@@ -790,6 +815,19 @@ class _TurnMeter:
             )
 
 
+@dataclass
+class AdoptionReplay:
+    """The replay window of an execution that adopted an already-running turn after a crash. Open
+    from the claim that re-took the turn until the first live arrival drain — the point where the
+    window's contents catch up with the queue. While it is open, a dispatch step whose body actually
+    executes is the crashed attempt's in-flight work re-running, chosen by a model that cannot have
+    seen anything queued since; an unkeyed redo yields to pending member guidance instead of
+    running ahead of it, while a side-effecting re-execution dedups through its idempotency key
+    and keeps its reattach."""
+
+    replaying: bool = False
+
+
 @dataclass(frozen=True, repr=False)
 class TurnEngine:
     turn: Turn
@@ -825,6 +863,7 @@ class TurnEngine:
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     preload: tuple[LoadedSkill, ...] = ()
     output_model: type[BaseModel] | None = None
+    adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
 
     def __post_init__(self) -> None:
         if any(context.audience != self.audience for context in self.tool_ext.values()):
@@ -1182,7 +1221,7 @@ class TurnEngine:
         the claim, and is resolved as superseded, so single ownership is the DB claim itself, not
         the per-conversation partition. Clearing the advisory dispatch stamp here tells the outbox
         the turn is live; a crash before this leaves the turn re-enqueueable."""
-        return await _claim_turn(self.turn.id, self.attempt)
+        return await _claim_turn(self.turn.id, self.attempt) is not None
 
     def _repair(self) -> TranscriptRepair:
         return TranscriptRepair(turn=self.turn, transcript=self.transcript, hub=self.hub)
@@ -1458,7 +1497,10 @@ class TurnEngine:
         the step, so a replay of a recorded drain reuses the memoized rendering instead of
         re-firing hooks. An arrival is consumed exactly once and never lost. A subagent turn claims
         only internally admitted rows — the results its own children deliver — so nothing else can
-        reach a channel that belongs to its parent."""
+        reach a channel that belongs to its parent. A drain whose body runs is by construction
+        live, not a replay, and is where an adopted execution's window catches up with the queue —
+        so it closes the adoption replay window."""
+        self.adoption.replaying = False
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -2117,6 +2159,22 @@ class TurnEngine:
                         text=bound.text,
                         is_error=True,
                     )
+                if (
+                    self.adoption.replaying
+                    and self._redoes_on_replay(call.name)
+                    and await self._pending_member_guidance()
+                ):
+                    outcome = "guidance_preempted"
+                    log(
+                        "turn.dispatch_preempted_by_guidance",
+                        turn_id=str(self.turn.id),
+                        tool=call.name,
+                    )
+                    return DispatchResult(
+                        tool_use_id=call.id,
+                        text=GUIDANCE_PREEMPTED_NOTICE,
+                        is_error=True,
+                    )
                 context = bound.context
                 await self._publish(tool_activity(call))
                 try:
@@ -2224,6 +2282,35 @@ class TurnEngine:
                 raise
             finally:
                 _meter_dispatch(self.tools, call, started, outcome, error_class, self.profile)
+
+    def _redoes_on_replay(self, name: str) -> bool:
+        """Whether re-executing this call redoes its work, making it preemptible. A side-effecting
+        tool's re-execution dedups through the call's idempotency key — a spawn reattaches to its
+        running child, a connector send dedups at the provider — and must keep that: preempting it
+        strands the keyed work, and a re-issued call would duplicate it under a fresh call id. An
+        unknown name never dispatches, so there is nothing to preempt."""
+        try:
+            return not self.tools.get(name).side_effecting
+        except KeyError:
+            return False
+
+    async def _pending_member_guidance(self) -> bool:
+        """Whether a member message is queued for this conversation that no drain has taken. Read
+        plainly, never as a step: it runs only inside a dispatch body that is already executing
+        live, and gates that one execution."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.id)
+                    .where(
+                        tables.inbound_message.c.conversation_id == self.turn.conversation_id,
+                        tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                        tables.inbound_message.c.consumed_turn_id.is_(None),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        return row is not None
 
     async def _bounded_image(self, image: ImageBlock) -> ImageBlock:
         source = image.source
