@@ -1561,9 +1561,13 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     assert [(point.count, dict(point.attributes)) for point in points["ufo.model_round_ms"]] == [
         (2, {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"})
     ]
-    assert [
-        (point.count, dict(point.attributes)) for point in points["ufo.model_first_event_ms"]
-    ] == [(2, {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"})]
+    assert {
+        (point.count, point.attributes["round"], point.attributes["gap"])
+        for point in points["ufo.model_first_event_ms"]
+    } == {
+        (1, "first", "new"),
+        (1, "later", "within_turn"),
+    }
     assert {
         (point.attributes["kind"], point.attributes["model"], point.value)
         for point in points["ufo.model_round_tokens_total"]
@@ -1609,7 +1613,7 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["result"])
-        for point in points["ufo.model_cache_first_event_ms"]
+        for point in points["ufo.model_first_event_ms"]
     } == {("first", "5m_1h", "miss"), ("later", "within_turn", "miss")}
     assert [
         (point.attributes["path"], point.attributes["status"], point.value)
@@ -1687,7 +1691,15 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
         }
     ]
     assert [dict(point.attributes) for point in points["ufo.model_first_event_ms"]] == [
-        {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"}
+        {
+            "model": "claude-opus-4-8",
+            "provider": "anthropic",
+            "profile": "main",
+            "ttl": "1h",
+            "round": "first",
+            "gap": "new",
+            "result": "hit",
+        }
     ]
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]

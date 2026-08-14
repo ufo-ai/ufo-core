@@ -81,8 +81,8 @@ MAIN_PROFILE = "main"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
     "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
-    "model_first_event_ms": ("model", "provider", PROFILE_DIMENSION),
-    "model_cache_first_event_ms": (
+    "model_first_event_ms": (
+        "model",
         "provider",
         PROFILE_DIMENSION,
         "ttl",

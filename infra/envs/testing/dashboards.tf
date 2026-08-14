@@ -960,11 +960,11 @@ resource "datadog_dashboard" "prompt_cache" {
     timeseries_definition {
       title = "first-event latency by cache result and idle gap"
       request {
-        q            = "p50:ufo.model_cache_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p50:ufo.model_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_cache_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p95:ufo.model_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
         display_type = "line"
       }
     }

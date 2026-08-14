@@ -1841,21 +1841,14 @@ class TurnEngine:
             profile=self.profile,
             **({} if error is None else {"error_class": type(error).__name__}),
         )
-        if first_event_ms is not None:
-            emit_histogram(
-                "model_first_event_ms",
-                first_event_ms,
-                model=request.model,
-                provider=self.provider,
-                profile=self.profile,
-            )
         round_usage = _total_usage(usages)
         cache_result = "hit" if round_usage.cache_read_tokens else "miss"
         emit_metric("model_cache_round_total", **cache_dimensions, result=cache_result)
         if first_event_ms is not None:
             emit_histogram(
-                "model_cache_first_event_ms",
+                "model_first_event_ms",
                 first_event_ms,
+                model=request.model,
                 **cache_dimensions,
                 result=cache_result,
             )
