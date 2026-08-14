@@ -997,6 +997,9 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/workspace/team");
 });
 
+/** The mark a subagent's name carries in the list, which stands in the cell beside the name. */
+const SUBAGENT_MARK = "Subagent";
+
 test("the agents view lists the deploy's subagents under the agents in one table", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
@@ -1018,8 +1021,8 @@ test("the agents view lists the deploy's subagents under the agents in one table
   ];
   expect(rows.map((row) => row.cells[0].textContent)).toEqual([
     "assistant",
-    "deep_research",
-    "general_purpose",
+    "deep_research" + SUBAGENT_MARK,
+    "general_purpose" + SUBAGENT_MARK,
   ]);
   expect(rows[0].cells[1].textContent).toBe("The agent this workspace answers with by default.");
   expect(rows[1].cells[1].textContent).toBe(

@@ -6,11 +6,13 @@ import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
 import { Page, PageHeader, PageToolbar } from "@/kernel/pane";
 import { DataTable } from "@/kernel/table";
 import { outcomeNotice, type NoticeState } from "@/kernel/panel";
 import { postIntent } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Agent, NewAgentForm, Subagent } from "@/lib/types";
 
@@ -33,10 +35,20 @@ const MANAGE = "Manage";
 /** A subagent with no model of its own runs on the model of the agent that spawned it, so the
  *  column has no id to name and says so rather than standing empty. */
 const INHERITED = "—";
+const AGENT_FAMILY = "agent";
+/** The one answer to which rows are subagents: the value the filter narrows on is the value the
+ *  pill is drawn from, so no row can carry the pill and fall outside the Subagents tab. */
+const SUBAGENT_FAMILY = "subagent";
 const FAMILIES = [
-  { label: "Agents", value: "agent" },
-  { label: "Subagents", value: "subagent" },
+  { label: "Agents", value: AGENT_FAMILY },
+  { label: "Subagents", value: SUBAGENT_FAMILY },
 ];
+const SUBAGENT_PILL = "Subagent";
+const SUBAGENT_HINT = "An agent starts one to do a single task and report back.";
+const PILL = cn(
+  "ml-xs inline-flex items-center rounded-full border-0 bg-fill-subtle px-sm py-hair",
+  "align-middle font-sans text-small text-inherit",
+);
 
 /** One row per thing this workspace runs, whichever family it comes from: an agent a member
  *  addresses, and a subagent an agent spawns. A row says which one it is, what it is for, and the
@@ -65,6 +77,33 @@ function initialSpec(form: NewAgentForm): Record<string, ObjectValue> {
   );
 }
 
+/** What family a name belongs to, said on the name rather than left to the column beside it, and
+ *  the one sentence a member who has never seen a subagent needs. Hover is not the only way to that
+ *  sentence: the pill is a button, so focus opens the tooltip from the keyboard and a tap opens it
+ *  on a touch screen, where a pointer never rests on anything. The press closes on Escape or on the
+ *  next press outside it, and it never reaches the row — `rowControl` hands a press landing on a
+ *  nested control to that control, so reading the pill does not open the record. */
+function SubagentPill() {
+  const [open, setOpen] = useState(false);
+  return (
+    <TooltipProvider>
+      <Tooltip open={open} onOpenChange={setOpen}>
+        <TooltipTrigger
+          type="button"
+          className={PILL}
+          onClick={(event) => {
+            event.preventDefault();
+            setOpen(true);
+          }}
+        >
+          {SUBAGENT_PILL}
+        </TooltipTrigger>
+        <TooltipContent side="top">{SUBAGENT_HINT}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export function Agents({
   agents,
   subagents,
@@ -82,7 +121,7 @@ export function Agents({
   const rows: AgentRow[] = [
     ...agents.map((agent) => ({
       key: "agent/" + agent.id,
-      family: "agent",
+      family: AGENT_FAMILY,
       name: agent.name,
       details: agent.main ? MAIN : "",
       model: agent.model,
@@ -90,7 +129,7 @@ export function Agents({
     })),
     ...subagents.map((subagent) => ({
       key: "subagent/" + subagent.name,
-      family: "subagent",
+      family: SUBAGENT_FAMILY,
       name: subagent.name,
       details: subagent.model ? SPAWNED : INHERITS,
       model: subagent.model ?? INHERITED,
@@ -157,7 +196,10 @@ export function Agents({
       >
         {(row) => (
           <>
-            <Td>{row.name}</Td>
+            <Td>
+              {row.name}
+              {row.family === SUBAGENT_FAMILY ? <SubagentPill /> : null}
+            </Td>
             <Td>{row.details}</Td>
             <TdFact>{row.model}</TdFact>
           </>

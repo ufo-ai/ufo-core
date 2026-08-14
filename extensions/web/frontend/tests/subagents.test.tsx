@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -26,6 +26,12 @@ beforeEach(() => {
   useStreamFake();
 });
 
+function tableRow(name: string): HTMLElement {
+  const found = screen.getByText(name).closest("tr");
+  if (!found) throw new Error("no row named " + name);
+  return found;
+}
+
 function portal(routes: Record<string, () => Response>) {
   render(<App agents={[AGENT]} subagents={[RESEARCH, GENERAL]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   return routes;
@@ -43,6 +49,45 @@ test("a subagent stands in the one table, and the family filter narrows to it", 
 
   expect(screen.getByText("deep_research")).toBeTruthy();
   expect(within(screen.getByRole("table")).queryByText("assistant")).toBeNull();
+});
+
+test("the pill marks every row the Subagents filter keeps, and no row it drops", async () => {
+  portal({});
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+
+  const table = within(screen.getByRole("table"));
+  expect(table.getAllByRole("button", { name: "Subagent" }).length).toBe(2);
+  expect(within(tableRow("assistant")).queryByRole("button", { name: "Subagent" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Subagents" }));
+
+  expect(table.getAllByRole("button", { name: "Subagent" }).length).toBe(2);
+});
+
+test("the pill says what a subagent is on keyboard focus and on a press, never on hover alone", async () => {
+  portal({});
+
+  await userEvent.click(screen.getByRole("button", { name: "Agents" }));
+  const pill = within(tableRow("deep_research")).getByRole("button", { name: "Subagent" });
+
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.focus(pill);
+
+  expect((await screen.findByRole("tooltip")).textContent).toBe(
+    "An agent starts one to do a single task and report back.",
+  );
+
+  fireEvent.blur(pill);
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+
+  await userEvent.click(pill);
+
+  expect(await screen.findByRole("tooltip")).toBeTruthy();
+  expect(location.hash).toBe("#/agents");
+
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
 });
 
 test("a deploy declaring no subagent says so under the family that has none", async () => {
