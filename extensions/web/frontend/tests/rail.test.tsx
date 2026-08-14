@@ -22,6 +22,7 @@ import {
   TURN_ID,
   SITE_KIND,
   TASK_KIND,
+  TRIGGER_KIND,
   json,
   objectIndex,
   pressRow,
@@ -615,6 +616,7 @@ test("the sidebar marks the section the member is in and leaves the others off",
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     "/skills": () => json({ skills: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
@@ -624,12 +626,12 @@ test("the sidebar marks the section the member is in and leaves the others off",
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
-    ["Agents", "Scheduled", "Artifacts", "Memory", "Workspace"].filter(
+    ["Agents", "Automations", "Artifacts", "Memory", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
-  await userEvent.click(screen.getByRole("button", { name: "Scheduled" }));
-  await waitFor(() => expect(marked()).toEqual(["Scheduled"]));
+  await userEvent.click(screen.getByRole("button", { name: "Automations" }));
+  await waitFor(() => expect(marked()).toEqual(["Automations"]));
 
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(marked()).toEqual(["Workspace"]);

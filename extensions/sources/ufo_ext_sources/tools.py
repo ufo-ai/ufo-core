@@ -1,4 +1,5 @@
-"""The `source` object kind: registered content-sync bindings managed through the object verbs.
+"""The `source` and `source_trigger` object kinds: registered content-sync bindings managed through
+the object verbs, and the conversations that wake when one changes.
 
 A source object is one provider binding — an account (or the workspace's BYOK credential) plus a
 tenant URL where the provider needs one — carrying the selected streams, each stream a `source`
@@ -15,13 +16,14 @@ registration, and only the registrar may later flip a private source to shared �
 delete-and-recreate. Delete is registrar-or-admin. Validation refuses with the
 valid provider and stream sets, so discovery is error-driven plus `object_explain`.
 
-The `subscribers` field is the one part any member who can see the source may change: a
-conversation adds its own id (surfaced as `status.subscriber_id`) to be alerted when the source's
-synced content changes, and removes it to stop. That edit is gated on visibility, not ownership,
-and may only toggle the caller's own id — a conversation cannot subscribe or unsubscribe another,
-nor reach a source private to someone else. The `page_change` hook reads a changed binding's
-subscribers and invokes one alert turn per subscribed conversation, carrying per-stream counts of
-what changed (only the shared pages a subscriber may read) and writing the whole delta — one JSON
+A source trigger is one conversation's standing interest in one shared source: apply the kind from
+the conversation to wake it when that source's synced content changes, delete the row to stop. Its
+name derives from the pair it is (`<binding>-<conversation>`), only a shared source can carry one —
+a private source's pages never reach another reader, so a trigger on one could never fire — and a
+trigger is seen by whoever reads the conversation it wakes, plus its creator and a workspace admin,
+which is how a scheduled task answers the same question. The `page_change` hook reads a changed
+binding's triggers and invokes one alert turn per woken conversation, carrying per-stream counts of
+what changed (only the shared pages that agent may read) and writing the whole delta — one JSON
 line per page — into that conversation's workspace for the agent to read with its file tools."""
 
 import json
@@ -42,8 +44,10 @@ from ufo.sdk.credentials import credential_object_name
 from ufo.sdk.grants import account_object_name
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
 from ufo.sdk.objects import (
+    CONVERSATION_KIND,
     CREDENTIAL_KIND,
     AdminRequired,
+    GeneratedObjectOwner,
     MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
@@ -53,6 +57,7 @@ from ufo.sdk.objects import (
     OwnedRow,
     UnknownObject,
     VerbNotSupported,
+    owner_emails,
 )
 from ufo.sdk.sources import (
     ConnectorSourceConfig,
@@ -63,11 +68,12 @@ from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
+from ufo_ext_sources.triggers import ListedTrigger, SourceTriggerStore
 
 CONNECTION_OBJECT_KIND = "connection"
+SOURCE_TRIGGER_KIND = "source_trigger"
 SUMMARY_MAX = 120
 MAX_BACKFILL_DAYS = 36500
-SUBSCRIBERS_PREFIX = "subscribers:"
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
 CHANGE_LOG_DIR = ".sources"
@@ -141,17 +147,11 @@ class SourceSpec(BaseModel):
         description="Sync into the whole workspace's shared memory rather than privately to the "
         "registering member. Set it only when the member's words say the source is for the team.",
     )
-    subscribers: tuple[str, ...] = Field(
-        default=(),
-        description="Conversation ids alerted when this source's synced content changes. Add or "
-        "remove only your own id (shown as status.subscriber_id) to subscribe or unsubscribe; "
-        "this is the one field an apply may change on an existing source you can see.",
-    )
     resync: bool = Field(
         default=False,
         description="Set true to schedule an immediate sync of this binding's streams — an act, "
-        "not state: it changes nothing else, ignores subscribers, always reads back false, and "
-        "is the registering member's or a workspace admin's.",
+        "not state: it changes nothing else, always reads back false, and is the registering "
+        "member's or a workspace admin's.",
     )
     backfill_days: Annotated[int, Field(ge=1, le=MAX_BACKFILL_DAYS)] | Literal["all"] | None = (
         Field(
@@ -217,14 +217,13 @@ class _Binding:
             )
         return (ObjectLink(relation="access_to", target=access),)
 
-    def spec(self, subscribers: tuple[str, ...] = ()) -> SourceSpec:
+    def spec(self) -> SourceSpec:
         return SourceSpec(
             provider=self.provider,
             streams=tuple(stream.name for stream in self.streams),
             account_id="" if self.account == DIRECT_ACCOUNT else self.account,
             base_url=self.base_url or "",
             shared=subject_shared(self.subject),
-            subscribers=subscribers,
             backfill_days=self.backfill_days,
         )
 
@@ -287,28 +286,21 @@ async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
     )
 
 
-async def _subscribers_map(ext: ExtensionContext, name: str) -> dict[str, str]:
-    """This source's subscribers as a `{conversation_id: agent_id}` map — the agent is captured
-    from the subscribing turn so a change alert re-enters the same conversation and agent."""
-    value = await ext.store.get(SUBSCRIBERS_PREFIX + name)
-    match value:
-        case dict() as stored if all(
-            isinstance(k, str) and isinstance(v, str) for k, v in stored.items()
-        ):
-            return dict(stored)
-        case None:
-            return {}
-        case _:
-            raise RuntimeError(f"malformed subscribers for source {name!r}")
+async def _binding_named(ext: ExtensionContext | None, name: str) -> _Binding | None:
+    """One registered binding by its derived name — the lookup the source kind and the trigger
+    kind both start from, since a trigger names the binding it watches."""
+    return next(
+        (
+            binding
+            for binding in await _bindings_from_ext(_require_ext(ext))
+            if binding.name == name
+        ),
+        None,
+    )
 
 
-async def _store_subscribers(ext: ExtensionContext, name: str, mapping: dict[str, str]) -> None:
-    if mapping:
-        await ext.store.put(
-            SUBSCRIBERS_PREFIX + name, {conv: agent for conv, agent in mapping.items()}
-        )
-    else:
-        await ext.store.delete(SUBSCRIBERS_PREFIX + name)
+def _require_triggers(ext: ExtensionContext | None) -> SourceTriggerStore:
+    return SourceTriggerStore(_require_ext(ext))
 
 
 def _effective_days(request: int | Literal["all"] | None, declared: int | None) -> int | None:
@@ -335,21 +327,13 @@ def _binding_identity(
     )
 
 
-def _self_only_change(old: tuple[str, ...], new: tuple[str, ...], caller: str) -> None:
-    """A subscribers edit may only add or remove the caller's own conversation id; any other
-    difference is refused so a conversation cannot subscribe or unsubscribe another."""
-    if (set(old) ^ set(new)) - {caller}:
-        raise ValueError(
-            "you may only add or remove your own conversation (status.subscriber_id) in "
-            "subscribers; leave every other id unchanged"
-        )
-
-
 SHARE_GATE = (
     "only the registering member may change a source; workspace admins may inspect or remove it"
 )
 DELETE_GATE = "only the registering member or a workspace admin may remove a source"
 RESYNC_GATE = "only the registering member or a workspace admin may resync a source"
+TRIGGER_GATE = "only the member who created a source trigger may change it"
+TRIGGER_DELETE_GATE = "only the trigger's creator or a workspace admin may delete a source trigger"
 
 
 @dataclass(frozen=True)
@@ -377,24 +361,15 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         *,
         expected_generation: UUID | None,
     ) -> None:
-        """A subscribers-only edit on a source the caller can already see (`old` is non-None only
-        for a visible source, since the base `get` hides the rest) is gated on visibility, not
-        ownership: any member who sees the source may add or remove their own conversation. A
-        resync is the registering member's or an admin's, changes nothing else, and ignores
-        subscribers. Every other apply — register, share-flip, recreate — goes through the base's
-        member/admin gate."""
+        """A resync is the registering member's or an admin's and changes nothing else. Re-applying
+        the identical spec of a source the caller can already see (`old` is non-None only for a
+        visible source, since the base `get` hides the rest) is the documented no-op. Every other
+        apply — register, share-flip, recreate, rewindow — goes through the base's member/admin
+        gate."""
         if spec.resync:
             await self._resync(ctx, name, spec, old)
             return
         if old is not None and _binding_identity(spec) == _binding_identity(old):
-            caller = ctx.turn.conversation_id.hex
-            owner = await self._owner(ctx, name)
-            if owner is not None and not owner.shared and owner.member_id != ctx.acting_member_id:
-                if spec.subscribers != old.subscribers:
-                    raise AdminRequired(SHARE_GATE)
-                return
-            _self_only_change(old.subscribers, spec.subscribers, caller)
-            await self._edit_subscribers(ctx, name, spec.subscribers, caller, ctx.turn.agent_id)
             return
         await super().apply(ctx, name, spec, old, expected_generation=expected_generation)
 
@@ -404,7 +379,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         """Schedule an immediate sync of the binding's streams: the act rides `apply` with
         `resync` set and the binding's current spec, so a submit that also edits what identifies
         the binding — provider, streams, account, tenant URL, or disclosure — is refused whole
-        rather than half-applied, and subscribers ride their own act. The gate is the delete
+        rather than half-applied. The gate is the delete
         gate's population — a resync drives connector traffic on the registering member's
         credential, so seeing a shared source is not enough to spend it."""
         if old is None or _binding_identity(spec) != _binding_identity(old):
@@ -417,36 +392,12 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         if not self._owned(owner, ctx.acting_member_id) and not is_admin:
             raise AdminRequired(RESYNC_GATE)
-        binding = await self._find(ctx.ext, name)
+        binding = await _binding_named(ctx.ext, name)
         if binding is None:
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         await _require_ext(ctx.ext).schedule_source_sync(
             tuple(stream.source_id for stream in binding.streams)
         )
-
-    async def _edit_subscribers(
-        self, ctx: ToolContext, name: str, desired: tuple[str, ...], caller: str, agent: UUID
-    ) -> None:
-        """Toggle only the caller's membership (the self-only rule already held the diff to it):
-        add captures the caller's agent so the alert re-enters the same conversation and agent;
-        remove drops it. Other subscribers' entries are preserved untouched. The map belongs to the
-        binding, so it stands only while the binding does: the removal that took the rows took the
-        subscribers with them, and re-reading after the write clears a map that landed behind it.
-        The recheck sees presence, not identity — a revival reuses the source row — so a write
-        landing inside a concurrent delete-then-revive of that name survives onto the revived
-        binding.
-        Bounded to `SHARED_SUBJECT` pages by the alert filter, so it is stale state rather than
-        disclosure; closing it needs the map to live in the source rows."""
-        ext = _require_ext(ctx.ext)
-        mapping = await _subscribers_map(ext, name)
-        if caller in desired:
-            mapping[caller] = agent.hex
-        else:
-            mapping.pop(caller, None)
-        await _store_subscribers(ext, name, mapping)
-        if await self._find(ctx.ext, name) is None:
-            await _store_subscribers(ext, name, {})
-            raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
 
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
@@ -471,12 +422,11 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         *,
         member_id: UUID | None,
     ) -> ObjectDetail[SourceSpec] | None:
-        binding = await self._find(ext, name)
+        binding = await _binding_named(ext, name)
         if binding is None:
             return None
-        subscribers = tuple(sorted((await _subscribers_map(_require_ext(ext), name)).keys()))
         return ObjectDetail(
-            spec=binding.spec(subscribers=subscribers),
+            spec=binding.spec(),
             created_at=binding.created_at,
             updated_at=binding.updated_at,
             links=binding.links(),
@@ -485,16 +435,12 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
     async def _status(
         self, ctx: ToolContext, name: str, _owner: ObjectOwner
     ) -> dict[str, JsonValue] | None:
-        binding = await self._find(ctx.ext, name)
+        binding = await _binding_named(ctx.ext, name)
         if binding is None:
             return None
         shared = subject_shared(binding.subject)
-        caller = ctx.turn.conversation_id.hex
-        subscribers = await _subscribers_map(_require_ext(ctx.ext), name)
         status: dict[str, JsonValue] = {
             "shared": shared,
-            "subscriber_id": caller,
-            "subscribed": caller in subscribers,
             "streams": {
                 stream.name: {
                     "next_sync_at": stream.next_sync_at.isoformat(),
@@ -521,11 +467,6 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         ext = _require_ext(ctx.ext)
         if ctx.speaker_member_id is None:
             raise ValueError("registering a source requires a speaking member")
-        if old is None and spec.subscribers:
-            raise ValueError(
-                "register the source first, then object_apply it again with your subscriber id "
-                "added to subscribers"
-            )
         connector_cls = CONNECTORS.get(spec.provider)
         if connector_cls is None:
             raise ValueError(
@@ -568,7 +509,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             shared=spec.shared,
             backfill_days=spec.backfill_days,
         )
-        binding = await self._find(ctx.ext, name)
+        binding = await _binding_named(ctx.ext, name)
         if binding is not None:
             old_spec = binding.spec()
             # Every refusal is raised before any write: a submit that edits the window AND what
@@ -698,12 +639,12 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
         ext = _require_ext(ctx.ext)
-        binding = await self._find(ctx.ext, name)
+        binding = await _binding_named(ctx.ext, name)
         if binding is None:
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         for stream in binding.streams:
             await ext.remove_source(stream.source_id)
-        await _store_subscribers(ext, name, {})
+        await _require_triggers(ctx.ext).remove_binding(name)
 
     async def _resolved_account(self, ctx: ToolContext, spec: SourceSpec) -> _ResolvedAccount:
         """The account a source authenticates as. An explicitly registered connector always uses its
@@ -780,26 +721,195 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             f"(request_credentials for slot {spec.provider!r})"
         )
 
-    async def _find(self, ext: ExtensionContext | None, name: str) -> _Binding | None:
+
+def trigger_name(binding: str, conversation_id: UUID) -> str:
+    """A trigger IS the pair it names, so its object name derives from that pair exactly as a
+    binding's derives from its config — one rule, so an apply under any other name is refused with
+    the one to use rather than filed as a second row over the same pair."""
+    return f"{binding}-{conversation_id.hex}"
+
+
+class SourceTriggerSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str = Field(
+        title="Source",
+        description="The shared source object this trigger watches; its changes wake the "
+        "conversation the trigger was applied from.",
+    )
+
+
+@dataclass(frozen=True)
+class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObjectOwner]):
+    """The kind's handlers over the core trigger store: a trigger is seen by whoever reads the
+    conversation it wakes, plus its creator and a workspace admin — the gate is the base's, and
+    this kind supplies only the `shared` fact it decides from, taken from that conversation's
+    audience. Deleting stays the creator's and an admin's, so a member reading a shared trigger is
+    never a member who can silence it. Only a shared source can carry one: a private source's
+    pages reach no other reader, so the alert filter would drop every change it ever made and the
+    trigger would stand as a promise nothing keeps."""
+
+    kind_name: ClassVar[str] = SOURCE_TRIGGER_KIND
+    mutate_gate: ClassVar[str] = TRIGGER_GATE
+    delete_gate: ClassVar[str] = TRIGGER_DELETE_GATE
+
+    async def _member_rows(
+        self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        """A trigger is shared exactly as far as the conversation it wakes is, so every surface
+        listing the kind answers one question one way. Its summary is the source's own, since what
+        a member came to read is which source wakes them and not the pair's derived name."""
+        listed = await _require_triggers(ext).list_reported()
+        bindings = {
+            binding.name: binding for binding in await _bindings_from_ext(_require_ext(ext))
+        }
+        emails = await owner_emails(row.trigger.created_by_member_id for row in listed)
+        return tuple(
+            OwnedRow(
+                name=trigger_name(row.trigger.binding, row.trigger.conversation_id),
+                summary=(
+                    bindings[row.trigger.binding].summary()
+                    if row.trigger.binding in bindings
+                    else row.trigger.binding
+                ),
+                owner=GeneratedObjectOwner(
+                    member_id=row.trigger.created_by_member_id,
+                    shared=subject_shared(row.audience),
+                    generation=row.trigger.id,
+                ),
+                fields={
+                    "conversation": str(row.trigger.conversation_id),
+                    "source": row.trigger.binding,
+                    "origin": row.surface_label or "Portal",
+                    "owner_email": emails.get(row.trigger.created_by_member_id),
+                    "mine": row.trigger.created_by_member_id == member_id,
+                },
+            )
+            for row in listed
+        )
+
+    async def _member_object(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        owner: GeneratedObjectOwner,
+        *,
+        member_id: UUID | None,
+    ) -> ObjectDetail[SourceTriggerSpec] | None:
+        listed = await self._find(ext, name)
+        if listed is None or listed.trigger.id != owner.generation:
+            return None
+        return ObjectDetail(
+            spec=SourceTriggerSpec(source=listed.trigger.binding),
+            created_at=listed.trigger.created_at,
+            updated_at=listed.trigger.updated_at,
+            links=(
+                ObjectLink(
+                    relation="watches",
+                    target=ObjectRef(kind=SOURCE_KIND, name=listed.trigger.binding),
+                ),
+                ObjectLink(
+                    relation="reports_to",
+                    target=ObjectRef(
+                        kind=CONVERSATION_KIND, name=str(listed.trigger.conversation_id)
+                    ),
+                ),
+            ),
+        )
+
+    async def _status(
+        self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner
+    ) -> dict[str, JsonValue] | None:
+        listed = await self._find(ctx.ext, name)
+        if listed is None or listed.trigger.id != owner.generation:
+            return None
+        emails = await owner_emails((listed.trigger.created_by_member_id,))
+        return {
+            "conversation": str(listed.trigger.conversation_id),
+            "source": listed.trigger.binding,
+            "origin": listed.surface_label or "Portal",
+            "owner_email": emails.get(listed.trigger.created_by_member_id),
+            "mine": listed.trigger.created_by_member_id == ctx.acting_member_id,
+        }
+
+    async def _apply_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: SourceTriggerSpec,
+        old: SourceTriggerSpec | None,
+        owner: GeneratedObjectOwner | None,
+    ) -> None:
+        """A trigger has nothing to change — re-applying the one that exists is the no-op a
+        re-registered source is — so the only act here is creating one. The name is checked before
+        anything else, because it names the conversation: applying the name of a trigger some other
+        conversation already holds would otherwise report success for a conversation no row was
+        written for. The binding is re-read after the write, because a source's removal drops its
+        triggers in another transaction and one landing behind that sweep would watch a source
+        nobody can reach."""
+        expected = trigger_name(spec.source, ctx.turn.conversation_id)
+        if name != expected:
+            raise ValueError(
+                f"a {SOURCE_TRIGGER_KIND} is named for the pair it is — apply it as {expected!r}"
+            )
+        if owner is not None:
+            if old is not None and old.source == spec.source:
+                return
+            raise ValueError(
+                f"a {SOURCE_TRIGGER_KIND} is the source and conversation it names — delete this "
+                "one and apply another"
+            )
+        await self._watchable(ctx, spec.source)
+        triggers = _require_triggers(ctx.ext)
+        await triggers.create(
+            conversation_id=ctx.turn.conversation_id,
+            binding=spec.source,
+            created_by_member_id=ctx.acting_member_id,
+        )
+        if await _binding_named(ctx.ext, spec.source) is None:
+            await triggers.remove_binding(spec.source)
+            raise UnknownObject(f"no {SOURCE_KIND} object named {spec.source!r}")
+
+    async def _watchable(self, ctx: ToolContext, source: str) -> None:
+        """Whether this caller may watch that source, asked of the source kind itself — its `get`
+        is the one place the per-member gate on a binding lives, so a source the caller cannot see
+        comes back as nothing and a stranger guessing a binding never learns one exists. A private
+        source the caller does own is refused for what it is: its pages reach no other reader, so
+        the alert filter would drop every change it ever made."""
+        source_object = await SOURCE_OBJECT.store.get(ctx, source)
+        if source_object is None:
+            raise UnknownObject(f"no {SOURCE_KIND} object named {source!r}")
+        if not source_object.spec.shared:
+            raise ValueError(
+                f"{source!r} syncs privately to the member who registered it, so its changes "
+                "reach no conversation; re-register it as shared to watch it"
+            )
+
+    async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
+        listed = await self._find(ctx.ext, name)
+        if listed is None or listed.trigger.id != owner.generation:
+            raise ValueError(f"{SOURCE_TRIGGER_KIND} {name!r} changed while deleting")
+        await _require_triggers(ctx.ext).remove(listed.trigger)
+
+    async def _find(self, ext: ExtensionContext | None, name: str) -> ListedTrigger | None:
         return next(
             (
-                binding
-                for binding in await _bindings_from_ext(_require_ext(ext))
-                if binding.name == name
+                row
+                for row in await _require_triggers(ext).list_reported()
+                if trigger_name(row.trigger.binding, row.trigger.conversation_id) == name
             ),
             None,
         )
 
 
 async def on_page_change(ctx: HookContext) -> HookOutcome:
-    """Alert each changed source's subscribers: group the batch by binding, and for every binding
-    with subscribers invoke one turn per subscribed conversation. The turn carries per-stream
+    """Wake each changed source's triggers: group the batch by binding, and for every binding a
+    conversation watches invoke one turn per woken conversation. The turn carries per-stream
     added/updated/removed counts and the path to a change log holding every changed page, written
     into that conversation's own workspace — a delta runs to a full batch of pages, so counts are
     what the agent reads to decide and the file is what it reads to drill in. Only shared changes
     are surfaced — a page private to some member is never referenced, counted, logged, or cause to
-    alert, so its existence never leaks to a subscriber who cannot read it, and a subscriber whose
-    agent holds no grant for the changed source is alerted about nothing. Idempotency-keyed on
+    wake anything, so its existence never leaks to a reader who cannot read it, and a trigger whose
+    agent holds no grant for the changed source wakes about nothing. Idempotency-keyed on
     binding + conversation + latest change, so a replayed batch never double-alerts; a changed row
     no binding claims alerts nothing."""
     match ctx.payload:
@@ -818,18 +928,18 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
         if binding is None:
             continue
         by_binding.setdefault(binding.name, (binding, []))[1].append(change)
+    triggers = _require_triggers(ctx.ext)
     for binding, binding_changes in by_binding.values():
-        subscribers = await _subscribers_map(ctx.ext, binding.name)
-        if not subscribers:
+        woken = await triggers.waking(binding.name)
+        if not woken:
             continue
         shared = [change for change in binding_changes if change.subject == SHARED_SUBJECT]
         if not shared:
             continue
-        for conversation, agent in subscribers.items():
-            agent_id = UUID(agent)
+        for trigger in woken:
             readable = await ctx.ext.readable_source_ids(
                 SourceReader(
-                    agent_id=agent_id,
+                    agent_id=trigger.agent_id,
                     requesting_member_id=None,
                     subjects=frozenset({SHARED_SUBJECT}),
                 )
@@ -838,19 +948,20 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             if not authorized:
                 continue
             latest = max(change.changed_at for change in authorized).isoformat()
-            conversation_id = UUID(conversation)
             path = await _write_change_log(
                 ctx.ext,
-                conversation_id,
+                trigger.conversation_id,
                 binding,
                 latest,
                 authorized,
             )
             await ctx.ext.invoke(
-                conversation_id,
-                agent_id,
+                trigger.conversation_id,
+                trigger.agent_id,
                 _alert_message(binding, authorized, path),
-                idempotency_key=f"source-sub:{binding.name}:{conversation}:{latest}",
+                idempotency_key=(
+                    f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
+                ),
             )
     return None
 
@@ -862,7 +973,7 @@ async def _write_change_log(
     latest: str,
     changes: list[PageChange],
 ) -> str | None:
-    """The whole delta as one JSON line per changed page, written into the subscribed
+    """The whole delta as one JSON line per changed page, written into the woken
     conversation's workspace so the alerted agent reads it with its file tools instead of carrying
     it in context. Named for the same `latest` stamp the alert's idempotency key carries, so a
     replayed batch overwrites its own line-for-line identical file rather than appending a
@@ -934,7 +1045,7 @@ def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str |
             "updated_at desc."
         )
     return (
-        f"The source {binding.name!r} ({binding.summary()}) you subscribed to changed — "
+        f"The source {binding.name!r} ({binding.summary()}) you watch changed — "
         f"{_stream_counts(changes)}. {detail} Then tell the member what is new and why it matters."
     )
 
@@ -1003,11 +1114,35 @@ SOURCE_OBJECT = ObjectKind(
         "changing streams is delete and recreate too. Delete is registrar-or-admin. Reads show "
         "shared sources plus the member's own — a workspace admin sees all. Its `access_to` link "
         "names the workspace credential slot a direct provider spends, or — while the source is "
-        "private — the connection a brokered one resolves to. To be alerted when a "
-        "source you can see changes, object_get it, then object_apply the same manifest with your "
-        "own conversation id (shown as status.subscriber_id) added to `subscribers`; remove it to "
-        "stop. You may only add or remove your own id, and subscribing is not admin-gated."
+        "private — the connection a brokered one resolves to. To be woken when a shared source "
+        f"changes, apply a {SOURCE_TRIGGER_KIND} naming it."
     ),
     spec_model=SourceSpec,
     store=SourceObjects(),
+)
+
+SOURCE_TRIGGER_OBJECT = ObjectKind(
+    name=SOURCE_TRIGGER_KIND,
+    description=(
+        "A standing wake-up: one conversation is invoked whenever one shared source's synced "
+        "content changes, carrying what changed per stream. Seen by whoever reads the conversation "
+        "it wakes; only its creator or a workspace admin may delete it."
+    ),
+    guidance=(
+        "Apply a manifest naming a shared source to be woken here whenever that source's synced "
+        "content changes; the fire arrives as a message in this conversation carrying per-stream "
+        f"counts and the path to a change log. A {SOURCE_TRIGGER_KIND} IS the source and "
+        "conversation it names, so its name derives from both and an apply under any other name "
+        "is refused with the exact one to use; there is nothing to update, and stopping the "
+        "wake-ups is a delete. A source private to the member who registered it cannot be "
+        "watched — its pages reach no other reader, so the change would surface to nobody — and a "
+        "source you cannot see is unknown by name. Removing the source removes every trigger on "
+        "it. Listing returns each trigger's `source`, the conversation it wakes, its creator "
+        "(`owner_email`), and `origin` — the surface label of that conversation, else `Portal` — "
+        "and filters on `mine: true` for the caller's own."
+    ),
+    spec_model=SourceTriggerSpec,
+    store=SourceTriggerObjects(),
+    list_fields=frozenset({"conversation", "source", "origin", "owner_email", "mine"}),
+    agent_target_verbs=frozenset({"list", "get", "delete"}),
 )

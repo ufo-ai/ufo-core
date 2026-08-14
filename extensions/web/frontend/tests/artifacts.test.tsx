@@ -11,6 +11,7 @@ import {
   PlacedSection,
   SITE_KIND,
   TASK_KIND,
+  TRIGGER_KIND,
   json,
   objectIndex,
   useStreamFake,
@@ -178,6 +179,7 @@ test("leaving the section takes the viewer with it", async () => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
+      if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
       if (url.includes("/workspace/team"))
         return json({ members: [], can_add: false, domain: null });
       return new Response("hello from the file");
@@ -194,7 +196,7 @@ test("leaving the section takes the viewer with it", async () => {
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="scheduled" />
+      <PlacedSection section="automations" />
     </MainAgentProvider>,
   );
 

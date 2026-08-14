@@ -176,6 +176,7 @@ export const CHAT_ROW = {
 export const json = (payload: unknown) => Response.json(payload);
 
 export const NO_TASKS = "No scheduled task is visible to you.";
+export const NO_TRIGGERS = "No source trigger is visible to you.";
 export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is listed here.";
 
 export const TASK_KIND = {
@@ -189,6 +190,17 @@ export const TASK_KIND = {
     },
   },
   applies: true,
+  deletes: true,
+};
+
+/** The kind the lane only ever deletes: a trigger is created from the conversation it wakes, so
+ *  the portal draws its rows and the act that ends one, and no act that makes one. */
+export const TRIGGER_KIND = {
+  kind: "source_trigger",
+  fields: ["conversation", "source", "origin", "owner_email", "mine"],
+  spec_schema: { properties: { source: { type: "string", title: "Source" } } },
+  applies: false,
+  deletes: true,
 };
 
 export const SITE_KIND = {
@@ -198,6 +210,7 @@ export const SITE_KIND = {
     properties: { visibility: { type: "string", enum: ["private", "workspace", "public"] } },
   },
   applies: false,
+  deletes: false,
 };
 
 export function objectIndex(kind: unknown, objects: unknown[], next: string | null = null) {

@@ -65,13 +65,15 @@ type IndexRow = ObjectRow & { agent_id: string; agent_name: string };
 export type ObjectLink = { relation: string; kind: string; name: string; opens: boolean };
 
 /** What every object page knows about the kind it renders, ahead of any one row: the fields it
- *  declared for columns and filters, the schema its form draws, and whether the intent lane takes
- *  an `apply` for it at all. */
+ *  declared for columns and filters, the schema its form draws, and which acts the intent lane
+ *  takes for it — apply and delete answered apart, so a kind the lane only ever deletes offers no
+ *  control that would be refused. */
 type Kind = {
   kind: string;
   fields: string[];
   spec_schema: SpecSchema | null;
   applies: boolean;
+  deletes: boolean;
 };
 
 type IndexPayload = Kind & { objects: IndexRow[]; next_cursor: string | null };
@@ -162,9 +164,13 @@ export function ObjectPane({
   agentId,
   kind,
   title,
+  lead,
 }: {
   agentId: string | null;
   kind: string;
+  /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
+   *  where what family to show already stands. */
+  lead?: ReactNode;
   /** The page's own name, where this pane is the page. A tab inside another page passes none —
    *  the pane it stands in is already headed. */
   title?: string;
@@ -182,18 +188,20 @@ export function ObjectPane({
       />
     );
   }
-  return <ObjectIndex agentId={agentId} kind={kind} title={title} onOpen={setAt} />;
+  return <ObjectIndex agentId={agentId} kind={kind} title={title} lead={lead} onOpen={setAt} />;
 }
 
 function ObjectIndex({
   agentId,
   kind,
   title,
+  lead,
   onOpen,
 }: {
   agentId: string | null;
   kind: string;
   title?: string;
+  lead?: ReactNode;
   onOpen: (at: At) => void;
 }) {
   const agents = useAgents();
@@ -293,6 +301,7 @@ function ObjectIndex({
                         fields: payload.fields,
                         spec_schema: payload.spec_schema,
                         applies: payload.applies,
+                        deletes: payload.deletes,
                       })
                     }
                   >
@@ -302,6 +311,7 @@ function ObjectIndex({
               }
             />
             <PageToolbar>
+              {lead}
               {flags.length ? (
                 <Filter
                   options={flags.map((field) => ({
@@ -571,9 +581,9 @@ export function ObjectDetail({
                 .filter((line) => line !== null)
                 .join(" · ")}
             </div>
-            {payload.applies && payload.spec_schema ? (
+            {payload.deletes ? (
               <div className="flex flex-wrap gap-sm">
-                {payload.spec ? (
+                {payload.applies && payload.spec_schema && payload.spec ? (
                   <Button variant="send" onClick={() => setEditing(payload)}>
                     Edit
                   </Button>

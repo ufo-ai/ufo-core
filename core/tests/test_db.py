@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -465,6 +466,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0012",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
+        "sources_0001",
         "monitors_0001",
         "skill_create_0002",
         "coding_0003",
@@ -472,7 +474,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "sites_0002",
         "web_0001",
     } <= set(heads)
-    assert len(heads) == 13
+    assert len(heads) == 14
 
 
 @pytest.mark.parametrize("graph_installed", [False, True])
@@ -615,6 +617,99 @@ def test_intent_admission_downgrade_rewrites_to_internal(tmp_path: Path) -> None
             refused = True
     assert source == "internal"
     assert refused
+
+
+def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path) -> None:
+    """The sources extension's own migration moves its subscriber maps into rows of its own. Every
+    entry has to arrive: the map is deleted in the same migration and nothing else could ever
+    restore it, so a conversation being woken before the upgrade is still woken after it. A
+    conversation that has since gone takes its entry with it rather than stranding a row no foreign
+    key would accept, and a member's own conversation names that member so the trigger stays
+    visible to the one person who could have subscribed it."""
+    database_path = tmp_path / "source-trigger.db"
+    url = f"sqlite+aiosqlite:///{database_path}"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "heads")
+    workspace_id, member_id = uuid4(), uuid4()
+    agent_id, other_agent_id = uuid4(), uuid4()
+    shared_conversation, private_conversation, gone = uuid4(), uuid4(), uuid4()
+    now = datetime(2026, 8, 14, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("delete from source_trigger")
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into member (id, workspace_id, email, created_at, updated_at) "
+            "values (?, ?, 'who@example.com', ?, ?)",
+            (member_id.hex, workspace_id.hex, now, now),
+        )
+        for identity, name in ((agent_id, "assistant"), (other_agent_id, "scout")):
+            connection.execute(
+                "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+                "updated_at) values (?, ?, ?, 'p', 'auto', 0, ?, ?)",
+                (identity.hex, workspace_id.hex, name, now, now),
+            )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, audience, "
+            "created_at, updated_at) values (?, ?, ?, 'web', 'a/b', 'shared', ?, ?)",
+            (shared_conversation.hex, workspace_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, member_id, "
+            "audience, created_at, updated_at) values (?, ?, ?, 'cli', 'c/d', ?, ?, ?, ?)",
+            (
+                private_conversation.hex,
+                workspace_id.hex,
+                other_agent_id.hex,
+                member_id.hex,
+                f"member:{member_id}",
+                now,
+                now,
+            ),
+        )
+        for key, value in (
+            (
+                "subscribers:asana-1a2b3c4d",
+                json.dumps(
+                    {
+                        shared_conversation.hex: agent_id.hex,
+                        private_conversation.hex: other_agent_id.hex,
+                        gone.hex: agent_id.hex,
+                    }
+                ),
+            ),
+            ("cursor:asana-1a2b3c4d", json.dumps({"seq": 7})),
+        ):
+            connection.execute(
+                "insert into ext_store (workspace_id, extension, key, value, created_at, "
+                "updated_at) values (?, 'sources', ?, ?, ?, ?)",
+                (workspace_id.hex, key, value, now, now),
+            )
+    command.downgrade(config, "sources@base")
+    command.upgrade(config, "sources@head")
+    with sqlite3.connect(database_path) as connection:
+        carried = connection.execute(
+            "select conversation_id, agent_id, binding, created_by_member_id from source_trigger"
+        ).fetchall()
+        left = connection.execute(
+            "select key from ext_store where extension = 'sources'"
+        ).fetchall()
+    assert sorted(carried) == sorted(
+        [
+            (shared_conversation.hex, agent_id.hex, "asana-1a2b3c4d", None),
+            (private_conversation.hex, other_agent_id.hex, "asana-1a2b3c4d", member_id.hex),
+        ]
+    )
+    assert [key for (key,) in left] == ["cursor:asana-1a2b3c4d"]
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:

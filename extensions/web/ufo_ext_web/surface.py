@@ -2608,7 +2608,8 @@ def _kind_payload(kind: PortalKind) -> dict[str, object]:
         "kind": kind.kind,
         "fields": list(kind.list_fields),
         "spec_schema": kind.spec_schema,
-        "applies": kind.kind in ApplyIntent.kinds(),
+        "applies": kind.kind in ApplyIntent.applying_kinds(),
+        "deletes": kind.kind in ApplyIntent.deleting_kinds(),
     }
 
 

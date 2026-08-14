@@ -64,6 +64,7 @@ type Relation = Literal[
     "synced_by",
     "created_in",
     "reports_to",
+    "watches",
     "superseded_by",
     "access_to",
     "scoped_to",

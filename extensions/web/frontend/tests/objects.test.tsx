@@ -7,7 +7,7 @@ import { ObjectPane } from "@/kernel/objects";
 import { Viewer } from "@/lib/audience";
 import { relativeMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { Scheduled } from "@/views/Scheduled";
+import { Automations } from "@/views/Automations";
 
 import {
   AGENT,
@@ -16,10 +16,12 @@ import {
   MEMBER,
   NO_ARTIFACTS,
   NO_TASKS,
+  NO_TRIGGERS,
   SECOND,
   SECOND_ID,
   SITE_KIND,
   TASK_KIND,
+  TRIGGER_KIND,
   fact,
   json,
   objectIndex,
@@ -133,7 +135,7 @@ function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
 function mount(agents = [AGENT]) {
   render(
     <MainAgentProvider agents={agents}>
-      <Scheduled />
+      <ObjectPane agentId={null} kind="scheduled_task" />
     </MainAgentProvider>,
   );
 }
@@ -142,6 +144,14 @@ function mountAgent() {
   render(
     <MainAgentProvider agents={[AGENT, SECOND]}>
       <ObjectPane agentId={AGENT_ID} kind="scheduled_task" />
+    </MainAgentProvider>,
+  );
+}
+
+function mountAutomations() {
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Automations agentId={null} title="Automations" />
     </MainAgentProvider>,
   );
 }
@@ -519,7 +529,7 @@ test("a creator reads as You to its own member, the address to another, Workspac
   render(
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={[AGENT]}>
-        <Scheduled />
+        <ObjectPane agentId={null} kind="scheduled_task" />
       </MainAgentProvider>
     </Viewer.Provider>,
   );
@@ -626,58 +636,70 @@ test("a deleted row lands back on the index; a refused delete states the refusal
   ]);
 });
 
-test("the scheduled section is reached by its own hash and lists across the audience", async () => {
+test("the automations section is reached by its own hash and lists across the audience", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task": (url) => {
       reads.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]);
     },
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/scheduled";
+  location.hash = "#/automations";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { level: 1, name: "Scheduled" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Automations" })).toBeTruthy();
   expect(screen.getByText("weekly-roll")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
-  expect(screen.queryByRole("tab", { name: "Tasks" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Scheduled" }).getAttribute("aria-selected")).toBe("true");
 });
 
-test("the scheduled tab of an agent is that agent's own scheduled_task index", async () => {
+test("the automations tab of an agent reads both kinds in that agent's namespace", async () => {
   const reads: string[] = [];
   wire({
     "/objects/scheduled_task": (url) => {
       reads.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW]);
     },
+    "/objects/source_trigger": (url) => {
+      reads.push(url);
+      return objectIndex(TRIGGER_KIND, []);
+    },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/scheduled";
+  location.hash = "#/agents/" + AGENT_ID + "/automations";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByText("daily-brief")).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(screen.getByRole("tab", { name: "Scheduled" }).getAttribute("aria-selected")).toBe("true");
-  expect(screen.getByRole("button", { name: "Scheduled" }).getAttribute("aria-current")).toBe(
+  expect(screen.queryByRole("heading", { level: 1, name: "Automations" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
+  await waitFor(() =>
+    expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true),
+  );
+  expect(reads.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
+  expect(screen.getByRole("button", { name: "Automations" }).getAttribute("aria-current")).toBe(
     "false",
   );
 });
 
-test("landing on another agent's scheduled tab leaves the first agent's detail behind", async () => {
+test("landing on another agent's automations tab leaves the first agent's detail behind", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
     "/objects/scheduled_task": (url) =>
       objectIndex(TASK_KIND, url.includes(AGENT_ID) ? [TASK_ROW] : [SECOND_TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/scheduled";
+  location.hash = "#/agents/" + AGENT_ID + "/automations";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("daily-brief");
   await screen.findByRole("heading", { name: "daily-brief" });
 
-  location.hash = "#/agents/" + SECOND_ID + "/scheduled";
+  location.hash = "#/agents/" + SECOND_ID + "/automations";
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
@@ -692,9 +714,10 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
       return json({ ...TASK_DETAIL, name: "weekly-roll", summary: "0 9 * * 1 — weekly roll-up" });
     },
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/scheduled";
+  location.hash = "#/automations";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("weekly-roll");
@@ -890,11 +913,101 @@ test("one agent in the audience is no choice, so the act asks for none", async (
 
 test("a kind the lane declines to write offers no act on its rows", async () => {
   wire({
-    "/objects/scheduled_task": () => objectIndex({ ...TASK_KIND, applies: false }, [TASK_ROW]),
+    "/objects/scheduled_task": () =>
+      objectIndex({ ...TASK_KIND, applies: false, deletes: false }, [TASK_ROW]),
   });
   mount();
 
   await screen.findByText("daily-brief");
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(screen.queryByRole("button", { name: "New scheduled task" })).toBeNull();
+});
+
+const TRIGGER_NAME = "github-1a2b3c4d-" + CONVO_ID.replaceAll("-", "");
+
+const TRIGGER_ROW = owned({
+  name: TRIGGER_NAME,
+  summary: "github (acct-one): pull_requests, issues",
+  conversation: CONVO_ID,
+  source: "github-1a2b3c4d",
+  origin: "#general",
+  owner_email: "mel@example.com",
+  mine: true,
+});
+
+test("Automations shows one kind at a time and the switcher names which", async () => {
+  const reads: string[] = [];
+  wire({
+    "/objects/scheduled_task": (url) => {
+      reads.push(url);
+      return objectIndex(TASK_KIND, [TASK_ROW]);
+    },
+    "/objects/source_trigger": (url) => {
+      reads.push(url);
+      return objectIndex(TRIGGER_KIND, [TRIGGER_ROW]);
+    },
+  });
+  mountAutomations();
+
+  expect(await screen.findByRole("heading", { level: 1, name: "Automations" })).toBeTruthy();
+  expect(await screen.findByText("daily-brief")).toBeTruthy();
+  expect(reads.every((read) => read.includes("/objects/scheduled_task"))).toBe(true);
+
+  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
+
+  expect(await screen.findByText(TRIGGER_NAME)).toBeTruthy();
+  expect(screen.queryByText("daily-brief")).toBeNull();
+  expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true);
+});
+
+test("a trigger is ended from its own page and never created from one", async () => {
+  const posted: unknown[] = [];
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    ["/objects/source_trigger/" + TRIGGER_NAME]: () =>
+      json({
+        ...TRIGGER_KIND,
+        name: TRIGGER_NAME,
+        summary: "github (acct-one): pull_requests",
+        spec: { source: "github-1a2b3c4d" },
+        status: { source: "github-1a2b3c4d", origin: "#general" },
+        links: [],
+        created_at: "2026-08-01T09:00:00Z",
+        updated_at: null,
+      }),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Deleted the trigger." });
+    },
+  });
+  mountAutomations();
+
+  await userEvent.click(await screen.findByRole("tab", { name: "Triggers" }));
+  expect(screen.queryByRole("button", { name: "New source trigger" })).toBeNull();
+  await openRow(TRIGGER_NAME);
+
+  expect(await screen.findByRole("heading", { name: TRIGGER_NAME })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toMatchObject({
+    verb: "delete",
+    kind: "source_trigger",
+    name: TRIGGER_NAME,
+  });
+});
+
+test("a section with no trigger says so without saying none was ever made", async () => {
+  wire({
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+  });
+  mountAutomations();
+
+  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
+  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
 });

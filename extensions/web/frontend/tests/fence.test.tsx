@@ -11,6 +11,7 @@ import {
   MEMBER,
   NO_TASKS,
   TASK_KIND,
+  TRIGGER_KIND,
   json,
   objectIndex,
   useStreamFake,
@@ -40,6 +41,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
         });
       }
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
+      if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
       if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });
     }),
@@ -50,7 +52,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
 
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
-  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Automations" }));
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));

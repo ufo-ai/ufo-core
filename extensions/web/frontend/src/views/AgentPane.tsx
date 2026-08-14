@@ -1,8 +1,8 @@
-import { ObjectPane } from "@/kernel/objects";
 import { useBeside } from "@/kernel/beside";
 import { BANDS, RecordPanel } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabRow } from "@/kernel/tabs";
+import { Automations } from "@/views/Automations";
 import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
@@ -11,12 +11,10 @@ import { AgentUsage } from "@/views/Usage";
 import type { AgentTab, PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
-const SCHEDULED_TASK_KIND = "scheduled_task";
-
 const TAB_LABELS: Record<AgentTab, string> = {
   overview: "Overview",
   conversations: "Conversations",
-  scheduled: "Scheduled",
+  automations: "Automations",
   connectors: "Connectors",
   skills: "Skills",
   usage: "Usage",
@@ -53,9 +51,7 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
       />
       <TabPanel group="agent" current={tab} className={BANDS} data-testid="panel">
         {tab === "overview" ? <Overview agent={agent} /> : null}
-        {tab === "scheduled" ? (
-          <ObjectPane key={agent.id} agentId={agent.id} kind={SCHEDULED_TASK_KIND} />
-        ) : null}
+        {tab === "automations" ? <Automations key={agent.id} agentId={agent.id} /> : null}
         {tab === "conversations" ? (
           <Conversations key={key} agent={agent} place={merged} onPlace={record} />
         ) : null}

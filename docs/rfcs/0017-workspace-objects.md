@@ -201,13 +201,13 @@ Semantics, fixed here so implementation doesn't relitigate them:
   a concurrent turn created or removed is that verb's ordinary absent-or-present case, resolved by
   the kind's own domain rule, never a lost race. Visibility is rechecked after a disclosure read on
   every kind — a row the caller may no longer see refuses instead of disclosing what was read.
-- **A kind's rows include the state it keeps beside them.** The `source` kind's subscriber map is
-  keyed by the binding name, so it is written only while that binding's rows still exist and is
-  dropped with them: the delete that takes the rows takes the map, and an edit that finds the binding
-  gone clears the map it just wrote. The map and the rows live in different tables and each write
-  opens its own transaction, so an edit whose write lands inside a concurrent delete-then-revive of
-  the same identity survives onto the revived binding — revival reuses the source row, so there is no
-  identity for the recheck to compare. Closing that needs the map to live in the source rows.
+- **A kind's rows include the state another kind keeps against them.** A `source_trigger` row is
+  keyed by the binding name, so it stands only while that binding's rows do: the delete that takes
+  the rows takes every trigger on the binding, and a create that finds the binding gone takes back
+  what it just wrote. The triggers and the source rows live in different tables and each write opens
+  its own transaction, so a create landing inside a concurrent delete-then-revive of the same
+  identity survives onto the revived binding — revival reuses the source row, so there is no
+  identity for the recheck to compare.
 - **One manifest per apply**, `yaml.safe_load`, bounded at `OBJECT_MANIFEST_MAX_BYTES = 65_536`
   next to the parse. Unknown top-level keys, multi-document streams, and non-mapping specs are
   refused at the envelope, before any kind code runs.

@@ -191,9 +191,9 @@ Small and owned centrally, because these are exactly the things that must not be
 - **Routing** — the hash grammar (`#/agents/<id>/<tab>`, `#/workspace/<view>`, `#/<section>`,
   `#/admin`) parsed once, with the listing cursor and filter carried as query state so a reload
   lands where the member was. A section the sidebar reaches directly is one path segment
-  (`#/scheduled`, `#/artifacts`) and carries the same query state a workspace tab does.
+  (`#/automations`, `#/artifacts`) and carries the same query state a workspace tab does.
   A kind read across the audience and read in one agent's namespace share a label but not a hash:
-  `#/scheduled` is every agent's, `#/agents/<id>/scheduled` is that one's.
+  `#/automations` is every agent's, `#/agents/<id>/automations` is that one's.
 - **The request fence** — one `load()` helper that owns the monotonic token, the abort of a
   superseded read, the error arm, and the empty arm. A view never writes `load !== panelLoad`
   again; the 19 hand-written copies become one.

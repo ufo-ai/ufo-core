@@ -4,9 +4,9 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
+import { Automations } from "@/views/Automations";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
-import { Scheduled } from "@/views/Scheduled";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
@@ -56,11 +56,11 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 };
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
-  scheduled: {
-    label: "Scheduled",
+  automations: {
+    label: "Automations",
     remountOnPlace: false,
     ownsHeader: true,
-    render: () => <Scheduled />,
+    render: () => <Automations agentId={null} title="Automations" />,
   },
   memory: {
     label: "Memory",

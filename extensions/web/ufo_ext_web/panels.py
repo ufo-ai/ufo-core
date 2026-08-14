@@ -29,6 +29,8 @@ from ufo_ext_web.audience import granted_emails, web_extension
 INTENT_MAX_CHARS = 16_384
 INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
+DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
+CONNECT_ONLY_KINDS = frozenset({"connection"})
 
 
 class ApplyIntent(BaseModel):
@@ -39,8 +41,10 @@ class ApplyIntent(BaseModel):
     `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
     at stream time, never in a transcript or an intent response — so it pairs with the `connection`
     kind exactly, both ways. The `credential` kind pairs the other way: a slot's value is a secret
-    a private prompt collects, so only `delete` (clear) names it here. A delete names its object
-    and carries no spec."""
+    a private prompt collects, so only `delete` (clear) names it here. The `source_trigger` kind
+    pairs that way too: a trigger IS the conversation it wakes, and the lane runs on the member's
+    intent conversation, so the portal can only ever end one. A delete names its object and carries
+    no spec."""
 
     verb: Literal["apply", "delete", "connect", "attach", "detach"]
     kind: Literal[
@@ -51,6 +55,7 @@ class ApplyIntent(BaseModel):
         "connector_grant",
         "connection",
         "source",
+        "source_trigger",
         "credential",
     ]
     name: str
@@ -63,13 +68,30 @@ class ApplyIntent(BaseModel):
         the kind's own description in place of a dead control everywhere else."""
         return frozenset(get_args(cls.model_fields["kind"].annotation))
 
+    @classmethod
+    def applying_kinds(cls) -> frozenset[str]:
+        """The kinds the lane takes an `apply` for."""
+        return cls.kinds().difference(DELETE_ONLY_KINDS | CONNECT_ONLY_KINDS)
+
+    @classmethod
+    def deleting_kinds(cls) -> frozenset[str]:
+        """The kinds the lane takes a `delete` for. Read off the same two sets the validator
+        refuses by, so the acts an object screen draws and the acts this lane admits cannot drift:
+        a kind it only ever deletes draws a delete and no create, and one it only ever connects
+        draws neither."""
+        return cls.kinds().difference(CONNECT_ONLY_KINDS)
+
     @model_validator(mode="after")
     def _verb_pairs_with_its_kind(self) -> "ApplyIntent":
-        if (self.verb == "connect") != (self.kind == "connection"):
+        if (self.verb == "connect") != (self.kind in CONNECT_ONLY_KINDS):
             raise ValueError("connect pairs with the connection kind exactly")
         if self.kind == "credential" and self.verb != "delete":
             raise ValueError(
                 "a credential slot's value is set through its private prompt, never a spec"
+            )
+        if self.kind == "source_trigger" and self.verb != "delete":
+            raise ValueError(
+                "a source trigger is created from the conversation it wakes, never from a panel"
             )
         if self.verb == "delete" and self.spec is not None:
             raise ValueError("a delete intent carries no spec")

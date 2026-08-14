@@ -41,12 +41,13 @@ from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_sources.manifest import manifest as sources_manifest
+from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
 from ufo_ext_web import community as web_community
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.panels import _outcome
+from ufo_ext_web.panels import ApplyIntent, _outcome
 from ufo_ext_web.surface import (
     ASSET_MEDIA_TYPES,
     NO_MEMBER_FAULT,
@@ -178,6 +179,11 @@ SCHEDULED_TASK_KIND_ONLY = Manifest(
     version="0.1.0",
     objects=(SCHEDULED_TASK_OBJECT,),
     conversation_slots=(AUTOMATIONS_SLOT,),
+)
+SOURCE_TRIGGER_KIND_ONLY = Manifest(
+    name="sources",
+    version="0.1.0",
+    objects=(SOURCE_TRIGGER_OBJECT,),
 )
 SLOTTED = Manifest(
     name="stub",
@@ -827,6 +833,7 @@ async def web(
             web_manifest(),
             todos.manifest(),
             SCHEDULED_TASK_KIND_ONLY,
+            SOURCE_TRIGGER_KIND_ONLY,
             SLOTTED,
             sites_manifest(),
         ),
@@ -849,7 +856,13 @@ async def web(
         ),
         subagents=PORTAL_SUBAGENTS,
         objects=member_object_registry(
-            (web_manifest(), SCHEDULED_TASK_KIND_ONLY, SLOTTED, sites_manifest())
+            (
+                web_manifest(),
+                SCHEDULED_TASK_KIND_ONLY,
+                SOURCE_TRIGGER_KIND_ONLY,
+                SLOTTED,
+                sites_manifest(),
+            )
         ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -4201,6 +4214,7 @@ async def test_admin_view_reads_the_workspace_shape(
     ] == [
         ("scheduled_tasks", "0.1.0", False),
         ("sites", "0.1.0", False),
+        ("sources", "0.1.0", False),
         ("stub", "0", False),
         ("todos", "0.1.0", False),
         ("web", "0.1.0", False),
@@ -6349,6 +6363,51 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
             await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
         ).scalar_one()
     assert turns == 0
+
+
+def test_the_acts_a_screen_draws_are_the_acts_this_lane_admits() -> None:
+    """`applies` and `deletes` are read off the same two sets the validator refuses by, so an
+    object screen cannot draw a control the lane would answer with a 400. A kind the lane only
+    ever connects draws neither act; one it only ever deletes draws no create."""
+    for kind in sorted(ApplyIntent.kinds()):
+        for verb, admitted in (
+            ("apply", kind in ApplyIntent.applying_kinds()),
+            ("delete", kind in ApplyIntent.deleting_kinds()),
+        ):
+            spec = {"x": "y"} if verb == "apply" else None
+            try:
+                ApplyIntent(verb=verb, kind=kind, name="n", spec=spec)
+            except ValidationError:
+                validates = False
+            else:
+                validates = True
+            assert validates is admitted, f"{verb} {kind}: lane {validates}, screen {admitted}"
+    assert "connection" not in ApplyIntent.deleting_kinds()
+    assert "source_trigger" not in ApplyIntent.applying_kinds()
+
+
+async def test_a_delete_only_kind_admits_a_delete_and_refuses_an_apply(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A source trigger IS the conversation it wakes, and this lane runs on the member's own intent
+    conversation, so the portal can only ever end one. The lane refuses the apply at validation,
+    before a turn exists, and the object read the screen is drawn from carries that same answer —
+    `deletes` without `applies` — so no control is offered that the lane would refuse."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "apply", "kind": "source_trigger", "name": "x", "spec": {"source": "y"}},
+        headers=cookie,
+    )
+    assert refused.status_code == 400
+    index = await client.get(
+        f"/surface/web/objects/source_trigger?agent={agent_id}", headers=cookie
+    )
+    assert index.status_code == 200
+    assert index.json()["applies"] is False
+    assert index.json()["deletes"] is True
 
 
 async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_value(

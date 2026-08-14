@@ -27,12 +27,14 @@ from ufo_ext_sources.tools import (
     CONNECTION_OBJECT_KIND,
     MAX_BACKFILL_DAYS,
     SOURCE_KIND,
+    SOURCE_TRIGGER_KIND,
     SourceObjects,
     SourceSpec,
-    _subscribers_map,
     _validated_base_url,
     on_page_change,
+    trigger_name,
 )
+from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore
 
 from ufo.agent_scope import agent
 from ufo.credential_kind import CREDENTIAL_KIND
@@ -241,7 +243,6 @@ def _manifest_text(
     account_id: str = "",
     base_url: str = "",
     shared: bool = False,
-    subscribers: tuple[str, ...] = (),
     resync: bool = False,
     backfill_days: int | str | None = None,
 ) -> str:
@@ -252,8 +253,6 @@ def _manifest_text(
         spec["base_url"] = base_url
     if shared:
         spec["shared"] = shared
-    if subscribers:
-        spec["subscribers"] = list(subscribers)
     if resync:
         spec["resync"] = resync
     if backfill_days is not None:
@@ -378,7 +377,6 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
         "account_id": "acct-one",
         "base_url": "",
         "shared": False,
-        "subscribers": [],
         "resync": False,
         "backfill_days": None,
     }
@@ -1212,7 +1210,7 @@ async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None)
 
 async def test_the_window_belongs_to_what_identifies_a_submitted_binding(db: None) -> None:
     """A submit that differs from the binding's own read-back spec only in the window has to reach
-    the window path rather than the subscribers-only path an identity-equal submit takes, and a
+    the window path rather than the no-op an identity-equal submit takes, and a
     resync carrying a changed window is refused whole rather than run while ignoring what it asked
     for. Both ride on the window's membership in the submitted binding's identity. The narrowing
     submit is the one that proves it reached the window path at all, since a widening one would
@@ -1317,18 +1315,6 @@ async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
             owner_ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True, resync=True)
         )
         assert resynced == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
-        carried = await _apply(
-            owner_ctx,
-            _manifest_text(
-                GREENHOUSE,
-                ("jobs",),
-                name,
-                shared=True,
-                resync=True,
-                subscribers=(uuid4().hex,),
-            ),
-        )
-        assert carried == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
         stored = yaml.safe_load(
             (
                 await _TOOLS["object_get"].handler(
@@ -1341,7 +1327,7 @@ async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
             .content[0]
             .text
         )
-        assert stored["spec"].get("subscribers", []) == []  # a resync ignores subscribers
+        assert stored["spec"]["resync"] is False  # an act, never state
 
 
 async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) -> None:
@@ -1852,8 +1838,8 @@ async def _register(
     stream: str = "tasks",
 ) -> tuple[str, UUID]:
     """Register one (account, stream) source row directly, with the given disclosure, and return
-    its binding name + row id — subscribing is an edit on an existing visible source, so this sets
-    one up without the connect/grant dance registration proper needs."""
+    its binding name + row id — a trigger names a source that already exists, so this sets one up
+    without the connect/grant dance registration proper needs."""
     with ws(state.workspace_id), agent(state.agent_id):
         ext = context_for(NAME, DECLARED_PROVIDERS)
         source_id = await ext.register_source(
@@ -1865,9 +1851,12 @@ async def _register(
     return binding_name(ASANA, account, None), source_id
 
 
-async def _stored_subscribers(state: _Workspace, name: str) -> dict[str, str]:
-    with ws(state.workspace_id), agent(state.agent_id):
-        return await _subscribers_map(context_for(NAME, DECLARED_PROVIDERS), name)
+async def _woken(state: _Workspace, name: str) -> dict[UUID, UUID]:
+    """Which conversation each trigger on this binding wakes, and as which agent — the durable
+    state an apply writes and a delete takes away, read workspace-wide the way the alert does."""
+    with ws(state.workspace_id):
+        triggers = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(name)
+    return {row.conversation_id: row.agent_id for row in triggers}
 
 
 async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
@@ -1883,9 +1872,13 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
-def _subscribe_manifest(name: str, subscribers: tuple[str, ...], *, shared: bool) -> str:
-    return _manifest_text(
-        ASANA, ("tasks",), name, account_id="acct-one", shared=shared, subscribers=subscribers
+def _trigger_manifest(source: str, conversation_id: UUID) -> str:
+    return yaml.safe_dump(
+        {
+            "kind": SOURCE_TRIGGER_KIND,
+            "name": trigger_name(source, conversation_id),
+            "spec": {"source": source},
+        }
     )
 
 
@@ -1919,16 +1912,19 @@ def _change(
     )
 
 
-async def test_subscribe_and_unsubscribe_self_on_a_shared_source(db: None) -> None:
+async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None) -> None:
     state = await _workspace()
     name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
     with ws(state.workspace_id), agent(state.agent_id):
-        subscribed = await _apply(
-            _context(state, None), _subscribe_manifest(name, (caller,), shared=True)
+        watched = await _apply(
+            _context(state, None), _trigger_manifest(name, state.conversation_id)
         )
-        assert subscribed["result"] == "updated"
-        assert await _stored_subscribers(state, name) == {caller: state.agent_id.hex}
+        assert watched == {
+            "kind": SOURCE_TRIGGER_KIND,
+            "name": trigger_name(name, state.conversation_id),
+            "result": "created",
+        }
+        assert await _woken(state, name) == {state.conversation_id: state.agent_id}
 
         get_tool = _TOOLS["object_get"]
         fetched = yaml.safe_load(
@@ -1936,74 +1932,134 @@ async def test_subscribe_and_unsubscribe_self_on_a_shared_source(db: None) -> No
                 await get_tool.handler(
                     _context(state, None),
                     get_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                        {
+                            "user_description": TOOL_NARRATION,
+                            "kind": SOURCE_TRIGGER_KIND,
+                            "name": trigger_name(name, state.conversation_id),
+                        }
                     ),
                 )
             )
             .content[0]
             .text
         )
-        assert fetched["spec"]["subscribers"] == [caller]
-        assert fetched["status"]["subscriber_id"] == caller
-        assert fetched["status"]["subscribed"] is True
+        assert fetched["spec"] == {"source": name}
+        assert fetched["status"]["source"] == name
+        assert fetched["status"]["conversation"] == str(state.conversation_id)
+        assert {(link["relation"], link["target"]["name"]) for link in fetched["links"]} == {
+            ("watches", name),
+            ("reports_to", str(state.conversation_id)),
+        }
 
-        await _apply(_context(state, None), _subscribe_manifest(name, (), shared=True))
-        assert await _stored_subscribers(state, name) == {}
-
-
-async def test_a_non_owner_may_subscribe_to_a_shared_source(db: None) -> None:
-    state = await _workspace()
-    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id), agent(state.agent_id):
-        subscribed = await _apply(
-            _context(state, None, speaker_id=state.member_id),
-            _subscribe_manifest(name, (caller,), shared=True),
+        delete_tool = _TOOLS["object_delete"]
+        await delete_tool.handler(
+            _context(state, None),
+            delete_tool.input_model.model_validate(
+                {
+                    "user_description": TOOL_NARRATION,
+                    "kind": SOURCE_TRIGGER_KIND,
+                    "name": trigger_name(name, state.conversation_id),
+                }
+            ),
         )
-        assert subscribed["result"] == "updated"
-        assert await _stored_subscribers(state, name) == {caller: state.agent_id.hex}
+        assert await _woken(state, name) == {}
 
 
-async def test_apply_may_only_toggle_the_callers_own_subscription(db: None) -> None:
+async def test_a_non_owner_may_watch_a_shared_source(db: None) -> None:
     state = await _workspace()
     name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    other = uuid4().hex
+    with ws(state.workspace_id), agent(state.agent_id):
+        watched = await _apply(
+            _context(state, None, speaker_id=state.member_id),
+            _trigger_manifest(name, state.conversation_id),
+        )
+        assert watched["result"] == "created"
+        assert await _woken(state, name) == {state.conversation_id: state.agent_id}
+
+
+async def test_a_trigger_is_named_for_the_pair_it_is(db: None) -> None:
+    """The name derives from the source and the conversation, so a submit under any other name is
+    refused with the exact one to use rather than filed as a second row over the same pair."""
+    state = await _workspace()
+    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     tool = _TOOLS["object_apply"]
     with ws(state.workspace_id), agent(state.agent_id):
-        with pytest.raises(ValueError, match="your own conversation"):
+        with pytest.raises(ValueError, match=trigger_name(name, state.conversation_id)):
             await tool.handler(
                 _context(state, None),
                 tool.input_model.model_validate(
                     {
                         "user_description": TOOL_NARRATION,
-                        "manifest": _subscribe_manifest(name, (other,), shared=True),
+                        "manifest": yaml.safe_dump(
+                            {
+                                "kind": SOURCE_TRIGGER_KIND,
+                                "name": "whatever-i-please",
+                                "spec": {"source": name},
+                            }
+                        ),
                     }
                 ),
             )
-        assert await _stored_subscribers(state, name) == {}
+        assert await _woken(state, name) == {}
 
 
-async def test_cannot_subscribe_to_another_members_private_source(db: None) -> None:
-    """A source private to member M is invisible to a stranger — the base gate hides it, so the
-    subscribers-only fast path is never reached and the stranger cannot subscribe to it."""
+async def test_applying_another_conversations_trigger_name_reports_no_success(db: None) -> None:
+    """The name names the conversation, so its own creator re-applying it from somewhere else is
+    refused with the name to use — never answered `updated` for a conversation no row was written
+    for, which is what the member would be told had been watched."""
+    state = await _workspace()
+    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    elsewhere = await _second_conversation(state)
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        base = _context(state, None)
+        from_elsewhere = replace(
+            base, turn=base.turn.model_copy(update={"conversation_id": elsewhere})
+        )
+        with pytest.raises(ValueError, match=trigger_name(name, elsewhere)):
+            await tool.handler(
+                from_elsewhere,
+                tool.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _trigger_manifest(name, state.conversation_id),
+                    }
+                ),
+            )
+        assert await _woken(state, name) == {state.conversation_id: state.agent_id}
+
+
+async def test_a_private_source_cannot_be_watched_and_a_strangers_is_unknown(db: None) -> None:
+    """A source private to member M reaches no other reader, so its changes could wake nobody: M is
+    told exactly that, while a stranger is told the source does not exist at all — the refusal a
+    guessed binding name earns."""
     state = await _workspace()
     name, _ = await _register(state, subject=member_subject(state.member_id), owner=state.member_id)
     stranger = await _stranger(state)
     tool = _TOOLS["object_apply"]
     with ws(state.workspace_id), agent(state.agent_id):
-        with pytest.raises(UnknownObject):
+        with pytest.raises(ValueError, match="syncs privately"):
+            await tool.handler(
+                _context(state, None, speaker_id=state.member_id),
+                tool.input_model.model_validate(
+                    {
+                        "user_description": TOOL_NARRATION,
+                        "manifest": _trigger_manifest(name, state.conversation_id),
+                    }
+                ),
+            )
+        with pytest.raises(UnknownObject, match=name):
             await tool.handler(
                 _context(state, None, speaker_id=stranger),
                 tool.input_model.model_validate(
                     {
                         "user_description": TOOL_NARRATION,
-                        "manifest": _subscribe_manifest(
-                            name, (state.conversation_id.hex,), shared=False
-                        ),
+                        "manifest": _trigger_manifest(name, state.conversation_id),
                     }
                 ),
             )
-        assert await _stored_subscribers(state, name) == {}
+        assert await _woken(state, name) == {}
 
 
 async def test_get_renders_an_empty_status_for_a_binding_removed_mid_verb(
@@ -2047,47 +2103,45 @@ async def test_get_renders_an_empty_status_for_a_binding_removed_mid_verb(
     assert row["removed_at"] is not None
 
 
-def _delete_binding_before_apply(state: _Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Have the registrar's delete land between the subscribe verb's read and its edit, so the edit
-    commits against a binding whose rows and subscribers are already gone."""
-    real_apply = SourceObjects.apply
+def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have the registrar's delete land between the trigger verb's read of the binding and the row
+    it writes, so the write commits against a source whose rows are already gone."""
+    real_create = SourceTriggerStore.create
     delete_tool = _TOOLS["object_delete"]
 
-    async def delete_before_apply(
-        store: SourceObjects,
-        ctx: ToolContext,
-        edited: str,
-        spec: SourceSpec,
-        old: SourceSpec | None,
-        *,
-        expected_generation: UUID | None,
-    ) -> None:
+    async def delete_before_create(
+        store: SourceTriggerStore,
+        conversation_id: UUID,
+        binding: str,
+        created_by_member_id: UUID | None = None,
+    ) -> SourceTrigger:
         await delete_tool.handler(
             _context(state, None),
             delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": edited}
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": binding}
             ),
         )
-        await real_apply(store, ctx, edited, spec, old, expected_generation=expected_generation)
+        return await real_create(
+            store, conversation_id, binding, created_by_member_id=created_by_member_id
+        )
 
-    monkeypatch.setattr(SourceObjects, "apply", delete_before_apply)
+    monkeypatch.setattr(SourceTriggerStore, "create", delete_before_create)
 
 
-async def test_a_subscription_edit_strands_nothing_on_a_binding_removed_mid_verb(
+async def test_a_trigger_strands_nothing_on_a_source_removed_mid_verb(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The subscribers map belongs to the binding, so the binding's removal takes it: an edit that
-    commits after the registrar's delete refuses and leaves nothing behind. A stored map outliving
-    its rows would alert a conversation about a source it can no longer see."""
+    """A trigger stands only while its source does: one written after the registrar's delete
+    refuses and leaves nothing behind. A row outliving its source would state a wake-up on a
+    source nobody can reach and that nothing will ever fire."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
-    _delete_binding_before_apply(state, monkeypatch)
+    _delete_source_before_create(state, monkeypatch)
 
     with ws(state.workspace_id), agent(state.agent_id):
         with pytest.raises(UnknownObject, match=name):
-            await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
-        assert await _stored_subscribers(state, name) == {}
+            await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        assert await _woken(state, name) == {}
         await on_page_change(
             HookContext(
                 ext=context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id)),
@@ -2099,21 +2153,25 @@ async def test_a_subscription_edit_strands_nothing_on_a_binding_removed_mid_verb
     assert row["removed_at"] is not None
 
 
-async def test_re_registering_a_removed_binding_carries_no_old_subscribers(
-    db: None, monkeypatch: pytest.MonkeyPatch
+async def test_removing_a_source_takes_its_triggers_and_a_revival_inherits_none(
+    db: None,
 ) -> None:
     """A source name derives from its (provider, account, base_url) identity, so re-registering that
-    identity — the documented recreate path — revives the same name. It arrives unsubscribed: a
-    change on the revived rows alerts nobody, because no subscription to the binding that was
-    removed survives to be inherited."""
+    identity — the documented recreate path — revives the same name. The removal took every trigger
+    on it, so the revived binding arrives unwatched and a change on its rows wakes nobody."""
     state = await _workspace()
     name, _removed = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
-    _delete_binding_before_apply(state, monkeypatch)
-
+    delete_tool = _TOOLS["object_delete"]
     with ws(state.workspace_id), agent(state.agent_id):
-        with pytest.raises(UnknownObject, match=name):
-            await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        assert await _woken(state, name) == {state.conversation_id: state.agent_id}
+        await delete_tool.handler(
+            _context(state, None),
+            delete_tool.input_model.model_validate(
+                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+            ),
+        )
+        assert await _woken(state, name) == {}
 
     revived_name, revived_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     with ws(state.workspace_id), agent(state.agent_id):
@@ -2123,7 +2181,7 @@ async def test_re_registering_a_removed_binding_carries_no_old_subscribers(
                 payload=PageChangeBatch(changes=(_change(revived_id, "# asana tasks: revived"),)),
             )
         )
-        assert await _stored_subscribers(state, name) == {}
+        assert await _woken(state, name) == {}
         assert await _turns(state.conversation_id) == []
     assert revived_name == name
     [row] = await _rows(state, ASANA)
@@ -2171,12 +2229,11 @@ async def test_a_registration_absorbs_a_binding_another_turn_created_first(
     assert row["subject"] == SHARED_SUBJECT
 
 
-async def test_page_change_alerts_only_subscribed_conversations_idempotently(db: None) -> None:
+async def test_page_change_alerts_only_woken_conversations_idempotently(db: None) -> None:
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         shipped = _change(source_id, "# asana tasks: Ship the launch list")
         legal = _change(source_id, "# asana tasks: Follow up with legal")
@@ -2202,19 +2259,12 @@ async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> No
     _, projects_id = await _register(
         state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
     )
-    caller = state.conversation_id.hex
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(
             _context(state, None),
-            _manifest_text(
-                ASANA,
-                ("projects", "tasks"),
-                name,
-                account_id="acct-one",
-                shared=True,
-                subscribers=(caller,),
-            ),
+            _manifest_text(ASANA, ("projects", "tasks"), name, account_id="acct-one", shared=True),
         )
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         await on_page_change(
             HookContext(
@@ -2239,6 +2289,26 @@ async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> No
         )
         (turn,) = await _turns(state.conversation_id)
         assert "projects: 1 added; tasks: 1 added" in turn["inbound"]
+
+
+async def _second_conversation(state: _Workspace) -> UUID:
+    """Another conversation of the same agent — the second place one member can apply from."""
+    conversation_id = uuid4()
+    created_at = datetime(2026, 7, 9, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=state.workspace_id,
+                agent_id=state.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=state.owner_id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    return conversation_id
 
 
 async def _second_agent_conversation(state: _Workspace) -> tuple[UUID, UUID]:
@@ -2274,20 +2344,19 @@ async def _second_agent_conversation(state: _Workspace) -> tuple[UUID, UUID]:
     return agent_id, conversation_id
 
 
-async def test_alert_skips_a_subscriber_whose_agent_holds_no_grant(db: None, tmp_path) -> None:
-    """Subscribing is a member act on a shared source, but reading its pages is the agent's own
+async def test_alert_skips_a_trigger_whose_agent_holds_no_grant(db: None, tmp_path) -> None:
+    """Watching is a member act on a shared source, but reading its pages is the agent's own
     grant. A conversation bound to an agent that was never granted the changed source is alerted
-    about nothing: no turn, no change log, no page ids anywhere — while the granted subscriber in
-    the same batch is alerted in full, so the suppression is per-subscriber and not a dropped
+    about nothing: no turn, no change log, no page ids anywhere — while the granted trigger in
+    the same batch is alerted in full, so the suppression is per-trigger and not a dropped
     batch."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     outsider_agent_id, outsider_conversation_id = await _second_agent_conversation(state)
-    granted, outsider = state.conversation_id.hex, outsider_conversation_id.hex
     sandboxes = _sandboxes(tmp_path)
     with ws(state.workspace_id):
         with agent(state.agent_id):
-            await _apply(_context(state, None), _subscribe_manifest(name, (granted,), shared=True))
+            await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         with agent(outsider_agent_id):
             base = _context(state, None)
             await _apply(
@@ -2300,11 +2369,11 @@ async def test_alert_skips_a_subscriber_whose_agent_holds_no_grant(db: None, tmp
                         }
                     ),
                 ),
-                _subscribe_manifest(name, tuple(sorted((granted, outsider))), shared=True),
+                _trigger_manifest(name, outsider_conversation_id),
             )
-        assert await _stored_subscribers(state, name) == {
-            granted: state.agent_id.hex,
-            outsider: outsider_agent_id.hex,
+        assert await _woken(state, name) == {
+            state.conversation_id: state.agent_id,
+            outsider_conversation_id: outsider_agent_id,
         }
 
         ext = context_for(
@@ -2326,9 +2395,8 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
     the same batch is neither referenced nor counted, so its existence never leaks."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         shared = _change(source_id, "# asana tasks: Ship it")
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
@@ -2374,19 +2442,12 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
         state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
     )
     sandboxes = _sandboxes(tmp_path)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id):
+    with ws(state.workspace_id), agent(state.agent_id):
         await _apply(
             _context(state, None),
-            _manifest_text(
-                ASANA,
-                ("projects", "tasks"),
-                name,
-                account_id="acct-one",
-                shared=True,
-                subscribers=(caller,),
-            ),
+            _manifest_text(ASANA, ("projects", "tasks"), name, account_id="acct-one", shared=True),
         )
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(
             NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
@@ -2427,9 +2488,8 @@ async def test_change_log_replay_rewrites_rather_than_appends(db: None, tmp_path
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     sandboxes = _sandboxes(tmp_path)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(
             NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
@@ -2444,13 +2504,12 @@ async def test_change_log_replay_rewrites_rather_than_appends(db: None, tmp_path
 
 async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> None:
     """The shared-only filter governs the log as well as the message — a private page is not
-    written to a file a subscriber who cannot read it will open."""
+    written to a file a reader of the woken conversation cannot open."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     sandboxes = _sandboxes(tmp_path)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(
             NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
@@ -2468,26 +2527,21 @@ async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> Non
 
 async def test_change_log_failure_propagates_rather_than_degrading(db: None, tmp_path) -> None:
     """A change log that cannot be written fails the batch instead of quietly alerting without it.
-    Here the subscribed conversation no longer resolves in this workspace — internal state, not
-    external flakiness — so it raises, the cursor stays put for the next tick, and no alert claims
-    a delta whose detail was dropped."""
+    Here the workspace root is a file, so the carrier cannot make the conversation's directory —
+    internal state, not external flakiness — so it raises, the cursor stays put for the next tick,
+    and no alert claims a delta whose detail was dropped."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
     sandboxes = _sandboxes(tmp_path)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(
             NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
         )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.conversation).where(
-                    tables.conversation.c.id == state.conversation_id
-                )
-            )
+        sandboxes.workspace_root.parent.mkdir(parents=True, exist_ok=True)
+        sandboxes.workspace_root.write_text("not a directory")
         changes = tuple(_change(source_id, f"# task {n}") for n in range(6))
-        with pytest.raises(ValueError):
+        with pytest.raises(OSError):
             await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
 
         assert await _turns(state.conversation_id) == []
@@ -2498,9 +2552,8 @@ async def test_alert_degrades_to_counts_when_no_sandbox_is_wired(db: None) -> No
     object_list route rather than losing the turn to plumbing."""
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
-    with ws(state.workspace_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         changes = tuple(_change(source_id, f"# task {n}") for n in range(6))
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
@@ -2513,9 +2566,8 @@ async def test_alert_degrades_to_counts_when_no_sandbox_is_wired(db: None) -> No
 async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    caller = state.conversation_id.hex
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _subscribe_manifest(name, (caller,), shared=True))
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(private,))))

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IconAdjustments,
   IconAdjustmentsHorizontal,
-  IconClock,
+  IconAutomation,
   IconEdit,
   IconFolder,
   IconLayoutSidebarRight,
@@ -942,7 +942,9 @@ function RailRow({
 
 const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;
 const AgentsGlyph = () => <IconSparkles className="size-(--size-glyph) shrink-0" aria-hidden />;
-const ScheduledGlyph = () => <IconClock className="size-(--size-glyph) shrink-0" aria-hidden />;
+const AutomationsGlyph = () => (
+  <IconAutomation className="size-(--size-glyph) shrink-0" aria-hidden />
+);
 const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
 const MemoryGlyph = () => (
   <IconAdjustmentsHorizontal className="size-(--size-glyph) shrink-0" aria-hidden />
@@ -951,7 +953,7 @@ const WorkspaceGlyph = () => <IconUsers className="size-(--size-glyph) shrink-0"
 const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-0" aria-hidden />;
 
 const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
-  scheduled: <ScheduledGlyph />,
+  automations: <AutomationsGlyph />,
   artifacts: <ArtifactsGlyph />,
   memory: <MemoryGlyph />,
 };

@@ -10,6 +10,7 @@ import {
   MEMBER,
   StreamFake,
   TASK_KIND,
+  TRIGGER_KIND,
   TURN_ID,
   json,
   objectIndex,
@@ -371,9 +372,10 @@ test("the scheduled, overview, and skills refusals tone their notices", async ()
   };
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
-  location.hash = "#/agents/" + AGENT.id + "/scheduled";
+  location.hash = "#/agents/" + AGENT.id + "/automations";
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
     "/intents": refuse,
   });

@@ -1,8 +1,9 @@
 """What the sources extension declares: one content-source backend per registered connector, the
 credential slots the direct auth backend reads BYOK keys from, the `direct` auth-proxy backend
 itself, the `source` object kind that turns a granted or keyed provider into syncing source rows,
-the `page` object kind that projects the synced pages back for read, and the `page_change` hook
-that alerts a source's subscribers when its synced content changes. One extension, N backends —
+the `page` object kind that projects the synced pages back for read, the `source_trigger` kind a
+conversation stands on one shared source with, and the `page_change` hook that wakes those
+conversations when its synced content changes. One extension, N backends —
 each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
 runner routes a source holding a broker connection to the extension that registers its provider
@@ -20,7 +21,7 @@ from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.registry import CONNECTORS
-from ufo_ext_sources.tools import SOURCE_OBJECT, on_page_change
+from ufo_ext_sources.tools import SOURCE_OBJECT, SOURCE_TRIGGER_OBJECT, on_page_change
 
 NAME = "sources"
 VERSION = "0.1.0"
@@ -39,7 +40,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        objects=(SOURCE_OBJECT, PAGE_OBJECT),
+        objects=(SOURCE_OBJECT, SOURCE_TRIGGER_OBJECT, PAGE_OBJECT),
         hooks=(HookSpec(event="page_change", handler=on_page_change),),
         sources=tuple(
             SourceProvider(
