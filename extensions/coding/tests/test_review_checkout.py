@@ -360,6 +360,21 @@ def test_review_prompt_requires_all_qualifying_findings() -> None:
     assert "Do not lower the finding bar to increase the count." in prompt
 
 
+def test_review_prompt_establishes_an_absence_before_it_reports_one() -> None:
+    prompt = CODE_REVIEW_PROFILE.prompt
+
+    assert "A finding that rests on absence" in prompt
+    assert "no other caller, no other definition, no emitted rule, no matching configuration" in (
+        prompt
+    )
+    assert "established only by the search that would have found the thing" in prompt
+    assert "read each file the claim depends on to its end" in prompt
+    assert "a rule you predict from one line of a file that continues is not established" in prompt
+    assert "a generated artifact has more sources than the changed file" in prompt
+    assert "establish every source before you report one" in prompt
+    assert "Omit the finding when the search does not settle it." in prompt
+
+
 def test_review_prompt_writes_findings_in_simplified_technical_english() -> None:
     prompt = CODE_REVIEW_PROFILE.prompt
 

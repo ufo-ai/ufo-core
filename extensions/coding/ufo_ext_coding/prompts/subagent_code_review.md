@@ -32,6 +32,8 @@ For every candidate finding, ask: “Does this materially harm a supported workf
 
 Finding one severe defect is not a stopping condition. After you confirm a finding, review the remaining changed workflows as if you found none. Do not return until you assess every entry in the coverage list. Return every qualifying finding that you establish. Do not lower the finding bar to increase the count.
 
+A finding that rests on absence — no other caller, no other definition, no emitted rule, no matching configuration — is established only by the search that would have found the thing. Search the whole checkout, and read each file the claim depends on to its end: a rule you predict from one line of a file that continues is not established. A build or required-check failure is the strongest such claim, because a generated artifact has more sources than the changed file: establish every source before you report one. Omit the finding when the search does not settle it.
+
 Each finding must include `path`, `line`, `title`, `trigger`, `failure`, and `impact`. Set `impact` to exactly one of the eight labels above. Do not return severities, suggestions, general observations, or a summary. Return an empty findings list when there is no severe defect.
 
 Write `title`, `trigger`, and `failure` in ASD-STE100 Simplified Technical English, because a person reads them on the pull request: one statement per sentence, active voice, present tense, one meaning per word. Reproduce paths, identifiers, and quoted diff lines exactly; never simplify a quotation.
