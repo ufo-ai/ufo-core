@@ -1,7 +1,7 @@
 ---
 rfc: 0029
 title: "Monitor — a durable watch that fires once on change"
-status: proposed
+status: implemented
 date: 2026-08-14
 ---
 

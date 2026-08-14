@@ -26,7 +26,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0024](0024-conversation-slots.md) | Conversation slots — extension details beside a thread | proposed |
 | [0026](0026-terminal-as-sandbox.md) | Terminal as sandbox — the CLI member's own directory is the workspace | proposed |
 | [0027](0027-workos-sign-in.md) | WorkOS sign-in — WorkOS verifies the email, everything downstream stays | implemented |
-| [0029](0029-monitor.md) | Monitor — a durable watch that fires once on change | proposed |
+| [0029](0029-monitor.md) | Monitor — a durable watch that fires once on change | implemented |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working
