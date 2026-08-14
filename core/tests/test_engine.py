@@ -2867,6 +2867,99 @@ async def test_reasoning_blocks_open_the_assistant_message_that_carries_the_tool
     assert stored.messages[1] == echoed
 
 
+@dataclass
+class StallAfterNarrationModel:
+    """Streams one text delta, then produces nothing until released — the shape of narration
+    followed by a long tool-call or thinking stretch with no further text events."""
+
+    release: asyncio.Event
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="on it —")
+        await self.release.wait()
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class TextSignallingHub(RecordingHub):
+    """RecordingHub that additionally signals the first published text delta, so a test can wait
+    on the event instead of polling the frame list."""
+
+    first_text: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+        cursor = await super().publish(turn_id, frame)
+        if isinstance(frame, TextDelta):
+            self.first_text.set()
+        return cursor
+
+
+async def test_buffered_text_reaches_the_hub_while_the_stream_stalls(
+    db: None, tmp_path: Path
+) -> None:
+    """The pacer owns the flush clock: text already streamed publishes within the window even
+    when no further model event arrives to re-check it, so narration cannot sit buffered behind
+    a stalled stream until the round's final flush."""
+    release = asyncio.Event()
+    hub = TextSignallingHub()
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, StallAfterNarrationModel(release), tmp_path), hub=hub)
+    run = asyncio.ensure_future(engine.run())
+    try:
+        async with asyncio.timeout(5):
+            await hub.first_text.wait()
+    finally:
+        release.set()
+    frame = await run
+    assert frame.status == "done"
+    assert [frame.text for frame in hub.frames if isinstance(frame, TextDelta)] == ["on it —"]
+
+
+@dataclass
+class BlockingPublishHub(RecordingHub):
+    """RecordingHub that holds its first text publish open until released — the shape of a hub
+    whose publish awaits I/O, so a test can drive the stream while a flush is in flight."""
+
+    publishing: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+        if isinstance(frame, TextDelta) and not self.publishing.is_set():
+            self.publishing.set()
+            await self.release.wait()
+        return await super().publish(turn_id, frame)
+
+
+@dataclass
+class DeltaDuringPublishModel:
+    """Streams a second text delta only once the hub is inside the publish of the first, so the
+    chunk lands in the engine's buffer while a paced flush holds it."""
+
+    hub: BlockingPublishHub
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield TextDelta(text="first ")
+        await self.hub.publishing.wait()
+        yield TextDelta(text="second")
+        self.hub.release.set()
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_text_streamed_during_a_paced_flush_still_reaches_the_hub(
+    db: None, tmp_path: Path
+) -> None:
+    """A flush takes the buffer it publishes, so chunks the stream appends while that publish is
+    in flight belong to the next flush instead of being dropped with the published ones."""
+    hub = BlockingPublishHub()
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, DeltaDuringPublishModel(hub), tmp_path), hub=hub)
+    async with asyncio.timeout(5):
+        frame = await engine.run()
+    assert frame.status == "done"
+    published = "".join(f.text for f in hub.frames if isinstance(f, TextDelta))
+    assert published == "first second"
+
+
 async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_order(
     db: None, tmp_path: Path
 ) -> None:

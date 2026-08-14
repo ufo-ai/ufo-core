@@ -131,7 +131,7 @@ FIND_MAX_TOKENS = 8_192
 MAIN_ROUND_LIMIT = 200
 MAX_PARALLEL_TOOL_CALLS = 8
 DELTA_FLUSH_BYTES = 2048
-DELTA_FLUSH_SECONDS = 0.2
+DELTA_FLUSH_SECONDS = 0.04
 CACHE_5M_SECONDS = 5 * 60
 CACHE_1H_SECONDS = 60 * 60
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
@@ -1767,7 +1767,8 @@ class TurnEngine:
         parts: list[str] = []
         buffer: list[str] = []
         pending = 0
-        last_flush = time.monotonic()
+        flush_lock = asyncio.Lock()
+        stop = asyncio.Event()
         call_names: dict[str, str] = {}
         call_json: dict[str, list[str]] = {}
         call_order: list[str] = []
@@ -1776,12 +1777,21 @@ class TurnEngine:
         error: Exception | None = None
 
         async def flush() -> None:
-            nonlocal pending, last_flush
-            if buffer:
-                await self.hub.publish(self.turn.id, TextDelta(text="".join(buffer)))
+            nonlocal pending
+            async with flush_lock:
+                if not buffer:
+                    return
+                text = "".join(buffer)
                 buffer.clear()
                 pending = 0
-            last_flush = time.monotonic()
+                await self.hub.publish(self.turn.id, TextDelta(text=text))
+
+        async def pace() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), DELTA_FLUSH_SECONDS)
+                except TimeoutError:
+                    await flush()
 
         started = time.monotonic()
         first_event_ms: int | None = None
@@ -1791,6 +1801,7 @@ class TurnEngine:
             provider=self.provider,
             round="first" if round_input.first_round else "later",
         ) as round_span:
+            pacer = asyncio.ensure_future(pace())
             try:
                 async for event in self.model.complete(request):
                     if first_event_ms is None:
@@ -1801,9 +1812,7 @@ class TurnEngine:
                             parts.append(chunk)
                             buffer.append(chunk)
                             pending += len(chunk)
-                            if pending >= DELTA_FLUSH_BYTES or (
-                                pending and time.monotonic() - last_flush >= DELTA_FLUSH_SECONDS
-                            ):
+                            if pending >= DELTA_FLUSH_BYTES:
                                 await flush()
                         case ToolCallStart(id=call_id, name=name):
                             call_names[call_id] = name
@@ -1817,6 +1826,13 @@ class TurnEngine:
                             usages.append(event)
             except Exception as caught:
                 error = caught
+            finally:
+                stop.set()
+                try:
+                    await pacer
+                except Exception as caught:
+                    if error is None:
+                        error = caught
             wall_ms = int((time.monotonic() - started) * 1000)
             await flush()
         emit_histogram(

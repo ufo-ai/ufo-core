@@ -1009,7 +1009,15 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
     assert workspace_id in await candidates()
 
     ctx = context_for(EXTENSION_WEB, frozenset(), blob=blob, model_resolver=STANDIN_REGISTRY)
+    assert ctx.corpus is not None
     with ws(workspace_id):
+        async with asyncio.timeout(5):
+            while True:
+                trajectories = {t.conversation_id: t for t in await ctx.corpus.trajectories()}
+                trajectory = trajectories.get(UUID(opened))
+                if trajectory is not None and web_surface._title_excerpt(trajectory.messages):
+                    break
+                await asyncio.sleep(0.01)
         await web_surface.summarize_chat_titles(ctx)
         assert await ctx.store.list(web_surface.CHAT_PENDING_PREFIX) == ()
 
