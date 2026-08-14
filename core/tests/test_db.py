@@ -482,7 +482,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0012",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
-        "sources_0001",
+        "sources_0002",
         "monitors_0001",
         "skill_create_0002",
         "coding_0003",
@@ -714,15 +714,22 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
     command.upgrade(config, "sources@head")
     with sqlite3.connect(database_path) as connection:
         carried = connection.execute(
-            "select conversation_id, agent_id, binding, created_by_member_id from source_trigger"
+            "select conversation_id, agent_id, binding, delivery, created_by_member_id "
+            "from source_trigger"
         ).fetchall()
         left = connection.execute(
             "select key from ext_store where extension = 'sources'"
         ).fetchall()
     assert sorted(carried) == sorted(
         [
-            (shared_conversation.hex, agent_id.hex, "asana-1a2b3c4d", None),
-            (private_conversation.hex, other_agent_id.hex, "asana-1a2b3c4d", member_id.hex),
+            (shared_conversation.hex, agent_id.hex, "asana-1a2b3c4d", "current", None),
+            (
+                private_conversation.hex,
+                other_agent_id.hex,
+                "asana-1a2b3c4d",
+                "current",
+                member_id.hex,
+            ),
         ]
     )
     assert [key for (key,) in left] == ["cursor:asana-1a2b3c4d"]
@@ -1118,12 +1125,15 @@ def test_migrate_command_brings_the_schema_to_head(
     engine = sa.create_engine("sqlite:///" + str(tmp_path / "app.db"))
     try:
         with engine.connect() as connection:
-            names = set(sa.inspect(connection).get_table_names())
+            inspector = sa.inspect(connection)
+            names = set(inspector.get_table_names())
+            trigger_columns = {column["name"] for column in inspector.get_columns("source_trigger")}
     finally:
         engine.dispose()
     assert "workspace" in names
     assert "user_skill" in names
     assert "sample_ext_note" in names
+    assert "delivery" in trigger_columns
 
 
 def test_transcript_reads_names_disclosures_newest_first_and_pages_on_the_operator_s_limit(

@@ -1047,12 +1047,12 @@ class ExtensionContext:
         surface), holds its own queue partition, and takes its own sandbox, so two of them neither
         serialize against each other nor share a checkout tree.
 
-        The key is the event's own identity — a comparison, a schedule firing, a delivery id — so
-        a replayed batch reopens the conversation it already opened rather than a second one, and
-        the extension's name is the surface, so one extension's keys can never collide with
-        another's. The audience is the workspace's, since no member delegated it. `invoke` admits
-        the turns; this only opens the room they run in, and an agent of another workspace fails
-        loud rather than binding a conversation nothing can reach."""
+        The key is the workflow subject — a pull request, a scheduled task, a delivery — so later
+        events for that subject keep one history and a replay reopens the same conversation. The
+        extension's name is the surface, so one extension's keys can never collide with another's.
+        The audience is the workspace's, since no member delegated it. `invoke` admits the turns;
+        this only opens the room they run in, and an agent of another workspace fails loud rather
+        than binding a conversation nothing can reach."""
         workspace_id = self.store.workspace_id
         async with workspace_tx() as connection:
             known = (

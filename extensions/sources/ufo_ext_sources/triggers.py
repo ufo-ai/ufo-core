@@ -1,8 +1,8 @@
 """The source-trigger table and the scoped store that owns it.
 
-A trigger is one conversation's standing interest in one shared source — the durable form of "wake
-this agent, here, when that source's content changes". The row carries the conversation the alert
-re-enters, the agent it re-enters as, and the member who asked for it.
+A trigger is one conversation's standing interest in one shared source. It can send each batch to
+that conversation or partition changes into one stable agent conversation per page. The row carries
+the owning conversation, the agent it invokes, the delivery mode, and the member who asked for it.
 
 Every statement filters `workspace_id` itself — `ExtensionContext.transaction` yields an unscoped
 connection. The alert sweep and a binding's removal run workspace-wide, because a source belongs to
@@ -12,6 +12,7 @@ agent."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -30,6 +31,7 @@ source_trigger = sa.Table(
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("binding", sa.Text, nullable=False),
+    sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -43,10 +45,14 @@ _COLUMNS = (
     source_trigger.c.conversation_id,
     source_trigger.c.agent_id,
     source_trigger.c.binding,
+    source_trigger.c.delivery,
     source_trigger.c.created_by_member_id,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
 )
+
+
+SourceTriggerDelivery = Literal["current", "per_page"]
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,7 @@ class SourceTrigger:
     conversation_id: UUID
     agent_id: UUID
     binding: str
+    delivery: SourceTriggerDelivery
     created_by_member_id: UUID | None
     created_at: datetime
     updated_at: datetime
@@ -65,7 +72,7 @@ class SourceTrigger:
 
 @dataclass(frozen=True)
 class ListedTrigger:
-    """One trigger beside the disclosure audience of the conversation it wakes — the pair every
+    """One trigger beside the disclosure audience of the conversation that owns it — the pair every
     member-facing read decides visibility from, since who may see a trigger is a fact of where it
     fires and not of the trigger row. An alert reads `SourceTrigger` alone, so only a read that
     must answer for a member pays for the lookup."""
@@ -80,11 +87,17 @@ def _utc(value: datetime) -> datetime:
 
 
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
+    match row["delivery"]:
+        case "current" | "per_page" as delivery:
+            pass
+        case value:
+            raise ValueError(f"unknown source trigger delivery {value!r}")
     return SourceTrigger(
         id=row["id"],
         conversation_id=row["conversation_id"],
         agent_id=row["agent_id"],
         binding=row["binding"],
+        delivery=delivery,
         created_by_member_id=row["created_by_member_id"],
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
@@ -105,11 +118,11 @@ class SourceTriggerStore:
         self,
         conversation_id: UUID,
         binding: str,
+        delivery: SourceTriggerDelivery,
         created_by_member_id: UUID | None = None,
     ) -> SourceTrigger:
-        """Wake one conversation on one binding. The conversation is checked against the object
-        namespace, so a trigger can never name a conversation another agent answers — the alert
-        re-enters as this agent, and an agent that cannot speak there would fire into nothing. A
+        """Create one delivery rule on one binding. The owning conversation is checked against the
+        object namespace, so a trigger can never invoke as an agent other than its owner. A
         pair already watched refuses in this vocabulary rather than as a constraint violation: two
         turns can read no trigger and both write one, and the loser of that race is a caller to
         answer, not a driver error to surface."""
@@ -130,6 +143,7 @@ class SourceTriggerStore:
                             conversation_id=conversation_id,
                             agent_id=agent_id,
                             binding=binding,
+                            delivery=delivery,
                             created_by_member_id=created_by_member_id,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
@@ -180,9 +194,8 @@ class SourceTriggerStore:
             )
 
     async def waking(self, binding: str) -> tuple[SourceTrigger, ...]:
-        """Every conversation this binding wakes, workspace-wide — the alert sweep's read. It spans
-        agents on purpose: a source belongs to the workspace, and the row already names the agent
-        each alert re-enters as."""
+        """Every delivery rule for this binding, workspace-wide — the alert sweep's read. It spans
+        agents on purpose: a source belongs to the workspace, and each row names its agent."""
         query = (
             sa.select(*_COLUMNS)
             .where(
@@ -198,8 +211,8 @@ class SourceTriggerStore:
     async def list_reported(
         self, *, conversation_id: UUID | None = None
     ) -> tuple[ListedTrigger, ...]:
-        """This agent's triggers, each beside the audience and surface label of the conversation it
-        wakes — the read a member-facing surface answers visibility from. The conversation facts are
+        """This agent's triggers, each beside the audience and surface label of its owning
+        conversation — the read a member-facing surface answers visibility from. The facts are
         read live rather than snapshotted onto the row: an audience never changes, but a channel's
         label does when it is renamed, and a listing showing a channel's old name is one that lies.
         A trigger whose conversation is gone is absent from this page."""

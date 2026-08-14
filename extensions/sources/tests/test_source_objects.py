@@ -1872,12 +1872,12 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
-def _trigger_manifest(source: str, conversation_id: UUID) -> str:
+def _trigger_manifest(source: str, conversation_id: UUID, *, delivery: str = "current") -> str:
     return yaml.safe_dump(
         {
             "kind": SOURCE_TRIGGER_KIND,
             "name": trigger_name(source, conversation_id),
-            "spec": {"source": source},
+            "spec": {"source": source, "delivery": delivery},
         }
     )
 
@@ -1890,6 +1890,8 @@ def _change(
     stream: str = "tasks",
     title: str = "",
     disposition: str = "added",
+    page_id: UUID | None = None,
+    revision: int = 1,
 ) -> PageChange:
     """One replayed page. `disposition` shapes the three fields the alert reads it from: a removed
     page is tombstoned, an added page carries equal create/change stamps, an updated page's change
@@ -1897,14 +1899,14 @@ def _change(
     now = changed_at or datetime(2026, 7, 20, tzinfo=UTC)
     created = now - timedelta(days=1) if disposition == "updated" else now
     return PageChange(
-        page_id=uuid4(),
+        page_id=page_id or uuid4(),
         source_id=source_id,
         subject=subject,
         stream=stream,
         title=title or body.removeprefix("# ")[:40],
         body=body,
         digest=f"sha256:{uuid4().hex}",
-        revision=1,
+        revision=revision,
         tombstone=disposition == "removed",
         created_at=created,
         as_of=now,
@@ -1943,7 +1945,7 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             .content[0]
             .text
         )
-        assert fetched["spec"] == {"source": name}
+        assert fetched["spec"] == {"source": name, "delivery": "current"}
         assert fetched["status"]["source"] == name
         assert fetched["status"]["conversation"] == str(state.conversation_id)
         assert {(link["relation"], link["target"]["name"]) for link in fetched["links"]} == {
@@ -2113,6 +2115,7 @@ def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPa
         store: SourceTriggerStore,
         conversation_id: UUID,
         binding: str,
+        delivery: str,
         created_by_member_id: UUID | None = None,
     ) -> SourceTrigger:
         await delete_tool.handler(
@@ -2122,7 +2125,11 @@ def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPa
             ),
         )
         return await real_create(
-            store, conversation_id, binding, created_by_member_id=created_by_member_id
+            store,
+            conversation_id,
+            binding,
+            delivery,
+            created_by_member_id=created_by_member_id,
         )
 
     monkeypatch.setattr(SourceTriggerStore, "create", delete_before_create)
@@ -2248,6 +2255,94 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
 
         await on_page_change(HookContext(ext=ext, payload=batch))
         assert len(await _turns(state.conversation_id)) == 1
+
+
+async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    first_page = uuid4()
+    second_page = uuid4()
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state, None),
+            _trigger_manifest(name, state.conversation_id, delivery="per_page"),
+        )
+        [trigger] = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(name)
+        assert trigger.delivery == "per_page"
+        fetched = yaml.safe_load(
+            (
+                await _TOOLS["object_get"].handler(
+                    _context(state, None),
+                    _TOOLS["object_get"].input_model.model_validate(
+                        {
+                            "user_description": TOOL_NARRATION,
+                            "kind": SOURCE_TRIGGER_KIND,
+                            "name": trigger_name(name, state.conversation_id),
+                        }
+                    ),
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert fetched["spec"] == {"source": name, "delivery": "per_page"}
+        assert fetched["status"]["delivery"] == "per_page"
+        assert [link["relation"] for link in fetched["links"]] == ["watches"]
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        first = _change(source_id, "# first", page_id=first_page)
+        second = _change(source_id, "# second", page_id=second_page)
+        batch = PageChangeBatch(changes=(first, second))
+
+        await on_page_change(HookContext(ext=ext, payload=batch))
+        await on_page_change(HookContext(ext=ext, payload=batch))
+
+    async with workspace_tx() as connection:
+        conversations = (
+            (
+                await connection.execute(
+                    sa.select(tables.conversation).where(
+                        tables.conversation.c.workspace_id == state.workspace_id,
+                        tables.conversation.c.surface == NAME,
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(conversations) == 2
+    turns_by_page = {}
+    for conversation in conversations:
+        [turn] = await _turns(conversation["id"])
+        if str(first_page) in turn["inbound"]:
+            turns_by_page[first_page] = turn
+        if str(second_page) in turn["inbound"]:
+            turns_by_page[second_page] = turn
+    assert set(turns_by_page) == {first_page, second_page}
+    assert (
+        turns_by_page[first_page]["conversation_id"]
+        != turns_by_page[second_page]["conversation_id"]
+    )
+    assert await _turns(state.conversation_id) == []
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="done", terminal={"status": "done", "text": "Handled."})
+            .where(tables.turn.c.id == turns_by_page[first_page]["id"])
+        )
+    changed = _change(
+        source_id,
+        "# first changed",
+        changed_at=datetime(2026, 7, 21, tzinfo=UTC),
+        disposition="updated",
+        page_id=first_page,
+        revision=2,
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(changed,))))
+
+    assert len(await _turns(turns_by_page[first_page]["conversation_id"])) == 2
+    assert len(await _turns(turns_by_page[second_page]["conversation_id"])) == 1
 
 
 async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> None:

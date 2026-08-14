@@ -1,9 +1,9 @@
 """What the sources extension declares: one content-source backend per registered connector, the
 credential slots the direct auth backend reads BYOK keys from, the `direct` auth-proxy backend
 itself, the `source` object kind that turns a granted or keyed provider into syncing source rows,
-the `page` object kind that projects the synced pages back for read, the `source_trigger` kind a
-conversation stands on one shared source with, and the `page_change` hook that wakes those
-conversations when its synced content changes. One extension, N backends —
+the `page` object kind that projects the synced pages back for read, the `source_trigger` kind that
+delivers shared-source changes to one conversation or one conversation per page, and the
+`page_change` hook that performs that delivery. One extension, N backends —
 each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
 runner routes a source holding a broker connection to the extension that registers its provider

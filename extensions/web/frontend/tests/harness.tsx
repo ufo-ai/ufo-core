@@ -193,12 +193,17 @@ export const TASK_KIND = {
   deletes: true,
 };
 
-/** The kind the lane only ever deletes: a trigger is created from the conversation it wakes, so
- *  the portal draws its rows and the act that ends one, and no act that makes one. */
+/** The kind the lane only ever deletes: a trigger is created in chat, so the portal draws its rows
+ *  and the act that ends one, and no act that makes one. */
 export const TRIGGER_KIND = {
   kind: "source_trigger",
-  fields: ["conversation", "source", "origin", "owner_email", "mine"],
-  spec_schema: { properties: { source: { type: "string", title: "Source" } } },
+  fields: ["conversation", "source", "delivery", "origin", "owner_email", "mine"],
+  spec_schema: {
+    properties: {
+      source: { type: "string", title: "Source" },
+      delivery: { type: "string", enum: ["current", "per_page"], title: "Delivery" },
+    },
+  },
   applies: false,
   deletes: true,
 };

@@ -17,14 +17,10 @@ delete-and-recreate. Delete is registrar-or-admin. Validation refuses with the
 valid provider and stream sets, so discovery is error-driven plus `object_explain`.
 
 A source trigger is one conversation's standing interest in one shared source: apply the kind from
-the conversation to wake it when that source's synced content changes, delete the row to stop. Its
-name derives from the pair it is (`<binding>-<conversation>`), only a shared source can carry one —
-a private source's pages never reach another reader, so a trigger on one could never fire — and a
-trigger is seen by whoever reads the conversation it wakes, plus its creator and a workspace admin,
-which is how a scheduled task answers the same question. The `page_change` hook reads a changed
-binding's triggers and invokes one alert turn per woken conversation, carrying per-stream counts of
-what changed (only the shared pages that agent may read) and writing the whole delta — one JSON
-line per page — into that conversation's workspace for the agent to read with its file tools."""
+the conversation and delete the row to stop. It can wake that conversation for each source batch,
+or open one stable agent conversation per changed page. Its name derives from the source and the
+conversation that owns the trigger. Only a shared source can carry one. The `page_change` hook
+includes only shared pages that the agent may read."""
 
 import json
 import re
@@ -68,7 +64,7 @@ from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
-from ufo_ext_sources.triggers import ListedTrigger, SourceTriggerStore
+from ufo_ext_sources.triggers import ListedTrigger, SourceTriggerDelivery, SourceTriggerStore
 
 CONNECTION_OBJECT_KIND = "connection"
 SOURCE_TRIGGER_KIND = "source_trigger"
@@ -733,16 +729,21 @@ class SourceTriggerSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: str = Field(
         title="Source",
-        description="The shared source object this trigger watches; its changes wake the "
-        "conversation the trigger was applied from.",
+        description="The shared source object this trigger watches.",
+    )
+    delivery: SourceTriggerDelivery = Field(
+        default="current",
+        title="Delivery",
+        description="Use current to wake this conversation for each source batch. Use per_page to "
+        "open one stable agent conversation for each changed page.",
     )
 
 
 @dataclass(frozen=True)
 class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObjectOwner]):
     """The kind's handlers over the core trigger store: a trigger is seen by whoever reads the
-    conversation it wakes, plus its creator and a workspace admin — the gate is the base's, and
-    this kind supplies only the `shared` fact it decides from, taken from that conversation's
+    conversation that owns it, plus its creator and a workspace admin — the gate is the base's,
+    and this kind supplies only the `shared` fact it decides from, taken from that conversation's
     audience. Deleting stays the creator's and an admin's, so a member reading a shared trigger is
     never a member who can silence it. Only a shared source can carry one: a private source's
     pages reach no other reader, so the alert filter would drop every change it ever made and the
@@ -755,7 +756,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
-        """A trigger is shared exactly as far as the conversation it wakes is, so every surface
+        """A trigger is shared exactly as far as its owning conversation, so every surface
         listing the kind answers one question one way. Its summary is the source's own, since what
         a member came to read is which source wakes them and not the pair's derived name."""
         listed = await _require_triggers(ext).list_reported()
@@ -779,6 +780,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 fields={
                     "conversation": str(row.trigger.conversation_id),
                     "source": row.trigger.binding,
+                    "delivery": row.trigger.delivery,
                     "origin": row.surface_label or "Portal",
                     "owner_email": emails.get(row.trigger.created_by_member_id),
                     "mine": row.trigger.created_by_member_id == member_id,
@@ -798,22 +800,30 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         listed = await self._find(ext, name)
         if listed is None or listed.trigger.id != owner.generation:
             return None
-        return ObjectDetail(
-            spec=SourceTriggerSpec(source=listed.trigger.binding),
-            created_at=listed.trigger.created_at,
-            updated_at=listed.trigger.updated_at,
-            links=(
-                ObjectLink(
-                    relation="watches",
-                    target=ObjectRef(kind=SOURCE_KIND, name=listed.trigger.binding),
-                ),
+        links = [
+            ObjectLink(
+                relation="watches",
+                target=ObjectRef(kind=SOURCE_KIND, name=listed.trigger.binding),
+            )
+        ]
+        if listed.trigger.delivery == "current":
+            links.append(
                 ObjectLink(
                     relation="reports_to",
                     target=ObjectRef(
-                        kind=CONVERSATION_KIND, name=str(listed.trigger.conversation_id)
+                        kind=CONVERSATION_KIND,
+                        name=str(listed.trigger.conversation_id),
                     ),
-                ),
+                )
+            )
+        return ObjectDetail(
+            spec=SourceTriggerSpec(
+                source=listed.trigger.binding,
+                delivery=listed.trigger.delivery,
             ),
+            created_at=listed.trigger.created_at,
+            updated_at=listed.trigger.updated_at,
+            links=tuple(links),
         )
 
     async def _status(
@@ -826,6 +836,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         return {
             "conversation": str(listed.trigger.conversation_id),
             "source": listed.trigger.binding,
+            "delivery": listed.trigger.delivery,
             "origin": listed.surface_label or "Portal",
             "owner_email": emails.get(listed.trigger.created_by_member_id),
             "mine": listed.trigger.created_by_member_id == ctx.acting_member_id,
@@ -852,7 +863,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 f"a {SOURCE_TRIGGER_KIND} is named for the pair it is — apply it as {expected!r}"
             )
         if owner is not None:
-            if old is not None and old.source == spec.source:
+            if old == spec:
                 return
             raise ValueError(
                 f"a {SOURCE_TRIGGER_KIND} is the source and conversation it names — delete this "
@@ -863,6 +874,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         await triggers.create(
             conversation_id=ctx.turn.conversation_id,
             binding=spec.source,
+            delivery=spec.delivery,
             created_by_member_id=ctx.acting_member_id,
         )
         if await _binding_named(ctx.ext, spec.source) is None:
@@ -902,16 +914,9 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
 
 
 async def on_page_change(ctx: HookContext) -> HookOutcome:
-    """Wake each changed source's triggers: group the batch by binding, and for every binding a
-    conversation watches invoke one turn per woken conversation. The turn carries per-stream
-    added/updated/removed counts and the path to a change log holding every changed page, written
-    into that conversation's own workspace — a delta runs to a full batch of pages, so counts are
-    what the agent reads to decide and the file is what it reads to drill in. Only shared changes
-    are surfaced — a page private to some member is never referenced, counted, logged, or cause to
-    wake anything, so its existence never leaks to a reader who cannot read it, and a trigger whose
-    agent holds no grant for the changed source wakes about nothing. Idempotency-keyed on
-    binding + conversation + latest change, so a replayed batch never double-alerts; a changed row
-    no binding claims alerts nothing."""
+    """Wake each changed source's triggers. Current delivery sends one batch to the trigger's
+    conversation. Per-page delivery sends each change to the stable agent conversation keyed by
+    that trigger and page. Only shared pages that the trigger's agent may read cause a wake."""
     match ctx.payload:
         case PageChangeBatch(changes=changes):
             pass
@@ -947,22 +952,47 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             authorized = [change for change in shared if change.source_id in readable]
             if not authorized:
                 continue
-            latest = max(change.changed_at for change in authorized).isoformat()
-            path = await _write_change_log(
-                ctx.ext,
-                trigger.conversation_id,
-                binding,
-                latest,
-                authorized,
-            )
-            await ctx.ext.invoke(
-                trigger.conversation_id,
-                trigger.agent_id,
-                _alert_message(binding, authorized, path),
-                idempotency_key=(
-                    f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
-                ),
-            )
+            match trigger.delivery:
+                case "current":
+                    latest = max(change.changed_at for change in authorized).isoformat()
+                    path = await _write_change_log(
+                        ctx.ext,
+                        trigger.conversation_id,
+                        binding,
+                        latest,
+                        authorized,
+                    )
+                    await ctx.ext.invoke(
+                        trigger.conversation_id,
+                        trigger.agent_id,
+                        _alert_message(binding, authorized, path),
+                        idempotency_key=(
+                            f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
+                        ),
+                    )
+                case "per_page":
+                    for change in authorized:
+                        conversation_id = await ctx.ext.open_conversation(
+                            trigger.agent_id,
+                            f"source-trigger:{trigger.id.hex}:page:{change.page_id.hex}",
+                        )
+                        revision = f"{change.changed_at.isoformat()}-{change.revision}"
+                        path = await _write_change_log(
+                            ctx.ext,
+                            conversation_id,
+                            binding,
+                            revision,
+                            [change],
+                        )
+                        await ctx.ext.invoke(
+                            conversation_id,
+                            trigger.agent_id,
+                            _alert_message(binding, [change], path),
+                            idempotency_key=(
+                                f"source-trigger:{trigger.id.hex}:{change.page_id.hex}:"
+                                f"{change.revision}"
+                            ),
+                        )
     return None
 
 
@@ -1124,25 +1154,22 @@ SOURCE_OBJECT = ObjectKind(
 SOURCE_TRIGGER_OBJECT = ObjectKind(
     name=SOURCE_TRIGGER_KIND,
     description=(
-        "A standing wake-up: one conversation is invoked whenever one shared source's synced "
-        "content changes, carrying what changed per stream. Seen by whoever reads the conversation "
-        "it wakes; only its creator or a workspace admin may delete it."
+        "A standing wake-up for one shared source. Delivery can wake the current conversation for "
+        "each batch or open one stable agent conversation per changed page. Only its creator or a "
+        "workspace admin may delete it."
     ),
     guidance=(
-        "Apply a manifest naming a shared source to be woken here whenever that source's synced "
-        "content changes; the fire arrives as a message in this conversation carrying per-stream "
-        f"counts and the path to a change log. A {SOURCE_TRIGGER_KIND} IS the source and "
-        "conversation it names, so its name derives from both and an apply under any other name "
-        "is refused with the exact one to use; there is nothing to update, and stopping the "
-        "wake-ups is a delete. A source private to the member who registered it cannot be "
-        "watched — its pages reach no other reader, so the change would surface to nobody — and a "
-        "source you cannot see is unknown by name. Removing the source removes every trigger on "
-        "it. Listing returns each trigger's `source`, the conversation it wakes, its creator "
-        "(`owner_email`), and `origin` — the surface label of that conversation, else `Portal` — "
-        "and filters on `mine: true` for the caller's own."
+        "Apply a manifest naming a shared source. Set `delivery: current` to wake this "
+        "conversation for each source batch. Set `delivery: per_page` to open one stable agent "
+        "conversation for "
+        f"each changed page. A {SOURCE_TRIGGER_KIND} IS the source and owning conversation it "
+        "names, so its name derives from both. Delete it to stop. A private or unknown source "
+        "cannot be watched. Removing the source removes every trigger on it. Listing returns "
+        "`source`, `delivery`, the owning `conversation`, its creator (`owner_email`), and "
+        "`origin`."
     ),
     spec_model=SourceTriggerSpec,
     store=SourceTriggerObjects(),
-    list_fields=frozenset({"conversation", "source", "origin", "owner_email", "mine"}),
+    list_fields=frozenset({"conversation", "source", "delivery", "origin", "owner_email", "mine"}),
     agent_target_verbs=frozenset({"list", "get", "delete"}),
 )
