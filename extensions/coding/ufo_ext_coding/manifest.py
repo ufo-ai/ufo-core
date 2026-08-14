@@ -12,20 +12,15 @@ to that child.
 
 The pack also declares the git credential slot, because a checkout is the work it routes: a
 workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
-with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox.
-A source bound to a review agent turns each changed pull-request head into one conversation of that
-agent, which reviews it through an exact-checkout child and publishes the typed result as an
-advisory GitHub Check."""
+with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox."""
 
 import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import (
     CredentialSlot,
-    HookSpec,
     InjectionTarget,
     Manifest,
     RouteSpec,
@@ -42,17 +37,6 @@ from ufo_ext_coding.connect import (
     install_workspace,
 )
 from ufo_ext_coding.github_app import GIT_SLOT, app_tokens
-from ufo_ext_coding.review_checkout import CODE_REVIEW_PROFILE, CODE_REVIEW_TOOLS
-from ufo_ext_coding.review_publish import PublishCodeReviewInput, publish_code_review
-from ufo_ext_coding.review_routing import (
-    ConfigureReviewInboxInput,
-    StopReviewInboxInput,
-    configure_review_inbox,
-    drop_dead_review_bindings,
-    route_review_pages,
-    stop_review_inbox,
-    workspaces_with_review_bindings,
-)
 
 NAME = "coding"
 VERSION = "0.1.0"
@@ -97,8 +81,6 @@ GIT_APP_CLIENT_ID_ENV = "GITHUB_APP_CLIENT_ID"
 GIT_APP_SECRET_ENV = "GITHUB_APP_CLIENT_SECRET"
 GIT_APP_KEY_ENV = "GITHUB_APP_PRIVATE_KEY"
 GIT_HOST = "github.com"
-REVIEW_BINDING_SWEEP = "coding_review_binding_sweep"
-REVIEW_BINDING_SWEEP_SCHEDULE = "0 */5 * * * *"
 GIT_SENTINEL = "UFO_SENTINEL_GIT_GITHUB"
 GIT_BASIC_USER = "x-access-token"
 GIT_INSTALLATION = CredentialSlot(
@@ -128,10 +110,10 @@ def github_app_id() -> str | None:
 
 GIT_CREDENTIAL = CredentialSlot(
     name=GIT_SLOT,
-    description="A GitHub token with repository contents read and write and Checks write — a "
-    "fine-grained personal access token scoped to the repositories the agent works in. Only "
-    "needed for a repository outside an organization that installed the ufo GitHub App; where "
-    "the App is installed, its own token is minted per turn instead.",
+    description="A GitHub token with repository contents read and write — a fine-grained personal "
+    "access token scoped to the repositories the agent works in. Only needed for a repository "
+    "outside an organization that installed the ufo GitHub App; where the App is installed, its "
+    "own token is minted per turn instead.",
     source=None if github_app_id() is None else app_tokens(GIT_INSTALLATION_SLOT),
     injection=InjectionTarget(
         host=GIT_HOST,
@@ -156,7 +138,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        subagents=(CODING_PROFILE, CODE_REVIEW_PROFILE),
+        subagents=(CODING_PROFILE,),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL),
         tools=(
@@ -167,41 +149,6 @@ def manifest() -> Manifest:
                 "still need the separate connector connection.",
                 input_model=ConnectGitHubInput,
                 handler=connect_github,
-            ),
-            *CODE_REVIEW_TOOLS,
-            ToolDef(
-                name="configure_review_inbox",
-                description="Review one shared GitHub pull-request source as this agent: every "
-                "later head opens its own conversation here. Existing pages become the baseline. "
-                "Admin-only.",
-                input_model=ConfigureReviewInboxInput,
-                handler=configure_review_inbox,
-                side_effecting=True,
-            ),
-            ToolDef(
-                name="stop_review_inbox",
-                description="Stop reviewing one GitHub pull-request source. Later heads open no "
-                "review conversation; the reviews already published stand. Admin-only.",
-                input_model=StopReviewInboxInput,
-                handler=stop_review_inbox,
-                side_effecting=True,
-            ),
-            ToolDef(
-                name="publish_code_review",
-                description="Publish the exact delivered review result as an advisory ufo review "
-                "Check on the stored head for this conversation's review run.",
-                input_model=PublishCodeReviewInput,
-                handler=publish_code_review,
-                side_effecting=True,
-            ),
-        ),
-        hooks=(HookSpec(event="page_change", handler=route_review_pages),),
-        jobs=(
-            JobSpec(
-                name=REVIEW_BINDING_SWEEP,
-                schedule=REVIEW_BINDING_SWEEP_SCHEDULE,
-                handler=drop_dead_review_bindings,
-                candidates=owner_candidates(workspaces_with_review_bindings),
             ),
         ),
         routes=(

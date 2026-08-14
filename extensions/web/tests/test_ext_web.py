@@ -22,7 +22,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
 from pydantic import BaseModel, ValidationError
-from ufo_ext_coding.review_checkout import CodeReviewFinding, CodeReviewOutput
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
@@ -6400,10 +6399,11 @@ def test_the_acts_a_screen_draws_are_the_acts_this_lane_admits() -> None:
 async def test_a_delete_only_kind_admits_a_delete_and_refuses_an_apply(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A source trigger IS the conversation it wakes, and this lane runs on the member's own intent
-    conversation, so the portal can only ever end one. The lane refuses the apply at validation,
-    before a turn exists, and the object read the screen is drawn from carries that same answer —
-    `deletes` without `applies` — so no control is offered that the lane would refuse."""
+    """A source trigger is created from its owning conversation, and this lane runs on the
+    member's own intent conversation, so the portal can only ever end one. The lane refuses apply
+    at validation, before a turn exists, and the object read the screen is drawn from carries that
+    same answer — `deletes` without `applies` — so no control is offered that the lane would
+    refuse."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -8962,14 +8962,14 @@ async def test_a_run_page_states_the_prose_a_run_wrote_not_the_payload_it_rode_i
     ]
 
 
-CODE_REVIEW_FINDING = CodeReviewFinding(
-    path="core/x.py",
-    line=42,
-    title="Wedged turn",
-    trigger="A cancel lands mid-dispatch",
-    failure="The turn never commits a terminal",
-    impact="production outage, deadlock, or permanently unfinished work",
-)
+RUN_FINDING = {
+    "path": "core/x.py",
+    "line": 42,
+    "title": "Wedged turn",
+    "trigger": "A cancel lands mid-dispatch",
+    "failure": "The turn never commits a terminal",
+    "impact": "production outage, deadlock, or permanently unfinished work",
+}
 
 
 async def test_a_run_page_states_an_answer_that_wrote_no_prose(
@@ -9000,7 +9000,7 @@ async def test_a_run_page_states_an_answer_that_wrote_no_prose(
                 Message(role="user", content='{"comparison": "pr-1409"}'),
                 Message(
                     role="assistant",
-                    content=CodeReviewOutput(findings=(CODE_REVIEW_FINDING,)).model_dump_json(),
+                    content=json.dumps({"findings": [RUN_FINDING]}),
                 ),
             ),
         )
@@ -9089,13 +9089,13 @@ def test_an_answer_arrives_whole_however_long_and_never_blank() -> None:
     how much of it stands on a screen is the fold's decision at the other end. Never blank — a
     review that found nothing answered, and a page saying nothing would state it never ran."""
     long_answer = json.dumps({"result": "word " * 900})
-    findings = CodeReviewOutput(findings=(CODE_REVIEW_FINDING,)).model_dump_json()
+    findings = json.dumps({"findings": [RUN_FINDING]})
 
     assert _run_answer(long_answer) == ("word " * 900).strip()
     assert len(_run_answer(long_answer)) > len(long_answer) - 40
 
     assert _run_answer(findings).startswith("**Findings**\n**Path** — core/x.py")
-    assert _run_answer(CodeReviewOutput().model_dump_json()) == "**Findings** — none"
+    assert _run_answer(json.dumps({"findings": []})) == "**Findings** — none"
     assert _run_answer("{}") == ""
 
 

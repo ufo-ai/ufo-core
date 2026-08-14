@@ -446,8 +446,8 @@ resource "datadog_dashboard" "coding_quality" {
         review verdict in `ufo.*`, so every number here is a process proxy: it catches an agent that
         gives up, loops, or misuses a tool, and misses one that ships wrong code confidently.
 
-        Set `$profile` to `coding` or `code_review`. Turns that report no profile are excluded, and
-        the last graph is how large that excluded share is — read it before trusting a rate above.
+        Set `$profile` to `coding`. Turns that report no profile are excluded, and the last graph
+        is how large that excluded share is — read it before trusting a rate above.
       EOT
       background_color = "yellow"
       font_size        = "14"

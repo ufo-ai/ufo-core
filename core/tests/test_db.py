@@ -45,6 +45,7 @@ from ufo.db import (
 )
 from ufo.ext.loader import migration_locations
 from ufo.schema import tables
+from ufo.sdk.sources import binding_name
 from ufo.workspace import ws
 
 
@@ -485,12 +486,25 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "sources_0002",
         "monitors_0001",
         "skill_create_0002",
-        "coding_0003",
+        "coding_0004",
         "eval_env_0001",
         "sites_0002",
         "web_0002",
     } <= set(heads)
     assert len(heads) == 14
+
+
+def test_coding_only_pack_migrates_without_sources(tmp_path: Path) -> None:
+    database_path = tmp_path / "coding-only.db"
+    apply_migrations(
+        f"sqlite+aiosqlite:///{database_path}",
+        pack="gdpval_documents",
+    )
+    with sqlite3.connect(database_path) as connection:
+        names = {row[0] for row in connection.execute("select name from sqlite_master")}
+    assert "source_trigger" not in names
+    assert "coding_review_inbox" not in names
+    assert "coding_review_run" not in names
 
 
 @pytest.mark.parametrize("graph_installed", [False, True])
@@ -733,6 +747,99 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
         ]
     )
     assert [key for (key,) in left] == ["cursor:asana-1a2b3c4d"]
+
+
+def test_coding_migration_carries_review_inboxes_to_per_page_triggers(tmp_path: Path) -> None:
+    database_path = tmp_path / "coding-tools.db"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "heads")
+    command.downgrade(config, "coding_0003")
+    now = datetime(2026, 8, 14, tzinfo=UTC).isoformat()
+    workspace_id, agent_id, source_id, conversation_id = (uuid4() for _ in range(4))
+    source_config = {
+        "account": "installation-123",
+        "stream": "pull_requests",
+        "base_url": None,
+    }
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, created_at, updated_at) "
+            "values (?, ?, 'reviewer', 'Review pull requests.', 'auto', ?, ?)",
+            (agent_id.hex, workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into source "
+            "(id, workspace_id, backend, config, subject, next_sync_at, created_at, updated_at) "
+            "values (?, ?, 'github', ?, 'shared', ?, ?, ?)",
+            (source_id.hex, workspace_id.hex, json.dumps(source_config), now, now, now),
+        )
+        connection.execute(
+            "insert into source_grant "
+            "(workspace_id, source_id, agent_id, created_at, updated_at) values (?, ?, ?, ?, ?)",
+            (workspace_id.hex, source_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into conversation "
+            "(id, workspace_id, agent_id, surface, queue_key, audience, created_at, updated_at) "
+            "values (?, ?, ?, 'coding', 'review-run', 'shared', ?, ?)",
+            (conversation_id.hex, workspace_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into coding_review_inbox "
+            "(workspace_id, source_id, agent_id, baseline_revision, created_at, updated_at) "
+            "values (?, ?, ?, 1, ?, ?)",
+            (workspace_id.hex, source_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into coding_review_run "
+            "(workspace_id, source_id, repository, pull_request_number, base_sha, head_sha, "
+            "run_id, conversation_id, agent_id, created_at, updated_at) "
+            "values (?, ?, 'metalcraftai/ufo', 1, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                workspace_id.hex,
+                source_id.hex,
+                "b" * 40,
+                "a" * 40,
+                uuid4().hex,
+                conversation_id.hex,
+                agent_id.hex,
+                now,
+                now,
+            ),
+        )
+    command.upgrade(config, "coding@head")
+    with sqlite3.connect(database_path) as connection:
+        names = {row[0] for row in connection.execute("select name from sqlite_master")}
+        carried = connection.execute(
+            "select source_trigger.binding, source_trigger.delivery, source_trigger.agent_id, "
+            "conversation.surface, conversation.queue_key, conversation.audience, "
+            "conversation.member_id from source_trigger join conversation "
+            "on conversation.id = source_trigger.conversation_id"
+        ).fetchall()
+    assert "coding_review_inbox" not in names
+    assert "coding_review_run" not in names
+    assert carried == [
+        (
+            binding_name("github", "installation-123", None),
+            "per_page",
+            agent_id.hex,
+            "sources",
+            f"code-review:{source_id.hex}",
+            "shared",
+            None,
+        )
+    ]
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:
@@ -1134,6 +1241,8 @@ def test_migrate_command_brings_the_schema_to_head(
     assert "user_skill" in names
     assert "sample_ext_note" in names
     assert "delivery" in trigger_columns
+    assert "coding_review_inbox" not in names
+    assert "coding_review_run" not in names
 
 
 def test_transcript_reads_names_disclosures_newest_first_and_pages_on_the_operator_s_limit(

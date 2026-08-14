@@ -160,7 +160,7 @@ async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expir
     assert len(calls) == 1
     (call,) = calls
     assert call.url.path == f"/app/installations/{INSTALLATION}/access_tokens"
-    assert loads(call.content)["permissions"] == {"checks": "write", "contents": "write"}
+    assert loads(call.content)["permissions"] == {"contents": "write"}
     scheme, _, jwt = call.headers["authorization"].partition(" ")
     assert scheme == "Bearer"
     assert len(jwt.split(".")) == 3

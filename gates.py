@@ -204,21 +204,6 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
         "issue #1112 row F10: a folder source's root is operator config; deferred with the"
         " symlink-following read it does under that root"
     ),
-    (
-        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_checkout.py",
-        "_review_relative_path",
-    ): (
-        "issue #1112: the near-duplicate lexical check to fold in next; the tool's own git-index"
-        " mode check is what refuses a symlink today"
-    ),
-    (
-        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_checkout.py",
-        "validate_repository",
-    ): "a repository slug is an identifier, not a path; the checkout root is the tool's own",
-    (
-        Path(EXTENSIONS_ROOT) / "coding" / "ufo_ext_coding" / "review_routing.py",
-        "repository_has_two_names",
-    ): "a repository slug is an identifier, not a path; the checkout root is the tool's own",
     (Path(EXTENSIONS_ROOT) / "e2b" / "ufo_ext_e2b.py", "write"): (
         "issue #1112 row F3: the copy-in is the provider's own `files.write`, which takes no stdin,"
         " so it cannot run COPY_IN_PROG the way docker's `exec -i` does; closing it needs a staged"

@@ -41,7 +41,7 @@ GIT_SLOT = "github_git_token"
 JWT_LIFETIME_SECONDS = 540
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 MINT_TIMEOUT_SECONDS = 10
-INSTALLATION_PERMISSIONS = {"checks": "write", "contents": "write"}
+INSTALLATION_PERMISSIONS = {"contents": "write"}
 
 
 def _segment(payload: dict[str, object]) -> bytes:

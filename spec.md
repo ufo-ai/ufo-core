@@ -329,19 +329,6 @@ grant/approval flow chat uses. This is what makes a full self-improvement extens
 mine trajectories, evaluate candidates via `invoke`, promote through `propose_change` — not just
 prompt files on disk. Extensions never see raw DB handles or other workspaces.
 
-### Pull request review
-
-The coding extension reviews GitHub pull requests from the existing `pull_requests` source stream.
-
-| Concern | Contract |
-|---|---|
-| Registration | A workspace admin binds one shared GitHub pull-request source to the agent that reviews it, in a conversation that agent holds. The binding is the agent, never a conversation, and the source's current revision is the baseline. The same admin stops it, so ending review never means deleting the feed; and a binding whose source is gone is dropped by its own sweep — a soft-deleted source reaches no foreign key and emits no page change, so nothing routing sees would ever find it, and a source registered again would otherwise revive the old baseline and review every head changed since. The sweep acts only on positive evidence of removal, never on a source it failed to read. |
-| Trigger | A later `page_change` for an open, non-draft pull request creates one automatic run per `(workspace, repository, pull request, base SHA, head SHA)`. Closed, draft, tombstoned, baselined, and metadata-only changes create none. |
-| Wake | The coding hook opens one conversation of the review agent per comparison, keyed by the comparison so a replayed batch reopens the one it opened, and invokes its first turn there with the run id and exact repository, pull request, base SHA, and head SHA. The conversation is the agent's and no member's: it lists under that agent, reaches no member's rail, holds its own queue partition, and takes its own sandbox, so concurrent reviews neither serialize nor share a checkout tree. That turn spawns exactly one background `code_review` child and ends; the child's validated result wakes the conversation again and the woken turn publishes it. One comparison to one conversation to one child, so a woken turn holds one result and can pair it with no other run. |
-| Review | The child starts a fresh conversation and records that conversation on the run when it takes the checkout, clones the base repository, fetches `refs/pull/<number>/head`, verifies both SHAs, detaches at the head, removes every remote, and reads the complete binary `base...head` diff. Its exact tools are checkout plus review-specific text read, tracked-path glob, and tracked-text grep; each derives this turn's verified checkout rather than accepting another root, and every result enters its context as untrusted data. It cannot ask a question, read binary model content, write, run arbitrary commands, browse, or read review material through an API. |
-| Finding | A finding publishes only when the changed code causes a concrete reachable severe defect, a specific supported input or execution path triggers it, and its impact is a security or workspace-boundary breach; data loss, corruption, or wrong-target mutation; production outage, deadlock, or permanently unfinished work; a supported operation that fails or cannot complete for valid input; a materially incorrect result or state for a supported workflow; a substantial availability, reliability, or performance regression; a feature that cannot function in its supported production configuration; or failed build or required CI. Every finding is merge-blocking and carries path, line, title, trigger, failure, and impact. The reviewer continues an independent sweep after each finding and returns every qualifying finding without lowering this bar. A finding that rests on an absence is established only by the search that would have found the thing, over the whole checkout and each dependent file read to its end. There are no severities or suggestions; an empty list means no severe defect found. |
-| Publication | `publish_code_review` resolves the opaque run under the inbox conversation and reads the named child through subagent control, which admits only a finished child spawned by that conversation and returns its exact conversation, terminal, and validated output. The tool verifies that child took the checkout and publishes a completed `ufo review` GitHub Check on the stored head. Only a complete review with no finding is `success`; a missing checkout, invalid output, incomplete terminal, or any finding is `action_required`, retaining partial findings. The model relays only the child id, never the review payload. The check links the reviewer child's portal page when the deploy has a public base URL. Its GitHub App installation token requests Contents and Checks write permission and fails at minting when the installation lacks either. The repository ruleset requires `ufo review`; no GitHub Actions review workflow exists. |
-
 ### Extension store
 
 Extensions are Python packages. A deploy may enable the extension store — a registry index that
@@ -830,7 +817,7 @@ bundle installs OSS, on-prem, or hosted.
 | GitHub / Asana feed-sync sources | sources, credentials, auth_proxies (`direct`) |
 | Agent-guided education / onboarding | onboarding, tools |
 | Scheduled tasks (cron / one-time) | jobs, invoke, tools, requires (`memory_search`) |
-| GH code review on PR | sources, hooks (page_change), credentials, invoke, subagents, tools |
+| GH code review on PR | agent prompt, source trigger (`per_page`), coding subagent, GitHub connector |
 | Service self-improvement / bug-fixing from o11y | sources (o11y), jobs, trajectories.read, invoke (evals), agents.propose_change |
 | Security review | tools, subagents |
 | gbrain-style memory (source page → derived facts, consolidated) | memory_search, sources, hooks (page_change) |

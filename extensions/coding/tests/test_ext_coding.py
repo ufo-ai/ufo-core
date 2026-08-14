@@ -46,20 +46,11 @@ def test_partial_github_app_registration_fails(
         coding.github_app_id()
 
 
-def test_coding_manifest_registers_coding_and_review_profiles() -> None:
+def test_coding_manifest_registers_the_coding_profile() -> None:
     manifest = coding.manifest()
-    assert [tool.name for tool in manifest.tools] == [
-        "connect_github",
-        "checkout_code_review",
-        "review_read",
-        "review_glob",
-        "review_grep",
-        "configure_review_inbox",
-        "stop_review_inbox",
-        "publish_code_review",
-    ]
+    assert [tool.name for tool in manifest.tools] == ["connect_github"]
     profile = manifest.subagents[0]
-    assert [subagent.name for subagent in manifest.subagents] == ["coding", "code_review"]
+    assert [subagent.name for subagent in manifest.subagents] == ["coding"]
     assert profile.name == "coding"
     assert (
         profile.input_model.model_validate(
@@ -68,7 +59,7 @@ def test_coding_manifest_registers_coding_and_review_profiles() -> None:
         == "fix it"
     )
     assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
-    assert [hook.event for hook in manifest.hooks] == ["page_change"]
+    assert manifest.hooks == ()
 
 
 def test_coding_result_uses_only_the_shared_register_bound() -> None:
