@@ -240,6 +240,7 @@ def run() -> None:
         embed=embed,
         memory=memory,
         artifact_token_secret=artifact_secret,
+        tailer=HubTailer(hub=hub),
     )
     init_runtime(runtime)
     install_connect_flow(_connect_flow(credentials, config, manifests))

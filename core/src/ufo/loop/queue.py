@@ -33,6 +33,7 @@ from ufo.ext.loader import (
     turn_tools,
 )
 from ufo.ext.manifest import CredentialSlot, Manifest, SubagentProfile
+from ufo.ext.surface import TurnTailer
 from ufo.grants import GrantStore, grant_sentinel
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
@@ -129,6 +130,7 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    tailer: TurnTailer | None = None
     memory: MemorySearch | None = None
 
 
@@ -314,7 +316,9 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             runtime.credentials,
             runtime.index,
             runtime.embed,
+            runtime.tailer,
             audience=audience,
+            public_base_url=runtime.config.connect.public_base_url,
         )
         skills = runtime.skills.merged_with(
             await turn_runtime_skills(

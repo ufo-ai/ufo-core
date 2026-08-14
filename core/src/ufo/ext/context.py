@@ -11,7 +11,7 @@ invoke, without reshaping what handlers already hold."""
 
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -41,8 +41,14 @@ from ufo.credentials import (
     slot_secret,
 )
 from ufo.db import workspace_tx
-from ufo.ext.surface import SurfaceInstallationAccess
+from ufo.ext.surface import (
+    OPERATOR_EMAIL_DOMAIN,
+    TERMINAL_TURN_STATUSES,
+    SurfaceInstallationAccess,
+    TurnTailer,
+)
 from ufo.governance import Governance, prompt_digest
+from ufo.hub import LiveFrame
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.models.interface import (
     Message,
@@ -63,6 +69,7 @@ from ufo.sandbox.conversation import ConversationSandbox
 from ufo.scheduling import ScheduleInvoker, ScheduleStore
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, ProposalRef, Usage
+from ufo.seats import workspace_domain
 from ufo.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
@@ -667,6 +674,11 @@ class ExtensionContext:
     model: ModelAccess | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     public_base_url: str | None = None
+    tailer: TurnTailer | None = None
+
+    @property
+    def workspace_id(self) -> UUID:
+        return self.store.workspace_id
 
     async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]:
         """This extension's settled, unacknowledged usage deltas, at most `limit`, minting new
@@ -728,6 +740,56 @@ class ExtensionContext:
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(conversation_id, agent_id, message, idempotency_key)
+
+    def tail(
+        self, turn_id: UUID, since: str = ""
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
+        """Tail a turn's live frames off the hub until it ends — how a handler watches the turn it
+        fires under from side-channel work of its own, reaching the hub only through the injected
+        tailer. Leaving the scope ends the subscription and the tasks behind it, however the block
+        ends. Fails loud when no tailer is wired rather than yielding a stream that never opens."""
+        if self.tailer is None:
+            raise RuntimeError("tail requires a turn tailer; none is wired")
+        return self.tailer.tail(turn_id, since)
+
+    async def turn_is_terminal(self, turn_id: UUID) -> bool:
+        """Whether a turn has committed its terminal state, read from the row rather than the hub —
+        what side-channel work asks before speaking for the turn it follows, since a tail learns the
+        end by polling and the reply may already be delivered. A missing turn reads as terminal:
+        there is nothing left to report on."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        return row is None or row.status in TERMINAL_TURN_STATUSES
+
+    async def conversation_agent(self, conversation_id: UUID) -> UUID | None:
+        """The agent this workspace's conversation is permanently bound to, or None when the id
+        names no conversation here — how a handler resolves an opaque conversation id to the agent
+        wall a member-facing link addresses."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                    )
+                )
+            ).one_or_none()
+        return None if found is None else found.agent_id
+
+    async def is_operator_workspace(self) -> bool:
+        """Whether the bound workspace is the fleet operator's own, by the same domain read the
+        surface seam gates on — so a rendering meant for the operator alone (a turn's spend, a
+        debugger link) is withheld in a customer's workspace wherever it is built. An unidentified
+        workspace is never the operator's."""
+        async with workspace_tx() as connection:
+            return await workspace_domain(connection, self.workspace_id) == OPERATOR_EMAIL_DOMAIN
 
     async def open_conversation(self, agent_id: UUID, key: str) -> UUID:
         """Get-or-create the conversation this extension keys by `key`, held by `agent_id` and by
@@ -1393,6 +1455,7 @@ def context_for(
     surfaces: frozenset[str] = frozenset(),
     credential_sources: tuple[tuple[str, CredentialSource], ...] = (),
     credential_store: CredentialStore | None = None,
+    tailer: TurnTailer | None = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
@@ -1402,7 +1465,9 @@ def context_for(
     workspace is bound when a handler runs. `declared` gates credential slots and `surfaces` gates
     installation registration; a `model_resolver` wires the metered model seam, keyed and billed
     to that same workspace. `public_base_url` is the deploy's externally reachable base, which a
-    kind listing rows a member opens needs and cannot reach any other way."""
+    kind listing rows a member opens needs and cannot reach any other way. A `tailer` lets a handler
+    firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
+    reads the loop through."""
     return ExtensionContext(
         store=ScopedStore(extension=extension),
         credentials=CredentialAccess(
@@ -1422,4 +1487,5 @@ def context_for(
         model=None if model_resolver is None else ModelAccess(model_resolver),
         key_slot_for=None if model_resolver is None else model_resolver.key_slot_for,
         public_base_url=public_base_url,
+        tailer=tailer,
     )

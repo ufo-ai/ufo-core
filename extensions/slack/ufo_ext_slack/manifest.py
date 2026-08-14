@@ -8,7 +8,11 @@ not credential slots; the OAuth callback mints the per-workspace bot token. The 
 bring-your-own Slack app (the `slack-app-setup` skill): the member creates an app from
 `slack_app_manifest` and fills the two per-workspace slots — the bot token and the app's own signing
 secret — privately. A surface authenticates to Slack directly, never through the sandbox egress
-proxy, so neither slot carries a wire-injection target."""
+proxy, so neither slot carries a wire-injection target.
+
+The surface's thread followers are side-channel tasks in the process that runs the turn, so the
+progress reporter is armed on `user_prompt_submit` — the one event that fires once per execution of
+a turn, which is what puts a reporter back on a run this fleet resumed."""
 
 from pathlib import Path
 
@@ -22,6 +26,7 @@ from ufo_ext_slack.surface import (
     SLACK_SIGNING_SECRET_SLOT,
     SURFACE_SLACK,
     attach,
+    follow_turn_progress,
     ingest,
     interactive,
     oauth_callback,
@@ -73,6 +78,7 @@ def manifest() -> Manifest:
                 handler=attribute_connector_send,
                 tools=(CONNECTOR_CALL_TOOL,),
             ),
+            HookSpec(event="user_prompt_submit", handler=follow_turn_progress),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
     )

@@ -29,7 +29,7 @@ from ufo.credentials import CredentialStore
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.ext.loader import BoundHook, HookChain, HookResolution, turn_hooks
-from ufo.ext.manifest import PreToolUse
+from ufo.ext.manifest import HookSpec, PreToolUse
 from ufo.ext.surface import AMBIENT_CONTEXT_ELEMENT, SurfaceContext
 from ufo.schema import tables
 from ufo.sdk.audience import SHARED_AUDIENCE
@@ -79,6 +79,12 @@ def _send(arguments: dict[str, JsonValue], slug: str = SLACK_SEND_SLUG) -> CallE
     )
 
 
+def _attribution_spec() -> HookSpec:
+    """The manifest's attribution hook, named by its handler — the manifest declares others."""
+    (spec,) = [hook for hook in slack_manifest().hooks if hook.handler is attribute_connector_send]
+    return spec
+
+
 def _declared_chain() -> HookChain:
     """The hook the Slack manifest declares, bound the way a turn binds it."""
     return turn_hooks(
@@ -89,7 +95,7 @@ def _declared_chain() -> HookChain:
 
 
 def _chain_over(store: ScopedStore) -> HookChain:
-    (spec,) = slack_manifest().hooks
+    spec = _attribution_spec()
     ext = ExtensionContext(store=store, credentials=CredentialAccess(declared=frozenset()))
     return HookChain(hooks={"pre_tool_use": (BoundHook(spec=spec, ext=ext),)})
 
@@ -116,7 +122,7 @@ async def _seed_workspace() -> UUID:
 
 
 def test_the_manifest_declares_the_hook_on_the_connector_call() -> None:
-    (spec,) = slack_manifest().hooks
+    spec = _attribution_spec()
     assert (spec.event, spec.tools) == ("pre_tool_use", (CONNECTOR_CALL_TOOL,))
     assert spec.handler is attribute_connector_send
 

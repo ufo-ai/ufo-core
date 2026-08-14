@@ -8,8 +8,10 @@ real handlers ran — the fire logic under test, never a stand-in dependency). T
 proven through the sample extension registering a hook per turn event — a pre_tool_use gate, a
 post_tool_use recorder, a post_tool_use_failure recorder, a stop recorder, and pre/post_compact
 recorders: the sample records what each hook received through its own scoped store, and the tests
-read those rows back through the public ScopedStore — no mock call-log. The data-plane page_change
-seam and its runner are proven in test_page_change."""
+read those rows back through the public ScopedStore — no mock call-log. The observation reads a
+hook's context carries — the turn's frames off the loop's tailer, and its durable end — are asserted
+against a real hub and a real turn row. The data-plane page_change seam and its runner are proven in
+test_page_change."""
 
 import json
 from collections.abc import AsyncIterator
@@ -45,7 +47,7 @@ from ufo.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
-from ufo.hub import InProcessHub
+from ufo.hub import InProcessHub, LiveFrame, ToolCall
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_KEEP_MESSAGES,
@@ -66,7 +68,8 @@ from ufo.models.interface import (
 )
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, TerminalFrame, Turn
+from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
@@ -153,6 +156,58 @@ async def test_hook_context_keeps_speaker_and_audience_separate() -> None:
             },
             audience=audience,
         )
+
+
+async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db: None) -> None:
+    """A handler fires inside the turn's own execution, and side-channel work it starts there — a
+    surface's loading state, an interim progress note — needs two reads and no more: the turn's live
+    frames, and whether it has committed its answer. Both come off the context, the frames through
+    the loop's own tailer and the end from the row rather than the lossy hub, so a narrator can
+    follow the turn without any way to re-enter it."""
+    turn = await _seed_turn(uuid4())
+    hub = InProcessHub()
+    await hub.publish(turn.id, ToolCall(tool="bash", preview="{}", description="migrating"))
+    seen: list[tuple[LiveFrame, bool]] = []
+
+    async def watch(ctx: HookContext) -> HookOutcome:
+        assert ctx.turn is not None
+        async with ctx.ext.tail(ctx.turn.id) as frames:
+            _cursor, frame = await anext(frames)
+        seen.append((frame, await ctx.ext.turn_is_terminal(ctx.turn.id)))
+        return None
+
+    ext = context_for("probe", frozenset(), tailer=HubTailer(hub=hub))
+    chain = _chain("user_prompt_submit", ext, HookSpec(event="user_prompt_submit", handler=watch))
+    with ws(turn.workspace_id):
+        resolution = await chain.fire(
+            "user_prompt_submit",
+            UserPromptSubmit(text="hi"),
+            turn,
+            Agent(prompt="p", model="claude-opus-4-8"),
+            None,
+        )
+        assert resolution.denied is None
+        assert seen == [(ToolCall(tool="bash", preview="{}", description="migrating"), False)]
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn.id)
+                .values(
+                    status="done",
+                    terminal=TerminalFrame(status="done", text="migrated").model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+            )
+        assert await ext.turn_is_terminal(turn.id) is True
+        assert await ext.turn_is_terminal(uuid4()) is True
+
+
+async def test_a_hook_context_with_no_tailer_wired_fails_loud(db: None) -> None:
+    """The loop wires the tailer; a context built without one cannot tail. That is a wiring fault,
+    so it raises where it is called instead of handing back a stream that never yields."""
+    with pytest.raises(RuntimeError, match="tail requires a turn tailer"):
+        _ext().tail(uuid4())
 
 
 # --- composition model, asserted directly against fire's resolution -----------------------------

@@ -67,6 +67,7 @@ from ufo.ext.manifest import (
     SubagentProfile,
     declared_slots,
 )
+from ufo.ext.surface import TurnTailer
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.members import MEMBER_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
@@ -843,15 +844,20 @@ def turn_hooks(
     credential_store: CredentialStore | None,
     index: IndexBackend | None = None,
     embed: EmbedClient | None = None,
+    tailer: TurnTailer | None = None,
     *,
     audience: Audience,
+    public_base_url: str | None = None,
 ) -> HookChain:
     """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
     event in the order `load_manifests` returns (lockfile pin order). The data-plane page_change
     event is deliberately excluded — the core page-change runner binds and drives it in the jobs
-    role with the model wired, never here. An extension that declares hooks without a credential key
-    set fails loud, since its context needs the credential store."""
+    role with the model wired, never here. The `tailer` is the loop's own, so a hook watching the
+    turn it fires under reads the frames that turn publishes, and `public_base_url` is the deploy's
+    externally reachable base, which a hook rendering a link a member opens cannot reach any other
+    way. An extension that declares hooks without a credential key set fails loud, since its context
+    needs the credential store."""
     grouped: dict[HookEvent, list[BoundHook]] = {event: [] for event in TURN_HOOK_EVENTS}
     for manifest in manifests:
         if not manifest.hooks:
@@ -861,7 +867,15 @@ def turn_hooks(
                 f"extension {manifest.name!r} declares hooks but no credential key is set"
             )
         declared = frozenset(slot.name for slot in manifest.credentials)
-        context = context_for(manifest.name, declared, index, embed, audience=audience)
+        context = context_for(
+            manifest.name,
+            declared,
+            index,
+            embed,
+            tailer=tailer,
+            audience=audience,
+            public_base_url=public_base_url,
+        )
         for spec in manifest.hooks:
             if spec.event == "page_change":
                 continue
