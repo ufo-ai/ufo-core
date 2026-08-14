@@ -417,6 +417,29 @@ impl SendLane {
             .map_err(|error| format!("lost connection ({error})"))?;
         sent_ack(&body).ok_or_else(|| "the server acknowledged nothing".to_string())
     }
+
+    /// Take back one acknowledged send the turn has not taken up. Ok(true) and the words are the
+    /// member's again; Ok(false) and they already left their hands — folded into a turn, founded
+    /// onto one, or retracted before.
+    pub fn retract(&self, arrival_id: &str) -> Result<bool, String> {
+        let mut request = build_agent()
+            .request("POST", &self.endpoint)
+            .set("content-type", "text/plain")
+            .set("x-ufo-session", &self.session_id)
+            .set("x-ufo-unsend", &header_safe(arrival_id));
+        if let Some(token) = &self.token {
+            request = request.set("authorization", &format!("Bearer {token}"));
+        }
+        match request.send_string("") {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(409, _)) => Ok(false),
+            Err(ureq::Error::Status(code, response)) => Err(format!(
+                "unsend failed ({code}): {}",
+                response.into_string().unwrap_or_default().trim()
+            )),
+            Err(error) => Err(format!("lost connection ({error})")),
+        }
+    }
 }
 
 /// The `sent` ack inside a send-only response body.

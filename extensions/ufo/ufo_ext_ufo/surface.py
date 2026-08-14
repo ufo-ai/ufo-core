@@ -71,6 +71,7 @@ OP_HEADER = "x-ufo-op"
 STOP_HEADER = "x-ufo-stop"
 SEND_HEADER = "x-ufo-send"
 SEND_ID_HEADER = "x-ufo-send-id"
+UNSEND_HEADER = "x-ufo-unsend"
 SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
@@ -472,6 +473,9 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
     if request.headers.get(SEND_HEADER, "").strip():
         return await _send(ctx, request, conversation_id, member_id, email, cwd)
+    if UNSEND_HEADER in request.headers:
+        unsend = request.headers[UNSEND_HEADER].strip()
+        return await _unsend(ctx, request, conversation_id, member_id, unsend)
     note: bytes | None = None
     resumed = False
     update = b""
@@ -611,6 +615,31 @@ async def _send(
         "" if admitted.arrival_id is None else str(admitted.arrival_id),
     )
     return PlainTextResponse(ack + note)
+
+
+async def _unsend(
+    ctx: SurfaceContext,
+    request: Request,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    unsend: str,
+) -> Response:
+    """Take back a message the member sent that no turn has taken up — the recall behind pressing
+    Up on a queued row. The named arrival is deleted iff it is still pending and the acting member
+    spoke it; 200 empty says the words are the member's again, and 409 says they already left
+    their hands — folded into a turn, founded onto one, or retracted before. Like a stop, an
+    unsend admits nothing."""
+    if await request.body():
+        return PlainTextResponse("an unsend admits no message", status_code=400)
+    if member_id is None:
+        return PlainTextResponse("only a member retracts a message", status_code=403)
+    try:
+        arrival_id = UUID(unsend)
+    except ValueError:
+        return PlainTextResponse(f"{UNSEND_HEADER} must be an arrival id", status_code=400)
+    if await ctx.retract_arrival(conversation_id, arrival_id, member_id):
+        return PlainTextResponse(b"")
+    return PlainTextResponse("already taken up", status_code=409)
 
 
 async def _fulfill_secret(

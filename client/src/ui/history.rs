@@ -169,7 +169,7 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
         ("Shift+Enter / Alt+Enter", "New line"),
         (
             "Up / Down",
-            "History (filtered by what you typed) or cursor",
+            "History (filtered by what you typed) or cursor; Up recalls the newest queued message",
         ),
         ("Ctrl+Up / Ctrl+Down", "Jump between your messages"),
         ("Ctrl+A / Ctrl+E", "Line start / end"),

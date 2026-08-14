@@ -1646,6 +1646,26 @@ class SurfaceContext:
         sent, so the surface can move the member's screen onto it."""
         return await self._stopper.stop(self.workspace_id, conversation_id, turn_id)
 
+    async def retract_arrival(
+        self, conversation_id: UUID, arrival_id: UUID, member_id: UUID
+    ) -> bool:
+        """Take back a message the member sent that no turn has taken up: the pending
+        `inbound_message` row is deleted iff it is still unconsumed and `member_id` spoke it — a
+        member unqueues only their own words. True iff this call retracted it; False for a row
+        already folded into a turn, already retracted, or another speaker's — the message has left
+        the member's hands either way."""
+        async with workspace_tx() as connection:
+            retracted = await connection.execute(
+                sa.delete(tables.inbound_message).where(
+                    tables.inbound_message.c.id == arrival_id,
+                    tables.inbound_message.c.workspace_id == self.workspace_id,
+                    tables.inbound_message.c.conversation_id == conversation_id,
+                    tables.inbound_message.c.speaker_member_id == member_id,
+                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                )
+            )
+        return retracted.rowcount == 1
+
     async def turn_is_terminal(self, turn_id: UUID) -> bool:
         """Whether a turn has committed its terminal state, read from the row rather than the hub.
 

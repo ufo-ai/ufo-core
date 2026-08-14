@@ -115,6 +115,7 @@ impl Drop for RawGuard {
 pub enum Reply {
     None,
     Send(String),
+    Recall { text: String, arrival_id: String },
     Choice(String),
     ChoiceCancelled,
     Secret(String),
@@ -141,11 +142,13 @@ struct SecretEntry {
     value: String,
 }
 
-/// One message waiting under the composer: typed, and — once an instant send is acknowledged —
-/// named by the arrival id the turn will fold.
+/// One message waiting under the composer: typed; named by the arrival id the turn will fold
+/// once its instant send is acknowledged; and marked while a recall is in flight so a second Up
+/// never retracts it twice.
 struct QueuedSend {
     text: String,
     arrival: Option<String>,
+    retracting: bool,
 }
 
 struct PathPick {
@@ -479,7 +482,52 @@ impl App {
         self.queued.push_back(QueuedSend {
             text: text.to_string(),
             arrival: None,
+            retracting: false,
         });
+    }
+
+    /// Up on an empty composer recalls the newest queued message: the recall the reply names is
+    /// posted to the server, and the row waits marked until the server answers whose the words
+    /// are. A row still awaiting its send ack cannot be recalled yet.
+    fn recall_queued(&mut self) -> Reply {
+        let Some(row) = self.queued.iter_mut().rev().find(|row| !row.retracting) else {
+            return Reply::None;
+        };
+        let Some(arrival_id) = row.arrival.clone() else {
+            self.flash = Some(("Still sending — try again.".to_string(), Instant::now()));
+            return Reply::None;
+        };
+        row.retracting = true;
+        Reply::Recall {
+            text: row.text.clone(),
+            arrival_id,
+        }
+    }
+
+    /// The server answered a recall: the words are the member's again (the row leaves the queue
+    /// and fills the composer), or the turn already took them up (the row stays and settles the
+    /// way every absorbed message does).
+    pub fn retracted(&mut self, text: &str, arrival_id: &str, retracted: bool) {
+        let Some(at) = self
+            .queued
+            .iter()
+            .position(|row| row.arrival.as_deref() == Some(arrival_id))
+        else {
+            return;
+        };
+        if !retracted {
+            self.queued[at].retracting = false;
+            self.flash = Some(("Already picked up.".to_string(), Instant::now()));
+            return;
+        }
+        self.queued.remove(at);
+        let restored = if self.ask.text.is_empty() {
+            text.to_string()
+        } else {
+            format!("{text}\n\n{}", self.ask.text)
+        };
+        self.ask.text = restored;
+        self.ask.cursor = self.ask.text.len();
     }
 
     /// The server admitted an instant send into the running turn: the row it acknowledged now
@@ -521,6 +569,17 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// The ack named a turn but no pending arrival: the message already lives in that turn — a
+    /// retried delivery whose first answer was lost, or a send a spend gate parked whole. The row
+    /// settles now, and there is nothing left to recall; a row an absorb already settled stays
+    /// settled.
+    pub fn settle_queued(&mut self, text: &str) {
+        if let Some(at) = self.queued.iter().position(|row| row.text == text) {
+            self.queued.remove(at);
+            self.member_echo(text);
         }
     }
 
@@ -623,6 +682,9 @@ impl App {
     fn compose_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Up if !ctrl && self.ask.text.is_empty() && !self.queued.is_empty() => {
+                return self.recall_queued();
+            }
             KeyCode::Char('o') if ctrl => {
                 self.copy_last_reply();
                 return Reply::None;

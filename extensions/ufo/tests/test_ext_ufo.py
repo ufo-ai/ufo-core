@@ -828,6 +828,17 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
     assert ["note", "running glob: Listing the folder"] in stale
 
 
+async def _post_unsend(
+    client: AsyncClient, token: str, arrival: str, body: bytes = b""
+) -> Response:
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        return await client.post(
+            "/surface/ufo/main",
+            content=body,
+            headers={"authorization": f"Bearer {token}", "x-ufo-unsend": arrival},
+        )
+
+
 async def _post_stop(client: AsyncClient, token: str, body: bytes = b"") -> Response:
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         return await client.post(
@@ -855,6 +866,117 @@ async def test_a_stop_ends_the_running_turn_and_returns_the_prompt(
     assert _lines(response.content) == [["say", "cancelled"], ["ask", ">"]]
     stopped, status = await _sole_turn(workspace_id)
     assert (stopped, status) == (turn_id, "cancelled")
+
+
+async def test_an_unsend_retracts_the_pending_message(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """Up on a queued row: the message the member sent mid-turn comes back into their hands — the
+    pending arrival is deleted, so no turn can fold it and a later stop founds nothing on it."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    sent = await _post_send(client, token, b"never mind", uuid4())
+    arrival = _lines(sent.content)[0][3]
+
+    retracted = await _post_unsend(client, token, arrival)
+
+    assert retracted.status_code == 200
+    assert retracted.content == b""
+    async with workspace_tx() as connection:
+        pending = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.inbound_message)
+                .where(tables.inbound_message.c.conversation_id == conversation_id)
+            )
+        ).scalar_one()
+    assert pending == 0
+
+    again = await _post_unsend(client, token, arrival)
+    assert again.status_code == 409
+    assert turn_id is not None
+
+
+async def test_an_unsend_of_a_taken_up_message_is_refused(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A message a turn already folded is out of the member's hands: the retraction answers 409
+    and the row stays consumed, so the transcript never loses a message the agent read."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    sent = await _post_send(client, token, b"too late", uuid4())
+    arrival = _lines(sent.content)[0][3]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.inbound_message)
+            .values(consumed_turn_id=turn_id)
+            .where(tables.inbound_message.c.id == UUID(arrival))
+        )
+
+    refused = await _post_unsend(client, token, arrival)
+
+    assert refused.status_code == 409
+    async with workspace_tx() as connection:
+        consumed = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.consumed_turn_id).where(
+                    tables.inbound_message.c.id == UUID(arrival)
+                )
+            )
+        ).scalar_one()
+    assert consumed == turn_id
+
+
+async def test_an_unsend_speaks_only_for_its_own_member(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """One member cannot retract another's words: the row survives and the answer refuses."""
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    await _seed_member(workspace_id, "other@example.com")
+    owner_token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, owner_token)
+    await _seed_running_turn(workspace_id, conversation_id, member_id)
+    sent = await _post_send(client, owner_token, b"mine", uuid4())
+    arrival = _lines(sent.content)[0][3]
+    other_token = _mint(SECRET, workspace_id, "other@example.com", _future())
+
+    refused = await _post_unsend(client, other_token, arrival)
+
+    assert refused.status_code in (404, 409)
+    async with workspace_tx() as connection:
+        survives = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.inbound_message)
+                .where(tables.inbound_message.c.id == UUID(arrival))
+            )
+        ).scalar_one()
+    assert survives == 1
+
+
+async def test_an_unsend_refuses_a_body_and_a_bad_id(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    await _linked_conversation(client, workspace_id, token)
+
+    carrying = await _post_unsend(client, token, str(uuid4()), body=b"and this")
+    assert carrying.status_code == 400
+
+    malformed = await _post_unsend(client, token, "not-a-uuid")
+    assert malformed.status_code == 400
+
+    empty = await _post_unsend(client, token, "")
+    assert empty.status_code == 400, "an empty header is an unsend, never a resume"
 
 
 async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(

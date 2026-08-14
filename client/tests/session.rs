@@ -29,6 +29,7 @@ struct Request {
     stop_header: Option<String>,
     send_header: Option<String>,
     send_id: Option<String>,
+    unsend_header: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
@@ -95,6 +96,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         mut stop_header,
         mut send_header,
         mut send_id,
+        mut unsend_header,
     ) = loop {
         let read = stream.read(&mut buffer).expect("read");
         raw.extend_from_slice(&buffer[..read]);
@@ -108,6 +110,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         let mut stop = None;
         let mut send = None;
         let mut send_key = None;
+        let mut unsend = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -128,8 +131,11 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             if lower.starts_with("x-ufo-send-id:") {
                 send_key = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-unsend:") {
+                unsend = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
-        break (end + 4, length, op, slot, stop, send, send_key);
+        break (end + 4, length, op, slot, stop, send, send_key, unsend);
     };
     while raw.len() < headers_end + content_length {
         let read = stream.read(&mut buffer).expect("read body");
@@ -146,6 +152,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         stop_header: stop_header.take(),
         send_header: send_header.take(),
         send_id: send_id.take(),
+        unsend_header: unsend_header.take(),
     }
 }
 
@@ -670,6 +677,168 @@ fn esc_on_a_running_turn_posts_the_stop() {
         "Esc ends the turn on its own connection: {requests:?}"
     );
     assert_eq!(requests[1].body, "", "a stop admits no message");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_ack_naming_no_arrival_settles_the_row_at_once() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 2500,
+            status: 200,
+            reply_lines: &["txt\tworking", "poll\t1"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["sent\tturn-1\t0\t"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-settle");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"later thought\r")
+        .expect("the mid-turn message reaches the pty");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !session.ended() {
+        assert!(std::time::Instant::now() < deadline, "client never exited");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(
+        requests.len(),
+        3,
+        "no unsend and no resend fire: {requests:?}"
+    );
+    assert_eq!(requests[1].send_header.as_deref(), Some("1"));
+    let printed = session.painted();
+    let leave = printed
+        .rfind("\x1b[?1049l")
+        .expect("the session leaves the alternate screen");
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    parser.process(&printed.as_bytes()[leave..]);
+    let document = parser.screen().contents();
+    assert_eq!(
+        document.matches("\u{203a} later thought").count(),
+        1,
+        "the message the turn already holds settles once: {document}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn up_recalls_the_queued_send_and_enter_sends_it_again() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 4000,
+            status: 200,
+            reply_lines: &["txt\tworking", "poll\t1"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["sent\tturn-1\t0\tarr-1"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["sent\tturn-1\t0\tarr-2"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["absorbed\tarr-2", "say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-recall");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the turn's own post reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session
+        .keys
+        .write_all(b"later thought\r")
+        .expect("the mid-turn message reaches the pty");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the send reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    session
+        .keys
+        .write_all(b"\x1b[A")
+        .expect("Up reaches the pty");
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the unsend reaches the gateway");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    session
+        .keys
+        .write_all(b"\r")
+        .expect("Enter resends the recalled text");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !session.ended() {
+        assert!(std::time::Instant::now() < deadline, "client never exited");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 5, "{requests:?}");
+    assert_eq!(requests[1].send_header.as_deref(), Some("1"));
+    assert_eq!(requests[1].body, "later thought");
+    assert_eq!(
+        requests[2].unsend_header.as_deref(),
+        Some("arr-1"),
+        "Up retracts the acknowledged send: {requests:?}"
+    );
+    assert_eq!(requests[2].body, "", "an unsend admits no message");
+    assert_eq!(requests[3].send_header.as_deref(), Some("1"));
+    assert_eq!(
+        requests[3].body, "later thought",
+        "the recalled text sends again from the composer: {requests:?}"
+    );
+    assert_ne!(
+        requests[3].send_id, requests[1].send_id,
+        "a re-send is a new delivery: {requests:?}"
+    );
+    let printed = session.painted();
+    let leave = printed
+        .rfind("\x1b[?1049l")
+        .expect("the session leaves the alternate screen");
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    parser.process(&printed.as_bytes()[leave..]);
+    let document = parser.screen().contents();
+    assert_eq!(
+        document.matches("\u{203a} later thought").count(),
+        1,
+        "the message prints once, never doubled by the recall: {document}"
+    );
+    let member = document
+        .find("\u{203a} later thought")
+        .expect("member line");
+    let reply = document.find("done").expect("the reply follows");
+    assert!(member < reply, "{document}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

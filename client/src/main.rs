@@ -207,6 +207,19 @@ fn hostname() -> String {
     }
 }
 
+/// Take back one queued message on its own connection: the member pressed Up to recall it, and
+/// the composer waits on the server's word that the words are theirs again.
+fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender<LoopEvent>) {
+    thread::spawn(move || {
+        let retracted = lane.retract(&arrival_id).unwrap_or(false);
+        let _ = evt.send(LoopEvent::Wire(WireEvent::Retracted {
+            text,
+            arrival_id,
+            retracted,
+        }));
+    });
+}
+
 /// Admit one message into the running turn on its own connection, retrying under one
 /// idempotency key; a send that never acks falls back to the wire's boundary queue.
 fn send_instant(lane: SendLane, text: String, evt: Sender<LoopEvent>, cmd: Sender<WireCmd>) {
@@ -373,12 +386,28 @@ enum WireEvent {
     OpStarted(OpRequest),
     OpFinished(OpRequest, Result<Vec<u8>, String>),
     MemberEcho(String),
-    Reconnecting { attempt: u32, retry_in_s: u64 },
-    WorkspaceChanged { url: String, channel: String },
+    Reconnecting {
+        attempt: u32,
+        retry_in_s: u64,
+    },
+    WorkspaceChanged {
+        url: String,
+        channel: String,
+    },
     Stoppable(Stop),
     Sendable(SendLane),
-    Sent { text: String, ack: SentAck },
-    StreamEnd { continues: bool },
+    Sent {
+        text: String,
+        ack: SentAck,
+    },
+    Retracted {
+        text: String,
+        arrival_id: String,
+        retracted: bool,
+    },
+    StreamEnd {
+        continues: bool,
+    },
     Fatal(String),
 }
 
@@ -841,6 +870,10 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                             });
                         }
                     }
+                    Reply::Recall { text, arrival_id } => match sends.clone() {
+                        Some(lane) => retract_instant(lane, text, arrival_id, stop_evt.clone()),
+                        None => app.retracted(&text, &arrival_id, false),
+                    },
                     Reply::Detach => {
                         let _ = cmd_tx.send(WireCmd::Detach);
                         app.end_turn(false);
@@ -912,9 +945,19 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                             app.begin_turn();
                         }
                         app.queued_sent(&text);
+                    } else if ack.arrival_id.is_empty() {
+                        app.settle_queued(&text);
                     } else {
                         app.sent_ack(&text, &ack.arrival_id);
                     }
+                    app.paint();
+                }
+                WireEvent::Retracted {
+                    text,
+                    arrival_id,
+                    retracted,
+                } => {
+                    app.retracted(&text, &arrival_id, retracted);
                     app.paint();
                 }
                 WireEvent::StreamEnd { continues } => {
@@ -1080,7 +1123,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 latest_channel = channel;
             }
             WireEvent::Stoppable(_) => {}
-            WireEvent::Sendable(_) | WireEvent::Sent { .. } => {}
+            WireEvent::Sendable(_) | WireEvent::Sent { .. } | WireEvent::Retracted { .. } => {}
             WireEvent::StreamEnd { continues } => {
                 if let Some(code) = gate.exit.take() {
                     break code;
@@ -1276,6 +1319,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                 WireEvent::Sent { ack, .. } => {
                     emit_json(&driver.message_sent(&ack));
                 }
+                WireEvent::Retracted { .. } => {}
                 WireEvent::StreamEnd { continues } => {
                     if continues {
                         continue;
