@@ -89,9 +89,9 @@ else
 /usr/bin/xargs -0 /usr/bin/stat -f '%z %.9Fm'
 fi
 }
-/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$UFO_OP_WORKDIR/glob-enum"
-printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
-/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 | measure >> "$UFO_OP_WORKDIR/glob-enum"
+walked="$UFO_OP_WORKDIR/glob-walk"
+/usr/bin/find "$UFO_WALK_ROOT" -type f -print0 > "$walked"
+{ /bin/cat "$walked"; printf '\000'; measure < "$walked"; } > "$UFO_OP_WORKDIR/glob-enum"
 """,
     "changes": rf"""r='{_REPOSITORY_COMMANDS}'
 /usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a -name '.git' \) -prune -print0 \
@@ -103,11 +103,14 @@ printf '\000' >> "$UFO_OP_WORKDIR/glob-enum"
 listing in the client's op workdir, where the walk's `enum` param names it. The walks read the
 listing rather than the tree because the client must not re-decide what a walk visits — `find`
 meets entries in the `readdir` order `os.walk` does, which is what keeps a truncated result
-identical to `sbxfs`'s. Only glob measures with `stat`, whose flags split by OS: `stat --version`
-succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD (macOS), which takes
-`-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client parses one shape and
-the double it reconstructs is the one `os.stat` reports on either. `find`, `git`, and `xargs` are
-POSIX across both."""
+identical to `sbxfs`'s. `grep` and `changes` prune `WALK_SKIP_NAMES` because the `sbxfs` walks they
+mirror do; `glob` mirrors `Path.glob`, which prunes nothing, so pruning here would hide files the
+container's own glob returns. Only glob measures with `stat` — over the listing it just wrote, never
+a second walk, because the client pairs the two sections by position — and its flags split by OS:
+`stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
+(macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client
+parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
+`git`, `cat`, and `xargs` are POSIX across both."""
 ARRIVAL_GRACE_SECONDS = 30.0
 """How long an op or an open waits for the terminal to reconnect. The client's stream ends at every
 hold and reconnects on a ~1s poll, so work landing in that gap is the normal case — a different

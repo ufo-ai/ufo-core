@@ -5,6 +5,11 @@ every op is asked over it, the test playing the connected terminal."""
 import asyncio
 import base64
 import json
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -465,6 +470,105 @@ async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace() -> 
     op = await _answer(terminals, conversation_id, b'{"matches": []}')
     assert _op_params(op)["path"] == root
     assert await running == {"matches": []}
+
+
+def _enumerate(op: str, root: Path, workdir: Path) -> tuple[list[str], list[str]]:
+    """The walk's own shell program run over a real tree, split into the sections the client reads:
+    the NUL-separated paths, then the measurement line each path is paired with by position."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        ["/bin/sh", "-c", terminal.WALK_ENUMERATION[op]],
+        env={"UFO_WALK_ROOT": str(root), "UFO_OP_WORKDIR": str(workdir), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    items = (workdir / f"{op}-enum").read_bytes().split(b"\0")
+    cut = items.index(b"")
+    return (
+        [item.decode() for item in items[:cut]],
+        [line.decode() for line in b"\0".join(items[cut + 1 :]).splitlines() if line],
+    )
+
+
+def _sbxfs_glob(root: Path, tmp_path: Path) -> list[str]:
+    """The paths the in-sandbox walk itself returns for the whole tree, from the real script run the
+    way a carrier runs it: beside the containment guard it imports."""
+    sandbox = Path(terminal.__file__).parent
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    (installed / "sbxfs").write_bytes((sandbox / "image" / "sbxfs").read_bytes())
+    (installed / "containment.py").write_bytes((sandbox / "containment.py").read_bytes())
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(installed / "sbxfs"),
+            "glob",
+            json.dumps({"pattern": "**/*", "workspace": str(root)}),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    return [file["path"] for file in json.loads(completed.stdout)["files"]]
+
+
+def test_the_glob_walk_lists_every_file_sbxfs_would_have_walked(tmp_path: Path) -> None:
+    """Parity with the container, which is what lets the client read the listing instead of the
+    tree: `sbxfs`'s glob is `Path.glob`, which enters `node_modules` and `.git` — so pruning the
+    names the `grep` walk prunes would hide files a glob run in the container returns."""
+    root = tmp_path / "workspace"
+    names = ("src/app.py", "node_modules/pkg/index.js", ".git/config", ".venv/lib/x.py")
+    for index, name in enumerate(names):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(name)
+        os.utime(root / name, (0, 1_700_000_000.5 + index))
+
+    paths, measurements = _enumerate("glob", root, tmp_path / "workdir")
+
+    assert sorted(paths) == sorted(_sbxfs_glob(root, tmp_path))
+    assert [(Path(path).stat().st_size, Path(path).stat().st_mtime) for path in paths] == [
+        (int(line.split(" ")[0]), float(line.split(" ")[1])) for line in measurements
+    ]
+
+
+GROWN_FILES = 2000
+
+
+def test_the_glob_walk_measures_the_paths_it_listed(tmp_path: Path) -> None:
+    """One walk, not two. The client pairs the sections by position, so a listing and a measurement
+    taken by separate walks hand every file after a newly created one another file's size."""
+    root = tmp_path / "tree"
+    churn = root / "churn"
+    churn.mkdir(parents=True)
+    for index in range(200):
+        (root / f"f{index}.txt").write_text("x" * index)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    stop = threading.Event()
+
+    def grow() -> None:
+        index = 0
+        while not stop.is_set() and index < GROWN_FILES:
+            staged = staging / f"n{index}"
+            staged.write_text("y" * (index % 13))
+            staged.rename(churn / f"n{index}")
+            index += 1
+
+    growing = threading.Thread(target=grow)
+    growing.start()
+    try:
+        paths, measurements = _enumerate("glob", root, tmp_path / "workdir")
+    finally:
+        stop.set()
+        growing.join()
+
+    assert len(paths) == len(measurements)
+    assert [Path(path).stat().st_size for path in paths] == [
+        int(line.split(" ")[0]) for line in measurements
+    ]
 
 
 async def test_dial_is_unreachable() -> None:
