@@ -35,6 +35,7 @@ sign-in card does. Nothing is typed or pasted, and the bearer never rides a URL.
 
 ```bash
 export ANTHROPIC_API_KEY=...   # required for serve to boot; the gateway/login needs no key
+export OPENAI_API_KEY=...      # the embed backend; memory indexing and recall raise without it
 make stack STACK=1             # http://ufo-1.localhost:18080/login
 make stack STACK=2             # http://ufo-2.localhost:18180/login
 ```

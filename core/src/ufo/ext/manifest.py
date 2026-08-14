@@ -576,7 +576,10 @@ class Manifest:
     `cdp_providers` seam); `serve` eagerly resolves each at boot and fails loud — naming the
     extension and the seam — if the backend is absent or unkeyed, so a missing dependency stops the
     process at startup rather than on the first tool call. `sandbox_internet` derives metered public
-    egress for live turns when the extension's sandbox tools require it."""
+    egress for live turns when the extension's sandbox tools require it. `deploy_keys` names the
+    environment keys this extension needs the deploy to carry — a provider key nobody can mint, so
+    `init` reports the ones a fresh checkout is missing rather than leaving them to be discovered
+    when the first job that needs one raises."""
 
     name: str
     version: str
@@ -610,6 +613,7 @@ class Manifest:
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
+    deploy_keys: tuple[str, ...] = field(default_factory=tuple)
 
 
 CONVERSATION_SLOT_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")

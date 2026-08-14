@@ -85,5 +85,6 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
+        deploy_keys=(API_KEY_ENV,),
         embeds=(EmbedBackendSpec(name=EMBED_BACKEND, factory=build),),
     )

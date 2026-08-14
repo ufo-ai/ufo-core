@@ -173,6 +173,28 @@ def init(email: str, model: str) -> None:
     token_path.chmod(0o600)
     click.echo(f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} ({model})")
     click.echo(f"cli token written to {token_path}")
+    for missing in _missing_deploy_keys(config):
+        click.echo(
+            f"{missing} is unset — add it to {_dotenv_path()} before the features that need it"
+        )
+
+
+def _missing_deploy_keys(config: Config) -> tuple[str, ...]:
+    """The provider keys this pack's extensions declared and the environment does not carry. Nobody
+    can mint one, so `init` names them where the developer is already configuring rather than
+    leaving the first job that needs one to raise into a log hours later. It reports rather than
+    refuses: a serve with no key still boots, which is what makes a zero-config checkout worth
+    having."""
+    declared = {
+        key for manifest in load_manifests(config.pack.name) for key in manifest.deploy_keys
+    }
+    present = (
+        {name for name, _ in _dotenv_pairs(_dotenv_path().read_text())}
+        if _dotenv_path().exists()
+        else set()
+    )
+    present |= {name for name in os.environ if os.environ[name]}
+    return tuple(sorted(declared - present))
 
 
 def _write_dev_secrets(config: Config) -> tuple[str, ...]:

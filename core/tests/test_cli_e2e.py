@@ -154,6 +154,28 @@ def test_init_provisions_dev_secrets_into_dotenv(
     assert env["UFO_ARTIFACT_TOKEN_SECRET"]
 
 
+def test_init_names_a_declared_deploy_key_the_environment_lacks(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider key is nobody's to mint, so `init` names the ones this pack declared and the
+    environment does not carry — where the developer is already configuring, rather than leaving
+    the first job that needs one to raise into a log hours later. It reports and carries on: a
+    zero-config serve with no key still boots."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert "OPENAI_API_KEY is unset" in result.output
+
+
+def test_init_stays_quiet_about_a_deploy_key_already_set(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-present")
+    result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert "OPENAI_API_KEY is unset" not in result.output
+
+
 def test_init_does_not_clobber_an_existing_dotenv_key(
     cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
