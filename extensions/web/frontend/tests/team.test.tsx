@@ -184,7 +184,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   await userEvent.click(submit);
 
   await refusedNotice("Only an admin adds a member.");
-  expect(screen.getByRole("dialog")).toBeTruthy();
+  expect(screen.getByRole("complementary", { name: "Add members" })).toBeTruthy();
   expect((screen.getByPlaceholderText("email@work.com") as HTMLInputElement).value).toBe(
     "x@example.com",
   );
@@ -197,7 +197,7 @@ test("the tab names the roster, so the section under it repeats no heading", asy
   expect(await screen.findByRole("tab", { name: "Team", selected: true })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
   await openAdd();
-  expect(screen.getByRole("dialog", { name: "Add Members" })).toBeTruthy();
+  expect(screen.getByRole("complementary", { name: "Add members" })).toBeTruthy();
 });
 
 test("the address and role are named for a member who cannot see the placeholder", async () => {

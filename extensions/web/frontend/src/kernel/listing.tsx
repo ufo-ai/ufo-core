@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Table, TableNote, Td, TdActs, Th } from "@/components/ui/table";
+import { BANDS } from "@/kernel/pane";
 import { CardGrid, type CardMark } from "@/kernel/cards";
 import {
   OutcomeNotice,
@@ -86,12 +87,10 @@ export type ListingSpec<Payload, Row> = {
 } & Presentation<Row>;
 
 export function Listing<Payload, Row>({
-  title,
   spec,
   place,
   onPlace,
 }: {
-  title: string;
   spec: ListingSpec<Payload, Row>;
   place: Placement;
   onPlace: (place: Placement) => void;
@@ -151,7 +150,6 @@ export function Listing<Payload, Row>({
     <>
       <OutcomeNotice state={notice} />
       <Section
-        title={title}
         note={spec.note}
         bar={
           known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
@@ -265,7 +263,7 @@ export function Listing<Payload, Row>({
                 ? groupRows(matched, spec.group)
                 : [{ title: null, rows: matched }];
             return (
-              <>
+              <div className={BANDS}>
                 {grouped.map(({ title: groupTitle, rows }) =>
                   groupTitle ? (
                     <Section key={groupTitle} title={groupTitle}>
@@ -298,7 +296,7 @@ export function Listing<Payload, Row>({
                       );
                     })()
                   : null}
-              </>
+              </div>
             );
           }}
         </Panel>

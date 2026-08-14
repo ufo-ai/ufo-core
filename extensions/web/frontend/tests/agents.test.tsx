@@ -117,7 +117,7 @@ test("an admin creates an agent from the bar, and the workspace answers with it"
   expect(await screen.findByRole("complementary", { name: "research" })).toBeTruthy();
 });
 
-test("a refused create keeps the dialog standing with what the member typed", async () => {
+test("a refused create keeps the panel standing with what the member typed", async () => {
   wire({
     "/api/agents": () => boot([AGENT], ADMIN, NEW_AGENT),
     "/intents": () => json({ applied: false, message: "An agent named 'research' already exists." }),
@@ -134,7 +134,7 @@ test("a refused create keeps the dialog standing with what the member typed", as
   expect(screen.queryByText("Created research.")).toBeNull();
 });
 
-test("a field the kind requires holds the act, and Cancel leaves without one", async () => {
+test("a field the kind requires holds the act, and closing the panel leaves without one", async () => {
   const posted: string[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN, NEW_AGENT),
@@ -153,7 +153,7 @@ test("a field the kind requires holds the act, and Cancel leaves without one", a
   expect(posted).toEqual([]);
   expect(screen.getByLabelText("Name")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
   expect(posted).toEqual([]);

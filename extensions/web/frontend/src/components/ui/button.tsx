@@ -23,7 +23,7 @@ export const buttonVariants = cva(
       },
       size: {
         default: "",
-        bar: "h-(--size-control) rounded-full px-2xl py-0 text-label",
+        bar: "h-(--size-control) whitespace-nowrap rounded-full px-2xl py-0 text-label",
         icon: "size-(--size-control) rounded-full p-0",
       },
     },

@@ -7,7 +7,8 @@ import { Filter } from "@/components/ui/filter";
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { SpecDialog, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
+import { SpecPanel, type ObjectValue, type SpecEnvelope } from "@/kernel/objects";
+import { useBeside } from "@/kernel/beside";
 import { Page, PageHeader, PageToolbar } from "@/kernel/pane";
 import { DataTable } from "@/kernel/table";
 import { outcomeNotice, type NoticeState } from "@/kernel/panel";
@@ -153,6 +154,22 @@ export function Agents({
     return outcomeNotice(outcome);
   }
 
+  const beside = useBeside(
+    creating && newAgent && mainAgent ? (
+      <SpecPanel
+        schema={newAgent.spec_schema}
+        kind={AGENT_KIND}
+        name={null}
+        spec={initialSpec(newAgent)}
+        title="New agent"
+        options={{ [MODEL_FIELD]: newAgent.models }}
+        onDone={(envelope) => create(mainAgent.id, envelope)}
+        onClose={() => setCreating(false)}
+      />
+    ) : null,
+    () => setCreating(false),
+  );
+
   return (
     <Page>
       <PageHeader
@@ -205,18 +222,7 @@ export function Agents({
           </>
         )}
       </DataTable>
-      {creating && newAgent && mainAgent ? (
-        <SpecDialog
-          schema={newAgent.spec_schema}
-          kind={AGENT_KIND}
-          name={null}
-          spec={initialSpec(newAgent)}
-          title="New agent"
-          options={{ [MODEL_FIELD]: newAgent.models }}
-          onDone={(envelope) => create(mainAgent.id, envelope)}
-          onClose={() => setCreating(false)}
-        />
-      ) : null}
+      {beside}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </Page>
   );

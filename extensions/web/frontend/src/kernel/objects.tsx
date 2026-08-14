@@ -3,13 +3,6 @@ import { IconRefresh } from "@tabler/icons-react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Field, Input, Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
@@ -21,7 +14,8 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
-import { PageHeader, PageToolbar } from "@/kernel/pane";
+import { useBeside } from "@/kernel/beside";
+import { PageHeader, PageToolbar, RecordPanel } from "@/kernel/pane";
 import {
   OutcomeNotice,
   Panel,
@@ -207,7 +201,7 @@ function ObjectIndex({
   const [descending, setDescending] = useState(false);
   const [narrowed, setNarrowed] = useState("");
   const [cursor, setCursor] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<Kind | null>(null);
   const params = new URLSearchParams({ order_by: orderBy });
   if (agentId) params.set("agent", agentId);
   if (query) params.set("q", query);
@@ -224,8 +218,23 @@ function ObjectIndex({
     return outcomeNotice(outcome);
   }
 
+  const beside = useBeside(
+    creating?.spec_schema && owner !== null ? (
+      <NewObject
+        schema={creating.spec_schema}
+        kind={creating.kind}
+        agents={agentId === null ? agents : []}
+        owner={owner}
+        onDone={submit}
+        onClose={() => setCreating(null)}
+      />
+    ) : null,
+    () => setCreating(null),
+  );
+
   return (
-    <Panel state={state}>
+    <>
+      <Panel state={state}>
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
@@ -270,7 +279,18 @@ function ObjectIndex({
               }
               action={
                 acts ? (
-                  <Button variant="send" size="bar" onClick={() => setCreating(true)}>
+                  <Button
+                    variant="send"
+                    size="bar"
+                    onClick={() =>
+                      setCreating({
+                        kind: payload.kind,
+                        fields: payload.fields,
+                        spec_schema: payload.spec_schema,
+                        applies: payload.applies,
+                      })
+                    }
+                  >
                     {"New " + noun(payload.kind)}
                   </Button>
                 ) : null
@@ -363,20 +383,12 @@ function ObjectIndex({
                   ) : null}
                 </div>
               ) : null}
-            {creating && payload.spec_schema && owner !== null ? (
-              <NewObject
-                schema={payload.spec_schema}
-                kind={payload.kind}
-                agents={agentId === null ? agents : []}
-                owner={owner}
-                onDone={submit}
-                onClose={() => setCreating(false)}
-              />
-            ) : null}
           </>
         );
       }}
-    </Panel>
+      </Panel>
+      {beside}
+    </>
   );
 }
 
@@ -400,7 +412,7 @@ function NewObject({
 }) {
   const [lane, setLane] = useState(owner);
   return (
-    <SpecDialog
+    <SpecPanel
       schema={schema}
       kind={kind}
       name={null}
@@ -451,7 +463,7 @@ export function ObjectDetail({
     reloads,
   );
   const now = new Date();
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<DetailPayload | null>(null);
 
   async function submit(envelope: unknown) {
     const outcome = await postIntent(agentId, envelope);
@@ -467,6 +479,21 @@ export function ObjectDetail({
     }
     setNotice(outcomeNotice(outcome));
   }
+
+  const beside = useBeside(
+    editing?.spec_schema && editing.spec ? (
+      <SpecPanel
+        schema={editing.spec_schema}
+        kind={editing.kind}
+        name={editing.name}
+        spec={editing.spec}
+        title={"Edit " + editing.name}
+        onDone={submit}
+        onClose={() => setEditing(null)}
+      />
+    ) : null,
+    () => setEditing(null),
+  );
 
   return (
     <>
@@ -542,27 +569,17 @@ export function ObjectDetail({
             {payload.applies && payload.spec_schema ? (
               <div className="flex flex-wrap gap-sm">
                 {payload.spec ? (
-                  <Button variant="send" onClick={() => setEditing(true)}>
+                  <Button variant="send" onClick={() => setEditing(payload)}>
                     Edit
                   </Button>
                 ) : null}
                 <ConfirmButton verb="Delete" variant="row" onClick={remove} />
               </div>
             ) : null}
-            {editing && payload.spec_schema && payload.spec ? (
-              <SpecDialog
-                schema={payload.spec_schema}
-                kind={payload.kind}
-                name={payload.name}
-                spec={payload.spec}
-                title={"Edit " + payload.name}
-                onDone={submit}
-                onClose={() => setEditing(false)}
-              />
-            ) : null}
           </>
         )}
       </Panel>
+      {beside}
     </>
   );
 }
@@ -597,13 +614,17 @@ export type SpecEnvelope = {
 };
 
 /** The one form a typed object is written through, for both the act that creates it and the act
- *  that changes it. Six schema fields under the records push the records off the screen and read as
- *  a seventh section of the page; in a dialog they are the act the member asked for, committed or
- *  cancelled, with the index still behind them. `lead` is for the one field the schema cannot
- *  state: which agent's namespace the new row lands in, which only a view listing across agents
- *  knows to ask. `options` is for the one facet the schema cannot state: a field whose choices are
- *  the deploy's rather than the type's, as an agent's model is. */
-export function SpecDialog({
+ *  that changes it, made or changed in the same column the object itself opens in — the record
+ *  panel, with the record's own heading and the record's own way out. Six schema fields under the
+ *  records push the records off the screen and read as a seventh section of the page; in the column
+ *  they are the act the member asked for, with the index still readable beside them and a refusal
+ *  stated next to the rows it was refused against.
+ *
+ *  `lead` is for the one field the schema cannot state: which agent's namespace the new row lands
+ *  in, which only a view listing across agents knows to ask. `options` is for the one facet the
+ *  schema cannot state: a field whose choices are the deploy's rather than the type's, as an
+ *  agent's model is. */
+export function SpecPanel({
   schema,
   kind,
   name,
@@ -658,37 +679,32 @@ export function SpecDialog({
   }
 
   return (
-    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-        </DialogHeader>
-        <OutcomeNotice state={notice} />
-        <form id="object-spec" onSubmit={send} className="flex flex-col gap-xl">
-          {lead}
-          <Field label="Name" htmlFor="object-name">
-            <Input
-              id="object-name"
-              value={objectName}
-              required={name === null}
-              disabled={name !== null}
-              onChange={(event) => setObjectName(event.target.value)}
-            />
-          </Field>
-          <FormFromSchema
-            schema={schema}
-            fields={fields}
-            values={values}
-            options={options}
-            onChange={(field, value) => setValues((held) => ({ ...held, [field]: value }))}
+    <RecordPanel title={title} onClose={onClose}>
+      <OutcomeNotice state={notice} />
+      <form onSubmit={send} className="flex flex-col gap-xl">
+        {lead}
+        <Field label="Name" htmlFor="object-name">
+          <Input
+            id="object-name"
+            value={objectName}
+            required={name === null}
+            disabled={name !== null}
+            onChange={(event) => setObjectName(event.target.value)}
           />
-        </form>
-        <DialogFooter>
-          <Button type="submit" form="object-spec" variant="send" busy={busy}>
+        </Field>
+        <FormFromSchema
+          schema={schema}
+          fields={fields}
+          values={values}
+          options={options}
+          onChange={(field, value) => setValues((held) => ({ ...held, [field]: value }))}
+        />
+        <div className="flex justify-end">
+          <Button type="submit" variant="send" size="bar" busy={busy}>
             {name === null ? "Create" : "Save"}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      </form>
+    </RecordPanel>
   );
 }

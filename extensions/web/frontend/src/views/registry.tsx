@@ -30,7 +30,7 @@ function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>):
     label,
     remountOnPlace: true,
     render: (place, onPlace) => (
-      <Listing title={label} spec={spec} place={place} onPlace={onPlace} />
+      <Listing spec={spec} place={place} onPlace={onPlace} />
     ),
   };
 }

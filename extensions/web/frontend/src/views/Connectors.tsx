@@ -1,13 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
 import { Facts, Group } from "@/components/ui/facts";
 import {
@@ -19,6 +12,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
+import { useBeside } from "@/kernel/beside";
+import { RecordPanel } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -286,6 +281,44 @@ function ConnectorList({
     setReloads((count) => count + 1);
   }
 
+  const beside = useBeside(
+    adding ? (
+      <RecordPanel title="Add connector" onClose={close}>
+        <OutcomeNotice state={refusal} />
+        <form onSubmit={connect} className="flex flex-col gap-xl">
+          <Field
+            label="Provider"
+            htmlFor="connect-provider"
+            description="Consent opens privately for you once the provider is named."
+          >
+            <Input
+              id="connect-provider"
+              required
+              aria-describedby="connect-provider-description"
+              placeholder="github"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value)}
+            />
+          </Field>
+          <div className="flex items-center gap-sm">
+            <Checkbox
+              id="connect-shared"
+              checked={shared}
+              onChange={(event) => setShared(event.target.checked)}
+            />
+            <Label htmlFor="connect-shared">Share with agent</Label>
+          </div>
+          <div className="flex justify-end">
+            <Button type="submit" variant="send" size="bar" busy={busy}>
+              Connect
+            </Button>
+          </div>
+        </form>
+      </RecordPanel>
+    ) : null,
+    close,
+  );
+
   return (
     <>
       {consentUrl || handoff.text ? (
@@ -408,45 +441,7 @@ function ConnectorList({
           )}
         </Panel>
       </Section>
-      {adding ? (
-        <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Add connector</DialogTitle>
-            </DialogHeader>
-            <OutcomeNotice state={refusal} />
-            <form id="add-connector" onSubmit={connect} className="flex flex-col gap-xl">
-              <Field
-                label="Provider"
-                htmlFor="connect-provider"
-                description="Consent opens privately for you once the provider is named."
-              >
-                <Input
-                  id="connect-provider"
-                  required
-                  aria-describedby="connect-provider-description"
-                  placeholder="github"
-                  value={provider}
-                  onChange={(event) => setProvider(event.target.value)}
-                />
-              </Field>
-              <div className="flex items-center gap-sm">
-                <Checkbox
-                  id="connect-shared"
-                  checked={shared}
-                  onChange={(event) => setShared(event.target.checked)}
-                />
-                <Label htmlFor="connect-shared">Share with agent</Label>
-              </div>
-            </form>
-            <DialogFooter>
-              <Button type="submit" form="add-connector" variant="send" busy={busy}>
-                Connect
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      ) : null}
+      {beside}
     </>
   );
 }

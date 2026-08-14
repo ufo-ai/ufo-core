@@ -2,6 +2,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Hint } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
+import { useBeside } from "@/kernel/beside";
 import { BANDS, RecordPanel } from "@/kernel/pane";
 import { Td } from "@/components/ui/table";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
@@ -54,7 +55,7 @@ export function SubagentPane({
   rootConversationId,
 }: SubagentPaneProps) {
   const base = "/subagents/" + subagent.name;
-  return (
+  return useBeside(
     <RecordPanel onClose={onClose} title={subagent.name}>
       <TabRow
         group="subagent"
@@ -75,7 +76,7 @@ export function SubagentPane({
         ) : null}
         {tab === "skills" ? <SubagentSkills base={base} /> : null}
       </TabPanel>
-    </RecordPanel>
+    </RecordPanel>,
   );
 }
 

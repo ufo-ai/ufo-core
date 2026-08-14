@@ -2,15 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 
 import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input, Search } from "@/components/ui/field";
+import { Hint, Input, Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
   Select,
@@ -21,6 +13,8 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { useBeside } from "@/kernel/beside";
+import { RecordPanel } from "@/kernel/pane";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -123,16 +117,66 @@ export function Team({
     });
   }
 
+  const beside = useBeside(
+    adding ? (
+      <RecordPanel title="Add members" describedBy="add-members-note" onClose={close}>
+        <OutcomeNotice state={notice} />
+        <form onSubmit={add} className="flex flex-col items-start gap-sm">
+          <Hint id="add-members-note" className="m-0">
+            Each address is added to this workspace, at any email domain.
+          </Hint>
+          {drafts.map((row, index) => (
+            <div key={index} className="flex w-full items-stretch gap-sm">
+              <Input
+                type="email"
+                required
+                aria-label={drafts.length > 1 ? "Email " + (index + 1) : "Email"}
+                placeholder="email@work.com"
+                className="max-w-none flex-1"
+                value={row.email}
+                onChange={(event) => edit(index, { email: event.target.value })}
+              />
+              <Select
+                value={row.admin ? "admin" : "member"}
+                onValueChange={(value) => edit(index, { admin: value === "admin" })}
+              >
+                <SelectTrigger
+                  aria-label={drafts.length > 1 ? "Role " + (index + 1) : "Role"}
+                  className="max-w-control-row"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="member">Member</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          ))}
+          <Button type="button" onClick={() => setDrafts((rows) => [...rows, BLANK])}>
+            Add more
+          </Button>
+          <div className="flex w-full justify-end">
+            <Button type="submit" variant="send" size="bar" busy={busy} disabled={!ready}>
+              Add members
+            </Button>
+          </div>
+        </form>
+      </RecordPanel>
+    ) : null,
+    close,
+  );
+
   return (
-    <Panel state={state}>
-      {({ members, can_add }) => {
-        const found = members.filter(
-          (entry) =>
-            entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
-            (!role || (role === ADMINS) === Boolean(entry.admin)),
-        );
-        return (
-          <>
+    <>
+      <Panel state={state}>
+        {({ members, can_add }) => {
+          const found = members.filter(
+            (entry) =>
+              entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
+              (!role || (role === ADMINS) === Boolean(entry.admin)),
+          );
+          return (
             <Section
               bar={
                 <>
@@ -168,65 +212,11 @@ export function Team({
                 )}
               </DataTable>
             </Section>
-            <Dialog open={adding} onOpenChange={(next) => (next ? open() : close())}>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Add Members</DialogTitle>
-                  <DialogDescription>
-                    Each address is added to this workspace, at any email domain.
-                  </DialogDescription>
-                </DialogHeader>
-                <OutcomeNotice state={notice} />
-                <form id="add-member" onSubmit={add} className="flex flex-col items-start gap-sm">
-                  {drafts.map((row, index) => (
-                    <div key={index} className="flex w-full items-stretch gap-sm">
-                      <Input
-                        type="email"
-                        required
-                        aria-label={drafts.length > 1 ? "Email " + (index + 1) : "Email"}
-                        placeholder="email@work.com"
-                        className="max-w-none flex-1"
-                        value={row.email}
-                        onChange={(event) => edit(index, { email: event.target.value })}
-                      />
-                      <Select
-                        value={row.admin ? "admin" : "member"}
-                        onValueChange={(value) => edit(index, { admin: value === "admin" })}
-                      >
-                        <SelectTrigger
-                          aria-label={drafts.length > 1 ? "Role " + (index + 1) : "Role"}
-                          className="max-w-control-row"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="member">Member</SelectItem>
-                          <SelectItem value="admin">Admin</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ))}
-                  <Button type="button" onClick={() => setDrafts((rows) => [...rows, BLANK])}>
-                    Add more
-                  </Button>
-                </form>
-                <DialogFooter>
-                  <Button
-                    type="submit"
-                    form="add-member"
-                    variant="send"
-                    busy={busy}
-                    disabled={!ready}
-                  >
-                    Add members
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-            <Toast state={toast} onDone={() => setToast(SILENT)} />
-          </>
-        );
-      }}
-    </Panel>
+          );
+        }}
+      </Panel>
+      {beside}
+      <Toast state={toast} onDone={() => setToast(SILENT)} />
+    </>
   );
 }

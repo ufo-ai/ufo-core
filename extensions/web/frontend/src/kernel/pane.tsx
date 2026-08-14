@@ -1,7 +1,8 @@
 import { IconX } from "@tabler/icons-react";
-import type { ComponentProps, ReactNode } from "react";
+import { useEffect, useRef, type ComponentProps, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { BesideHost } from "@/kernel/beside";
 import { cn } from "@/lib/cn";
 
 /** The measure a conversation is read at, centred in whatever width the shell leaves. A transcript
@@ -12,8 +13,12 @@ export const COLUMN = "mx-auto w-full max-w-page";
 /** The pane a destination draws in. It runs the full width the shell leaves, because the top bar's
  *  rule separates the page's header from its body and a rule that stops two thirds of the way
  *  across states a boundary the surface does not have. */
-export function Pane({ className, ...props }: ComponentProps<"main">) {
-  return <main {...props} className={cn("flex min-h-0 min-w-0 flex-col", className)} />;
+export function Pane({ className, children, ...props }: ComponentProps<"main">) {
+  return (
+    <main {...props} className={cn("flex min-h-0 min-w-0 flex-col", className)}>
+      <BesideHost>{children}</BesideHost>
+    </main>
+  );
 }
 
 /** Every screen is this: one scrolling column, a gutter either side, and a stack of bands one gap
@@ -85,40 +90,69 @@ export function PageToolbar({ children }: { children: ReactNode }) {
 
 /** A record opened beside the list it came from: a column of the pane rather than a sheet laid
  *  over it, so the list stays readable and closing the record is a press rather than a way back.
- *  Under `--breakpoint-narrow` there is no room for two columns, so it covers the pane instead. */
+ *  Under `--breakpoint-narrow` there is no room for two columns, so it covers the pane instead.
+ *
+ *  It takes focus when it opens and gives it back when it closes, and Escape leaves it. A record
+ *  that opened where the member was not looking, and that only an unlabelled corner glyph could
+ *  shut, is one a keyboard never reaches — and at narrow widths the panel covers the pane, so that
+ *  member would have nothing to go back to. Escape is taken only where nothing else has claimed it:
+ *  a select open inside the form answers that key first, and a panel that shut on it would take the
+ *  whole form away when the member meant to close a menu. */
 export function RecordPanel({
   title,
+  describedBy,
   onClose,
   children,
 }: {
   title: string;
+  /** The id of the one line stating what this record's form does, where it has one — a heading
+   *  names the panel, and a member arriving on it by keyboard hears only that name otherwise. */
+  describedBy?: string;
   onClose: () => void;
   children: ReactNode;
 }) {
+  const held = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const before = document.activeElement;
+    held.current?.focus();
+    return () => {
+      if (before instanceof HTMLElement && document.body.contains(before)) before.focus();
+    };
+  }, []);
   return (
     <aside
+      ref={held}
       aria-label={title}
+      aria-describedby={describedBy}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.stopPropagation();
+        onClose();
+      }}
       className={cn(
-        "flex min-h-0 min-w-0 flex-col gap-(--size-record-gutter)",
+        "relative flex min-h-0 min-w-0 flex-1 flex-col gap-(--size-record-gutter)",
         "border-l border-edge-soft py-2xl",
         "max-narrow:absolute max-narrow:inset-0 max-narrow:z-10 max-narrow:border-l-0",
         "max-narrow:bg-surface",
       )}
     >
-      <header className="flex h-(--size-control) shrink-0 items-center gap-md px-(--size-record-gutter)">
-        <h2 className="m-0 flex-1 truncate font-sans text-subtitle font-medium">{title}</h2>
-        <Button size="icon" aria-label="Close" onClick={onClose}>
-          <IconX className="size-icon" aria-hidden />
-        </Button>
-      </header>
-      <div
-        className={cn(
-          "flex min-h-0 flex-1 flex-col gap-(--size-record-gutter)",
-          "overflow-y-auto scrollbar-gutter-stable px-(--size-record-gutter)",
-        )}
-      >
-        {children}
-      </div>
+      <BesideHost over>
+        <header className="flex h-(--size-control) shrink-0 items-center gap-md px-(--size-record-gutter)">
+          <h2 className="m-0 flex-1 truncate font-sans text-subtitle font-medium">{title}</h2>
+          <Button size="icon" aria-label="Close" onClick={onClose}>
+            <IconX className="size-icon" aria-hidden />
+          </Button>
+        </header>
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col gap-(--size-record-gutter)",
+            "overflow-y-auto scrollbar-gutter-stable px-(--size-record-gutter)",
+          )}
+        >
+          {children}
+        </div>
+      </BesideHost>
     </aside>
   );
 }

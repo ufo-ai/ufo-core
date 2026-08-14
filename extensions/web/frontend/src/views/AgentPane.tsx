@@ -1,4 +1,5 @@
 import { ObjectPane } from "@/kernel/objects";
+import { useBeside } from "@/kernel/beside";
 import { BANDS, RecordPanel } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabRow } from "@/kernel/tabs";
@@ -41,7 +42,7 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
     remountOnPlace: tab === "conversations",
     onPlace,
   });
-  return (
+  return useBeside(
     <RecordPanel onClose={onClose} title={agent.name}>
       <TabRow
         group="agent"
@@ -62,6 +63,6 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
         {tab === "skills" ? <AgentSkills agent={agent} /> : null}
         {tab === "usage" ? <AgentUsage agent={agent} /> : null}
       </TabPanel>
-    </RecordPanel>
+    </RecordPanel>,
   );
 }

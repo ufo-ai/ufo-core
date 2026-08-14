@@ -523,18 +523,16 @@ function RoutedPane({
     if (!subagent) return <PaneNote>No such subagent.</PaneNote>;
     return (
       <Pane>
-        <RecordBeside>
-          {agentsIndex}
-          <SubagentPane
-            subagent={subagent}
-            tab={route.tab}
-            tabs={SUBAGENT_TABS}
-            onTab={(tab) => onOpenSubagent(subagent.name, tab)}
-            onClose={onAgentsIndex}
-            conversationId={route.conversationId}
-            rootConversationId={route.rootConversationId}
-          />
-        </RecordBeside>
+        {agentsIndex}
+        <SubagentPane
+          subagent={subagent}
+          tab={route.tab}
+          tabs={SUBAGENT_TABS}
+          onTab={(tab) => onOpenSubagent(subagent.name, tab)}
+          onClose={onAgentsIndex}
+          conversationId={route.conversationId}
+          rootConversationId={route.rootConversationId}
+        />
       </Pane>
     );
   }
@@ -543,18 +541,16 @@ function RoutedPane({
     if (!agent) return <PaneNote>No such agent.</PaneNote>;
     return (
       <Pane>
-        <RecordBeside>
-          {agentsIndex}
-          <AgentPane
+        {agentsIndex}
+        <AgentPane
             agent={agent}
-            tab={route.tab}
-            tabs={AGENT_TABS}
-            onTab={(tab) => onOpenAgent(agent.id, tab)}
-            onClose={onAgentsIndex}
-            place={route.place}
-            onPlace={(place, step) => onPlaceAgent(route.tab, place, step)}
-          />
-        </RecordBeside>
+          tab={route.tab}
+          tabs={AGENT_TABS}
+          onTab={(tab) => onOpenAgent(agent.id, tab)}
+          onClose={onAgentsIndex}
+          place={route.place}
+          onPlace={(place, step) => onPlaceAgent(route.tab, place, step)}
+        />
       </Pane>
     );
   }
@@ -673,16 +669,6 @@ function LinkedPane({
 
 function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
-}
-
-/** A list and the record opened from it, side by side: the pane's two columns, the record taking
- *  the narrower one. */
-function RecordBeside({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="relative grid min-h-0 flex-1 grid-cols-(--grid-slot) max-narrow:grid-cols-1">
-      {children}
-    </div>
-  );
 }
 
 function PaneNote({ children }: { children: React.ReactNode }) {

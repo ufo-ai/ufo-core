@@ -20,6 +20,8 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { useBeside } from "@/kernel/beside";
+import { RecordPanel } from "@/kernel/pane";
 import { rowControl } from "@/kernel/row";
 import {
   type NoticeState,
@@ -293,6 +295,64 @@ export function AgentSkills({ agent }: { agent: Agent }) {
     setReloads((count) => count + 1);
   }
 
+  const beside = useBeside(
+    writing ? (
+      <RecordPanel title="New skill" onClose={close}>
+        <OutcomeNotice state={saveNotice} />
+        <form onSubmit={save} className="flex flex-col gap-xl">
+          <Field
+            label="Name"
+            htmlFor="skill-name"
+            description="Lowercase letters, digits, and hyphens."
+          >
+            <Input
+              id="skill-name"
+              required
+              pattern={NAME_PATTERN}
+              maxLength={NAME_MAX}
+              aria-describedby="skill-name-description"
+              placeholder="release-notes"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          <Field
+            label="Description"
+            htmlFor="skill-description"
+            description="The agent reads this to decide when to load the skill."
+          >
+            <Input
+              id="skill-description"
+              required
+              aria-describedby="skill-description-description"
+              placeholder="Load when a member asks to draft release notes."
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </Field>
+          <Field label="Instructions" htmlFor="skill-instructions">
+            <Textarea
+              id="skill-instructions"
+              required
+              className={PROSE}
+              placeholder={
+                "Read the merged pull requests since the last tag.\nGroup them by area, and lead each line with the verb."
+              }
+              value={instructions}
+              onChange={(event) => setInstructions(event.target.value)}
+            />
+          </Field>
+          <div className="flex justify-end">
+            <Button type="submit" variant="send" size="bar" busy={busy}>
+              Save
+            </Button>
+          </div>
+        </form>
+      </RecordPanel>
+    ) : null,
+    close,
+  );
+
   return (
     <>
       <OutcomeNotice state={notice} />
@@ -433,65 +493,7 @@ export function AgentSkills({ agent }: { agent: Agent }) {
         </Dialog>
       ) : null}
 
-      {writing ? (
-        <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>New skill</DialogTitle>
-            </DialogHeader>
-            <OutcomeNotice state={saveNotice} />
-            <form id="save-skill" onSubmit={save} className="flex flex-col gap-xl">
-              <Field
-                label="Name"
-                htmlFor="skill-name"
-                description="Lowercase letters, digits, and hyphens."
-              >
-                <Input
-                  id="skill-name"
-                  required
-                  pattern={NAME_PATTERN}
-                  maxLength={NAME_MAX}
-                  aria-describedby="skill-name-description"
-                  placeholder="release-notes"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                />
-              </Field>
-              <Field
-                label="Description"
-                htmlFor="skill-description"
-                description="The agent reads this to decide when to load the skill."
-              >
-                <Input
-                  id="skill-description"
-                  required
-                  aria-describedby="skill-description-description"
-                  placeholder="Load when a member asks to draft release notes."
-                  value={description}
-                  onChange={(event) => setDescription(event.target.value)}
-                />
-              </Field>
-              <Field label="Instructions" htmlFor="skill-instructions">
-                <Textarea
-                  id="skill-instructions"
-                  required
-                  className={PROSE}
-                  placeholder={
-                    "Read the merged pull requests since the last tag.\nGroup them by area, and lead each line with the verb."
-                  }
-                  value={instructions}
-                  onChange={(event) => setInstructions(event.target.value)}
-                />
-              </Field>
-            </form>
-            <DialogFooter>
-              <Button type="submit" form="save-skill" variant="send" busy={busy}>
-                Save
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      ) : null}
+      {beside}
 
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>

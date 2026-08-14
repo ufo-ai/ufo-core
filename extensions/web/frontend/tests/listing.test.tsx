@@ -61,7 +61,6 @@ function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
     return (
       <MainAgentProvider agents={[AGENT]}>
         <Listing
-          title="Probe"
           spec={declaration}
           place={current}
           onPlace={(patch) => {
@@ -132,12 +131,12 @@ test("a column's render receives the field's value, its row, and the row context
   expect(screen.getByText("×5 of beta")).toBeTruthy();
 });
 
-test("a listing with no rows states a titled blank, and lists no header or filter bar", async () => {
+test("a listing with no rows states its blank, and names itself nowhere", async () => {
   wire({ "/workspace/probe": () => json({ rows: [] }) });
   mount(spec({ search: (row: Row) => row.name }));
 
   expect(await screen.findByText("Nothing listed yet.")).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "Probe" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Probe" })).toBeNull();
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
   expect(screen.queryByRole("searchbox")).toBeNull();
 });
