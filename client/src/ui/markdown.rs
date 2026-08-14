@@ -425,14 +425,9 @@ impl<'a> Render<'a> {
         loop {
             let cap = self.width.saturating_sub(span_width(&prefix)).max(1);
             let left = &body[at..];
-            let (head, next) = if wrap::width(left) <= cap {
-                (left.len(), left.len())
-            } else {
-                wrap::wrap_head(left, cap)
-            };
+            let (head, next) = wrap::wrap_head(left, cap);
             let mut row = std::mem::take(&mut prefix);
-            let end = body[..at + head].trim_end_matches(' ').len().max(at);
-            row.extend(styled_slice(body, &runs, at, end));
+            row.extend(styled_slice(body, &runs, at, at + head));
             self.lines.push(Line::from(row));
             at += next;
             if at >= body.len() {

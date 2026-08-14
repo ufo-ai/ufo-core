@@ -1202,7 +1202,9 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                 }
                 WireEvent::MemberEcho(_) => {}
                 WireEvent::Reconnecting { .. } => {}
-                WireEvent::WorkspaceChanged { .. } => {}
+                WireEvent::WorkspaceChanged { url, channel } => {
+                    emit_json(&driver.signed_in(&url, &channel));
+                }
                 WireEvent::Stoppable(_) => {}
                 WireEvent::StreamEnd { continues } => {
                     if continues {

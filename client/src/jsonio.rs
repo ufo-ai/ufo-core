@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ui::toolrender::OpView;
 use crate::wire::{Directive, OpRequest};
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -45,6 +46,7 @@ pub enum Event {
         kind: String,
         name: String,
         arg: String,
+        command: String,
     },
     OpEnd {
         op_id: String,
@@ -68,6 +70,10 @@ pub enum Event {
         prompt: String,
     },
     TurnEnd,
+    SignedIn {
+        workspace_url: String,
+        channel: String,
+    },
     Error {
         message: String,
         fatal: bool,
@@ -208,6 +214,7 @@ impl Driver {
             kind: op.kind.clone(),
             name: op.name.clone(),
             arg: op.arg.clone(),
+            command: OpView::from_request(op).title(None),
         }
     }
 
@@ -221,6 +228,15 @@ impl Driver {
 
     pub fn on_turn_end(&self) -> Event {
         Event::TurnEnd
+    }
+
+    /// Sign-in completed: the workspace this session now talks to, and the conversation channel —
+    /// re-minted when onboarding hands the session its workspace.
+    pub fn signed_in(&self, workspace_url: &str, channel: &str) -> Event {
+        Event::SignedIn {
+            workspace_url: workspace_url.to_string(),
+            channel: channel.to_string(),
+        }
     }
 
     pub fn on_stream_error(&self, message: &str, fatal: bool) -> Event {
@@ -404,6 +420,7 @@ mod tests {
                 kind: "exec".into(),
                 name: "exec".into(),
                 arg: "notes.md".into(),
+                command: "exec ls".into(),
             }
         );
         assert_eq!(
@@ -658,7 +675,7 @@ mod tests {
         );
         assert_eq!(
             emit(&driver.on_op_started(&op())),
-            "{\"type\":\"op_start\",\"op_id\":\"op1\",\"kind\":\"exec\",\"name\":\"exec\",\"arg\":\"notes.md\"}\n"
+            "{\"type\":\"op_start\",\"op_id\":\"op1\",\"kind\":\"exec\",\"name\":\"exec\",\"arg\":\"notes.md\",\"command\":\"exec ls\"}\n"
         );
         assert_eq!(
             emit(&driver.on_op_finished("op1", &Ok(Vec::new()))),
@@ -713,5 +730,37 @@ mod tests {
             assert_eq!(line.matches('\n').count(), 1, "{line}");
             assert!(line.ends_with('\n'));
         }
+    }
+}
+
+#[cfg(test)]
+mod signin_tests {
+    use super::*;
+
+    #[test]
+    fn sign_in_and_out_are_events() {
+        let driver = Driver::new();
+        assert_eq!(
+            emit(&driver.signed_in("https://w.example", "abc123")),
+            "{\"type\":\"signed_in\",\"workspace_url\":\"https://w.example\",\"channel\":\"abc123\"}\n"
+        );
+    }
+
+    #[test]
+    fn op_start_speaks_the_members_command() {
+        let driver = Driver::new();
+        let op = OpRequest {
+            op_id: "op9".into(),
+            kind: "exec".into(),
+            name: "exec".into(),
+            timeout_s: 60,
+            arg: String::new(),
+            params: r#"{"argv":["sh","-c","UFO_WALK_ROOT=/w export UFO_WALK_ROOT ..."],"env":{}}"#
+                .into(),
+        };
+        let Event::OpStart { command, .. } = driver.on_op_started(&op) else {
+            panic!("op_start expected");
+        };
+        assert_eq!(command, "list files");
     }
 }

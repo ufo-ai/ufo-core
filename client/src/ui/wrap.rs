@@ -19,8 +19,9 @@ pub fn clip(text: &str, max: usize) -> &str {
     text
 }
 
-/// One transcript wrap step: the byte end of the head row and the byte start of the remainder,
-/// breaking on the last space inside the window when one has content after it, always making
+/// One transcript wrap step: the byte end of the head row and the byte start of the remainder.
+/// Text that fits the window is never broken; a break lands on the last space so no word is cut,
+/// the head carries no trailing spaces, the remainder starts past them, and every step makes
 /// progress.
 pub fn wrap_head(text: &str, cap: usize) -> (usize, usize) {
     let mut taken = clip(text, cap);
@@ -28,14 +29,25 @@ pub fn wrap_head(text: &str, cap: usize) -> (usize, usize) {
         let first = text.chars().next().unwrap();
         taken = &text[..first.len_utf8()];
     }
+    if taken.len() == text.len() {
+        return (taken.len(), taken.len());
+    }
     let mut head_end = taken.len();
-    if let Some(space) = taken.rfind(' ') {
-        if space > 0 && space + 1 < taken.len() {
-            head_end = space;
+    if !text[head_end..].starts_with(' ') {
+        if let Some(space) = taken.rfind(' ') {
+            if space > 0 {
+                head_end = space;
+            }
         }
     }
+    while head_end > 0 && text[..head_end].ends_with(' ') {
+        head_end -= 1;
+    }
+    if head_end == 0 {
+        head_end = taken.len();
+    }
     let mut rest = head_end;
-    if text[rest..].starts_with(' ') {
+    while text[rest..].starts_with(' ') {
         rest += 1;
     }
     (head_end, rest)
@@ -124,6 +136,29 @@ mod tests {
         let (head, rest) = wrap_head("日x", 1);
         assert_eq!(head, "日".len());
         assert_eq!(rest, head);
+    }
+
+    #[test]
+    fn wrap_head_never_breaks_fitting_text() {
+        let text = "# Title";
+        assert_eq!(wrap_head(text, 20), (text.len(), text.len()));
+        assert_eq!(wrap_head(text, 7), (text.len(), text.len()));
+    }
+
+    #[test]
+    fn wrap_head_drops_a_space_the_window_lands_on() {
+        let text = "ab cd";
+        let (head, rest) = wrap_head(text, 3);
+        assert_eq!(&text[..head], "ab");
+        assert_eq!(&text[rest..], "cd");
+    }
+
+    #[test]
+    fn wrap_head_skips_every_space_at_the_break() {
+        let text = "a  b";
+        let (head, rest) = wrap_head(text, 3);
+        assert_eq!(&text[..head], "a");
+        assert_eq!(&text[rest..], "b");
     }
 
     #[test]

@@ -344,7 +344,14 @@ fn exec_op_runs_and_replies_on_the_op_channel() {
 fn json_mode_speaks_the_event_protocol() {
     let served = serve(vec![Exchange {
         delay_ms: 0,
-        reply_lines: &["txt\tpartial ", "txt\treply", "say\twhole", "exit\t0"],
+        reply_lines: &[
+            "token\ttok-1",
+            "workspace\thttp://workspace.example",
+            "txt\tpartial ",
+            "txt\treply",
+            "say\twhole",
+            "exit\t0",
+        ],
     }]);
     let home = scratch_home("json");
     let (stdout, code) = run_client(&served.url, &["--json", "go"], "", &home);
@@ -364,6 +371,12 @@ fn json_mode_speaks_the_event_protocol() {
     assert!(kinds.contains(&"text_delta"));
     assert!(kinds.contains(&"message"));
     assert!(kinds.contains(&"exit"));
+    let signed_in = events
+        .iter()
+        .find(|event| event["type"] == "signed_in")
+        .expect("sign-in is observable");
+    assert_eq!(signed_in["workspace_url"], "http://workspace.example");
+    assert_eq!(signed_in["channel"], "e2e-test");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -475,6 +488,10 @@ fn a_finished_ops_reply_outranks_a_queued_message() {
         requests[1].op_header.as_deref(),
         Some("op-slow"),
         "the turn is blocked on the op reply, so it posts first: {requests:?}"
+    );
+    assert!(
+        stdout.contains("\"command\":\"exec sleep 1\""),
+        "op_start states the command an embedder can show: {stdout}"
     );
     assert_eq!(requests[2].body, "queued while the op ran");
 }
