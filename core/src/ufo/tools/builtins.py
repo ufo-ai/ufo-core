@@ -28,6 +28,7 @@ Subagents workflow that backs `spawn`, to cancel a running child or queue it a f
 that runs as its next turn — scoped to the children this turn
 spawned."""
 
+import asyncio
 import json
 import mimetypes
 import shlex
@@ -53,7 +54,7 @@ from ufo.db import workspace_tx
 from ufo.grants import installed_connect_flow
 from ufo.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.members import ADD_MEMBER_TOOL_DEF
-from ufo.o11y import log
+from ufo.o11y import log, turn_profile
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
@@ -122,6 +123,9 @@ link's target."""
 
 
 MAX_BASH_TIMEOUT_MS = 600_000
+EXEC_TIMEOUT_VITALS_SECONDS = 5
+EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
+EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
 MAX_REQUESTED_SLOTS = 4
 
 
@@ -367,9 +371,47 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
         )
     else:
         notice = f"timed out: the sandbox stopped this command after {stopped}s."
+    if stopped is not None:
+        await _record_exec_timeout(ctx, args.command, stopped, requested_s)
     return ToolResult(
         content=(TextContent(text=f"{output}\n{notice}" if output else notice),),
         is_error=True,
+    )
+
+
+async def _record_exec_timeout(
+    ctx: ToolContext, command: str, applied_s: int, requested_s: int | None
+) -> None:
+    """What the container looked like the moment it stopped a command, read from the container
+    itself and bounded twice — by the probe's own deadline and by this wait — so a container that
+    cannot answer costs seconds rather than a second full timeout.
+
+    The probe failing is the reading that matters. A container merely busy still answers
+    `cat /proc/loadavg` in milliseconds, so a probe that returns nothing says the command channel
+    stopped answering rather than the work being slow, and those two have opposite fixes. The
+    counter alone separates them nowhere: it carries the carrier and no command, no profile, and
+    nothing about the container behind it.
+
+    Diagnosis, never the outcome — every fault here is swallowed, because what the caller must
+    still be told is the timeout its own command hit."""
+    reached, vitals = False, ""
+    try:
+        async with asyncio.timeout(EXEC_TIMEOUT_VITALS_SECONDS):
+            probe = await ctx.sandbox.bash(
+                EXEC_TIMEOUT_VITALS_CMD, timeout_s=EXEC_TIMEOUT_VITALS_SECONDS
+            )
+        reached = probe.exit_code == 0
+        vitals = " ".join((probe.stdout + probe.stderr).split())
+    except Exception:
+        reached, vitals = False, ""
+    log(
+        "sandbox.exec_timeout",
+        profile=turn_profile(ctx.turn.subagent_profile),
+        applied_seconds=applied_s,
+        requested_seconds=requested_s,
+        command=command[:EXEC_TIMEOUT_COMMAND_MAX_CHARS],
+        vitals_reached=reached,
+        vitals=vitals,
     )
 
 

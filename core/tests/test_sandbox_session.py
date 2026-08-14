@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -6,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+import ufo.tools.builtins as builtins_module
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.session import (
@@ -20,7 +23,12 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema.records import Agent, Turn
-from ufo.tools.builtins import BashInput, bash_handler
+from ufo.tools.builtins import (
+    EXEC_TIMEOUT_COMMAND_MAX_CHARS,
+    EXEC_TIMEOUT_VITALS_CMD,
+    BashInput,
+    bash_handler,
+)
 from ufo.tools.context import SpawnResult, ToolContext
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
@@ -167,9 +175,11 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
 class _RecordingCarrier:
     """Records the exec timeout so the bash tool's ms→s conversion and cap can be asserted."""
 
-    def __init__(self, result: ExecResult | None = None) -> None:
+    def __init__(self, result: ExecResult | None = None, probe: ExecResult | None = None) -> None:
         self.timeouts: list[int] = []
+        self.commands: list[str] = []
         self.result = result or ExecResult(stdout="", stderr="", exit_code=0)
+        self.probe = probe
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise NotImplementedError
@@ -180,6 +190,9 @@ class _RecordingCarrier:
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
+        self.commands.append(argv[-1] if argv else "")
+        if self.probe is not None and argv and argv[-1] == EXEC_TIMEOUT_VITALS_CMD:
+            return self.probe
         return self.result
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
@@ -290,3 +303,85 @@ async def test_a_commands_own_timeout_is_not_reported_as_the_sandboxs(tmp_path: 
 
     assert result.is_error
     assert result.content[0].text == "exit code: 124"
+
+
+async def test_a_stopped_command_records_the_container_it_was_stopped_in(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The counter names the carrier and nothing else, so a timeout is unattributable: which
+    profile, which command, and what the container was doing are all absent. The record carries
+    them, and the vitals come from the container itself at the moment it stopped the work."""
+    carrier = _RecordingCarrier(
+        ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=600),
+        probe=ExecResult(stdout="1.90 1.20 0.80 3/210 900\n", stderr="", exit_code=0),
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        result = await bash_handler(
+            _bash_ctx(carrier, tmp_path),
+            BashInput(
+                command="uv run pytest -n auto " + "x" * 500,
+                timeout=9_000_000,
+                user_description="running the tests",
+            ),
+        )
+
+    logged = next(r for r in caplog.records if r.message == "sandbox.exec_timeout")
+    assert logged.ufo["applied_seconds"] == 600
+    assert logged.ufo["requested_seconds"] == 9000
+    assert logged.ufo["vitals_reached"] is True
+    assert "1.90 1.20 0.80" in logged.ufo["vitals"]
+    assert logged.ufo["command"].startswith("uv run pytest -n auto")
+    assert len(logged.ufo["command"]) == EXEC_TIMEOUT_COMMAND_MAX_CHARS
+    assert result.is_error and "600s" in result.content[0].text
+
+
+async def test_a_container_that_cannot_answer_is_the_reading_that_matters(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy container answers `cat /proc/loadavg` in milliseconds, so a probe that never returns
+    says the command channel stopped answering rather than the work being slow. The probe is
+    bounded by its own wait, and the tool result is the command's timeout either way — diagnosis
+    must never change what the caller is told."""
+    monkeypatch.setattr(builtins_module, "EXEC_TIMEOUT_VITALS_SECONDS", 0.05)
+
+    class _Unanswering(_RecordingCarrier):
+        async def exec(
+            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        ) -> ExecResult:
+            if argv and argv[-1] == EXEC_TIMEOUT_VITALS_CMD:
+                await asyncio.sleep(5)
+            return await super().exec(handle, argv, timeout_s)
+
+    carrier = _Unanswering(
+        ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120),
+        probe=ExecResult(stdout="0.10 0.05 0.01 1/80 900\n", stderr="", exit_code=0),
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        result = await bash_handler(
+            _bash_ctx(carrier, tmp_path),
+            BashInput(command="echo alive", user_description="checking the box"),
+        )
+
+    logged = next(r for r in caplog.records if r.message == "sandbox.exec_timeout")
+    assert logged.ufo["vitals_reached"] is False
+    assert logged.ufo["vitals"] == ""
+    assert result.is_error and "120s" in result.content[0].text
+
+
+async def test_a_command_that_failed_on_its_own_records_no_timeout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the carrier's own deadline is a sandbox timeout. A command that chose its exit — even
+    124 from its own `timeout` — records nothing, else the record would count the failures it is
+    meant to tell apart."""
+    carrier = _RecordingCarrier(
+        ExecResult(stdout="", stderr="boom", exit_code=124, timed_out_after_s=None)
+    )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await bash_handler(
+            _bash_ctx(carrier, tmp_path),
+            BashInput(command="timeout 3000 pytest", user_description="running the tests"),
+        )
+
+    assert not [r for r in caplog.records if r.message == "sandbox.exec_timeout"]
+    assert EXEC_TIMEOUT_VITALS_CMD not in carrier.commands
