@@ -17,6 +17,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a version bump beside a client change
+        run: |
+          BASE="origin/$GITHUB_BASE_REF"
+          if git diff --quiet "$BASE"...HEAD -- client; then
+            exit 0
+          fi
+          old=$(git show "$(git merge-base "$BASE" HEAD)":client/Cargo.toml | grep '^version = ')
+          new=$(grep '^version = ' client/Cargo.toml)
+          if [ "$old" = "$new" ]; then
+            echo "client/ changed but client/Cargo.toml still says $new — installed clients only update on a version change" >&2
+            exit 1
+          fi
+
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
