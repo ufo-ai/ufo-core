@@ -472,7 +472,12 @@ export async function refreshTranscript(
  *  A message admitted while a turn runs also gets the queue row it joined: the bubble holds that id
  *  until the turn's `absorbed` event names it back. The drain can beat this response — the row is
  *  committed before the POST returns — so an id the stream has already named is never stamped on,
- *  or the wait would stand under the bubble with nothing left to clear it. */
+ *  or the wait would stand under the bubble with nothing left to clear it.
+ *
+ *  The files at the foot of the log go with the send rather than with the tail it opens: the tail
+ *  begins only once this call returns, and until then a list the last turn shared would stand under
+ *  the words the member just sent, reading as what this turn produced before it has produced
+ *  anything. */
 export async function sendMessage(
   target: ChatTarget,
   body: string | FormData,
@@ -489,6 +494,7 @@ export async function sendMessage(
     ...state,
     busy: true,
     live: state.live ?? liveTurn(),
+    handoffs: { ...state.handoffs, files: null },
     messages: (state.messages ?? []).concat({
       role: "user",
       text: shown,

@@ -23,7 +23,12 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import ScheduleStore
-from ufo_ext_scheduled_tasks.tools import PRIVATE_PROMPT, SCHEDULED_TASK_OBJECT, SUMMARY_MAX
+from ufo_ext_scheduled_tasks.tools import (
+    PRIVATE_PROMPT,
+    PROMPT_EXCERPT_MAX,
+    SCHEDULED_TASK_OBJECT,
+    SUMMARY_MAX,
+)
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
@@ -263,8 +268,9 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     member's alone, reaching an admin as a management row with its content elided (`spec` null,
     the summary saying so) and no one else at all. A task no member created is read the same way —
     by where it reports, so the private conversation elides it from the admin too. Each read is
-    walled by the agent named on it. The row's `prompt` is the task's own prompt, whole: the
-    summary is the line a bound is drawn on, and the column the portal reads is not."""
+    walled by the agent named on it. The row's `prompt` is the task's own prompt, whole — past
+    both the summary's line and the excerpt a turn's own read is bounded to: a member's screen
+    holds its own length, and a cut made here is one it cannot undo."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -361,13 +367,15 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert read.json()["spec"]["prompt"] == "post the channel digest"
 
     sprawling = "Weekly customer and prospect signal digest, proposals only. " * 6
+    sprawling_prompt = "Post the long digest, then thread the open proposals under it. " * 8
+    assert len(sprawling_prompt) > PROMPT_EXCERPT_MAX > SUMMARY_MAX
     with ws(workspace_id):
         with bind_agent(agent_a):
             await _schedule_store().create(
                 shared_conversation,
                 "long-digest",
                 "0 7 * * *",
-                "post the long digest",
+                sprawling_prompt,
                 sprawling,
                 NEXT_RUN,
                 created_by_member_id=creator_id,
@@ -380,7 +388,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     listed = await client.get(index, headers=other_headers)
     sprawled_row = next(row for row in listed.json()["objects"] if row["name"] == "long-digest")
     assert len(sprawled_row["summary"]) == SUMMARY_MAX
-    assert sprawled_row["prompt"] == "post the long digest"
+    assert sprawled_row["prompt"] == sprawling_prompt
 
     crossed = await client.get(
         f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=creator_headers

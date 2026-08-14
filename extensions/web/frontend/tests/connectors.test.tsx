@@ -59,6 +59,29 @@ test("the workspace tab lists the connection pool", async () => {
   expect(screen.getAllByText("Sources").length).toBeGreaterThan(1);
 });
 
+test("the pool narrows on the header's search, which names what it searches", async () => {
+  location.hash = "#/workspace/connectors";
+  wire({
+    "/connections": () =>
+      json({ connections: [grant("github", false, "g1"), grant("notion", true, "g2")] }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  expect(await screen.findByText("notion")).toBeTruthy();
+  const box = screen.getByLabelText("Search connectors");
+  expect(screen.getByRole("heading", { level: 1, name: "Workspace" }).parentElement!.contains(box)).toBe(
+    true,
+  );
+
+  await userEvent.type(box, "github{enter}");
+
+  await waitFor(() => expect(screen.queryByText("notion")).toBeNull());
+  expect(screen.getByText("github")).toBeTruthy();
+  expect(location.hash).toContain("q=github");
+});
+
 test("a row's acts neither wrap nor clip, so the row keeps the table's pitch", async () => {
   location.hash = "#/workspace/connectors";
   connectors();

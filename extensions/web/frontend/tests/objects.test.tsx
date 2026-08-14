@@ -191,13 +191,15 @@ test("an index carries the name, the kind's own prose and the one field it leads
 /** The tracks are fixed pixels, so a table whose tracks outrun the page it is read on holds its
  *  width and scrolls the column sideways — and what falls off the right is the act the row is
  *  pressed by. The desktop the portal is read at has to clear the sum, sidebar and gutters included,
- *  or every member scrolls to reach `Open`. */
+ *  or every member scrolls to reach `Open`. It measures the pane a list has to itself; a record
+ *  opened beside one takes its own column out of that width, and a list read under one is narrower
+ *  than any floor. */
 const DESKTOP = 1280;
 
 const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
 
 function size(name: string): number {
-  const declared = new RegExp("\\" + name + ":\\s*(\\d+)px").exec(TOKENS);
+  const declared = new RegExp("^\\s*" + name + ":\\s*(\\d+)px;", "m").exec(TOKENS);
   if (!declared) throw new Error("theme.css declares no " + name);
   return Number(declared[1]);
 }
@@ -233,7 +235,11 @@ test("one agent's index fits that same desktop", async () => {
   mountAgent();
 
   await screen.findByText("daily-brief");
-  expect(pageFits(screen.getByRole("table").style.minWidth)).toBe(true);
+  const across = screen.getByRole("table").style.minWidth;
+  expect(pageFits(across)).toBe(true);
+  expect(across).toBe(
+    "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
 });
 
 test("a record's name is the record's, not a link away from it, and no uuid is a column", async () => {

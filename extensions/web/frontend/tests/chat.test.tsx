@@ -1474,6 +1474,55 @@ test("a settled turn names each shared file once, with its size", async () => {
   expect(links).toHaveLength(1);
   expect(links[0].getAttribute("href")).toBe("/dl/report.csv");
   expect(screen.getByText("· 2 kB")).toBeTruthy();
+
+});
+
+/** The list stands at the foot of the log, so it belongs to the turn the foot of the log is waiting
+ *  on. It has to go the moment the member sends, not when the tail that answers them opens: the POST
+ *  between the two is exactly where the last turn's file would stand under the words they just
+ *  typed, naming what this turn has not produced yet. */
+test("a file the last turn shared does not stand under the message that opens the next", async () => {
+  let land: (payload: unknown) => void = () => {};
+  const admitted = new Promise<Response>((resolve) => {
+    land = (payload) => resolve(json(payload));
+  });
+  let sends = 0;
+  wire({
+    ...transcript(),
+    "/chat": () => {
+      sends += 1;
+      return sends === 1
+        ? Promise.resolve(json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }))
+        : admitted;
+    },
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "share it");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("message", { text: "Here it is." });
+  StreamFake.last().emit("files", {
+    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
+  });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Message the agent"), "and another");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(await screen.findByText(saying("and another"))).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
+
+  land({ turn_id: "turn-2", conversation_id: CONVO_ID, title: "hello" });
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
 });
 
 test("a credential handoff stores a value and drops the prompt it answered", async () => {

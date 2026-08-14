@@ -134,6 +134,23 @@ test("credentials group, sort, and render slot state and literals", async () => 
   ]);
 });
 
+/** A family name has to bind down to the cards it heads. Stacked at the band gap it stood the same
+ *  distance from them as from the family above, and headed neither. */
+test("a credential family stands further from the family above it than from its own cards", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+
+  await screen.findByText("Credential values are shared across the workspace.");
+  const families = [...document.querySelectorAll("main h2")].map(
+    (heading) => heading.closest("section")!,
+  );
+  expect(families).toHaveLength(2);
+  const between = families[0].parentElement!;
+  expect(between.className).toContain("gap-8xl");
+  expect(families[0].className).toContain("gap-6xl");
+});
+
 test("a stored credential states the slot it stored and re-reads the listing", async () => {
   location.hash = "#/workspace/credentials";
   let reads = 0;

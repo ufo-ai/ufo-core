@@ -49,6 +49,7 @@ SUMMARY_MAX = 120
 PRIVATE_PROMPT = "private member task"
 SCHEDULE_MAX = 100
 RESPONSE_EXCERPT_MAX = 400
+PROMPT_EXCERPT_MAX = 400
 SCHEDULE_GATE = (
     "only the task's creator may change its content; an admin may change cadence or expiry"
 )
@@ -188,7 +189,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             return object_page((), query)
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
-            for row in await self._rows(ext, member_id=member_id, conversation_id=conversation_id)
+            for row in await self._rows(
+                ext, member_id=member_id, conversation_id=conversation_id, prompt_max=None
+            )
             if self._visible(row.owner, member_id, admin)
         )
         return object_page(rows, query)
@@ -218,13 +221,23 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
-        return await self._rows(ext, member_id=member_id)
+        return await self._rows(ext, member_id=member_id, prompt_max=None)
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        """The rows a turn reads. One `object_list` puts a whole page of these in the model's
+        context and `ScheduledTaskSpec.prompt` is unbounded, so a turn reads each prompt as an
+        excerpt. The member's own read carries it whole: a cut arrives at a reader
+        indistinguishable from a prompt that ended, and the screen that draws it cannot undo it."""
+        return await self._rows(
+            ctx.ext, member_id=ctx.acting_member_id, prompt_max=PROMPT_EXCERPT_MAX
+        )
 
     async def _rows(
         self,
         ext: ExtensionContext | None,
         *,
         member_id: UUID | None,
+        prompt_max: int | None,
         conversation_id: UUID | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         listed_rows = await _require_scheduler(ext).list_reported(conversation_id=conversation_id)
@@ -246,7 +259,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "origin": listed.surface_label or "Portal",
                     "mine": listed.task.created_by_member_id == member_id,
                     "prompt": (
-                        listed.task.prompt
+                        listed.task.prompt[:prompt_max]
                         if task_content_visible(listed, member_id)
                         else PRIVATE_PROMPT
                     ),

@@ -54,6 +54,7 @@ export function TabbedPane<Tab extends string>({
             search={
               search ? (
                 <PaneSearch
+                  key={view}
                   label={search}
                   query={place.q ?? ""}
                   onSearch={(q) => record({ q: q || undefined, after: undefined })}
@@ -95,7 +96,10 @@ export function TabbedPane<Tab extends string>({
 
 /** What the member has typed is theirs until they submit it, so the box holds its own text and
  *  takes the place's word for it only when the place itself names a different query — a filter
- *  picked beside a half-written search leaves that search standing. */
+ *  picked beside a half-written search leaves that search standing. It is held only as long as the
+ *  view it was typed against: one shell heads every tab and every section from the same box, and a
+ *  term left unsubmitted on one of them would otherwise still be standing in it on the next, where
+ *  Enter would narrow records it was never meant for. */
 function PaneSearch({
   label,
   query,

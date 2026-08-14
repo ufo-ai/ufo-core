@@ -265,11 +265,31 @@ test("search and chip ride the hash by replacement, never as history entries", a
   await userEvent.click(await screen.findByRole("tab", { name: "Workspace" }));
   await userEvent.type(screen.getByRole("searchbox"), "rss{enter}");
 
+
   await waitFor(() => expect(location.hash).toContain("q=rss"));
   expect(location.hash).toContain("chip=Workspace");
 
   history.back();
   await waitFor(() => expect(location.hash).toBe("#/agents"));
+});
+
+/** One shell heads every tab and every section from one box, so the box has to belong to the view
+ *  under it. A term typed and not submitted, left standing across a tab press, is a term the next
+ *  Enter narrows the wrong records by. */
+test("a search term typed and not submitted does not follow the member to the next tab", async () => {
+  location.hash = workspaceHash("team");
+  serve();
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("tab", { name: "Sources" }));
+  await userEvent.type(await screen.findByLabelText("Search sources"), "rss");
+  expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("rss");
+  expect(location.hash).not.toContain("q=");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Credentials" }));
+
+  const box = (await screen.findByLabelText("Search credentials")) as HTMLInputElement;
+  expect(box.value).toBe("");
 });
 
 test("a reloaded filter lands filtered", async () => {

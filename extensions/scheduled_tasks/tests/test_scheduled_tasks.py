@@ -33,8 +33,10 @@ from ufo_ext_scheduled_tasks.schedules import (
 )
 from ufo_ext_scheduled_tasks.schedules import scheduled_task as schedule_table
 from ufo_ext_scheduled_tasks.tools import (
+    PROMPT_EXCERPT_MAX,
     SCHEDULE_MAX,
     SCHEDULED_TASK_KIND,
+    SCHEDULED_TASK_OBJECT,
     SUMMARY_MAX,
     ScheduledTaskObjects,
     ScheduledTaskSpec,
@@ -458,6 +460,42 @@ async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None)
     assert [row["name"] for row in soonest_first["objects"]] == sorted(
         ("daily", "weekly"), key=lambda name: tasks[name].next_run_at
     )
+
+
+async def test_a_turn_reads_a_prompt_excerpt_the_member_reads_whole(db: None) -> None:
+    """`object_list` answers a whole page — 50 rows — into the model's context, and the spec bounds
+    no prompt, so the rows a turn reads carry an excerpt. The member's own read carries the prompt
+    whole: the portal titles that column Prompt, and a cut made in the projection reaches the
+    reader indistinguishable from a prompt that ended."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    sprawling = "Summarize what merged yesterday and post the list to the team. " * 8
+    assert len(sprawling) > PROMPT_EXCERPT_MAX
+    with ws(workspace_id), agent(agent_id):
+        await _store().create(
+            conversation_id,
+            "digest",
+            DAILY_9AM,
+            sprawling,
+            "daily digest",
+            datetime(2026, 8, 8, 9, tzinfo=UTC),
+            created_by_member_id=creator,
+        )
+        listed = json.loads(
+            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
+        )
+        page = await ScheduledTaskObjects().member_page(
+            context_for(NAME, frozenset()),
+            member_id=creator,
+            admin=False,
+            query=ObjectListQuery(supported_fields=SCHEDULED_TASK_OBJECT.list_fields),
+        )
+
+    [turn_row] = listed["objects"]
+    assert turn_row["prompt"] == sprawling[:PROMPT_EXCERPT_MAX]
+    [member_row] = page.rows
+    assert member_row.fields["prompt"] == sprawling
 
 
 async def test_malformed_conversation_filter_still_validates_the_list_query() -> None:
@@ -2868,8 +2906,9 @@ def test_a_bound_field_refuses_a_value_past_its_bound() -> None:
 def test_a_description_past_the_listing_line_is_still_a_spec_this_model_reads() -> None:
     """A listing line is bounded where it is drawn, never where it is stored: this model is what a
     read reconstructs a stored row into, so a bound here makes every row written before it
-    unreadable for good. The portal's own proof carries the other half — the row that holds this
-    description still summarizes at `SUMMARY_MAX`, and sends its prompt whole."""
+    unreadable for good. Each read draws its own — the portal's proof carries a row that summarizes
+    at `SUMMARY_MAX` and states its prompt whole, and a turn's carries the same prompt at
+    `PROMPT_EXCERPT_MAX`."""
     sprawling = "d" * (SUMMARY_MAX * 3)
     assert ScheduledTaskSpec(description=sprawling).description == sprawling
 
