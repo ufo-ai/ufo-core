@@ -90,38 +90,29 @@ resource "tls_self_signed_cert" "egress_ca" {
   }
 }
 
-resource "tls_private_key" "sandbox_proxy" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-resource "tls_cert_request" "sandbox_proxy" {
-  private_key_pem = tls_private_key.sandbox_proxy.private_key_pem
-  dns_names       = ["sandbox-proxy.${var.hostname}"]
-
-  subject {
-    common_name = "sandbox-proxy.${var.hostname}"
+# The key, request, and leaf the front door used to carry held no object outside terraform state, so
+# state is all there is to drop; the ACM certificate they fed was real and is destroyed with them.
+# Forgetting also leaves the plan guard's refusal to delete a `tls_private_key` standing, and the
+# type it withholds is the egress CA's own.
+removed {
+  from = tls_private_key.sandbox_proxy
+  lifecycle {
+    destroy = false
   }
 }
 
-resource "tls_locally_signed_cert" "sandbox_proxy" {
-  cert_request_pem      = tls_cert_request.sandbox_proxy.cert_request_pem
-  ca_private_key_pem    = tls_private_key.egress_ca.private_key_pem
-  ca_cert_pem           = tls_self_signed_cert.egress_ca.cert_pem
-  validity_period_hours = 8760
-  early_renewal_hours   = 720
-  allowed_uses          = ["digital_signature", "key_encipherment", "server_auth"]
+removed {
+  from = tls_cert_request.sandbox_proxy
+  lifecycle {
+    destroy = false
+  }
 }
 
-# The retired front door's certificate, kept only until its `create_before_destroy` is out of state:
-# the flag propagates to every resource it depends on and inverts their destroy edges, so deleting
-# the chain while state still records it makes terraform's graph cyclic against the manifests that
-# once read its ARN. Dropping the flag here is what lets the next apply delete the chain outright.
-resource "aws_acm_certificate" "sandbox_proxy" {
-  private_key       = tls_private_key.sandbox_proxy.private_key_pem
-  certificate_body  = tls_locally_signed_cert.sandbox_proxy.cert_pem
-  certificate_chain = tls_self_signed_cert.egress_ca.cert_pem
-  tags              = local.tags
+removed {
+  from = tls_locally_signed_cert.sandbox_proxy
+  lifecycle {
+    destroy = false
+  }
 }
 
 # The proxy's front door is a public endpoint, so its NLB listener carries a publicly trusted

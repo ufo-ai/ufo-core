@@ -27,8 +27,6 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "kubernetes_namespace_v1",
         "kubernetes_secret",
         "kubernetes_secret_v1",
-        "tls_cert_request",
-        "tls_locally_signed_cert",
         "tls_self_signed_cert",
     }
 )

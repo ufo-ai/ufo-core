@@ -48,7 +48,7 @@ PERSISTENT_DELETIONS = (
     ("module.platform.module.vpc.aws_vpc.this[0]", "aws_vpc"),
 )
 REGENERABLE_TYPE_DELETIONS = (
-    ("module.platform.aws_acm_certificate.sandbox_proxy", "aws_acm_certificate"),
+    ("module.platform.aws_acm_certificate.sandbox_proxy_public", "aws_acm_certificate"),
     ("module.platform.aws_ecr_lifecycle_policy.this", "aws_ecr_lifecycle_policy"),
     ("module.platform.aws_elasticache_subnet_group.redis", "aws_elasticache_subnet_group"),
     (
@@ -75,8 +75,6 @@ REGENERABLE_TYPE_DELETIONS = (
     ("kubernetes_namespace_v1.ufo_system", "kubernetes_namespace_v1"),
     ("module.platform.kubernetes_secret.cloudflare_api_token", "kubernetes_secret"),
     ("kubernetes_secret_v1.ufo_serve", "kubernetes_secret_v1"),
-    ("module.platform.tls_cert_request.sandbox_proxy", "tls_cert_request"),
-    ("module.platform.tls_locally_signed_cert.sandbox_proxy", "tls_locally_signed_cert"),
     ("module.platform.tls_self_signed_cert.egress_ca", "tls_self_signed_cert"),
 )
 REGENERABLE_MODULE_DELETIONS = (
