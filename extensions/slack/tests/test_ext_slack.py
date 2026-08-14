@@ -191,6 +191,7 @@ async def _status_task_lifecycle():
                 await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
             slack._STATUS_TASKS.clear()
             slack._PROGRESS_TASKS.clear()
+            slack._THREAD_STATUSES.clear()
             slack._THREAD_WRITERS.clear()
             slack._IDENTITY_TASKS.clear()
             slack._AMBIENT_TASKS.clear()
@@ -5642,6 +5643,149 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     assert final == {"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}
 
 
+async def test_the_writer_claim_returns_to_the_turn_still_running(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A short turn admitted into a long turn's thread takes the writer claim, and gives it back
+    when it ends: the long turn narrates the rest of its work instead of going silent for the rest
+    of its life. The claim goes to the turn still running on the thread, not to nobody — an absent
+    key is not the older turn's id either, so deleting it silences that turn just as thoroughly. The
+    thread's status only comes down once the last turn leaves it.
+
+    The durable terminal poll is slowed so each follower ends on the hub Terminal this test
+    publishes, and the first turn is marked done durably before the second message so that message
+    founds a turn of its own rather than draining into the first."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 60.0)
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    first = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
+    )
+    second = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts="101.0",
+        thread_ts="100.5",
+        text="<@UBOT00000> and the changelog",
+    )
+    long_terminal = TerminalFrame(status="done", text="migrated")
+
+    def _sent() -> list[str]:
+        return [
+            json.loads(r.content)["status"]
+            for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
+        ]
+
+    async def _await_status(text: str, complaint: str) -> None:
+        deadline = time.monotonic() + 5
+        while text not in _sent():
+            assert time.monotonic() < deadline, complaint
+            await asyncio.sleep(0.01)
+
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=first, headers=_sign(first, int(time.time()))
+        )
+        assert response.status_code == 200
+        async with workspace_tx() as connection:
+            long_id = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
+        long_task = slack._STATUS_TASKS[long_id]
+        applying = slack.STATUS_DESCRIBED_TEXT.format(description="applying the migration")
+        deadline = time.monotonic() + 5
+        while applying not in _sent():
+            await hub.publish(
+                long_id,
+                ToolCall(tool="bash", preview="{}", description="applying the migration"),
+            )
+            assert time.monotonic() < deadline, "the long turn's tail never started draining"
+            await asyncio.sleep(0.01)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal=long_terminal.model_dump(mode="json"))
+                .where(tables.turn.c.id == long_id)
+            )
+        response = await client.post(
+            EVENTS_PATH, content=second, headers=_sign(second, int(time.time()))
+        )
+        assert response.status_code == 200
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.idempotency_key).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    short_id = {row.idempotency_key: row.id for row in rows}["C1:101.0"]
+    short_task = slack._STATUS_TASKS[short_id]
+    writer = (workspace_id, "C1", "100.5")
+    assert slack._THREAD_WRITERS[writer] == short_id
+
+    await hub.publish(
+        short_id, ToolCall(tool="read", preview="{}", description="reading the changelog")
+    )
+    await _await_status(
+        slack.STATUS_DESCRIBED_TEXT.format(description="reading the changelog"),
+        "the newer turn never took the thread over",
+    )
+    await hub.publish(short_id, Terminal(frame=TerminalFrame(status="done", text="here")))
+    await short_task
+
+    assert slack._THREAD_WRITERS[writer] == long_id
+    assert slack.STATUS_CLEAR_TEXT not in _sent()
+
+    await hub.publish(long_id, ToolCall(tool="bash", preview="{}", description="running the suite"))
+    await _await_status(
+        slack.STATUS_DESCRIBED_TEXT.format(description="running the suite"),
+        "the long turn never got the thread back",
+    )
+    await hub.publish(long_id, Terminal(frame=long_terminal))
+    await long_task
+
+    assert _sent()[-1] == slack.STATUS_CLEAR_TEXT
+    assert writer not in slack._THREAD_WRITERS
+
+
+async def test_the_status_comes_down_only_once_the_thread_is_idle() -> None:
+    """The clear itself, on the writer whose turn has ended: the status is state on the thread, so
+    it stays up while another turn is still running there and goes down when that turn is the last
+    one off. Both followers hold the real writer map, so a skipped clear is a skipped call to Slack,
+    not a write Slack refused."""
+    sent: list[dict[str, object]] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    ctx = slack.SurfaceContext.__new__(slack.SurfaceContext)
+    object.__setattr__(ctx, "workspace_id", uuid4())
+    ending = slack.ThreadStatus(ctx=ctx, turn_id=uuid4(), channel="C1", thread_ts="100.5")
+    running = slack.ThreadStatus(ctx=ctx, turn_id=uuid4(), channel="C1", thread_ts="100.5")
+    elsewhere = slack.ThreadStatus(ctx=ctx, turn_id=uuid4(), channel="C1", thread_ts="200.5")
+    slack._THREAD_WRITERS[ending.thread] = ending.turn_id
+    slack._THREAD_STATUSES[ending.turn_id] = ending
+    slack._THREAD_STATUSES[running.turn_id] = running
+    slack._THREAD_STATUSES[elsewhere.turn_id] = elsewhere
+
+    async with REAL_ASYNC_CLIENT(transport=httpx.MockTransport(record)) as client:
+        await ending._clear(client, "xoxb-test")
+        assert sent == []
+
+        del slack._THREAD_STATUSES[running.turn_id]
+        await ending._clear(client, "xoxb-test")
+
+    assert sent == [{"channel_id": "C1", "thread_ts": "100.5", "status": slack.STATUS_CLEAR_TEXT}]
+
+
 def test_the_progress_cadence_grows_from_the_base_and_settles_at_the_cap() -> None:
     """The shipped schedule as a member experiences it — the clock reading when each update lands,
     which is what the waiting is measured in, not the gaps between them. A first word ten minutes
@@ -5902,6 +6046,83 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
     assert any(record.message == "slack.thread_progress.posted" for record in caplog.records)
     emitted = [r for r in caplog.records if r.message.startswith("slack.thread_progress")]
     assert all("Rerunning the migration" not in str(record.ufo) for record in emitted)
+
+
+def _statuses_after_the_first_post(recorder: list[httpx.Request]) -> list[dict[str, object]]:
+    """Every status write Slack took after the first in-thread post, in order — the post is what
+    blanked the line, so what follows it is what the member is left with."""
+    watched = (slack.SLACK_ASSISTANT_STATUS_URL, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    trace = [r for r in recorder if str(r.url).split("?")[0] in watched]
+    posted = next(
+        (
+            index
+            for index, request in enumerate(trace)
+            if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+        ),
+        None,
+    )
+    if posted is None:
+        return []
+    return [
+        json.loads(r.content)
+        for r in trace[posted + 1 :]
+        if str(r.url).split("?")[0] == slack.SLACK_ASSISTANT_STATUS_URL
+    ]
+
+
+async def test_a_progress_post_re_stamps_the_status_it_blanked(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Slack ends a thread's status as soon as the app replies in that thread, so the digest blanks
+    the line it duplicates. The post puts the line straight back, so the member is never left
+    watching a thread with no liveness signal at the very moment the digest drew them to it. The
+    refresh timeout stays at its shipped ninety seconds, which the test cannot outlast: the write
+    that follows the post can only be the post's own re-stamp."""
+    workspace_id, _ = await _seed()
+    monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
+    monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 30.0)
+    assert slack.STATUS_REFRESH_SECONDS == 90.0
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    mention = _event_body(
+        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
+        )
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    status_task = slack._STATUS_TASKS[turn_id]
+    await _arm_progress(workspace_id, turn_id, hub)
+    progress_task = slack._PROGRESS_TASKS[turn_id]
+    applying = slack.STATUS_DESCRIBED_TEXT.format(description="applying the migration")
+
+    await hub.publish(
+        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
+    )
+    deadline = time.monotonic() + 10
+    while not _progress_posts(recorder) or not _statuses_after_the_first_post(recorder):
+        assert time.monotonic() < deadline, "the progress post never re-stamped the status"
+        await asyncio.sleep(0.01)
+
+    assert _statuses_after_the_first_post(recorder)[0] == {
+        "channel_id": "C1",
+        "thread_ts": "100.5",
+        "status": applying,
+        "loading_messages": [applying],
+    }
+    assert _progress_posts(recorder)[0]["thread_ts"] == "100.5"
+
+    await _finish_turn(turn_id, "migrated")
+    await asyncio.wait_for(asyncio.gather(status_task, progress_task), timeout=10)
 
 
 async def test_a_turn_shorter_than_the_first_interval_posts_no_progress(

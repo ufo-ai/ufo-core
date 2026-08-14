@@ -2213,14 +2213,19 @@ class ThreadStatus:
     write pins the display through a one-element `loading_messages` rotation — the field the client
     shows verbatim, and the field Slack measures against STATUS_TEXT_LIMIT: over it the whole call
     is refused, so every line the follower builds is bounded before the send, not only the model's
-    prose. The clear at turn end is always ours: a reply never ends the status (a DM reply posts
-    top-level, outside the status thread), so Terminal, Parked, and a dead stream all clear alike.
-    A cancelled follower does not clear.
+    prose. A reply inside the status's own thread ends the status, so a progress post into it blanks
+    the line it duplicates: `blanked` wakes the follower to re-stamp on the spot, rather than
+    leaving the thread with no liveness signal until the next frame. A DM's reply posts top-level,
+    outside the status thread, and ends nothing.
+    The clear at turn end is ours — Terminal, Parked, and a dead stream clear alike, a cancelled
+    follower does not — and it waits for the thread to go idle: the status belongs to the thread, so
+    a turn ending while a sibling still runs there leaves that sibling's line standing.
     The status is state on the thread, not a message, and the thread has one writer — the newest
-    turn (`_THREAD_WRITERS`) — so an
-    outrun sibling's writes, its clear included, are skipped rather than blanking the status the
-    member is watching. Slack drops a status two minutes after its last write, so a quiet stretch
-    re-stamps the shown text every STATUS_REFRESH_SECONDS. An update inside
+    turn (`_THREAD_WRITERS`) — so an outrun sibling's writes are skipped rather than blanking the
+    status the member is watching. The claim comes back on the writer's end, so an outrun turn
+    narrates again instead of staying silent for the rest of its life.
+    Slack drops a status two minutes after its last write, so a quiet stretch re-stamps the shown
+    text every STATUS_REFRESH_SECONDS. An update inside
     STATUS_UPDATE_MIN_SECONDS of the last send is dropped, not delayed: the next distinct frame
     refreshes, and the clear ends the status regardless.
     Each write is contained: Slack rejecting one line costs that one update, never the follower, so
@@ -2235,6 +2240,11 @@ class ThreadStatus:
     turn_id: UUID
     channel: str
     thread_ts: str
+    blanked: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def thread(self) -> tuple[UUID, str, str]:
+        return (self.ctx.workspace_id, self.channel, self.thread_ts)
 
     async def run(self) -> None:
         bot_token = await self.ctx.credential(SLACK_BOT_TOKEN_SLOT)
@@ -2253,17 +2263,14 @@ class ThreadStatus:
                 )
                 raise
             except Exception:
-                await self._set(client, bot_token, STATUS_CLEAR_TEXT)
+                await self._clear(client, bot_token)
                 raise
-            await self._set(client, bot_token, STATUS_CLEAR_TEXT)
+            await self._clear(client, bot_token)
 
     async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> bool:
         """Whether Slack took the line, so the caller keeps `shown` on what a member can actually
         see."""
-        if (
-            _THREAD_WRITERS.get((self.ctx.workspace_id, self.channel, self.thread_ts))
-            != self.turn_id
-        ):
+        if _THREAD_WRITERS.get(self.thread) != self.turn_id:
             return False
         body: dict[str, object] = {
             "channel_id": self.channel,
@@ -2302,14 +2309,34 @@ class ThreadStatus:
         )
         return True
 
+    async def _clear(self, client: httpx.AsyncClient, bot_token: str) -> None:
+        """This turn ending is not the thread going idle: a sibling turn still running there is
+        still owed a line, and the last turn off the thread takes the status down."""
+        if any(
+            live.thread == self.thread
+            for turn_id, live in _THREAD_STATUSES.items()
+            if turn_id != self.turn_id
+        ):
+            return
+        await self._set(client, bot_token, STATUS_CLEAR_TEXT)
+
     async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None:
         sent_at = time.monotonic()
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
+            waking = asyncio.ensure_future(self.blanked.wait())
             try:
                 while True:
-                    done, _pending = await asyncio.wait([upcoming], timeout=STATUS_REFRESH_SECONDS)
-                    if not done:
+                    done, _pending = await asyncio.wait(
+                        [upcoming, waking],
+                        timeout=STATUS_REFRESH_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    blanked = waking in done
+                    if blanked:
+                        self.blanked.clear()
+                        waking = asyncio.ensure_future(self.blanked.wait())
+                    if blanked or upcoming not in done:
                         if shown:
                             await self._set(client, bot_token, shown)
                             sent_at = time.monotonic()
@@ -2345,11 +2372,25 @@ class ThreadStatus:
                     sent_at = time.monotonic()
             finally:
                 upcoming.cancel()
-                await asyncio.gather(upcoming, return_exceptions=True)
+                waking.cancel()
+                await asyncio.gather(upcoming, waking, return_exceptions=True)
 
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
+_THREAD_STATUSES: dict[UUID, ThreadStatus] = {}
+"""Every live follower in this process, in admission order — so the oldest turn still running on a
+thread is the first entry keyed to it."""
 _THREAD_WRITERS: dict[tuple[UUID, str, str], UUID] = {}
+
+
+def _restamp_thread_status(workspace_id: UUID, channel: str, thread_ts: str) -> None:
+    """Slack ends a thread's status the moment the app replies in that thread, so an in-thread
+    progress post blanks the line it duplicates. Wake the thread's followers to re-stamp it at
+    once, instead of leaving the member with no liveness signal until the next frame or
+    STATUS_REFRESH_SECONDS."""
+    for status in _THREAD_STATUSES.values():
+        if status.thread == (workspace_id, channel, thread_ts):
+            status.blanked.set()
 
 
 def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts: str) -> None:
@@ -2362,17 +2403,26 @@ def _track_status(ctx: SurfaceContext, turn_id: UUID, queue_key: str, message_ts
     if turn_id in _STATUS_TASKS:
         return
     channel, separator, root_ts = queue_key.partition(":")
-    thread = (channel, root_ts if separator else message_ts)
-    writer = (ctx.workspace_id, *thread)
-    status = ThreadStatus(ctx=ctx, turn_id=turn_id, channel=thread[0], thread_ts=thread[1])
-    _THREAD_WRITERS[writer] = turn_id
+    status = ThreadStatus(
+        ctx=ctx,
+        turn_id=turn_id,
+        channel=channel,
+        thread_ts=root_ts if separator else message_ts,
+    )
+    _THREAD_WRITERS[status.thread] = turn_id
+    _THREAD_STATUSES[turn_id] = status
     task = asyncio.create_task(_run_status(status))
     _STATUS_TASKS[turn_id] = task
 
 
 async def _run_status(status: ThreadStatus) -> None:
     """A write Slack refuses is the write's own event; reaching here means the follower itself is
-    gone — no credential, a dead tail — and the member sees nothing further for the turn."""
+    gone — no credential, a dead tail — and the member sees nothing further for the turn.
+
+    The writer claim is lent, not spent: a turn that ends holding it passes it to the oldest turn
+    still running on the thread, whose own writes stopped when this one took the thread over, and
+    only a thread with nobody left on it loses the key. Deleting it instead leaves that older turn
+    writing against a claim no turn holds — silent for the rest of its life."""
     try:
         await status.run()
     except Exception as error:
@@ -2385,9 +2435,15 @@ async def _run_status(status: ThreadStatus) -> None:
         )
     finally:
         _STATUS_TASKS.pop(status.turn_id, None)
-        writer = (status.ctx.workspace_id, status.channel, status.thread_ts)
-        if _THREAD_WRITERS.get(writer) == status.turn_id:
-            del _THREAD_WRITERS[writer]
+        _THREAD_STATUSES.pop(status.turn_id, None)
+        if _THREAD_WRITERS.get(status.thread) == status.turn_id:
+            successor = next(
+                (live for live in _THREAD_STATUSES.values() if live.thread == status.thread), None
+            )
+            if successor is None:
+                del _THREAD_WRITERS[status.thread]
+            else:
+                _THREAD_WRITERS[status.thread] = successor.turn_id
 
 
 @dataclass(frozen=True)
@@ -2600,6 +2656,9 @@ class ThreadProgress:
         the model's own narration, which is turn content, and no field name that would survive
         `redact_payload` may hold it — so the event logs its size and the thread holds the text.
 
+        A post into the turn's thread is the app replying there, which is what ends a thread status,
+        so a landed post re-stamps the line it just blanked.
+
         Answers whether the post landed, so the footer rides the turn's first delivered message: a
         skipped or rejected checkpoint leaves it for the next one to carry."""
         text = activity.report(elapsed_seconds)
@@ -2640,6 +2699,8 @@ class ThreadProgress:
             characters=len(text),
             footer=metadata is not None,
         )
+        if separator:
+            _restamp_thread_status(self.ctx.workspace_id, channel, thread_ts)
         return True
 
     async def _footer(self, bot_token: str, channel: str, spend: CostTick | None) -> str | None:
