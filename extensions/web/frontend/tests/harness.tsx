@@ -171,7 +171,8 @@ export const CHAT_ROW = {
   agent_name: "assistant",
   title: "Pick one thread",
   last_at: "2026-08-01T09:00:00.000Z",
-  origin: null,
+  surface: "web",
+  surface_label: null,
   mine: true,
   speaker: null,
 };

@@ -1230,9 +1230,14 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     an admin's rail is their own work and not every private conversation in the workspace.
 
     Web conversations use the chat row this surface stores; another surface's conversations use
-    their opening message, and their origin names the surface. A same-surface conversation without
-    a chat row is dropped: the member's prepared-intent lane. A colleague's row also names who
-    spoke it, which is the one fact the member cannot get from the title."""
+    their opening message. A same-surface conversation without a chat row is dropped: the member's
+    prepared-intent lane. A colleague's row also names who spoke it, which is the one fact the
+    member cannot get from the title.
+
+    Every row carries `surface` and the surface's own name for it, never one string collapsing the
+    two: the rail draws a glyph off the surface and reads the label as the words, and a Slack
+    conversation in `#ops` would otherwise arrive as `#ops` with nothing saying it came from
+    Slack."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1269,11 +1274,8 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
                         "speaker": (
                             None if participation == "mine" or not speakers else speakers[0]
                         ),
-                        "origin": (
-                            None
-                            if entry.summary.surface == SURFACE_WEB
-                            else entry.surface_label or entry.summary.surface
-                        ),
+                        "surface": entry.summary.surface,
+                        "surface_label": entry.surface_label,
                         "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
                     }
                 )
@@ -1320,6 +1322,8 @@ async def _resolve_chat(
                         "title": await _named(ctx, agent.id, member_id, named),
                         "mine": True,
                         "speaker": None,
+                        "surface": SURFACE_WEB,
+                        "surface_label": None,
                         "last_at": _iso(detail.turn.created_at),
                     }
                 ]

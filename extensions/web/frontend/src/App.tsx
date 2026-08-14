@@ -3,6 +3,7 @@ import {
   IconAdjustments,
   IconAdjustmentsHorizontal,
   IconAutomation,
+  IconBrandSlack,
   IconDeviceDesktop,
   IconEdit,
   IconFolder,
@@ -11,6 +12,7 @@ import {
   IconSettings,
   IconSparkles,
   IconSun,
+  IconTerminal2,
   IconUsers,
 } from "@tabler/icons-react";
 
@@ -27,7 +29,15 @@ import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { SignIn } from "@/views/SignIn";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
-import { Viewer, speakerName, surfaceWord } from "@/lib/audience";
+import {
+  SLACK_SURFACE,
+  UFO_SURFACE,
+  WEB_SURFACE,
+  Viewer,
+  origin,
+  speakerName,
+  surfaceWord,
+} from "@/lib/audience";
 import { COLUMN, Pane } from "@/kernel/pane";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
@@ -254,15 +264,16 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
         agent_name: agent.name,
         title,
         last_at: stampIso(new Date()),
-        origin: null,
+        surface: WEB_SURFACE,
+        surface_label: null,
         mine: true,
         speaker: null,
       };
       setRail((current) => ({ ...current, rows: mergeChats(current.rows, [row]) }));
       const seen = routeRef.current;
-      const origin =
+      const started =
         seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id);
-      if (origin) openChat(conversationId);
+      if (started) openChat(conversationId);
     },
     [openChat],
   );
@@ -278,7 +289,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
     if (route.kind !== "chat" || rail.phase !== "ready") return;
     const wanted = route.conversationId;
     if (
-      rail.rows.some((row) => row.conversation_id === wanted && !row.origin) ||
+      rail.rows.some((row) => row.conversation_id === wanted && row.surface === WEB_SURFACE) ||
       wanted in sought
     ) {
       return;
@@ -574,7 +585,7 @@ function RoutedPane({
   }
   if (route.kind === "chat") {
     const row = rail.rows.find(
-      (entry) => entry.conversation_id === route.conversationId && !entry.origin,
+      (entry) => entry.conversation_id === route.conversationId && entry.surface === WEB_SURFACE,
     );
     const linkedConversation = linked[route.conversationId];
     if (!row && linkedConversation) {
@@ -840,7 +851,7 @@ function RailList({
             {group.rows.map((row) => {
               const facts = [
                 row.speaker ? speakerName(row.speaker) : null,
-                row.origin,
+                row.surface === WEB_SURFACE ? null : origin(row),
                 mainAgent && row.agent_id !== mainAgent.id ? row.agent_name : null,
               ].filter((fact): fact is string => fact !== null);
               return (
@@ -853,6 +864,7 @@ function RailList({
                     facts={facts.length ? facts.join(" · ") : null}
                     onClick={() => onOpen(row.conversation_id)}
                   >
+                    <SurfaceGlyph surface={row.surface} />
                     <span className="min-w-0 flex-1 truncate">{row.title}</span>
                   </RailRow>
                 </li>
@@ -962,7 +974,8 @@ function NavRow({
 /** A fact the group above cannot state — the agent holding the conversation, the surface it came
  *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
  *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
- *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. */
+ *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
+ *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read. */
 function RailRow({
   current,
   facts,
@@ -980,7 +993,7 @@ function RailRow({
       aria-current={current}
       onClick={onClick}
       className={cn(
-        "flex h-(--size-row) w-full items-center rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
+        "flex h-(--size-row) w-full items-center gap-xs rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
         "max-narrow:w-auto max-narrow:whitespace-nowrap",
         current && "bg-fill",
       )}
@@ -995,6 +1008,18 @@ function RailRow({
       <TooltipContent>{facts}</TooltipContent>
     </Tooltip>
   );
+}
+
+const SURFACE_GLYPH = "size-icon shrink-0 text-ink-soft";
+
+/** The surface a conversation came in on, drawn before its title. The portal draws none: the rail
+ *  is read in the portal, so a glyph on every row would state where the member already is. The
+ *  words for the same fact stay in the row's tooltip, which is what a reader unable to see the
+ *  glyph gets. */
+function SurfaceGlyph({ surface }: { surface: string }) {
+  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
+  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
+  return null;
 }
 
 const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;

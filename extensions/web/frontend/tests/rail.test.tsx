@@ -49,7 +49,8 @@ function row(id: string, last_at: string): ChatRow {
     agent_name: "assistant",
     title: "chat " + id,
     last_at,
-    origin: null,
+    surface: "web",
+    surface_label: null,
     mine: true,
     speaker: null,
   };
@@ -355,15 +356,40 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   expect((await screen.findByRole("tooltip")).textContent).toBe("second");
 });
 
-test("a row with an origin states it in the rail", async () => {
-  const slack = { ...CHAT_ROW, origin: "Direct message", title: "Slack question" };
+test("a row from another surface draws its glyph and states the surface's own name", async () => {
+  const slack = {
+    ...CHAT_ROW,
+    surface: "slack",
+    surface_label: "Direct message",
+    title: "Slack question",
+  };
   wire({ "/api/chats": () => json({ chats: [slack] }) });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
   expect(railRow.textContent).toBe("Slack question");
+  expect(railRow.querySelector(".tabler-icon-brand-slack")).not.toBeNull();
   fireEvent.focus(railRow);
   expect((await screen.findByRole("tooltip")).textContent).toBe("Direct message");
+});
+
+test("a cli row draws the terminal glyph and reads as CLI, never as the surface's own name", async () => {
+  const cli = { ...CHAT_ROW, surface: "ufo", surface_label: null, title: "Deploy the branch" };
+  wire({ "/api/chats": () => json({ chats: [cli] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Deploy the branch/ });
+  expect(railRow.querySelector(".tabler-icon-terminal-2")).not.toBeNull();
+  fireEvent.focus(railRow);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("CLI");
+});
+
+test("a portal row draws no glyph — the rail is read where those conversations happen", async () => {
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(railRow.querySelector(".tabler-icon")).toBeNull();
 });
 
 test("a row whose title is the whole of it is no tooltip trigger", async () => {
@@ -399,7 +425,12 @@ test("a conversation another member spoke stands at the foot and names them", as
 });
 
 test("an origin rail row opens the read-only pane, never the live chat", async () => {
-  const slack = { ...CHAT_ROW, origin: "Direct message", title: "Slack question" };
+  const slack = {
+    ...CHAT_ROW,
+    surface: "slack",
+    surface_label: "Direct message",
+    title: "Slack question",
+  };
   const linked = {
     id: CONVO_ID,
     surface: "slack",

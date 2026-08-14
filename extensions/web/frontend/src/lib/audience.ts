@@ -7,9 +7,17 @@ export function useViewer(): string | null {
   return useContext(Viewer);
 }
 
-const SLACK_SURFACE = "slack";
+/** The names the surfaces register under, which every conversation carries as its `surface`. The
+ *  CLI registers as `ufo`, and `SURFACE_WORDS` is the one place that becomes a member's word. */
+export const WEB_SURFACE = "web";
+export const SLACK_SURFACE = "slack";
+export const UFO_SURFACE = "ufo";
 
-const SURFACE_WORDS: Record<string, string> = { web: "Portal", slack: "Slack", cli: "CLI" };
+const SURFACE_WORDS: Record<string, string> = {
+  [WEB_SURFACE]: "Portal",
+  [SLACK_SURFACE]: "Slack",
+  [UFO_SURFACE]: "CLI",
+};
 
 /** The member's word for a surface. A surface the map does not name reads as its own word rather
  *  than breaking the screen. */

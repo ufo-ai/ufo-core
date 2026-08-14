@@ -6,7 +6,8 @@ export type ChatRow = {
   agent_name: string;
   title: string;
   last_at: string;
-  origin: string | null;
+  surface: string;
+  surface_label: string | null;
   mine: boolean;
   speaker: string | null;
 };

@@ -33,5 +33,7 @@ test("an audience the map does not know reads as Unknown, never as nothing", () 
 
 test("a surface the map does not name reads as its own word", () => {
   expect(surfaceWord("web")).toBe("Portal");
+  expect(surfaceWord("slack")).toBe("Slack");
+  expect(surfaceWord("ufo")).toBe("CLI");
   expect(surfaceWord("teams")).toBe("teams");
 });

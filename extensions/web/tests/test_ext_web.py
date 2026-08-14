@@ -3489,9 +3489,12 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     ]
 
 
-async def test_the_rail_lists_readable_slack_conversations_with_origin(
+async def test_the_rail_lists_readable_conversations_with_the_surface_they_came_in_on(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
+    """A row names its surface and the surface's own name for it as two fields. Collapsed to one
+    the `#ops` case is lossy — the rail would read `#ops` with nothing saying it is Slack — and the
+    CLI, which names nothing, would have only its registered name to draw."""
     client, workspace_id, agent_id = web
     member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
@@ -3508,6 +3511,15 @@ async def test_the_rail_lists_readable_slack_conversations_with_origin(
     await _seed_listed_turn(
         workspace_id, slack_id, agent_id, seq=1, inbound="Review this Slack message"
     )
+    cli_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="tty:1",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="ufo",
+    )
+    await _seed_listed_turn(workspace_id, cli_id, agent_id, seq=1, inbound="Deploy the branch")
     await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -3530,10 +3542,14 @@ async def test_the_rail_lists_readable_slack_conversations_with_origin(
         "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_rail.status_code == 200
-    rows = member_rail.json()["chats"]
-    assert [row["conversation_id"] for row in rows] == [str(slack_id)]
-    assert rows[0]["title"] == "Review this Slack message"
-    assert rows[0]["origin"] == "Direct message"
+    listed = {row["conversation_id"]: row for row in member_rail.json()["chats"]}
+    assert set(listed) == {str(slack_id), str(cli_id)}
+    assert listed[str(slack_id)]["title"] == "Review this Slack message"
+    assert listed[str(slack_id)]["surface"] == "slack"
+    assert listed[str(slack_id)]["surface_label"] == "Direct message"
+    assert listed[str(cli_id)]["title"] == "Deploy the branch"
+    assert listed[str(cli_id)]["surface"] == "ufo"
+    assert listed[str(cli_id)]["surface_label"] is None
 
     other_rail = await client.get(
         "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={other_token}"}
@@ -3602,7 +3618,8 @@ async def test_the_rail_reads_every_surface_under_its_bound(
     rows = rail.json()["chats"]
     assert [row["conversation_id"] for row in rows] == [str(slack_id)]
     assert rows[0]["title"] == "new Slack traffic"
-    assert rows[0]["origin"] == "slack"
+    assert rows[0]["surface"] == "slack"
+    assert rows[0]["surface_label"] is None
 
 
 async def test_the_rail_groups_the_members_own_conversations_and_everyone_elses(
