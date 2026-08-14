@@ -135,6 +135,57 @@ class Admission:
             intent=intent,
         )
 
+    async def redispatch(
+        self, workspace_id: UUID, conversation_id: UUID
+    ) -> tuple[UUID, UUID] | None:
+        """Give a member message a cancelled turn left unconsumed its own run, now. The oldest
+        member-spoken pending arrival is re-admitted under its delivery key — the same admission a
+        resend rides, so a dead target founds a new turn on the message and a live one folds it —
+        and later pending rows join that turn's first drain. Returns `(turn_id, arrival_id)` when
+        this call founded a run on the arrival, None when nothing was pending or the message joined
+        an existing turn. A pending row without a key is stamped one first, so every path through
+        here is a re-admission and none can say a message twice."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.inbound_message.c.id,
+                        tables.inbound_message.c.body,
+                        tables.inbound_message.c.context,
+                        tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.idempotency_key,
+                    )
+                    .where(
+                        tables.inbound_message.c.workspace_id == workspace_id,
+                        tables.inbound_message.c.conversation_id == conversation_id,
+                        tables.inbound_message.c.consumed_turn_id.is_(None),
+                        tables.inbound_message.c.speaker_member_id.is_not(None),
+                    )
+                    .order_by(tables.inbound_message.c.seq)
+                    .limit(1)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            idempotency_key = row.idempotency_key
+            if idempotency_key is None:
+                idempotency_key = f"redispatch:{row.id}"
+                await connection.execute(
+                    sa.update(tables.inbound_message)
+                    .values(idempotency_key=idempotency_key)
+                    .where(tables.inbound_message.c.id == row.id)
+                )
+        admitted = await self.admit_member(
+            workspace_id,
+            conversation_id,
+            row.body,
+            row.speaker_member_id,
+            idempotency_key=idempotency_key,
+            context=None if row.context is None else TurnContext.model_validate(row.context),
+        )
+        return (admitted.turn_id, row.id) if admitted.opened_run else None
+
     async def invoke(
         self,
         workspace_id: UUID,

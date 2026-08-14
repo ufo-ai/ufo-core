@@ -857,6 +857,55 @@ async def test_a_stop_ends_the_running_turn_and_returns_the_prompt(
     assert (stopped, status) == (turn_id, "cancelled")
 
 
+async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """Esc after a mid-turn send: the cancel ends the running turn and the message the member had
+    already sent founds the next one. The stop's own tail ends on an immediate `poll` because the
+    conversation moved on, and the reconnect resumes on the new turn — whose first frame names the
+    arrival, so the row the client held as pending settles as the new turn's own message."""
+    client, workspace_id = ufo
+    hub = runtime[1]
+    member_id = await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    conversation_id = await _linked_conversation(client, workspace_id, token)
+    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
+    sent = await _post_send(client, token, b"do this instead", uuid4())
+    arrival = UUID(_lines(sent.content)[0][3])
+
+    response = await _post_stop(client, token)
+
+    assert response.status_code == 200
+    lines = _lines(response.content)
+    assert lines[:2] == [["say", "cancelled"], ["ask", ">"]]
+    assert lines[2][:2] == ["since", str(turn_id)]
+    assert lines[3] == ["poll", "0"]
+    assert len(lines) == 4
+    async with workspace_tx() as connection:
+        new_turn = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.status, tables.turn.c.inbound)
+                .where(
+                    tables.turn.c.conversation_id == conversation_id,
+                    tables.turn.c.id != turn_id,
+                )
+                .order_by(tables.turn.c.seq.desc())
+            )
+        ).one()
+    assert new_turn.status == "queued"
+    assert new_turn.inbound == "do this instead"
+
+    held = asyncio.ensure_future(_post(client, "main", token, b""))
+    await _tailing(hub, new_turn.id)
+    await hub.publish(
+        new_turn.id, Terminal(frame=TerminalFrame(status="done", text="Done instead."))
+    )
+    resumed = await held
+    assert ["absorbed", str(arrival)] in resumed
+    assert resumed.index(["absorbed", str(arrival)]) < resumed.index(["say", "Done instead."])
+
+
 async def test_a_stop_with_no_live_turn_resumes_the_tail(ufo: tuple[AsyncClient, UUID]) -> None:
     """A press with nothing running is not an error: a conversation holding no turn prompts, and one
     whose turn already ended re-reads that answer and leaves it done."""

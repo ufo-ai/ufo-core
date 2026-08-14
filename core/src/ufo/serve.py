@@ -867,7 +867,7 @@ def _mount_shared_surfaces(
     app.add_middleware(WorkspaceScopeBoundary)
     admission = Admission(dbos=dbos_client, durable_surfaces=durable_surfaces(manifests))
     tailer = HubTailer(hub=hub)
-    stopper = MemberStop(client=dbos_client, hub=hub)
+    stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     registered: dict[str, SurfaceSpec] = {}
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)

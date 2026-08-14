@@ -760,7 +760,10 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
             stopped = await ctx.stop_turn(conversation_id, stop)
         except ValueError:
             return Response("no such turn in this conversation", status_code=404)
-        return JSONResponse({"stopped": stopped})
+        outcome: dict[str, bool | str] = {"stopped": stopped.ended}
+        if stopped.founded_turn_id is not None:
+            outcome["turn_id"] = str(stopped.founded_turn_id)
+        return JSONResponse(outcome)
     key = None if answer is None else f"{conversation_id}:{answer[0]}:answer:{answer[1]}"
     await _deliver_uploads(ctx, conversation_id, uploads, paths)
     admitted = await ctx.admit(

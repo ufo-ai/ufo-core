@@ -266,6 +266,7 @@ async def stream_directives(
     *,
     turn_id: UUID,
     since: str = "",
+    moved_on: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -289,7 +290,10 @@ async def stream_directives(
     rendered nothing, so a quiet hold never walks it backwards, and a frame taken off the
     subscription but not rendered — one in flight when the op won the race — is replayed rather than
     lost, because it stands after the cursor this names. A stream that ends on its own terminal
-    names none: nothing resumes it."""
+    names none: nothing resumes it — unless `moved_on` says the conversation already holds a newer
+    live turn, as it does when a stop founds the next turn on a message the member had already
+    sent; then the terminal is followed by `since` and an immediate `poll`, so the reconnect is a
+    cursor-carrying resume onto that turn rather than a fresh join that would replay history."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
     streamed = False
@@ -387,6 +391,9 @@ async def stream_directives(
     if not terminated and not ran:
         yield directive("since", str(turn_id), rendered_cursor)
         yield directive("poll", str(POLL_SECONDS))
+    elif terminated and moved_on is not None and await moved_on():
+        yield directive("since", str(turn_id), rendered_cursor)
+        yield directive("poll", "0")
 
 
 async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, LiveFrame] | None:
@@ -517,6 +524,11 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         transcript = await ctx.read_transcript(conversation_id)
         if transcript is not None:
             history = history_directives(transcript)
+
+    async def moved_on() -> bool:
+        latest = await ctx.latest_turn(conversation_id)
+        return latest is not None and latest != turn_id and not await ctx.turn_is_terminal(latest)
+
     directives = stream_directives(
         ctx.tail(turn_id, since),
         HOLD_SECONDS,
@@ -526,6 +538,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         ops=partial(ctx.next_terminal_op, conversation_id, op_id or None) if cwd else None,
         turn_id=turn_id,
         since=since,
+        moved_on=moved_on,
     )
 
     async def bound() -> AsyncIterator[bytes]:

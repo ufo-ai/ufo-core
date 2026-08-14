@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from ufo.ambient_reply import AmbientDecision, AmbientReplyClassifier
+from ufo.ext.surface import Stopped
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.interface import ModelRequest
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
@@ -49,7 +50,7 @@ class UnreachedStopper:
     """A surface context requires a stopper; a test whose surface stops no turn gets one that
     fails loud on use."""
 
-    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> bool:
+    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped:
         raise AssertionError("this surface stops no turn")
 
 

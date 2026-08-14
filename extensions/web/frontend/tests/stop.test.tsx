@@ -88,6 +88,20 @@ test("a live turn is stopped by the header alone, and the stream's terminal ends
   expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
 });
 
+test("a stop that founds the next turn moves the tail onto it", async () => {
+  const founded = "22222222-2222-4222-8222-222222222222";
+  const { handler } = wire(reading(() => json({ stopped: true, turn_id: founded })));
+  open();
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+
+  await waitFor(() => expect(posts(handler)).toHaveLength(1));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  expect(StreamFake.last().url).toContain(founded);
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+});
+
 test("a stop in flight swallows a second press", async () => {
   let land = () => {};
   const held = new Promise<void>((resolve) => {

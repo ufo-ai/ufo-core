@@ -950,3 +950,131 @@ async def _armed_pause(task_id: UUID) -> tuple[UUID | None, bool]:
         ).one_or_none()
     assert row is not None, "the pause was deleted"
     return row.resume_turn_id, row.next_run_at.replace(tzinfo=UTC) <= datetime.now(UTC)
+
+
+async def _cancel_turn_row(turn_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="cancelled",
+                terminal=TerminalFrame(status="cancelled").model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == turn_id)
+        )
+
+
+async def test_redispatch_founds_a_run_on_the_oldest_pending_member_arrival(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    followup = await admission.admit_member(
+        workspace_id, conversation_id, "follow up", member_id, idempotency_key="send-1"
+    )
+    assert not followup.opened_run
+    assert followup.arrival_id is not None
+    await _cancel_turn_row(first.turn_id)
+
+    founded = await admission.redispatch(workspace_id, conversation_id)
+
+    assert founded is not None
+    new_turn_id, arrival_id = founded
+    assert arrival_id == followup.arrival_id
+    assert new_turn_id != first.turn_id
+    status, _ = await _turn_row(new_turn_id)
+    assert status == "queued"
+    assert str(new_turn_id) in dbos.enqueued
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.speaker_member_id).where(
+                    tables.turn.c.id == new_turn_id
+                )
+            )
+        ).one()
+    assert row.inbound == "follow up"
+    assert row.speaker_member_id == member_id
+    assert await _queued_bodies(conversation_id) == []
+    assert await admission.redispatch(workspace_id, conversation_id) is None
+
+
+async def test_redispatch_stamps_a_keyless_arrival(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await admission.admit_member(workspace_id, conversation_id, "keyless follow up", member_id)
+    await _cancel_turn_row(first.turn_id)
+
+    founded = await admission.redispatch(workspace_id, conversation_id)
+
+    assert founded is not None
+    new_turn_id, arrival_id = founded
+    async with workspace_tx() as connection:
+        key = (
+            await connection.execute(
+                sa.select(tables.turn.c.idempotency_key).where(tables.turn.c.id == new_turn_id)
+            )
+        ).scalar_one()
+    assert key == f"redispatch:{arrival_id}"
+
+
+async def test_redispatch_with_nothing_pending_is_none(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await _cancel_turn_row(first.turn_id)
+    assert await admission.redispatch(workspace_id, conversation_id) is None
+
+
+async def test_redispatch_joins_a_live_turn_without_founding(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await admission.admit_member(
+        workspace_id, conversation_id, "follow up", member_id, idempotency_key="send-1"
+    )
+
+    assert await admission.redispatch(workspace_id, conversation_id) is None
+
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["follow up"]
+
+
+async def test_redispatch_leaves_internal_arrivals_for_the_next_turn(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await admission.invoke(workspace_id, conversation_id, agent_id, "a child result")
+    await _cancel_turn_row(first.turn_id)
+
+    assert await admission.redispatch(workspace_id, conversation_id) is None
+
+    assert await _queued_bodies(conversation_id) == ["a child result"]
+
+
+async def test_redispatch_founds_on_the_oldest_and_leaves_the_rest_for_the_drain(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await admission.admit_member(
+        workspace_id, conversation_id, "first follow up", member_id, idempotency_key="send-1"
+    )
+    await admission.admit_member(
+        workspace_id, conversation_id, "second follow up", member_id, idempotency_key="send-2"
+    )
+    await _cancel_turn_row(first.turn_id)
+
+    founded = await admission.redispatch(workspace_id, conversation_id)
+
+    assert founded is not None
+    new_turn_id, _ = founded
+    async with workspace_tx() as connection:
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == new_turn_id)
+            )
+        ).scalar_one()
+    assert inbound == "first follow up"
+    assert await _queued_bodies(conversation_id) == ["second follow up"]

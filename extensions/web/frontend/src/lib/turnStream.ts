@@ -633,8 +633,10 @@ export async function answerQuestion(
 
 /** End the turn the page is tailing. Nothing settles here: the stop admits no message, and the
  *  cancelled terminal the server publishes reaches the tail already open, so the turn comes down the
- *  way every other turn does. A refusal leaves the turn running with no field on the screen to
- *  answer it, so it reports as the chat's toast. */
+ *  way every other turn does. A stop that founds the next turn on a message the member had already
+ *  sent names it in the answer, and the page moves its tail there — the waiting bubble settles off
+ *  that turn's own frames. A refusal leaves the turn running with no field on the screen to answer
+ *  it, so it reports as the chat's toast. */
 export async function stopTurn(target: ChatTarget, turnId: string): Promise<void> {
   let description: string;
   try {
@@ -643,7 +645,11 @@ export async function stopTurn(target: ChatTarget, turnId: string): Promise<void
       credentials: "same-origin",
       headers: { "x-ufo-stop-turn": turnId },
     });
-    if (res.ok) return;
+    if (res.ok) {
+      const outcome = (await res.json()) as { stopped: boolean; turn_id?: string };
+      if (outcome.turn_id) streamTurn(target.key, outcome.turn_id, false);
+      return;
+    }
     description = "Error " + res.status + " — try again.";
   } catch {
     description = "Network error — try again.";

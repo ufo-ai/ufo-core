@@ -251,6 +251,17 @@ def member_message_text(inbound: str) -> str:
 
 
 @dataclass(frozen=True)
+class Stopped:
+    """What one member stop did: whether this call ended the turn, and the turn the stop founded
+    on a follow-up the member had already sent — None when nothing was pending. A surface holding
+    the member's screen switches its tail to the founded turn; the one that stays on the stopped
+    turn shows an idle chat while the follow-up runs unseen."""
+
+    ended: bool
+    founded_turn_id: UUID | None
+
+
+@dataclass(frozen=True)
 class Admitted:
     """What one member admission did: the turn the message belongs to, and whether this admission is
     the one that put that turn's current run on the queue. Founding a turn, taking over a queued
@@ -302,11 +313,11 @@ class TurnTailer(Protocol):
 class TurnStopper(Protocol):
     """End a running turn a member asked to stop — the member's write-half counterpart to
     `TurnTailer`. The concrete stopper cancels the turn's durable workflow, commits its cancelled
-    terminal, and publishes that terminal so live tails end immediately; descendants are the
-    cancel reconciler's. Refuses a turn that is not the named conversation's; returns True iff
-    this call ended the turn."""
+    terminal, publishes that terminal so live tails end immediately, and founds the next turn on a
+    follow-up the member had already sent; descendants are the cancel reconciler's. Refuses a turn
+    that is not the named conversation's."""
 
-    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> bool: ...
+    async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> "Stopped": ...
 
 
 TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
@@ -1627,10 +1638,12 @@ class SurfaceContext:
             ).one_or_none()
         return None if row is None else row.member_id
 
-    async def stop_turn(self, conversation_id: UUID, turn_id: UUID) -> bool:
+    async def stop_turn(self, conversation_id: UUID, turn_id: UUID) -> Stopped:
         """End a running turn of a conversation this surface already authorized for the acting
         member — the surface's identity assertion is the gate, exactly as it is for `admit` and
-        `tail`. Idempotent: True iff this call ended the turn, False for one already terminal."""
+        `tail`. Idempotent: `ended` iff this call ended the turn, False for one already terminal.
+        `founded_turn_id` names the run the stop opened on a follow-up the member had already
+        sent, so the surface can move the member's screen onto it."""
         return await self._stopper.stop(self.workspace_id, conversation_id, turn_id)
 
     async def turn_is_terminal(self, turn_id: UUID) -> bool:
