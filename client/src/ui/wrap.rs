@@ -6,6 +6,28 @@ pub fn width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// Text as painted units: an OSC escape is one zero-width unit that never splits; every other
+/// char takes its display width, minimum one column.
+pub fn units(text: &str) -> Vec<(&str, usize)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        if rest.starts_with("\x1b]") {
+            let bel = rest.find('\x07').map(|end| end + 1);
+            let st = rest.find("\x1b\\").map(|end| end + 2);
+            let end = bel.into_iter().chain(st).min().unwrap_or(rest.len());
+            out.push((&rest[..end], 0));
+            at += end;
+            continue;
+        }
+        let end = rest.chars().next().expect("rest is non-empty").len_utf8();
+        out.push((&rest[..end], width(&rest[..end]).max(1)));
+        at += end;
+    }
+    out
+}
+
 /// The longest prefix of `text` that fits `max` display columns.
 pub fn clip(text: &str, max: usize) -> &str {
     let mut used = 0;
@@ -99,6 +121,31 @@ pub fn cursor_pos(text: &str, rows: &[(usize, usize)], cursor: usize) -> (usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn units_hold_an_osc_escape_as_one_zero_width_unit() {
+        let text = "a\x1b]8;;https://u.fo\x07b\x1b]8;;\x07c";
+        assert_eq!(
+            units(text),
+            vec![
+                ("a", 1),
+                ("\x1b]8;;https://u.fo\x07", 0),
+                ("b", 1),
+                ("\x1b]8;;\x07", 0),
+                ("c", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn units_take_an_st_terminator_and_an_unterminated_tail() {
+        assert_eq!(
+            units("\x1b]8;;x\x1b\\y"),
+            vec![("\x1b]8;;x\x1b\\", 0), ("y", 1)]
+        );
+        assert_eq!(units("\x1b]8;;x"), vec![("\x1b]8;;x", 0)]);
+        assert_eq!(units("日"), vec![("日", 2)]);
+    }
 
     #[test]
     fn clip_is_char_safe() {

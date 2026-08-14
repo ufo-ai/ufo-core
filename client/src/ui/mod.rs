@@ -1032,7 +1032,8 @@ impl App {
     fn activity_line(&self, width: usize) -> Line<'static> {
         if let Some((said, at)) = self.flash.as_ref() {
             if at.elapsed().as_secs() < FLASH_SECONDS {
-                return Line::styled(format!(" {said}"), self.theme.muted);
+                let said = format!(" {said}");
+                return Line::styled(wrap::clip(&said, width).to_string(), self.theme.muted);
             }
         }
         if let Some(view) = self.running_op.as_ref() {
@@ -1228,19 +1229,22 @@ fn highlight_columns(line: Line<'static>, from: usize, to: usize) -> Line<'stati
             spans.push(Span::styled(std::mem::take(text), style));
         };
         let style = base.patch(span.style);
-        for ch in span.content.chars() {
-            let step = wrap::width(&ch.to_string()).max(1);
+        for (unit, step) in wrap::units(&span.content) {
+            if step == 0 {
+                plain.push_str(unit);
+                continue;
+            }
             let inside = at >= from && at < to;
             if inside != lit {
                 flush(&mut spans, &mut plain, lit, style);
                 lit = inside;
             }
-            plain.push(ch);
+            plain.push_str(unit);
             at += step;
         }
         flush(&mut spans, &mut plain, lit, style);
     }
-    let mut width: usize = spans.iter().map(|span| wrap::width(&span.content)).sum();
+    let mut width = at;
     if width < to {
         let pad_from = width.max(from);
         if to > pad_from {
@@ -1324,4 +1328,73 @@ pub fn decode_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Char(ch) if !ctrl && !alt => Key::Char(ch),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINKED: Caps = Caps {
+        hyperlinks: true,
+        osc52: false,
+        images: ImageProtocol::None,
+        notifications: false,
+    };
+
+    fn shared_line() -> Line<'static> {
+        let said = osc::hyperlink(LINKED, "https://ufo.test/artifacts/abc?exp=1&sig=2", "name");
+        Line::styled(format!("shared {said} (12 bytes)"), Style::new())
+    }
+
+    fn visible(text: &str) -> String {
+        wrap::units(text)
+            .into_iter()
+            .filter(|(_, step)| *step > 0)
+            .map(|(unit, _)| unit)
+            .collect()
+    }
+
+    #[test]
+    fn a_hyperlink_survives_highlight_whole() {
+        let lit = highlight_columns(shared_line(), 8, 9);
+        let joined: String = lit.spans.iter().map(|span| span.content.as_ref()).collect();
+        let original: String = shared_line()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(joined, original);
+        for span in &lit.spans {
+            let opens = span.content.matches('\x1b').count();
+            let closes = span.content.matches('\x07').count();
+            assert_eq!(
+                opens, closes,
+                "escape torn across spans: {:?}",
+                span.content
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_lands_on_visible_columns() {
+        let lit = highlight_columns(shared_line(), 7, 11);
+        let reversed: String = lit
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| visible(&span.content))
+            .collect();
+        assert_eq!(reversed, "name");
+    }
+
+    #[test]
+    fn highlight_pads_past_the_visible_width() {
+        let lit = highlight_columns(shared_line(), 0, 30);
+        let width: usize = lit
+            .spans
+            .iter()
+            .map(|span| wrap::width(&visible(&span.content)))
+            .sum();
+        assert_eq!(width, 30);
+    }
 }

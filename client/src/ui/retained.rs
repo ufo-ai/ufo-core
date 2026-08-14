@@ -208,10 +208,20 @@ impl Retained {
             .unwrap_or_default()
     }
 
-    /// The URL under a display column of one absolute line, scanned from the line's own text.
+    /// The URL under a display column of one absolute line: an OSC 8 link's label, or a URL
+    /// written in the line's visible text.
     pub fn link_at(&mut self, line: usize, col: usize, theme: &Theme) -> Option<String> {
-        let text = self.text_of(line, theme);
-        urls(&text)
+        self.layout(theme);
+        if line >= self.total {
+            return None;
+        }
+        let index = self.entry_at(line);
+        let place = self.places[index];
+        let at = place.from + (line - place.start);
+        let row = self.draw(index, theme).get(at)?;
+        let mut found = osc_links(row);
+        found.extend(urls(&plain_text(row)));
+        found
             .into_iter()
             .find(|(from, to, _)| col >= *from && col < *to)
             .map(|(_, _, url)| url)
@@ -362,11 +372,36 @@ fn is_blank(line: &Line) -> bool {
     line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
+/// The visible text of a rendered line: escapes carried in span text take no columns and drop.
 fn plain_text(line: &Line) -> String {
     line.spans
         .iter()
-        .map(|span| span.content.as_ref())
+        .flat_map(|span| wrap::units(&span.content))
+        .filter(|(_, step)| *step > 0)
+        .map(|(unit, _)| unit)
         .collect()
+}
+
+/// Every OSC 8 link in one line as `(first column, column past the end, url)`, the columns those
+/// of its visible label.
+fn osc_links(line: &Line) -> Vec<(usize, usize, String)> {
+    let mut found = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    let mut col = 0;
+    for span in &line.spans {
+        for (unit, step) in wrap::units(&span.content) {
+            if let Some(rest) = unit.strip_prefix("\x1b]8;;") {
+                let url = rest.trim_end_matches('\x07').trim_end_matches("\x1b\\");
+                match (url.is_empty(), open.take()) {
+                    (true, Some((from, url))) if col > from => found.push((from, col, url)),
+                    (true, _) => {}
+                    (false, _) => open = Some((col, url.to_string())),
+                }
+            }
+            col += step;
+        }
+    }
+    found
 }
 
 /// Every URL in one line's text as `(first column, column past the end, url)`. A token runs to the
@@ -410,6 +445,7 @@ fn urls(text: &str) -> Vec<(usize, usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::osc::{self, Caps, ImageProtocol};
     use crate::ui::theme::{ColorMode, Scheme, Theme};
 
     const PARAGRAPH: &str = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu";
@@ -621,6 +657,37 @@ mod tests {
         assert_eq!(retained.link_at(0, 2, &theme), None);
         assert_eq!(retained.link_at(0, 24, &theme), None);
         assert_eq!(retained.link_at(9, 0, &theme), None);
+    }
+
+    fn linked_line() -> Line<'static> {
+        let caps = Caps {
+            hyperlinks: true,
+            osc52: false,
+            images: ImageProtocol::None,
+            notifications: false,
+        };
+        let said = osc::hyperlink(caps, "https://ufo.test/artifacts/abc?exp=1&sig=2", "name");
+        Line::raw(format!("shared {said} (12 bytes)"))
+    }
+
+    #[test]
+    fn text_of_reads_visible_text_through_a_hyperlink() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.push(Entry::Raw(vec![linked_line()]));
+        assert_eq!(retained.text_of(0, &theme), "shared name (12 bytes)");
+    }
+
+    #[test]
+    fn link_at_finds_a_hyperlink_under_its_label() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.push(Entry::Raw(vec![linked_line()]));
+        let url = "https://ufo.test/artifacts/abc?exp=1&sig=2";
+        assert_eq!(retained.link_at(0, 7, &theme).as_deref(), Some(url));
+        assert_eq!(retained.link_at(0, 10, &theme).as_deref(), Some(url));
+        assert_eq!(retained.link_at(0, 6, &theme), None);
+        assert_eq!(retained.link_at(0, 11, &theme), None);
     }
 
     #[test]
