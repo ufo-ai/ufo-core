@@ -62,7 +62,13 @@ export const BANDS = "flex flex-col gap-6xl";
  *  records to a family stays with the records, so the head of the page and the head of the table
  *  each carry the controls that answer to them. The title takes the body face rather than the
  *  display one: it stands on a line with two controls, and a serif set beside a pill reads as a
- *  masthead over the page instead of as the first item in a row. */
+ *  masthead over the page instead of as the first item in a row.
+ *
+ *  A phone has no room for all three on one line, and the title is the only part that can give —
+ *  which is the page's own name, so it must not. The band stacks below the narrow breakpoint: the
+ *  title keeps its line and the controls take the one beneath it. They wrap among themselves rather
+ *  than shrink: the search states a width it is readable at, and one squeezed below it is a box the
+ *  member cannot type into. */
 export function PageHeader({
   title,
   search,
@@ -75,14 +81,23 @@ export function PageHeader({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex h-(--size-control) shrink-0 items-center gap-sm">
+    <div
+      className={cn(
+        "flex h-(--size-control) shrink-0 items-center gap-sm",
+        "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
+      )}
+    >
       {title ? (
         <h1 className="m-0 flex-1 truncate text-title font-medium">{title}</h1>
       ) : (
-        <span className="flex-1" />
+        <span className="flex-1 max-narrow:hidden" />
       )}
-      {search}
-      {action}
+      {search || action ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-sm max-narrow:w-full">
+          {search}
+          {action}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -118,7 +133,10 @@ export function PageToolbar({ children }: { children: ReactNode }) {
  *  over it, so the list stays readable and closing the record is a press rather than a way back.
  *  Under `--breakpoint-narrow` there is no room for two columns, so it covers the pane instead.
  *
- *  It takes focus when it opens and gives it back when it closes, and Escape leaves it. A record
+ *  It takes focus when it opens and gives it back when it closes — but only if it still holds it.
+ *  A pane may host two of these, and the one displaced unmounts a commit after its replacement has
+ *  already focused itself; a panel that handed focus back unconditionally would take it out of the
+ *  panel the member just opened and drop them behind it. Escape leaves it. A record
  *  that opened where the member was not looking, and that only an unlabelled corner glyph could
  *  shut, is one a keyboard never reaches — and at narrow widths the panel covers the pane, so that
  *  member would have nothing to go back to. Escape is taken only where nothing else has claimed it:
@@ -140,9 +158,15 @@ export function RecordPanel({
   const held = useRef<HTMLElement>(null);
   useEffect(() => {
     const before = document.activeElement;
-    held.current?.focus();
+    const panel = held.current;
+    panel?.focus();
     return () => {
-      if (before instanceof HTMLElement && document.body.contains(before)) before.focus();
+      if (!(before instanceof HTMLElement) || !document.body.contains(before)) return;
+      const active = document.activeElement;
+      const claimed =
+        active instanceof HTMLElement && active !== document.body && !panel?.contains(active);
+      if (claimed) return;
+      before.focus();
     };
   }, []);
   return (

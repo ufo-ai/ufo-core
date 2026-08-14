@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { COLUMN, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
@@ -48,22 +49,23 @@ export function ChatPane({
         </button>
         <span className="font-mono text-mono text-ink-soft">{agent.model}</span>
         {slots.phase === "ready" && slots.payload.slots.length ? (
-          <div className="ml-auto flex items-center gap-sm" aria-label="Conversation slots">
+          <div
+            className="ml-auto flex items-center gap-sm self-center"
+            aria-label="Conversation slots"
+          >
             {slots.payload.slots.map((entry) => (
-              <button
+              <Button
                 key={entry.id}
-                type="button"
+                variant="option"
                 aria-pressed={slot === entry.id}
                 onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
               >
-                <span className="inline-flex items-center gap-xs">
-                  <SlotIcon icon={entry.icon} />
-                  <span>
-                    {entry.label}
-                    {entry.count ? " " + entry.count : ""}
-                  </span>
+                <SlotIcon icon={entry.icon} />
+                <span>
+                  {entry.label}
+                  {entry.count ? " " + entry.count : ""}
                 </span>
-              </button>
+              </Button>
             ))}
           </div>
         ) : null}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
-import { Facts, Group } from "@/components/ui/facts";
+import { Facts, Group, type Fact } from "@/components/ui/facts";
 import {
   BAR_CONTROL,
   Select,
@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
+import { Td, TdFact } from "@/components/ui/table";
 import { useBeside } from "@/kernel/beside";
 import type { Placement } from "@/kernel/pager";
 import { RecordPanel } from "@/kernel/pane";
@@ -25,7 +25,7 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { DataTable } from "@/kernel/table";
+import { DataTable, OPEN } from "@/kernel/table";
 import { day } from "@/lib/moments";
 import { BASE, postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
@@ -50,9 +50,25 @@ type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
 
 const PROVIDER = { label: "Provider", fact: true };
 const ACCESS = { label: "Access", fact: true };
-const CONNECTED = { label: "Connected", fact: true };
-const POOL_COLUMNS = [PROVIDER, "Account", "Owner", ACCESS, CONNECTED, "Agents", ""];
-const AGENT_COLUMNS = [PROVIDER, "Account", "Owner", ACCESS, CONNECTED, ""];
+const POOL_COLUMNS = [PROVIDER, "Account", ACCESS, "Agents"];
+const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
+const ATTACH_AGENT = "attach-agent";
+
+/** What the record standing beside the table is headed by. A member holding two accounts on one
+ *  provider tells them apart by the account, so that is the name; a connection the provider named
+ *  no account for is the provider itself. */
+function connectionName(entry: Connection): string {
+  return entry.account_label ?? entry.account_id ?? entry.provider;
+}
+
+/** What the record states about the connection it heads: who holds it, and when it was made. Both
+ *  are facts about that one connection, read by the member who opened it. */
+function connectionFacts(entry: Connection, viewer: string | null): Fact[] {
+  return [
+    { label: "Owner", value: ownerLabel(entry.owner_email, viewer) },
+    { label: "Connected", value: day(entry.connected_at) },
+  ];
+}
 
 function matches(entry: Connection | PoolConnection, query: string): boolean {
   const said = [
@@ -68,109 +84,185 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
  *  states the same records narrowed to what that agent can actually reach; both read the one
  *  grant list, so nothing here needs a second endpoint. */
 export function WorkspaceConnectors({ place }: { place: Placement }) {
-  const agents = useAgents();
-  const [targetAgent, setTargetAgent] = useState("");
   const query = place.q ?? "";
   const [reloads, setReloads] = useState(0);
   const [handoff, setHandoff] = useState<NoticeState>(QUIET);
+  const [opened, setOpened] = useState("");
   const viewer = useViewer();
   const state = usePanelRead<PoolPayload>("/connections", reloads);
   const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
+  const record =
+    state.phase === "ready"
+      ? state.payload.connections.find((entry) => entry.grant === opened)
+      : undefined;
+  if (state.phase === "ready" && opened && !record) setOpened("");
+
+  const beside = useBeside(
+    record ? (
+      <PoolRecord
+        key={record.grant}
+        entry={record}
+        viewer={viewer}
+        onDone={(notice) => {
+          setHandoff(notice);
+          setReloads((count) => count + 1);
+        }}
+        onClose={() => setOpened("")}
+      />
+    ) : null,
+    () => setOpened(""),
+  );
+
   return (
-    <Section
-      bar={
-        <Select value={targetAgent} onValueChange={setTargetAgent}>
-          <SelectTrigger aria-label="Agent" className={BAR_CONTROL}><SelectValue placeholder="Attach to agent" /></SelectTrigger>
-          <SelectContent>{agents.map((agent) => <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>)}</SelectContent>
-        </Select>
-      }
-    >
-      {handoff.text ? <Notice tone="quiet">{handoff.text}</Notice> : null}
-      <Panel state={state}>
-        {(payload) => (
-          <DataTable
-            columns={POOL_COLUMNS}
-            rows={payload.connections.filter((entry) => matches(entry, query))}
-            rowKey={(entry) => entry.provider + "-" + entry.account_id}
-            empty="No connector is connected yet."
-            note={query ? "No connected account matches this search." : undefined}
-          >
-            {(entry) => (
-              <>
-                <TdFact>{entry.provider}</TdFact>
-                <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
-                <Td>{entry.owner_email ? ownerLabel(entry.owner_email, viewer) : "—"}</Td>
-                <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
-                <TdFact>{day(entry.connected_at)}</TdFact>
-                <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
-                <TdActs>
-                  {entry.owner_email ? (
-                    <div className={ACTS}>
-                      <Button
-                        variant="row"
-                        disabled={!targetAgent}
-                        onClick={async () => {
-                          const outcome = await postIntent(targetAgent, { verb: "attach", kind: "connector_grant", name: entry.grant, spec: { provider: entry.provider, account_id: entry.account_id, shared: entry.shared } });
-                          setHandoff(outcomeNotice(outcome));
-                          setReloads((count) => count + 1);
-                        }}
-                      >Attach to agent</Button>
-                      {(entry.agents ?? [])[0] ? (
-                        <Button
-                          variant="row"
-                          onClick={async () => {
-                            const outcome = await postIntent(entry.agents[0].id, {
-                              verb: "apply",
-                              kind: "connector_grant",
-                              name: entry.grant,
-                              spec: { provider: entry.provider, account_id: entry.account_id, shared: !entry.shared },
-                            });
-                            setHandoff(outcomeNotice(outcome));
-                            setReloads((count) => count + 1);
-                          }}
-                        >
-                          {entry.shared ? "Unshare" : "Share"}
-                        </Button>
-                      ) : null}
-                      {(entry.agents ?? [])[0] ? (
-                        <ConfirmButton
-                          verb="Revoke"
-                          variant="row"
-                          onClick={async () => {
-                            let last = QUIET;
-                            for (const attached of entry.agents) {
-                              const outcome = await postIntent(attached.id, { verb: "detach", kind: "connector_grant", name: entry.grant });
-                              last = outcomeNotice(outcome);
-                              if (last.refused) break;
-                            }
-                            setHandoff(last);
-                            setReloads((count) => count + 1);
-                          }}
-                        />
-                      ) : null}
-                    </div>
-                  ) : null}
-                </TdActs>
-              </>
-            )}
-          </DataTable>
-        )}
-      </Panel>
-      {coverage.phase === "ready" ? (
-        <Group title="Coverage">
-          <Facts
-            rows={[
-              { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
-              {
-                label: "Git push",
-                value: coverage.payload.git_push ? "Connected" : "Not connected",
-              },
-              { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
-            ]}
-          />
-        </Group>
+    <>
+      <Section>
+        {handoff.text ? <Notice tone="quiet">{handoff.text}</Notice> : null}
+        <Panel state={state}>
+          {(payload) => (
+            <DataTable
+              columns={POOL_COLUMNS}
+              rows={payload.connections.filter((entry) => matches(entry, query))}
+              rowKey={(entry) => entry.provider + "-" + entry.account_id}
+              empty="No connector is connected yet."
+              note={query ? "No connected account matches this search." : undefined}
+              open={(entry) => () => setOpened(entry.grant)}
+              act={() => OPEN}
+            >
+              {(entry) => (
+                <>
+                  <TdFact>{entry.provider}</TdFact>
+                  <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
+                  <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
+                  <Td>{(entry.agents ?? []).map((agent) => agent.name).join(", ") || "—"}</Td>
+                </>
+              )}
+            </DataTable>
+          )}
+        </Panel>
+        {coverage.phase === "ready" ? (
+          <Group title="Coverage">
+            <Facts
+              rows={[
+                { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
+                {
+                  label: "Git push",
+                  value: coverage.payload.git_push ? "Connected" : "Not connected",
+                },
+                { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
+              ]}
+            />
+          </Group>
+        ) : null}
+      </Section>
+      {beside}
+    </>
+  );
+}
+
+/** One connection of the pool, opened beside it: the connection's own facts and every act on it.
+ *  The agent to attach to is picked here rather than in the bar, so the pick is this connection's
+ *  and not whichever row the member presses next. */
+function PoolRecord({
+  entry,
+  viewer,
+  onDone,
+  onClose,
+}: {
+  entry: PoolConnection;
+  viewer: string | null;
+  onDone: (notice: NoticeState) => void;
+  onClose: () => void;
+}) {
+  const agents = useAgents();
+  const [targetAgent, setTargetAgent] = useState("");
+  const attached = (entry.agents ?? [])[0];
+
+  async function act(lane: string, envelope: unknown) {
+    onDone(outcomeNotice(await postIntent(lane, envelope)));
+  }
+
+  return (
+    <RecordPanel title={connectionName(entry)} onClose={onClose}>
+      <Facts rows={connectionFacts(entry, viewer)} />
+      {entry.owner_email ? (
+        <>
+          <Field label="Agent" htmlFor={ATTACH_AGENT}>
+            <Select value={targetAgent} onValueChange={setTargetAgent}>
+              <SelectTrigger id={ATTACH_AGENT}>
+                <SelectValue placeholder="Attach to agent" />
+              </SelectTrigger>
+              <SelectContent>
+                {agents.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className="flex flex-wrap items-center gap-sm">
+            <Button
+              variant="send"
+              size="bar"
+              disabled={!targetAgent}
+              onClick={() =>
+                act(targetAgent, {
+                  verb: "attach",
+                  kind: "connector_grant",
+                  name: entry.grant,
+                  spec: {
+                    provider: entry.provider,
+                    account_id: entry.account_id,
+                    shared: entry.shared,
+                  },
+                })
+              }
+            >
+              Attach to agent
+            </Button>
+            {attached ? (
+              <Button
+                variant="row"
+                onClick={() =>
+                  act(attached.id, {
+                    verb: "apply",
+                    kind: "connector_grant",
+                    name: entry.grant,
+                    spec: {
+                      provider: entry.provider,
+                      account_id: entry.account_id,
+                      shared: !entry.shared,
+                    },
+                  })
+                }
+              >
+                {entry.shared ? "Unshare" : "Share"}
+              </Button>
+            ) : null}
+            {attached ? (
+              <ConfirmButton
+                verb="Revoke"
+                variant="row"
+                onClick={async () => {
+                  let last = QUIET;
+                  for (const holder of entry.agents) {
+                    last = outcomeNotice(
+                      await postIntent(holder.id, {
+                        verb: "detach",
+                        kind: "connector_grant",
+                        name: entry.grant,
+                      }),
+                    );
+                    if (last.refused) break;
+                  }
+                  onDone(last);
+                }}
+              />
+            ) : null}
+          </div>
+        </>
       ) : null}
-    </Section>
+    </RecordPanel>
   );
 }
 
@@ -207,6 +299,12 @@ function ConnectorList({
     pool.phase === "ready"
       ? pool.payload.connections.find((entry) => entry.grant === attachName)
       : undefined;
+  const [opened, setOpened] = useState("");
+  const record =
+    state.phase === "ready"
+      ? state.payload.connections.find((entry) => entry.grant === opened)
+      : undefined;
+  if (state.phase === "ready" && opened && !record) setOpened("");
   const source = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -311,6 +409,44 @@ function ConnectorList({
     close,
   );
 
+  const shown = useBeside(
+    record ? (
+      <RecordPanel key={record.grant} title={connectionName(record)} onClose={() => setOpened("")}>
+        <Facts rows={connectionFacts(record, viewer)} />
+        {record.own ? (
+          <div className="flex flex-wrap items-center gap-sm">
+            <Button
+              variant="send"
+              size="bar"
+              onClick={() =>
+                act({
+                  verb: "apply",
+                  kind: "connector_grant",
+                  name: record.grant,
+                  spec: {
+                    provider: record.provider,
+                    account_id: record.account_id,
+                    shared: !record.shared,
+                  },
+                })
+              }
+            >
+              {record.shared ? "Make private" : "Share with agent"}
+            </Button>
+            <ConfirmButton
+              verb="Revoke"
+              variant="row"
+              onClick={() =>
+                act({ verb: "detach", kind: "connector_grant", name: record.grant })
+              }
+            />
+          </div>
+        ) : null}
+      </RecordPanel>
+    ) : null,
+    () => setOpened(""),
+  );
+
   return (
     <>
       {consentUrl || handoff.text ? (
@@ -385,48 +521,14 @@ function ConnectorList({
                   : "No account is connected to " + agent.name + " yet."
               }
               note={query ? "No connected account matches this search." : undefined}
+              open={(entry) => () => setOpened(entry.grant)}
+              act={() => OPEN}
             >
               {(entry) => (
                 <>
                   <TdFact>{entry.provider}</TdFact>
                   <Td>{entry.account_label ?? entry.account_id ?? "—"}</Td>
-                  <Td>{ownerLabel(entry.owner_email, viewer)}</Td>
                   <TdFact>{entry.shared ? "Workspace" : "Only you"}</TdFact>
-                  <TdFact>{day(entry.connected_at)}</TdFact>
-                  <TdActs>
-                    {entry.own ? (
-                      <div className={ACTS}>
-                        <Button
-                          variant="row"
-                          onClick={() =>
-                            act({
-                              verb: "apply",
-                              kind: "connector_grant",
-                              name: entry.grant,
-                              spec: {
-                                provider: entry.provider,
-                                account_id: entry.account_id,
-                                shared: !entry.shared,
-                              },
-                            })
-                          }
-                        >
-                          {entry.shared ? "Make private" : "Share with agent"}
-                        </Button>
-                        <ConfirmButton
-                          verb="Revoke"
-                          variant="row"
-                          onClick={() =>
-                            act({
-                              verb: "detach",
-                              kind: "connector_grant",
-                              name: entry.grant,
-                            })
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </TdActs>
                 </>
               )}
             </DataTable>
@@ -434,6 +536,7 @@ function ConnectorList({
         </Panel>
       </Section>
       {beside}
+      {shown}
     </>
   );
 }

@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
@@ -28,6 +25,7 @@ import {
   fact,
   json,
   objectIndex,
+  pageFits,
   owned,
   pick,
   openRow,
@@ -194,27 +192,6 @@ test("an index carries the name, the kind's own prose and the one field it leads
  *  or every member scrolls to reach `Open`. It measures the pane a list has to itself; a record
  *  opened beside one takes its own column out of that width, and a list read under one is narrower
  *  than any floor. */
-const DESKTOP = 1280;
-
-const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
-
-function size(name: string): number {
-  const declared = new RegExp("^\\s*" + name + ":\\s*(\\d+)px;", "m").exec(TOKENS);
-  if (!declared) throw new Error("theme.css declares no " + name);
-  return Number(declared[1]);
-}
-
-function pageFits(minWidth: string): boolean {
-  const tracks = minWidth
-    .replace(/^calc\(|\)$/g, "")
-    .split("+")
-    .reduce((total, term) => {
-      const [count, name] = term.split("*").map((part) => part.trim());
-      return total + Number(count) * size(name.replace(/^var\(|\)$/g, ""));
-    }, 0);
-  return size("--container-sidebar") + 2 * size("--size-page-gutter") + tracks <= DESKTOP;
-}
-
 test("an index fits the desktop it is read on, so the row's act never scrolls off", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();

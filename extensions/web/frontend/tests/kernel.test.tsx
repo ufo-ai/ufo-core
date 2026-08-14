@@ -11,6 +11,8 @@ import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/ke
 import { DataTable } from "@/kernel/table";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Search } from "@/components/ui/field";
+import { PageHeader } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
 
 import { json, opened } from "./harness";
@@ -140,6 +142,38 @@ test("the table falls to its own empty words when it holds no rows", async () =>
   );
   expect(screen.getByText("No rows here.")).toBeTruthy();
   expect(screen.queryByRole("table")).toBeNull();
+});
+
+/** A phone has no room for a title beside a search beside an act: the search states its own width
+ *  and the act sizes to its words, so a title sharing that line is squeezed to nothing — the page's
+ *  own name, invisible. It keeps a line of its own instead. */
+test("the page's header stacks below the narrow breakpoint, so the title keeps its line", () => {
+  render(<PageHeader title="Automations" search={<Search label="Search automations" />} action={<button type="button">New</button>} />);
+
+  const heading = screen.getByRole("heading", { level: 1, name: "Automations" });
+  const band = heading.parentElement!;
+  expect(band.className).toContain("max-narrow:flex-col");
+  expect(band.className).toContain("max-narrow:items-stretch");
+  expect(band.className).toContain("max-narrow:h-auto");
+
+  const controls = screen.getByRole("searchbox").closest("form")!.parentElement!;
+  expect(controls.className).toContain("max-narrow:w-full");
+  expect(controls.contains(screen.getByRole("button", { name: "New" }))).toBe(true);
+  expect(controls.contains(heading)).toBe(false);
+});
+
+/** The controls wrap among themselves rather than shrink. `flex-1` on the search would let a
+ *  crowded row take it to its padding — a 2px box the member cannot type into — because the flex
+ *  shorthand resets the basis it would have shrunk from. */
+test("the header's controls wrap rather than squeeze the search", () => {
+  render(<PageHeader title="Automations" search={<Search label="Search automations" />} action={<button type="button">New</button>} />);
+
+  const controls = screen.getByRole("searchbox").closest("form")!.parentElement!;
+  expect(controls.className).toContain("flex-wrap");
+  expect(screen.getByRole("searchbox").closest("form")!.className).toContain(
+    "w-(--container-search)",
+  );
+  expect(screen.getByRole("searchbox").closest("form")!.className).not.toContain("flex-1");
 });
 
 test("the table states a floor covering every track it declares", async () => {

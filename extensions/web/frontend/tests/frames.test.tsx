@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { buttonVariants } from "@/components/ui/button";
 import { tokens } from "@/lib/turnStream";
 
 import {
@@ -283,6 +284,38 @@ test("a question with more options than fit offers none of them as buttons", asy
   await asked({ question: "Which one?", options: many });
   expect(await screen.findByText("Which one?")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "option-0" })).toBeNull();
+});
+
+test("the slot strip draws the option every pressed control in the portal is drawn as", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
+      json({ type: "changes", changes: [], truncated: false }),
+    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    "/transcript": () => json({ messages: [] }),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "changes", label: "Changes", icon: "diff", kind: "changes", count: 2 },
+          { id: "sources", label: "Sources", icon: "link", kind: "sources", count: 1 },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const changes = await screen.findByRole("button", { name: "Changes 2" });
+  expect(changes.className).toContain(buttonVariants({ variant: "option" }));
+  expect(changes.className).toContain("aria-pressed:bg-ink");
+  expect(changes.className).toContain("aria-pressed:text-surface");
+  expect(changes.className).toContain("aria-pressed:border-ink");
+  expect(changes.className).toContain("hover:bg-fill");
+  expect(changes.getAttribute("aria-pressed")).toBe("false");
+
+  await userEvent.click(changes);
+  expect(changes.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "Sources 1" }).getAttribute("aria-pressed")).toBe(
+    "false",
+  );
 });
 
 test("a send whose answer is not json ends the wait instead of disabling the composer", async () => {

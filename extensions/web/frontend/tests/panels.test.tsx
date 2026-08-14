@@ -421,6 +421,7 @@ test("a private grant is shared with the agent from the connectors tab", async (
   location.hash = "#/agents/" + AGENT_ID + "/connectors";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
   expect(await screen.findByText("Only you")).toBeTruthy();
+  await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
@@ -1141,6 +1142,7 @@ test("a refusal after a consent link supersedes the link with the toned message"
     await screen.findByRole("link", { name: "Open the provider consent page" }),
   ).toBeTruthy();
 
+  await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await refusedNotice("The provider refuses it.");
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
@@ -1219,6 +1221,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
   StreamFake.last().emit("connect", { url: "https://consent.example/go" });
   await screen.findByRole("link", { name: "Open the provider consent page" });
 
+  await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
   await waitFor(() => expect(calls).toBe(2));
   expect(screen.getByRole("link", { name: "Open the provider consent page" })).toBeTruthy();

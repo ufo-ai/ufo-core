@@ -185,3 +185,26 @@ test("closing a form hands focus back to the act, not to the record beneath it",
   expect(screen.getByRole("complementary", { name: "assistant" })).toBeTruthy();
   expect(mounts).toEqual(["mount:assistant"]);
 });
+
+/** A pane may host two of these. The displaced one unmounts a commit after its replacement has
+ *  already taken focus, so a panel that hands focus back unconditionally takes it out of the panel
+ *  the member just opened and drops them behind it. */
+test("a displaced record leaves focus in the panel that displaced it", async () => {
+  render(
+    <Pane>
+      <Maker verb="New thing" />
+      <Maker verb="Other thing" />
+    </Pane>,
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "New thing" }));
+  expect(
+    screen.getByRole("complementary", { name: "New thing" }).contains(document.activeElement),
+  ).toBe(true);
+
+  await userEvent.click(screen.getByRole("button", { name: "Other thing" }));
+
+  const second = screen.getByRole("complementary", { name: "Other thing" });
+  expect(screen.queryByRole("complementary", { name: "New thing" })).toBeNull();
+  expect(second.contains(document.activeElement)).toBe(true);
+});

@@ -151,6 +151,20 @@ test("a credential family stands further from the family above it than from its 
   expect(families[0].className).toContain("gap-6xl");
 });
 
+/** A row's acts are a cluster, and the cluster holds one line. Three screens still draw one on a
+ *  row — a set that wraps takes the row past the table's own pitch, which is the fault the
+ *  connector and agent tables were carrying. */
+test("a row's acts stand on one line, so the row keeps its pitch", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
+
+  const replace = await screen.findByRole("button", { name: "Replace" });
+  const cluster = replace.parentElement!;
+  expect(cluster.className).toContain("flex-nowrap");
+  expect(cluster.contains(screen.getByRole("button", { name: "Clear" }))).toBe(true);
+});
+
 test("a stored credential states the slot it stored and re-reads the listing", async () => {
   location.hash = "#/workspace/credentials";
   let reads = 0;

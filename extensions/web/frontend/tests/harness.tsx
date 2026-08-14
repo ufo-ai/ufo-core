@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
@@ -268,4 +271,42 @@ export async function viewCard(name: string): Promise<HTMLElement> {
     .find((entry) => entry);
   if (!card) throw new Error("no card named " + name);
   return within(card).getByRole("button", { name: "View" });
+}
+
+/** The width the portal is read at. The one number here that is not a token, because no token
+ *  states what a desktop is. */
+const DESKTOP = 1280;
+
+const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+
+function token(name: string): number {
+  const declared = new RegExp("^\\s*" + name + ":\\s*(\\d+)px;", "m").exec(TOKENS);
+  if (!declared) throw new Error("theme.css declares no " + name);
+  return Number(declared[1]);
+}
+
+/** `Page` reserves the scrollbar with `scrollbar-gutter-stable`, so the column a table is read in
+ *  is always this much narrower than the gutters alone imply. Blink's thin scrollbar, measured in
+ *  the running portal: a table summing to the gutter budget exactly still scrolls without it. */
+const SCROLLBAR_GUTTER = 11;
+
+/** Whether a table's declared floor clears the column a desktop leaves it. The tracks are fixed
+ *  pixels, so a table whose tracks outrun its page holds its width and the column scrolls sideways —
+ *  and what falls off the right is the act the row is pressed by. Every width but `DESKTOP` is read
+ *  from `theme.css`, so a token change moves the assertion with it. */
+export function pageFits(minWidth: string): boolean {
+  const tracks = minWidth
+    .replace(/^calc\(|\)$/g, "")
+    .split("+")
+    .reduce((total, term) => {
+      const [count, name] = term.split("*").map((part) => part.trim());
+      return total + Number(count) * token(name.replace(/^var\(|\)$/g, ""));
+    }, 0);
+  const shell = token("--container-sidebar") + 2 * token("--size-page-gutter") + SCROLLBAR_GUTTER;
+  return shell + tracks <= DESKTOP;
+}
+
+/** Every table on a screen, by the floor it declares. */
+export function tableFloors(): string[] {
+  return [...document.querySelectorAll("table")].map((table) => table.style.minWidth);
 }

@@ -6,6 +6,10 @@ import { rowControl } from "@/kernel/row";
 import { PanelBlank } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 
+/** What a row's act says where the row opens a record of its own. One word, in one place: three
+ *  screens draw this act and a member reads the same verb on each. */
+export const OPEN = "Open";
+
 /** A column head. A plain string names a column carrying prose, which the read cannot order by and
  *  which shares the width left over. The object form carries the key the read orders on — which is
  *  what makes the head pressable — and `fact` marks a column holding one short value, which states

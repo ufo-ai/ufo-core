@@ -11,7 +11,11 @@ import {
   MEMBER,
   SECOND,
   SECOND_ID,
+  fact,
   json,
+  pageFits,
+  pick,
+  pressRow,
   useStreamFake,
   wire,
 } from "./harness";
@@ -82,16 +86,28 @@ test("the pool narrows on the header's search, which names what it searches", as
   expect(location.hash).toContain("q=github");
 });
 
-test("a row's acts neither wrap nor clip, so the row keeps the table's pitch", async () => {
+test("the pool fits the desktop it is read on, so the row's act never scrolls off", async () => {
   location.hash = "#/workspace/connectors";
   connectors();
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const act = await screen.findByRole("button", { name: "Attach to agent" });
-  const cell = act.closest("td");
-  expect(cell?.className).not.toContain("truncate");
-  expect(cell?.className).toContain("border-edge");
-  expect(act.parentElement?.className).toContain("flex-nowrap");
+  const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
+  expect(pageFits(across)).toBe(true);
+  expect(across).toBe(
+    "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
+});
+
+test("the agent's own edges fit that same desktop", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  connectors();
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const across = (await screen.findByText("github")).closest("table")!.style.minWidth;
+  expect(pageFits(across)).toBe(true);
+  expect(across).toBe(
+    "calc(2 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
 });
 
 test("the agent tab reads attached connections", async () => {
@@ -101,6 +117,62 @@ test("the agent tab reads attached connections", async () => {
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/connections"))).toBe(true);
+});
+
+test("the pool's record states what the row gave up, and attaches to the agent named on it", async () => {
+  const posted: string[] = [];
+  location.hash = "#/workspace/connectors";
+  wire({
+    "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/intents": (url) => {
+      posted.push(url);
+      return json({ applied: true, message: "Attached." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await pressRow("github");
+
+  expect(fact("Owner")).toBe("You");
+  expect(fact("Connected")).toBe("Jul 1 2026");
+
+  await pick("Agent", "second");
+  await userEvent.click(screen.getByRole("button", { name: "Attach to agent" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
+});
+
+test("the pool's record shares and revokes into the lane of the agent already holding the grant", async () => {
+  const posted: string[] = [];
+  location.hash = "#/workspace/connectors";
+  wire({
+    "/connections": () =>
+      json({
+        connections: [{ ...grant("github", true, "g1"), agents: [{ id: SECOND_ID, name: "second" }] }],
+      }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/intents": (url) => {
+      posted.push(url);
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await pressRow("github");
+  await userEvent.click(screen.getByRole("button", { name: "Unshare" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
+
+  await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
+
+  await waitFor(() => expect(posted.length).toBe(2));
+  expect(posted[1]).toContain("/agents/" + SECOND_ID + "/intents");
 });
 
 test("a grant change is admitted into the lane of the agent whose tab holds it", async () => {
@@ -116,10 +188,65 @@ test("a grant change is admitted into the lane of the agent whose tab holds it",
   });
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Share with agent" }));
+  await pressRow("github");
+
+  expect(fact("Owner")).toBe("You");
+  expect(fact("Connected")).toBe("Jul 1 2026");
+
+  await userEvent.click(screen.getByRole("button", { name: "Share with agent" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toContain("/agents/" + AGENT_ID + "/intents");
+});
+
+test("the agent's record revokes the grant it stands on", async () => {
+  const posted: string[] = [];
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  wire({
+    "/connections": () => json({ connections: [grant("github", true, "g1")] }),
+    "/intents": (url) => {
+      posted.push(url);
+      return json({ applied: true, message: "Revoked." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await pressRow("github");
+  await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toContain("/agents/" + AGENT_ID + "/intents");
+});
+
+test("a revoked connection stays shut when the grant comes back on a later read", async () => {
+  let served = 0;
+  location.hash = "#/agents/" + AGENT_ID + "/connectors";
+  wire({
+    "/connections": (url) => {
+      if (!url.includes("/agents/"))
+        return json({ connections: [{ ...grant("github", true, "g1"), agents: [] }] });
+      served += 1;
+      return json({ connections: served === 2 ? [] : [grant("github", true, "g1")] });
+    },
+    "/intents": () => json({ applied: true, message: "Applied." }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  await pressRow("github");
+  expect(await screen.findByRole("complementary", { name: "acct" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
+  await waitFor(() => expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull());
+
+  await pick("Connection", "acct");
+  await userEvent.click(screen.getByRole("button", { name: "Attach" }));
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(screen.queryByRole("complementary", { name: "acct" })).toBeNull();
 });
 
 test("an empty pool states that no connector is connected yet", async () => {

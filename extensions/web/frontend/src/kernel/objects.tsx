@@ -25,7 +25,7 @@ import {
   usePanelRead,
   type NoticeState,
 } from "@/kernel/panel";
-import { DataTable, type Column } from "@/kernel/table";
+import { DataTable, OPEN, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
@@ -142,7 +142,6 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null, now:
 
 export const OWNER_FIELD = "owner_email";
 const OWNER_HEADING = "Created By";
-const OPEN = "Open";
 
 /** Who made a row, in the member's words — the wire's `owner_email` never renders raw. A row
  *  carrying no creator is the workspace's own. */
