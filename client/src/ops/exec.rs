@@ -12,7 +12,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
-const CA_CERT_FILE: &str = "egress-ca.pem";
+const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
+const PEM_LINE_BYTES: usize = 64;
 const CA_CERT_CONSUMERS: [&str; 4] = [
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -56,11 +57,11 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         command.env(name, value);
     }
     if let Some(cert) = parsed.env.get(CA_CERT_ENV) {
-        let pem = workdir.join(CA_CERT_FILE);
-        fs::write(&pem, cert)
-            .map_err(|error| format!("could not write {}: {error}", pem.display()))?;
+        let bundle = workdir.join(TRUST_BUNDLE_FILE);
+        fs::write(&bundle, trust_bundle(cert)?)
+            .map_err(|error| format!("could not write {}: {error}", bundle.display()))?;
         for name in CA_CERT_CONSUMERS {
-            command.env(name, &pem);
+            command.env(name, &bundle);
         }
     }
     #[cfg(unix)]
@@ -83,6 +84,37 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
     let out = fs::read(&out_path).unwrap_or_default();
     let err = fs::read(&err_path).unwrap_or_default();
     Ok(reply(code, &out, &err))
+}
+
+/// What a command verifies TLS with: this machine's own trust store, then the deploy's egress CA.
+/// Both halves are load-bearing — the CA signs the leaves the proxy mints for the hosts it
+/// terminates, and the roots cover every host it tunnels untouched, whose real certificate the
+/// command sees. The container carriers merge the same two by installing the CA into the system
+/// store; nothing here touches the member's, so the merged copy lives in the op's workdir and the
+/// environment points at it.
+fn trust_bundle(ca_cert: &str) -> Result<String, String> {
+    let roots = rustls_native_certs::load_native_certs()
+        .map_err(|error| format!("could not read this machine's trust store: {error}"))?;
+    if roots.is_empty() {
+        return Err("this machine's trust store holds no certificates".into());
+    }
+    let mut bundle: String = roots.iter().map(|root| pem(root.as_ref())).collect();
+    bundle.push_str(ca_cert);
+    if !bundle.ends_with('\n') {
+        bundle.push('\n');
+    }
+    Ok(bundle)
+}
+
+fn pem(certificate: &[u8]) -> String {
+    let encoded = STANDARD.encode(certificate);
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(PEM_LINE_BYTES) {
+        out.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 fn sink(path: &Path) -> Result<File, String> {
@@ -243,17 +275,44 @@ mod tests {
         assert_eq!(decoded(&parsed(&reply), "stdout_b64"), expected.as_bytes());
     }
 
+    #[test]
+    fn trust_bundle_carries_this_machine_and_the_egress_ca() {
+        let bundle =
+            trust_bundle("-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n")
+                .unwrap();
+        assert!(bundle.matches("BEGIN CERTIFICATE").count() > 1);
+        assert!(bundle.ends_with("EGRESSCA\n-----END CERTIFICATE-----\n"));
+    }
+
+    #[test]
+    fn every_root_encodes_as_a_readable_certificate() {
+        let roots = rustls_native_certs::load_native_certs().unwrap();
+        for root in &roots {
+            let encoded = pem(root.as_ref());
+            let body: String = encoded
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            assert!(encoded
+                .lines()
+                .all(|line| line.len() <= PEM_LINE_BYTES || line.starts_with("-----")));
+            assert_eq!(STANDARD.decode(body).unwrap(), root.as_ref());
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn materializes_the_ca_cert() {
+    fn materializes_the_trust_bundle() {
         let dir = scratch("ca");
         let reply = run(
-            r#"{"argv":["/bin/sh","-c","cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"UFO_EGRESS_CA_CERT":"PEMDATA"}}"#,
+            r#"{"argv":["/bin/sh","-c","cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,
             Path::new("/tmp"),
             30,
         )
         .unwrap();
-        assert_eq!(decoded(&parsed(&reply), "stdout_b64"), b"PEMDATAunset");
+        let stdout = String::from_utf8(decoded(&parsed(&reply), "stdout_b64")).unwrap();
+        assert!(stdout.matches("BEGIN CERTIFICATE").count() > 1);
+        assert!(stdout.ends_with("EGRESSCA\n-----END CERTIFICATE-----\nunset"));
     }
 }

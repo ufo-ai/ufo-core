@@ -1168,6 +1168,7 @@ dependencies = [
  "libc",
  "pulldown-cmark",
  "ratatui",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "similar",

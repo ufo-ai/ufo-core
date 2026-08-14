@@ -30,12 +30,12 @@ output "blob_bucket" {
 }
 
 output "sandbox_proxy_certificate_arn" {
-  description = "ACM certificate for the public sandbox-proxy NLB TLS listener."
-  value       = aws_acm_certificate.sandbox_proxy.arn
+  description = "Validated public ACM certificate for the sandbox-proxy NLB TLS listener."
+  value       = aws_acm_certificate_validation.sandbox_proxy_public.certificate_arn
 }
 
 output "egress_ca_cert" {
-  description = "Trust anchor installed in off-cluster sandboxes and used by the proxy TLS gate."
+  description = "Trust anchor for the leaves the proxy mints inside the tunnel, installed in off-cluster sandboxes and used by the proxy TLS gate."
   value       = tls_self_signed_cert.egress_ca.cert_pem
 }
 

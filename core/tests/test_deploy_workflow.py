@@ -1637,12 +1637,18 @@ def test_only_testing_owns_account_global_resources() -> None:
     )
 
     prod = environment_sources[ROOT / "infra" / "envs" / "prod"]
-    assert not re.search(r'^\s*provider\s+"cloudflare"\s*{', prod, re.MULTILINE)
-    assert not re.search(r"^\s*cloudflare\s*=\s*{", prod, re.MULTILINE)
+    assert not re.search(r'^resource\s+"cloudflare_', prod, re.MULTILINE)
+    assert not re.search(r'^data\s+"cloudflare_', prod, re.MULTILINE)
     assert (
         "registry.terraform.io/cloudflare/cloudflare"
-        not in (ROOT / "infra" / "envs" / "prod" / ".terraform.lock.hcl").read_text()
+        in (ROOT / "infra" / "envs" / "prod" / ".terraform.lock.hcl").read_text()
     )
+    platform_dns = re.findall(
+        r'^resource\s+"cloudflare_dns_record"\s+"([^"]+)"',
+        _code((ROOT / "infra" / "modules" / "platform" / "secrets.tf").read_text()),
+        re.MULTILINE,
+    )
+    assert platform_dns == ["sandbox_proxy_validation"]
 
 
 def test_production_deploy_role_trusts_only_the_main_production_workflow() -> None:

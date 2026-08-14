@@ -585,8 +585,11 @@ class TerminalCarrier:
     ) -> ExecResult:
         """One command on the member's machine, in the bound directory, under their own user. The
         `/workspace` paths tools pass are rewritten here — path logic never reaches the client.
-        `EGRESS_CA_CERT_ENV` rides the env whole; the client materializes it to a file and points
-        each CA variable at it, since only the client knows a path on its own disk."""
+        `EGRESS_CA_CERT_ENV` rides the env whole; the client merges it with the machine's own trust
+        store into one bundle and points each CA variable there, since only the client knows both a
+        path on its own disk and the roots the member already trusts — the container carriers reach
+        the same bundle by installing the CA into the system store, which a member's machine is
+        never asked to accept."""
         root = _root(handle)
         return await self._exec(
             handle, tuple(arg.replace(WORKSPACE_DIR, root) for arg in argv), timeout_s

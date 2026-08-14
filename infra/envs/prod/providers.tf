@@ -49,3 +49,7 @@ provider "kubectl" {
     args        = ["eks", "get-token", "--cluster-name", module.platform.cluster_name, "--region", var.region]
   }
 }
+
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}

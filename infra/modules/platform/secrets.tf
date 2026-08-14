@@ -124,6 +124,48 @@ resource "aws_acm_certificate" "sandbox_proxy" {
   }
 }
 
+# The proxy's front door is a public endpoint, so its NLB listener carries a publicly trusted
+# certificate and a sandbox reaches the proxy on the trust store it already has; the egress CA above
+# is left to the leaves the proxy mints inside the tunnel. The member's terminal is the carrier that
+# makes the split load-bearing — it runs commands on a machine whose trust store nothing may touch,
+# and curl reads no environment variable for the certificate of an HTTPS proxy. The validation
+# record names this environment's own host, so each environment owns its own; the zone's shared
+# singletons stay with testing.
+data "cloudflare_zone" "dns" {
+  filter = { name = var.dns_zone_name }
+}
+
+resource "aws_acm_certificate" "sandbox_proxy_public" {
+  domain_name       = "sandbox-proxy.${var.hostname}"
+  validation_method = "DNS"
+  tags              = local.tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "cloudflare_dns_record" "sandbox_proxy_validation" {
+  for_each = {
+    for option in aws_acm_certificate.sandbox_proxy_public.domain_validation_options :
+    option.domain_name => option
+  }
+
+  zone_id = data.cloudflare_zone.dns.id
+  name    = trimsuffix(each.value.resource_record_name, ".")
+  type    = each.value.resource_record_type
+  content = trimsuffix(each.value.resource_record_value, ".")
+  ttl     = 60
+  proxied = false
+}
+
+resource "aws_acm_certificate_validation" "sandbox_proxy_public" {
+  certificate_arn = aws_acm_certificate.sandbox_proxy_public.arn
+  validation_record_fqdns = [
+    for record in cloudflare_dns_record.sandbox_proxy_validation : record.name
+  ]
+}
+
 resource "aws_secretsmanager_secret_version" "platform" {
   secret_id = aws_secretsmanager_secret.platform.id
   secret_string = jsonencode({
