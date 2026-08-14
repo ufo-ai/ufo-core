@@ -49,7 +49,7 @@ export function Segmented({
       <span
         aria-hidden
         className={cn(
-          "absolute inset-y-0 rounded-full bg-fill-subtle",
+          "absolute inset-y-0 rounded-full bg-fill",
           "transition-[left,width] duration-100 ease-control motion-reduce:transition-none",
         )}
         style={{ left: pill.left, width: pill.width }}
@@ -79,8 +79,8 @@ export function Segmented({
             className={cn(
               "relative h-(--size-control) shrink-0 rounded-full border-0 bg-transparent px-2xl",
               "text-label",
-              "transition-[opacity] duration-100 ease-control motion-reduce:transition-none",
-              active ? "opacity-100" : "opacity-(--opacity-muted-soft) hover:opacity-100",
+              "transition-[color] duration-100 ease-control motion-reduce:transition-none",
+              active ? "text-ink" : "text-ink-soft hover:text-ink",
             )}
           >
             {segment.label}

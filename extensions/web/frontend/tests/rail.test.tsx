@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -350,7 +350,9 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
-  expect(railRow.textContent).toContain("second");
+  expect(railRow.textContent).toBe("An ops question");
+  fireEvent.focus(railRow);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("second");
 });
 
 test("a row with an origin states it in the rail", async () => {
@@ -359,7 +361,18 @@ test("a row with an origin states it in the rail", async () => {
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
-  expect(railRow.textContent).toContain("Direct message");
+  expect(railRow.textContent).toBe("Slack question");
+  fireEvent.focus(railRow);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Direct message");
+});
+
+test("a row whose title is the whole of it is no tooltip trigger", async () => {
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(railRow.getAttribute("data-state")).toBeNull();
+  expect(railRow.getAttribute("aria-describedby")).toBeNull();
 });
 
 test("a conversation another member spoke stands at the foot and names them", async () => {
@@ -374,7 +387,9 @@ test("a conversation another member spoke stands at the foot and names them", as
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /The deploy thread/ });
-  expect(railRow.textContent).toContain("Pat Reyes");
+  expect(railRow.textContent).toBe("The deploy thread");
+  fireEvent.focus(railRow);
+  expect((await screen.findByRole("tooltip")).textContent).toContain("Pat Reyes");
   const section = railRow.closest("section");
   expect(section?.textContent).toContain("Other members");
   expect(section?.textContent).not.toContain("Pick one thread");
@@ -501,7 +516,7 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
   expect(drawn).toContain("text-inherit");
   expect(drawn).toContain("no-underline");
   expect(drawn).not.toContain("underline");
-  expect(within(out).getByText("↗").className).toContain("opacity-(--opacity-muted)");
+  expect(within(out).getByText("↗").className).toContain("text-ink-soft");
 });
 
 test("the new-conversation control targets the main agent, or picks among several", async () => {

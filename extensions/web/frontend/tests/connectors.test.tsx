@@ -90,7 +90,7 @@ test("a row's acts neither wrap nor clip, so the row keeps the table's pitch", a
   const act = await screen.findByRole("button", { name: "Attach to agent" });
   const cell = act.closest("td");
   expect(cell?.className).not.toContain("truncate");
-  expect(cell?.className).toContain("border-edge-faint");
+  expect(cell?.className).toContain("border-edge");
   expect(act.parentElement?.className).toContain("flex-nowrap");
 });
 

@@ -46,7 +46,7 @@ export function ChatPane({
         >
           {agent.name}
         </button>
-        <span className="font-mono text-mono opacity-(--opacity-muted-strong)">{agent.model}</span>
+        <span className="font-mono text-mono text-ink-soft">{agent.model}</span>
         {slots.phase === "ready" && slots.payload.slots.length ? (
           <div className="ml-auto flex items-center gap-sm" aria-label="Conversation slots">
             {slots.payload.slots.map((entry) => (

@@ -75,7 +75,7 @@ type SpecFieldProps = {
 
 const ROW = cn(
   "flex min-h-(--size-control) items-center justify-between gap-2xl py-2xs",
-  "border-b border-edge-soft",
+  "border-b border-edge",
 );
 
 /** One schema field as the control its shape asks for. A required field carries the requirement so

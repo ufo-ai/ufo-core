@@ -127,7 +127,7 @@ function SkillItems({ rows }: { rows: SkillRow[] }) {
         return (
           <Fragment key={row.key}>
             {index ? <ItemSeparator /> : null}
-            <Item {...control} className={cn(control.className, "hover:bg-fill-hover")}>
+            <Item {...control} className={cn(control.className, "hover:bg-fill")}>
               <ItemContent>
                 <ItemTitle>{row.name}</ItemTitle>
                 <ItemDescription>{row.body}</ItemDescription>
@@ -256,7 +256,7 @@ export function AgentSkills({ agent }: { agent: Agent }) {
               className={cn(
                 buttonVariants({ variant: "outline" }),
                 "border-transparent no-underline transition-opacity",
-                "opacity-(--opacity-muted) hover:opacity-100",
+                "text-ink-soft hover:text-ink",
               )}
             >
               Source ↗

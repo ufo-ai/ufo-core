@@ -14,7 +14,7 @@ function Chevron({ className }: { className?: string }) {
     <svg
       viewBox="0 0 12 12"
       aria-hidden
-      className={cn("size-(--spacing-lg) shrink-0 opacity-(--opacity-muted)", className)}
+      className={cn("size-(--spacing-lg) shrink-0 text-ink-soft", className)}
     >
       <path
         d="M3 4.5 6 7.5 9 4.5"
@@ -112,7 +112,7 @@ export function SelectContent({
         className={cn(
           "z-10 max-h-(--radix-select-content-available-height) overflow-y-auto",
           "min-w-(--radix-select-trigger-width) origin-(--radix-select-content-transform-origin)",
-          "rounded-panel border border-edge-strong bg-popover text-popover-foreground p-2xs",
+          "rounded-panel border border-edge bg-popover text-popover-foreground p-2xs",
           "[box-shadow:var(--shadow-raised)] animate-raise",
           className,
         )}
@@ -136,7 +136,7 @@ export function SelectItem({
       data-slot="select-item"
       className={cn(
         "flex cursor-default select-none items-center justify-between gap-lg rounded-sm px-lg py-sm",
-        "text-ui outline-none data-[highlighted]:bg-fill-hover",
+        "text-ui outline-none data-[highlighted]:bg-fill",
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-(--disabled)",
         className,
       )}

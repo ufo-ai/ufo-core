@@ -28,12 +28,12 @@ export function Toast({ state, onDone }: { state: ToastState; onDone: () => void
       role="status"
       className={cn(
         "fixed bottom-2xl left-2xl z-10 max-w-empty",
-        "rounded-panel border border-edge-strong bg-popover text-popover-foreground px-lg py-md",
+        "rounded-panel border border-edge bg-popover text-popover-foreground px-lg py-md",
         "[box-shadow:var(--shadow-raised)] animate-raise",
       )}
     >
       <p className="text-ui font-strong">{title}</p>
-      {description ? <p className="text-small opacity-(--opacity-muted) mt-hair">{description}</p> : null}
+      {description ? <p className="text-small text-ink-soft mt-hair">{description}</p> : null}
     </div>
   );
 }

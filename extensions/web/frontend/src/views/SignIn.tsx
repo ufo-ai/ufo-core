@@ -21,14 +21,14 @@ export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {
   return (
     <section className="m-auto w-card rounded-card border border-edge bg-card text-card-foreground p-4xl">
       <h1 className="m-0 mb-2xs text-title">{stated.title}</h1>
-      <div className="mb-xl text-label opacity-(--opacity-muted-faint)">{stated.cause}</div>
+      <div className="mb-xl text-label text-ink-soft">{stated.cause}</div>
       <a
         href="/login"
         className={cn(buttonVariants({ variant: "send" }), "inline-block no-underline")}
       >
         {stated.action}
       </a>
-      <div className="mt-xl text-label opacity-(--opacity-muted-faint)">
+      <div className="mt-xl text-label text-ink-soft">
         On a self-hosted node, run <code>ufoctl portal</code> on the host instead.
       </div>
     </section>

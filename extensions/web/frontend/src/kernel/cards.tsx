@@ -46,7 +46,7 @@ export function CardGrid<Row>({
         const press = open?.(row) ?? null;
         const control = press ? rowControl(press) : null;
         const state = status ? (
-          <div data-part="status" className="whitespace-nowrap text-small opacity-(--opacity-muted)">
+          <div data-part="status" className="whitespace-nowrap text-small text-ink-soft">
             {status(row)}
           </div>
         ) : null;
@@ -57,7 +57,7 @@ export function CardGrid<Row>({
             className={cn(
               "flex flex-col overflow-hidden rounded-panel border border-edge bg-card text-card-foreground",
               control?.className,
-              press && "hover:bg-fill-hover",
+              press && "hover:bg-fill",
             )}
           >
             {mark?.shape === "band" ? <Band src={mark.image?.(row) ?? null} /> : null}
@@ -67,7 +67,7 @@ export function CardGrid<Row>({
                   <div
                     data-part="mark"
                     aria-hidden
-                    className="size-7xl rounded-panel bg-fill-subtle"
+                    className="size-7xl rounded-panel bg-fill"
                   />
                   {state}
                 </div>
@@ -81,7 +81,7 @@ export function CardGrid<Row>({
               {said ? (
                 <p
                   data-part="body"
-                  className="m-0 mt-sm line-clamp-2 text-small opacity-(--opacity-muted-soft)"
+                  className="m-0 mt-sm line-clamp-2 text-small text-ink-soft"
                 >
                   {said}
                 </p>
@@ -89,7 +89,7 @@ export function CardGrid<Row>({
               {from ? (
                 <p
                   data-part="meta"
-                  className="m-0 mt-sm truncate font-mono text-mono opacity-(--opacity-muted-soft)"
+                  className="m-0 mt-sm truncate font-mono text-mono text-ink-soft"
                 >
                   {from}
                 </p>
@@ -121,7 +121,7 @@ export function codeSpans(text: string): ReactNode {
 function Band({ src }: { src: string | null }) {
   const [failed, setFailed] = useState(false);
   return (
-    <div data-part="mark" aria-hidden className="h-(--size-band) w-full border-b border-edge bg-fill-subtle">
+    <div data-part="mark" aria-hidden className="h-(--size-band) w-full border-b border-edge bg-fill">
       {src && !failed ? (
         <img
           loading="lazy"

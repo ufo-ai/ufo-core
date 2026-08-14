@@ -51,7 +51,7 @@ export function Th({ className, ...props }: ComponentProps<"th">) {
  *  table is read down a column, and a row as tall as whatever prose it happens to carry breaks the
  *  pitch the eye is running on — the record's own screen carries the rest. */
 const CELL = cn(
-  "border-b border-edge-faint px-2xl text-left align-middle tabular-nums",
+  "border-b border-edge px-2xl text-left align-middle tabular-nums",
   "text-label text-ink-soft",
 );
 
@@ -86,7 +86,7 @@ export const ACTS = "flex flex-nowrap items-center justify-end gap-xs";
 export function TableNote({ span, children }: { span: number; children: ReactNode }) {
   return (
     <tr>
-      <Td colSpan={span} className="opacity-(--opacity-muted-soft)">
+      <Td colSpan={span} className="text-ink-soft">
         {children}
       </Td>
     </tr>

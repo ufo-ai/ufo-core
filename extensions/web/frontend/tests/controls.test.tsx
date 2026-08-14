@@ -101,11 +101,11 @@ test("the send variant keeps a boundary so it holds its height beside a field", 
 
 test("a picked option is the filled chip, so it never reads lighter than a hovered neighbour", () => {
   const classes = buttonVariants({ variant: "option" });
-  expect(classes).toContain("hover:bg-fill-hover");
+  expect(classes).toContain("hover:bg-fill");
   expect(classes).toContain("aria-pressed:bg-ink");
   expect(classes).toContain("aria-pressed:text-surface");
   expect(classes).toContain("aria-pressed:border-ink");
-  expect(classes).not.toMatch(/aria-pressed:bg-fill-/);
+  expect(classes).not.toMatch(/aria-pressed:bg-fill/);
 });
 
 test("a picked option holds that fill under the pointer and dims the way send does", () => {

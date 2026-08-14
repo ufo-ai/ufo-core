@@ -44,7 +44,7 @@ export function Reveal({ children, bare = false }: { children: ReactNode; bare?:
         ) : null}
       </div>
       {over ? (
-        <div className={cn(bare ? "pt-2xs" : "border-t border-edge-soft p-md text-center")}>
+        <div className={cn(bare ? "pt-2xs" : "border-t border-edge p-md text-center")}>
           <Button
             variant="row"
             aria-expanded={open}

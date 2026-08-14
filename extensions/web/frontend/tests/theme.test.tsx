@@ -62,49 +62,64 @@ const AUTHORED = new RegExp(
   "g",
 );
 
-const RAMP_STEP = /--(?:void|signal|sand|ember|heat|sage)-\d+:#[0-9a-f]{6}/g;
-
-const PAPER = /--paper:#fff\b/g;
+const PALETTE_STEP =
+  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
 
 /** Everything but the palette declarations themselves — a step is where a colour may be written. */
-const outsideThePalette = (css: string) => css.replace(RAMP_STEP, "").replace(PAPER, "");
+const outsideThePalette = (css: string) => css.replace(PALETTE_STEP, "");
 
 beforeEach(() => {
   location.hash = "";
   useStreamFake();
 });
 
-test("every colour the portal paints resolves through the brand palette ramps", () => {
+test("every colour the portal paints resolves through the palette's seven steps", () => {
   const css = builtStyles();
 
   expect(authoredColours(outsideThePalette(css))).toEqual([]);
-  const anchors = {
-    "--void-900": "#0d1418",
-    "--signal-500": "#2e81b6",
-    "--ember-100": "#ffd18b",
+  // Each step carries both schemes in one declaration, exactly as the Figma theme states them.
+  const steps = {
+    "--bkgd-100": "light-dark(#faf9f7,#191a1a)",
+    "--bkgd-200": "light-dark(#f4f3f2,#262929)",
+    "--bkgd-300": "light-dark(#ebeae9,#323535)",
+    "--text-primary": "light-dark(#191a1a,#f5f5f5)",
+    "--text-secondary": "light-dark(#919090,#a7a9a9)",
+    "--accent-primary": "#0095ff",
+    "--accent-secondary": "#ff6700",
   };
-  for (const [step, hex] of Object.entries(anchors)) {
-    expect(css.replace(/:\s+/g, ":")).toContain(`${step}:${hex}`);
+  for (const [step, value] of Object.entries(steps)) {
+    expect(css.replace(/\s+/g, "")).toContain(`${step}:${value}`);
   }
   const basis = {
-    "--color-surface": String.raw`var\(--background\)`,
-    "--color-ink": String.raw`color-mix\(in srgb,\s*var\(--foreground\) 90%,\s*var\(--background\)\)`,
-    "--color-field": String.raw`var\(--card\)`,
-    "--color-field-ink": String.raw`var\(--card-foreground\)`,
-    "--color-link": String.raw`var\(--primary\)`,
+    "--color-surface": String.raw`var\(--bkgd-100\)`,
+    "--color-ink": String.raw`var\(--text-primary\)`,
+    "--color-ink-soft": String.raw`var\(--text-secondary\)`,
+    "--color-field": String.raw`var\(--bkgd-200\)`,
+    "--color-edge": String.raw`var\(--bkgd-300\)`,
+    "--color-fill": String.raw`var\(--bkgd-200\)`,
+    "--color-link": String.raw`var\(--accent-primary\)`,
   };
-  for (const [token, brand] of Object.entries(basis)) {
-    expect(new RegExp(`${token}:\\s*${brand}`).test(css)).toBe(true);
+  for (const [token, step] of Object.entries(basis)) {
+    expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);
   }
-  expect(css.replace(/:\s+/g, ":")).toContain("color-scheme:light dark");
-  // The scheme is these two anchors and nothing else: no `.dark` class and no `dark:` variant, so
-  // the media query is what rebinds a mode, and every role composites from the pair it sets.
-  expect(css.replace(/\s+/g, "")).toContain(
-    "@media(prefers-color-scheme:dark){:root{--background:var(--void-950);--foreground:var(--sand-50)",
-  );
+});
+
+test("color-scheme carries the scheme, and the appearance class pins it", () => {
+  const css = builtStyles().replace(/\s+/g, "");
+
+  // A member who has pinned nothing leaves the choice with the browser; the two classes the
+  // appearance control writes are the only thing that overrides it, and `light-dark()` reads them.
+  expect(css).toContain("color-scheme:lightdark");
+  expect(css).toContain(":root.light{color-scheme:light}");
+  expect(css).toContain(":root.dark{color-scheme:dark}");
+  // No role is written twice to answer a mode, so no second block can drift out of step.
+  expect(css).not.toContain("@media(prefers-color-scheme:dark){:root{--");
+  // Streamdown's own `dark:` classes resolve through that same pinning, not through the bare query.
+  expect(css).toMatch(/@media\(prefers-color-scheme:dark\)\{[^{]*:where\(:not\(\.light,\.light\*\)\)/);
+  expect(css).toContain(":where(.dark,.dark*)");
 });
 
 test("the drawer fills a narrow viewport rather than overflowing it", () => {
@@ -124,6 +139,12 @@ test("reply headings carry an emitted scale, not just declared tokens", () => {
   const css = builtStyles().replace(/\s+/g, "");
   expect(css).toContain(":where(h2){font-size:var(--text-subtitle)");
   expect(css).toContain(":where(h4,h5,h6){font-size:var(--text-ui)");
+});
+
+test("a quoted passage is dimmed by a token the theme declares", () => {
+  // A name the theme never defines makes the declaration invalid, and the browser drops it — so
+  // the quote renders at full weight and nothing says why.
+  expect(builtStyles().replace(/\s+/g, "")).toContain("opacity:var(--opacity-muted-soft)");
 });
 
 test("a table scrolls its own overflow instead of squeezing the page", () => {
@@ -189,8 +210,12 @@ test("the reading plane's tokens survive into the built sheet", () => {
   expect(css).toContain("--leading-reading:1.65");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
-  expect(css).toContain("--color-link:var(--primary)");
-  expect(css).toContain("--color-attention:var(--brand-accent)");
+  expect(css).toContain("--color-link:var(--accent-primary)");
+  // Each accent tints the pane at one weight, so a status reads the same in both schemes.
+  expect(css).toContain("--color-affirm:color-mix(insrgb,var(--accent-primary)15%,var(--bkgd-100))");
+  expect(css).toContain(
+    "--color-attention:color-mix(insrgb,var(--accent-secondary)15%,var(--bkgd-100))",
+  );
 });
 
 test("the bundled faces are Inter for the chrome and Roboto Mono for the code", () => {
@@ -203,30 +228,31 @@ test("the bundled faces are Inter for the chrome and Roboto Mono for the code", 
   expect(/@font-face\{font-family:Canela;src:url\(\/surface\/web\/static\/assets\/Canela-[^)]+\.otf\)/.test(css)).toBe(true);
 });
 
-test("the shadcn contract carries the brand theme", () => {
+test("the shadcn contract carries the theme, and names nothing no component reads", () => {
   const css = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8").replace(
     /\s+/g,
     "",
   );
+  // Every name here is drawn with by the portal's own components or by streamdown's.
   for (const token of [
     "background",
     "foreground",
     "card",
     "popover",
     "primary",
-    "secondary",
     "muted",
-    "accent",
-    "destructive",
     "border",
-    "input",
     "ring",
     "sidebar",
   ]) {
     expect(css).toContain(`--color-${token}:var(--${token})`);
   }
+  // A contract name with no consumer is a colour nothing can account for, so it is not declared.
+  for (const token of ["secondary", "accent", "destructive", "success", "warning", "input"]) {
+    expect(css).not.toContain(`--color-${token}:`);
+  }
   expect(css).toContain("--radius:0.25rem");
-  expect(css).toContain("--accent:var(--sand-100)");
+  expect(css).toContain("--muted:var(--bkgd-200)");
 });
 
 test("text is smoothed and wrapped, and headings balance", () => {
@@ -330,7 +356,20 @@ test("a field shows the member that it is disabled, or that they left it invalid
 });
 
 test("a placeholder is muted rather than mistaken for a value", () => {
+  // The comps draw a placeholder in the third text tone, not in dimmed ink — so it is a colour,
+  // and it fades against the pane the same way in both schemes.
   expect(builtStyles().replace(/\s+/g, "")).toContain(
-    ".placeholder\\:opacity-\\(--opacity-muted\\)::placeholder{opacity:var(--opacity-muted)}",
+    ".placeholder\\:text-ink-faint::placeholder{color:var(--color-ink-faint)}",
   );
+});
+
+test("muted text is the palette's second tone, never ink held back by opacity", () => {
+  const src = join(import.meta.dirname, "..", "src");
+  const dimmed = readdirSync(src, { recursive: true, encoding: "utf8" })
+    .filter((name) => name.endsWith(".tsx") || name.endsWith(".ts"))
+    .filter((name) => /opacity-\(--opacity-muted/.test(readFileSync(join(src, name), "utf8")));
+
+  // Opacity survives only where it states a passing condition, never where it states a text tone:
+  // the comps give one secondary colour, and ink at 50%-75% lands on five different greys instead.
+  expect(dimmed.sort()).toEqual(["components/ui/button.tsx", "kernel/table.tsx"]);
 });

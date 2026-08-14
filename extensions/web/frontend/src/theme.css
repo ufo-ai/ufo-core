@@ -50,177 +50,37 @@
   font-display: swap;
 }
 
-/* The brand palette: six ramps on one matched-lightness ladder, so contrast is a function of step
- * distance, not hue — distance >= 6 is AA body text, >= 5 is AA large text and UI. Every colour
+/* The palette: three background steps, two text steps, two accents. `color-scheme` picks the pair
+ * — the browser's preference, or the appearance control's class pinning one — so a scheme is these
+ * seven declarations and nothing else, and no rule is written twice to answer a mode. Every colour
  * the portal paints is one of these steps or a composite of two; nothing else names a colour. */
 :root {
-  --void-25: #F7FBFD;
-  --void-50: #E9EEF0;
-  --void-100: #D4DADD;
-  --void-200: #BAC1C4;
-  --void-300: #9EA7AB;
-  --void-400: #879195;
-  --void-500: #717C81;
-  --void-600: #5B656A;
-  --void-700: #454F53;
-  --void-800: #2E373B;
-  --void-900: #0D1418;
-  --void-950: #050C0F;
-
-  --signal-25: #F6FBFE;
-  --signal-50: #DBF0FE;
-  --signal-100: #B3E0FE;
-  --signal-200: #91C7EC;
-  --signal-300: #6EADD8;
-  --signal-400: #4F97C7;
-  --signal-500: #2E81B6;
-  --signal-600: #166A98;
-  --signal-700: #025378;
-  --signal-800: #013A54;
-  --signal-900: #001621;
-  --signal-950: #000D15;
-
-  --sand-25: #FFFAEF;
-  --sand-50: #F3ECDE;
-  --sand-100: #E1D8C9;
-  --sand-200: #C9BEAE;
-  --sand-300: #B1A392;
-  --sand-400: #9B8D7C;
-  --sand-500: #857768;
-  --sand-600: #6E6054;
-  --sand-700: #574A3F;
-  --sand-800: #3F3329;
-  --sand-900: #1A110A;
-  --sand-950: #110804;
-
-  --ember-25: #FFF9F1;
-  --ember-50: #FFEAC9;
-  --ember-100: #FFD18B;
-  --ember-200: #E6B672;
-  --ember-300: #CB9B5F;
-  --ember-400: #B38550;
-  --ember-500: #9B7041;
-  --ember-600: #825931;
-  --ember-700: #694321;
-  --ember-800: #4E2C0F;
-  --ember-900: #230C00;
-  --ember-950: #170600;
-
-  --heat-25: #FFF9F7;
-  --heat-50: #FFE7E1;
-  --heat-100: #FECBC2;
-  --heat-200: #FFA39C;
-  --heat-300: #F67A78;
-  --heat-400: #D96667;
-  --heat-500: #BD5357;
-  --heat-600: #9F3F45;
-  --heat-700: #822A34;
-  --heat-800: #621321;
-  --heat-900: #2C0009;
-  --heat-950: #1D0005;
-
-  --sage-25: #F1FFEF;
-  --sage-50: #DDF5DA;
-  --sage-100: #C6E2C5;
-  --sage-200: #A9CAA9;
-  --sage-300: #8BB18E;
-  --sage-400: #719C76;
-  --sage-500: #5D8564;
-  --sage-600: #486E50;
-  --sage-700: #34563D;
-  --sage-800: #1E3D28;
-  --sage-900: #01190A;
-  --sage-950: #000F05;
-
-  --paper: #FFFFFF;
+  --bkgd-100: light-dark(#FAF9F7, #191A1A);
+  --bkgd-200: light-dark(#F4F3F2, #262929);
+  --bkgd-300: light-dark(#EBEAE9, #323535);
+  --text-primary: light-dark(#191A1A, #F5F5F5);
+  --text-secondary: light-dark(#919090, #A7A9A9);
+  --accent-primary: #0095FF;
+  --accent-secondary: #FF6700;
 }
 
-/* The scheme's two anchors, and the four steps that carry hue. `color-scheme` still decides which
- * pair applies, as it did when these were `Canvas` and `CanvasText`: every role below composites
- * from them, so a mode is these declarations and nothing else. */
+/* The shadcn contract, and streamdown's with it: those components draw in these names and this is
+ * all they see of the palette. A name no component reads is not declared. */
 :root {
-  --background: var(--sand-50);
-  --foreground: var(--void-900);
-  --card: var(--paper);
-  --card-foreground: var(--void-900);
-  --popover: var(--paper);
-  --popover-foreground: var(--void-900);
-  --primary: var(--signal-600);
-  --primary-foreground: var(--sand-25);
-  --secondary: var(--signal-50);
-  --secondary-foreground: var(--signal-800);
-  --muted: var(--sand-100);
-  --muted-foreground: var(--void-700);
-  --accent: var(--sand-100);
-  --accent-foreground: var(--foreground);
-  --destructive: var(--heat-600);
-  --destructive-foreground: var(--heat-25);
-  --success: var(--sage-600);
-  --success-foreground: var(--sage-25);
-  --warning: var(--ember-700);
-  --warning-foreground: var(--ember-25);
-  --border: var(--sand-100);
-  --input: var(--sand-100);
-  --ring: var(--signal-500);
-  --chart-1: var(--signal-500);
-  --chart-2: var(--ember-400);
-  --chart-3: var(--signal-700);
-  --chart-4: var(--sage-400);
-  --chart-5: var(--heat-400);
-  --sidebar: var(--sand-100);
-  --sidebar-foreground: var(--void-900);
-  --sidebar-primary: var(--signal-600);
-  --sidebar-primary-foreground: var(--sand-25);
-  --sidebar-accent: var(--sand-200);
-  --sidebar-accent-foreground: var(--void-900);
-  --sidebar-border: var(--sand-200);
-  --sidebar-ring: var(--signal-500);
-  --brand-accent: var(--ember-100);
-  --brand-accent-foreground: var(--ember-800);
+  --background: var(--bkgd-100);
+  --foreground: var(--text-primary);
+  --card: var(--bkgd-100);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bkgd-100);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--accent-primary);
+  --primary-foreground: var(--bkgd-100);
+  --muted: var(--bkgd-200);
+  --muted-foreground: var(--text-secondary);
+  --border: var(--bkgd-300);
+  --ring: var(--accent-primary);
+  --sidebar: var(--bkgd-100);
   --radius: 0.25rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: var(--void-950);
-    --foreground: var(--sand-50);
-    --card: var(--void-900);
-    --card-foreground: var(--sand-50);
-    --popover: var(--void-900);
-    --popover-foreground: var(--sand-50);
-    --primary: var(--signal-400);
-    --primary-foreground: var(--void-950);
-    --secondary: var(--signal-800);
-    --secondary-foreground: var(--signal-100);
-    --muted: var(--void-800);
-    --muted-foreground: var(--void-300);
-    --accent: var(--void-800);
-    --accent-foreground: var(--foreground);
-    --destructive: var(--heat-300);
-    --destructive-foreground: var(--heat-950);
-    --success: var(--sage-300);
-    --success-foreground: var(--sage-950);
-    --warning: var(--ember-200);
-    --warning-foreground: var(--ember-900);
-    --border: var(--void-800);
-    --input: var(--void-800);
-    --ring: var(--signal-400);
-    --chart-1: var(--signal-400);
-    --chart-2: var(--ember-200);
-    --chart-3: var(--signal-200);
-    --chart-4: var(--sage-300);
-    --chart-5: var(--heat-300);
-    --sidebar: var(--void-900);
-    --sidebar-foreground: var(--sand-50);
-    --sidebar-primary: var(--signal-400);
-    --sidebar-primary-foreground: var(--void-950);
-    --sidebar-accent: var(--void-800);
-    --sidebar-accent-foreground: var(--sand-50);
-    --sidebar-border: var(--void-800);
-    --sidebar-ring: var(--signal-400);
-    --brand-accent: var(--ember-200);
-    --brand-accent-foreground: var(--ember-900);
-  }
 }
 
 @theme inline {
@@ -232,65 +92,42 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
   --color-border: var(--border);
-  --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
   --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
 }
 
+/* The portal's own vocabulary. A pane is `surface`, anything the pointer fills is `fill`, every
+ * hairline is `edge`, and `edge-strong` is the one border that answers a pointer. `attention` is
+ * the second accent laid over the pane at the weight the comps draw a status on. */
 @theme {
-  --color-surface: var(--background);
-  --color-ink: color-mix(in srgb, var(--foreground) 90%, var(--background));
-  --color-ink-soft: color-mix(in srgb, var(--foreground) 55%, var(--background));
-  --color-field: var(--card);
-  --color-field-ink: var(--card-foreground);
+  --color-surface: var(--bkgd-100);
+  --color-ink: var(--text-primary);
+  --color-ink-soft: var(--text-secondary);
+  /* The third and last text tone the comps draw: a placeholder, and an act the member cannot take
+     yet. Secondary held back over the pane, so it fades in both schemes without naming a colour. */
+  --color-ink-faint: color-mix(in srgb, var(--text-secondary) 50%, var(--bkgd-100));
+  --color-field: var(--bkgd-200);
+  --color-field-ink: var(--text-primary);
 
-  --color-edge-faint: color-mix(in srgb, var(--foreground) 5%, transparent);
-  --color-edge-soft: color-mix(in srgb, var(--foreground) 12%, transparent);
-  --color-edge: color-mix(in srgb, var(--foreground) 15%, transparent);
-  --color-edge-strong: color-mix(in srgb, var(--foreground) 20%, transparent);
-  --color-edge-control: color-mix(in srgb, var(--foreground) 25%, transparent);
-  --color-edge-control-strong: color-mix(in srgb, var(--foreground) 35%, transparent);
+  --color-edge: var(--bkgd-300);
+  --color-edge-strong: var(--text-secondary);
 
-  --color-link: var(--primary);
+  --color-link: var(--accent-primary);
 
-  --color-fill-subtle: color-mix(in srgb, var(--foreground) 5%, transparent);
-  --color-fill-hover: color-mix(in srgb, var(--foreground) 8%, transparent);
-  --color-fill: color-mix(in srgb, var(--foreground) 12%, transparent);
-  --color-scrim: color-mix(in srgb, var(--foreground) 40%, transparent);
+  --color-fill: var(--bkgd-200);
+  --color-scrim: color-mix(in srgb, var(--text-primary) 40%, transparent);
 
-  --color-attention: var(--brand-accent);
-  --color-attention-ink: var(--brand-accent-foreground);
-
-  --color-sidebar: var(--sidebar);
+  /* Each accent laid over the pane at the one weight the comps tint a status at. */
+  --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
+  --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
+  --color-attention-ink: var(--accent-secondary);
 
   --shadow-raised:
-    0 8px 18px color-mix(in srgb, var(--foreground) 10%, transparent),
-    0 22px 55px color-mix(in srgb, var(--foreground) 16%, transparent);
+    0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),
+    0 22px 55px color-mix(in srgb, var(--text-primary) 16%, transparent);
 
   --ease-control: cubic-bezier(0.2, 0, 0, 1);
 
@@ -416,10 +253,27 @@
    own — one mapping, so their components draw in our colours, type and radii, and no second palette
    or scale reaches the page. A key left unnamed compiles Tailwind's own default, which is a literal
    colour the zero-authored-colour test refuses, so every key they use is answered. */
+/* Streamdown's highlighted code carries its own `dark:` classes, and Tailwind resolves that variant
+   off the media query alone — so a member who pinned a scheme would keep the browser's inside a
+   code block. This restates the variant as the mechanism the palette already uses: the pinning
+   class first, the preference only where nothing is pinned. The portal's own views write no `dark:`
+   at all, which `gates.py` holds. */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:not(.light, .light *)) {
+      @slot;
+    }
+  }
+
+  &:where(.dark, .dark *) {
+    @slot;
+  }
+}
+
 @theme {
-  --color-black: CanvasText;
-  --color-red-50: var(--color-fill-subtle);
-  --color-red-100: var(--color-fill-subtle);
+  --color-black: var(--text-primary);
+  --color-red-50: var(--color-fill);
+  --color-red-100: var(--color-fill);
   --color-red-600: var(--color-ink);
   --color-red-700: var(--color-ink);
   --color-red-800: var(--color-ink);
@@ -474,6 +328,17 @@
     color-scheme: light dark;
   }
 
+  /* The appearance control writes one of these onto the root, and `light-dark()` reads it. A member
+     who has chosen nothing carries neither class, so the declaration above leaves the choice with
+     the browser. */
+  :root.light {
+    color-scheme: light;
+  }
+
+  :root.dark {
+    color-scheme: dark;
+  }
+
   body {
     box-sizing: border-box;
     height: 100dvh;
@@ -515,7 +380,7 @@
      `scrollbar-gutter-stable`, which holds the gutter open so a growing reply never shifts the
      line being read. */
   :root {
-    scrollbar-color: var(--color-edge-control-strong) transparent;
+    scrollbar-color: var(--color-edge-strong) transparent;
   }
 
   * {
@@ -618,7 +483,7 @@
     &:where(:not(pre) > code) {
       padding-inline: var(--spacing-2xs);
       border-radius: var(--radius-sm);
-      background: var(--color-fill-subtle);
+      background: var(--color-fill);
       font-family: var(--font-mono);
       font-size: var(--text-label);
     }
@@ -627,7 +492,7 @@
       overflow-x: auto;
       padding: var(--spacing-lg);
       border-radius: var(--radius-panel);
-      background: var(--color-fill-subtle);
+      background: var(--color-fill);
       font-family: var(--font-mono);
       font-size: var(--text-label);
       tab-size: 2;
@@ -643,12 +508,12 @@
       margin-inline: 0;
       padding-inline-start: var(--spacing-lg);
       border-inline-start: var(--marker-width) solid var(--color-edge);
-      opacity: var(--muted-soft);
+      opacity: var(--opacity-muted-soft);
     }
 
     &:where(hr) {
       border: 0;
-      border-block-start: 1px solid var(--color-edge-soft);
+      border-block-start: 1px solid var(--color-edge);
     }
 
     &:where(table) {
@@ -657,13 +522,13 @@
       overflow-x: auto;
       border-collapse: separate;
       border-spacing: 0;
-      border-block-end: 1px solid var(--color-edge-soft);
+      border-block-end: 1px solid var(--color-edge);
       font-variant-numeric: tabular-nums;
     }
 
     &:where(th, td) {
       padding: var(--spacing-2xs) var(--spacing-sm);
-      border-block-start: 1px solid var(--color-edge-soft);
+      border-block-start: 1px solid var(--color-edge);
       text-align: start;
       vertical-align: top;
     }

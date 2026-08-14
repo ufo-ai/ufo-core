@@ -213,7 +213,7 @@ function WayOut({ out }: { out: { href: string; channel: string } }) {
       rel="noopener noreferrer"
       className="whitespace-nowrap text-inherit no-underline hover:underline focus-visible:underline"
     >
-      {out.channel} <span className="opacity-(--opacity-muted)">↗</span>
+      {out.channel} <span className="text-ink-soft">↗</span>
     </a>
   );
 }

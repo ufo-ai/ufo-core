@@ -75,11 +75,11 @@ export function ArtifactText({
     };
   }, [byteLimit, url]);
 
-  if (message) return <div className="font-mono text-small opacity-(--opacity-muted)">{message}</div>;
+  if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
   if (body === null) return <div>Loading…</div>;
   if (mediaType === HTML_MEDIA_TYPE && bounded)
     return (
-      <div className="font-mono text-small opacity-(--opacity-muted)">
+      <div className="font-mono text-small text-ink-soft">
         This page is larger than {formatSize(byteLimit)}. Download it to open it.
       </div>
     );
@@ -89,7 +89,7 @@ export function ArtifactText({
         <div
           data-artifact-document
           className={cn(
-            "relative rounded-panel bg-fill-subtle p-lg",
+            "relative rounded-panel bg-fill p-lg",
             display === "excerpt" && "max-h-24 overflow-hidden",
             display === "frame" && "max-h-(--media-tall) overflow-y-auto",
           )}
@@ -98,7 +98,7 @@ export function ArtifactText({
           {display === "excerpt" ? (
             <div
               aria-hidden
-              className="pointer-events-none absolute inset-x-0 bottom-0 h-2xl bg-linear-to-t from-fill-subtle"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-2xl bg-linear-to-t from-fill"
             />
           ) : null}
         </div>
@@ -111,12 +111,12 @@ export function ArtifactText({
           className="h-(--media-tall) max-h-(--media-tall) w-full rounded-panel border border-edge"
         />
       ) : (
-        <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill-subtle p-lg font-mono text-mono [overflow-wrap:anywhere]">
+        <pre className="m-0 max-h-(--media-tall) overflow-x-auto whitespace-pre-wrap rounded-panel bg-fill p-lg font-mono text-mono [overflow-wrap:anywhere]">
           {body}
         </pre>
       )}
       {bounded && display !== "excerpt" ? (
-        <div className="font-mono text-small opacity-(--opacity-muted)">
+        <div className="font-mono text-small text-ink-soft">
           First {formatSize(byteLimit)} shown.
         </div>
       ) : null}

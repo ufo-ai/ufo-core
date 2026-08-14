@@ -16,11 +16,11 @@ export const buttonVariants = cva(
       variant: {
         send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline:
-          "border border-edge-control bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
-        row: "border border-edge-control bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill-hover",
+          "border border-edge bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        row: "border border-edge bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         option: cn(
-          "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs",
-          "hover:bg-fill-hover",
+          "border border-edge-strong bg-transparent text-inherit px-lg py-xs",
+          "hover:bg-fill",
           "aria-pressed:bg-ink aria-pressed:text-surface aria-pressed:border-ink",
           "aria-pressed:hover:bg-ink aria-pressed:hover:opacity-(--opacity-muted-soft)",
         ),

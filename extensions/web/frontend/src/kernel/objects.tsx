@@ -116,7 +116,7 @@ function enumerated(schema: SpecSchema | null, field: string): boolean {
  *  rather than set in the mono a wire identifier takes. */
 function Chip({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-control border border-edge-control px-sm py-hair text-small">
+    <span className="rounded-control border border-edge px-sm py-hair text-small">
       {children}
     </span>
   );
@@ -516,8 +516,8 @@ export function ObjectDetail({
         <Button variant="row" onClick={onBack}>
           Back
         </Button>
-        <h2 className="m-0 text-title font-strong">{name}</h2>
-        <span className="opacity-(--opacity-muted-strong)">{noun(kind)}</span>
+        <h2 className="m-0 font-sans text-title font-strong">{name}</h2>
+        <span className="text-ink-soft">{noun(kind)}</span>
       </div>
       <Panel state={state} shape="form">
         {(payload) => (
@@ -570,10 +570,10 @@ export function ObjectDetail({
                   ))}
                 </ul>
               ) : (
-                <p className="m-0 opacity-(--opacity-muted)">Nothing links out of this one.</p>
+                <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
               )}
             </Section>
-            <div className="mb-2xl text-small opacity-(--opacity-muted-strong)">
+            <div className="mb-2xl text-small text-ink-soft">
               {[
                 payload.created_at ? "Created " + day(payload.created_at) : null,
                 payload.updated_at ? "Updated " + day(payload.updated_at) : null,

@@ -51,11 +51,11 @@ export function Portal() {
   }, []);
 
   if (boot.phase === "loading")
-    return <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">Loading…</div>;
+    return <div className="m-auto max-w-empty text-center text-ink-soft">Loading…</div>;
   if (boot.phase === "signed-out") return <SignIn fault={boot.fault} />;
   if (boot.phase === "failed") {
     return (
-      <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">
+      <div className="m-auto max-w-empty text-center text-ink-soft">
         {boot.message}
       </div>
     );

@@ -100,7 +100,7 @@ function Head({ column, sort }: { column: Column; sort?: Sort }) {
 function Act({ verb }: { verb: string | null }) {
   if (!verb) return null;
   return (
-    <span className="flex items-center justify-end gap-2xs opacity-(--opacity-muted-strong)">
+    <span className="flex items-center justify-end gap-2xs text-ink-soft">
       {verb}
       <IconChevronRight className="size-icon shrink-0" aria-hidden />
     </span>
@@ -160,7 +160,7 @@ export function DataTable<Row>({
               <tr
                 key={rowKey(row)}
                 {...control}
-                className={cn(control && "hover:bg-fill-subtle", control?.className)}
+                className={cn(control && "hover:bg-fill", control?.className)}
               >
                 {children(row)}
                 {act ? (

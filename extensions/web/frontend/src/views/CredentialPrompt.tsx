@@ -51,7 +51,7 @@ export function CredentialPromptForm({
 
   return (
     <div>
-      <div role="status" className="mb-hair text-ui opacity-(--opacity-muted-soft)">
+      <div role="status" className="mb-hair text-ui text-ink-soft">
         {label}
       </div>
       {stored ? null : (

@@ -40,9 +40,9 @@ export function RowLines<Row>({
             key={rowKey(row)}
             {...control}
             className={cn(
-              "flex items-baseline gap-md border-b border-edge-soft py-md last:border-b-0",
+              "flex items-baseline gap-md border-b border-edge py-md last:border-b-0",
               control?.className,
-              press && "hover:bg-fill-hover",
+              press && "hover:bg-fill",
             )}
           >
             <div className="min-w-0 flex-1">
@@ -54,7 +54,7 @@ export function RowLines<Row>({
             {when ? (
               <div
                 data-part="when"
-                className="whitespace-nowrap font-mono text-small tabular-nums opacity-(--opacity-muted)"
+                className="whitespace-nowrap font-mono text-small tabular-nums text-ink-soft"
               >
                 {when(row)}
               </div>
@@ -71,7 +71,7 @@ function MetaLine({ parts }: { parts: ReactNode[] }) {
   const shown = parts.filter((entry) => entry !== null && entry !== undefined && entry !== "");
   if (!shown.length) return null;
   return (
-    <div data-part="meta" className="truncate text-small opacity-(--opacity-muted)">
+    <div data-part="meta" className="truncate text-small text-ink-soft">
       {shown.map((entry, index) => (
         <span key={index}>
           {index ? " · " : ""}

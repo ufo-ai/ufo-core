@@ -3,11 +3,14 @@ import {
   IconAdjustments,
   IconAdjustmentsHorizontal,
   IconAutomation,
+  IconDeviceDesktop,
   IconEdit,
   IconFolder,
   IconLayoutSidebarRight,
+  IconMoon,
   IconSettings,
   IconSparkles,
+  IconSun,
   IconUsers,
 } from "@tabler/icons-react";
 
@@ -29,6 +32,7 @@ import { COLUMN, Pane } from "@/kernel/pane";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/scheme";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -307,8 +311,8 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
       <MainAgentProvider agents={agents}>
         <div className={cn("grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]", collapsed ? "grid-cols-[var(--container-rail)_1fr]" : "grid-cols-[var(--container-sidebar)_1fr]")}>
           <TooltipProvider>
-          <nav className="flex min-h-0 flex-col gap-sm border-r border-edge-faint bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
-            <div className={cn("flex items-center justify-between px-2xl max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
+          <nav className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
+            <div className={cn("flex h-(--size-row) items-center justify-between pl-2xl pr-md max-narrow:h-auto max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
               <span
                 role="img"
                 aria-label="ufo"
@@ -378,7 +382,7 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
                 onRetry={() => setReloads((count) => count + 1)}
               />
             </div>
-            <footer className={cn("flex items-center gap-sm px-lg max-narrow:ml-auto max-narrow:px-lg max-narrow:py-md", collapsed && "mt-auto justify-center px-sm max-narrow:mt-0 max-narrow:px-lg")}>
+            <footer className={cn("flex items-center gap-sm px-2xl max-narrow:ml-auto max-narrow:px-lg max-narrow:py-md", collapsed && "mt-auto justify-center px-sm max-narrow:mt-0 max-narrow:px-lg")}>
               <SidebarTooltip collapsed={collapsed} label={member.email}>
                 <span
                   aria-hidden="true"
@@ -388,18 +392,19 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
                 </span>
               </SidebarTooltip>
               <span className={cn("flex min-w-0 flex-1 flex-col max-narrow:hidden", collapsed && "hidden")}>
-                <span className="truncate">{member.email}</span>
-                <span className="text-small opacity-(--opacity-muted)">
+                <span className="truncate text-label">{member.email}</span>
+                <span className="text-small text-ink-soft">
                   {member.admin ? "Admin" : "Member"}
                 </span>
               </span>
+              <SchemePick collapsed={collapsed} />
               {member.admin ? (
                 <button
                   type="button"
                   aria-label="Administration"
                   onClick={openAdmin}
                   className={cn(
-                    "rounded-control border-0 bg-transparent p-2xs opacity-(--opacity-muted) hover:bg-fill-hover",
+                    "rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
                     collapsed && "hidden max-narrow:block",
                   )}
                 >
@@ -649,7 +654,7 @@ function LinkedPane({
         {conversation.readable || disclosed ? (
           <>
             <ConversationDetail agent={agent} conversation={conversation} onBack={back} />
-            <p className="max-w-hint opacity-(--opacity-muted-soft)">
+            <p className="max-w-hint text-ink-soft">
               This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
               continue it.
             </p>
@@ -674,7 +679,7 @@ function NotShared() {
 function PaneNote({ children }: { children: React.ReactNode }) {
   return (
     <Pane className={COLUMN}>
-      <div className="m-auto max-w-empty text-center opacity-(--opacity-muted-soft)">{children}</div>
+      <div className="m-auto max-w-empty text-center text-ink-soft">{children}</div>
     </Pane>
   );
 }
@@ -733,7 +738,7 @@ function NewChat({
             setPicking((open) => (collapsed ? true : !open));
           }}
           aria-label="New conversation"
-          className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", picking && "bg-fill-subtle")}
+          className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", picking && "bg-fill")}
         >
           <NewChatGlyph />
           <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>New conversation</span>
@@ -749,7 +754,7 @@ function NewChat({
                   setPicking(false);
                   onNewChat(agent.id);
                 }}
-                className="block w-full rounded-control border-0 bg-transparent py-xs pl-4xl pr-sm text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap"
+                className="block w-full rounded-full border-0 bg-transparent py-xs pl-4xl pr-sm text-left text-label text-inherit hover:bg-fill max-narrow:w-auto max-narrow:whitespace-nowrap"
               >
                 {agent.name}
               </button>
@@ -782,13 +787,13 @@ function RailList({
   return (
     <>
       <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
-        <h2 className="m-0 text-label font-medium opacity-(--opacity-muted-strong)">Conversations</h2>
+        <h2 className="m-0 font-sans text-label font-medium text-ink-soft">Conversations</h2>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label="Conversation settings"
-              className="rounded-control border-0 bg-transparent p-2xs opacity-(--opacity-muted) hover:bg-fill-hover data-[state=open]:bg-fill-subtle"
+              className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
             >
               <IconAdjustments className="size-(--size-glyph)" aria-hidden />
             </button>
@@ -812,10 +817,10 @@ function RailList({
         </DropdownMenu>
       </div>
       {rail.phase === "loading" ? (
-        <div className="p-sm opacity-(--opacity-muted)">Loading…</div>
+        <div className="p-sm text-ink-soft">Loading…</div>
       ) : null}
       {rail.phase === "failed" ? (
-        <div className="flex flex-col gap-2xs p-sm opacity-(--opacity-muted)">
+        <div className="flex flex-col gap-2xs p-sm text-ink-soft">
           <span>Couldn't load conversations.</span>
           <button
             type="button"
@@ -828,7 +833,7 @@ function RailList({
       ) : null}
       {railGroups(rail.rows, sort, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium opacity-(--opacity-muted-strong) max-narrow:hidden">
+          <h2 className="m-0 flex h-(--size-row) items-center px-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">
@@ -845,14 +850,10 @@ function RailList({
                       (route.kind === "chat" || route.kind === "conversation-slot") &&
                       route.conversationId === row.conversation_id
                     }
+                    facts={facts.length ? facts.join(" · ") : null}
                     onClick={() => onOpen(row.conversation_id)}
                   >
-                    <span className="block truncate">{row.title}</span>
-                    {facts.length ? (
-                      <span className="block truncate text-small opacity-(--opacity-muted-strong) max-narrow:hidden">
-                        {facts.join(" · ")}
-                      </span>
-                    ) : null}
+                    <span className="min-w-0 flex-1 truncate">{row.title}</span>
                   </RailRow>
                 </li>
               );
@@ -865,7 +866,7 @@ function RailList({
 }
 
 const NAV_ROW =
-  "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0 bg-transparent px-sm text-left text-inherit hover:bg-fill-hover max-narrow:w-auto max-narrow:whitespace-nowrap";
+  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill max-narrow:w-auto max-narrow:whitespace-nowrap";
 
 function SidebarTooltip({ collapsed, label, children }: { collapsed: boolean; label: string; children: React.ReactElement }) {
   if (!collapsed) return children;
@@ -879,9 +880,52 @@ function SidebarTooltip({ collapsed, label, children }: { collapsed: boolean; la
 
 function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
   return (
-    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs opacity-(--opacity-muted) hover:bg-fill-hover max-narrow:hidden">
+    <button type="button" aria-label={label} onClick={onClick} className="rounded-control border-0 bg-transparent p-xs text-ink-soft hover:bg-fill max-narrow:hidden">
       <IconLayoutSidebarRight className="size-(--size-glyph)" aria-hidden />
     </button>
+  );
+}
+
+/** The glyph states the palette the member picked, not the one the browser resolved: `System` is a
+ *  choice they can read back, and a sun that flips itself at dusk would say they had picked light. */
+function SchemeGlyph({ scheme }: { scheme: Scheme }) {
+  if (scheme === "light") return <IconSun className="size-(--size-glyph)" aria-hidden />;
+  if (scheme === "dark") return <IconMoon className="size-(--size-glyph)" aria-hidden />;
+  return <IconDeviceDesktop className="size-(--size-glyph)" aria-hidden />;
+}
+
+function SchemePick({ collapsed }: { collapsed: boolean }) {
+  const [scheme, setScheme] = useState<Scheme>(heldScheme);
+  const pick = (next: Scheme) => {
+    holdScheme(next);
+    setScheme(next);
+  };
+  return (
+    <DropdownMenu>
+      <SidebarTooltip collapsed={collapsed} label="Theme">
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Theme"
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
+          >
+            <SchemeGlyph scheme={scheme} />
+          </button>
+        </DropdownMenuTrigger>
+      </SidebarTooltip>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup
+          value={scheme}
+          onValueChange={(value) => pick(value === "light" || value === "dark" ? value : "system")}
+        >
+          {SCHEME_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -906,7 +950,7 @@ function NavRow({
       aria-label={collapsed ? label : undefined}
       aria-current={current}
       onClick={onClick}
-      className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", current && "bg-fill-subtle")}
+      className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0 max-narrow:justify-start max-narrow:gap-sm max-narrow:px-sm", current && "bg-fill")}
     >
       {icon}
       <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden max-narrow:inline")}>{children}</span>
@@ -915,28 +959,41 @@ function NavRow({
   return <SidebarTooltip collapsed={collapsed} label={label}>{button}</SidebarTooltip>;
 }
 
+/** A fact the group above cannot state — the agent holding the conversation, the surface it came
+ *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
+ *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
+ *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. */
 function RailRow({
   current,
+  facts,
   onClick,
   children,
 }: {
   current: boolean;
+  facts: string | null;
   onClick: () => void;
   children: React.ReactNode;
 }) {
-  return (
+  const button = (
     <button
       type="button"
       aria-current={current}
       onClick={onClick}
       className={cn(
-        "flex min-h-(--size-row) w-full flex-col justify-center rounded-control border-0 bg-transparent px-sm py-2xs text-left text-inherit hover:bg-fill-hover",
+        "flex h-(--size-row) w-full items-center rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
         "max-narrow:w-auto max-narrow:whitespace-nowrap",
-        current && "bg-fill-subtle",
+        current && "bg-fill",
       )}
     >
       {children}
     </button>
+  );
+  if (!facts) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent>{facts}</TooltipContent>
+    </Tooltip>
   );
 }
 

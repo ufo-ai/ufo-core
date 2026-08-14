@@ -12,17 +12,17 @@ export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 export const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
 
 const POPUP =
-  "z-10 flex min-w-(--container-menu) origin-(--radix-dropdown-menu-content-transform-origin) flex-col gap-px rounded-menu border border-edge-faint bg-popover text-popover-foreground p-sm [box-shadow:var(--shadow-raised)] animate-raise";
+  "z-10 flex min-w-(--container-menu) origin-(--radix-dropdown-menu-content-transform-origin) flex-col gap-px rounded-menu border border-edge bg-popover text-popover-foreground p-sm [box-shadow:var(--shadow-raised)] animate-raise";
 
 const ITEM =
-  "flex h-(--size-row) cursor-default select-none items-center justify-between gap-sm rounded-control p-sm text-ui outline-none data-[highlighted]:bg-fill-hover";
+  "flex h-(--size-row) cursor-default select-none items-center justify-between gap-sm rounded-control p-sm text-ui outline-none data-[highlighted]:bg-fill";
 
 function SubChevron() {
   return (
     <svg
       viewBox="0 0 12 12"
       aria-hidden
-      className="size-(--spacing-lg) shrink-0 opacity-(--opacity-muted)"
+      className="size-(--spacing-lg) shrink-0 text-ink-soft"
     >
       <path
         d="M4.5 3 7.5 6 4.5 9"
@@ -77,12 +77,12 @@ export function DropdownMenuSubTrigger({
   return (
     <DropdownMenuPrimitive.SubTrigger
       data-slot="dropdown-menu-sub-trigger"
-      className={cn(ITEM, "data-[state=open]:bg-fill-hover", className)}
+      className={cn(ITEM, "data-[state=open]:bg-fill", className)}
       {...props}
     >
       {children}
       <span className="flex items-center gap-xs">
-        {value ? <span className="opacity-(--opacity-muted)">{value}</span> : null}
+        {value ? <span className="text-ink-soft">{value}</span> : null}
         <SubChevron />
       </span>
     </DropdownMenuPrimitive.SubTrigger>

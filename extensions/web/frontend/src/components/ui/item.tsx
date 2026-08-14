@@ -24,7 +24,7 @@ export function Item({ className, ...props }: ComponentProps<"li">) {
 /** The rule between two items, drawn as its own row so no item carries an edge of its own and the
  *  last one meets the card with nothing beside it. */
 export function ItemSeparator() {
-  return <li aria-hidden className="border-t border-edge-soft" />;
+  return <li aria-hidden className="border-t border-edge" />;
 }
 
 export function ItemContent({ children }: { children: ReactNode }) {
@@ -41,7 +41,7 @@ export function ItemTitle({ children }: { children: ReactNode }) {
 
 export function ItemDescription({ children }: { children: ReactNode }) {
   return (
-    <p data-part="body" className="m-0 truncate text-small opacity-(--opacity-muted-soft)">
+    <p data-part="body" className="m-0 truncate text-small text-ink-soft">
       {children}
     </p>
   );

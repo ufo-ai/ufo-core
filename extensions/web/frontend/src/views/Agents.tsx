@@ -47,7 +47,7 @@ const FAMILIES = [
 const SUBAGENT_PILL = "Subagent";
 const SUBAGENT_HINT = "An agent starts one to do a single task and report back.";
 const PILL = cn(
-  "ml-xs inline-flex items-center rounded-full border-0 bg-fill-subtle px-sm py-hair",
+  "ml-xs inline-flex items-center rounded-full border-0 bg-fill px-sm py-hair",
   "align-middle font-sans text-small text-inherit",
 );
 

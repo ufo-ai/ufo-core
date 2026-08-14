@@ -100,7 +100,7 @@ export function PanelSkeleton({ shape }: { shape: PanelShape }) {
       {Array.from({ length: SKELETON_ROWS }, (_, index) => (
         <div
           key={index}
-          className="flex items-center gap-2xl border-b border-edge-soft px-2xl py-md"
+          className="flex items-center gap-2xl border-b border-edge px-2xl py-md"
         >
           <Skeleton className="h-(--size-notice) w-full" />
           <Skeleton className="h-(--size-notice) w-1/6" />
@@ -135,7 +135,7 @@ export function Panel<T>({
 
 function Empty({ className, children }: { className?: string; children: ReactNode }) {
   return (
-    <div className={cn("m-auto max-w-empty text-center opacity-(--opacity-muted-soft)", className)}>
+    <div className={cn("m-auto max-w-empty text-center text-ink-soft", className)}>
       {children}
     </div>
   );
@@ -155,7 +155,7 @@ export function PanelEmpty({ children }: { children: ReactNode }) {
 export function PanelBlank({ body, action }: { body: string; action?: ReactNode }) {
   return (
     <div className="rounded-panel border border-edge bg-surface px-xl py-4xl text-center">
-      <p className="m-0 mx-auto max-w-hint opacity-(--opacity-muted-soft)">{body}</p>
+      <p className="m-0 mx-auto max-w-hint text-ink-soft">{body}</p>
       {action ? <div className="mt-lg">{action}</div> : null}
     </div>
   );

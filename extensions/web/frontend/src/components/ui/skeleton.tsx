@@ -6,7 +6,7 @@ export function Skeleton({ className }: { className?: string }) {
       data-slot="skeleton"
       data-part="skeleton"
       aria-hidden
-      className={cn("animate-skeleton rounded-control bg-fill-subtle", className)}
+      className={cn("animate-skeleton rounded-control bg-fill", className)}
     />
   );
 }

@@ -15,7 +15,7 @@ export type Fact = { label: string; value: ReactNode; block?: boolean };
 export function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col">
-      <p className="m-0 flex h-(--size-record) items-center border-b border-edge-faint text-label">
+      <p className="m-0 flex h-(--size-record) items-center border-b border-edge text-label">
         {title}
       </p>
       {children}
@@ -46,7 +46,7 @@ export function Facts({ rows }: { rows: Fact[] }) {
             key={row.label}
             className={cn(
               "flex min-h-(--size-record) flex-col justify-center gap-2xs py-sm",
-              "border-b border-edge-faint text-label",
+              "border-b border-edge text-label",
             )}
           >
             <dt className="text-ink-soft">{row.label}</dt>
@@ -57,7 +57,7 @@ export function Facts({ rows }: { rows: Fact[] }) {
             key={row.label}
             className={cn(
               "flex h-(--size-record) items-center justify-between gap-2xl overflow-hidden",
-              "border-b border-edge-faint text-label",
+              "border-b border-edge text-label",
             )}
           >
             <dt className="shrink-0 truncate text-ink-soft">{row.label}</dt>

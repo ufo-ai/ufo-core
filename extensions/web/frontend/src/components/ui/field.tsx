@@ -6,11 +6,11 @@ import { cn } from "@/lib/cn";
 /** The one field surface. `Select` draws its trigger with this too, so a button that stands in for
  *  a field is the same object to the eye as the fields beside it. */
 export const CONTROL = cn(
-  "rounded-panel border border-edge-control bg-field text-field-ink px-lg py-md font-sans",
-  "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
-  "transition-[border-color] duration-100 ease-control hover:border-edge-control-strong",
+  "rounded-panel border border-edge bg-field text-field-ink px-lg py-md font-sans",
+  "text-subtitle narrow:text-ui placeholder:text-ink-faint",
+  "transition-[border-color] duration-100 ease-control hover:border-edge-strong",
   "user-invalid:border-ink user-invalid:border-dashed",
-  "disabled:cursor-not-allowed disabled:opacity-(--disabled) disabled:hover:border-edge-control",
+  "disabled:cursor-not-allowed disabled:opacity-(--disabled) disabled:hover:border-edge",
 );
 
 export function Label({ className, ...props }: ComponentProps<typeof LabelPrimitive.Root>) {
@@ -57,7 +57,7 @@ export function FieldGroup({
   return (
     <form data-slot="field-group" className={cn("rounded-panel border border-edge bg-card text-card-foreground", className)} {...props}>
       <div className="flex flex-col gap-xl p-xl">{children}</div>
-      <div className="flex justify-end border-t border-edge-soft px-xl py-lg">{submit}</div>
+      <div className="flex justify-end border-t border-edge px-xl py-lg">{submit}</div>
     </form>
   );
 }
@@ -93,7 +93,7 @@ export function Search({
     <form
       className={cn(
         "flex h-(--size-control) w-(--container-search) items-center gap-sm rounded-full",
-        "bg-fill-subtle px-lg",
+        "bg-fill px-lg",
         "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink",
         className,
       )}
@@ -105,7 +105,7 @@ export function Search({
       <svg
         viewBox="0 0 16 16"
         aria-hidden
-        className="size-(--size-glyph) shrink-0 opacity-(--opacity-muted)"
+        className="size-(--size-glyph) shrink-0 text-ink-soft"
       >
         <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
         <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -115,7 +115,7 @@ export function Search({
         aria-label={label}
         className={cn(
           "min-w-0 flex-1 border-0 bg-transparent p-0 font-sans text-label",
-          "placeholder:opacity-(--opacity-muted) focus-visible:outline-none",
+          "placeholder:text-ink-faint focus-visible:outline-none",
         )}
         {...props}
       />
@@ -144,7 +144,7 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
  *  the row it sizes is the row the member is typing into. */
 const BARE = cn(
   "border-0 bg-transparent p-0 text-field-ink font-sans",
-  "text-subtitle narrow:text-ui placeholder:opacity-(--opacity-muted)",
+  "text-subtitle narrow:text-ui placeholder:text-ink-faint",
 );
 
 /** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a
@@ -204,7 +204,7 @@ export function Hint({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="field-description"
-      className={cn("text-label opacity-(--opacity-muted-faint) max-w-hint mt-2xs mb-lg", className)}
+      className={cn("text-label text-ink-soft max-w-hint mt-2xs mb-lg", className)}
       {...props}
     />
   );

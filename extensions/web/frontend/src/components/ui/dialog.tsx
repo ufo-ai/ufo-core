@@ -19,7 +19,7 @@ export function DialogContent({
         className={cn(
           "fixed top-1/2 left-1/2 z-10 -translate-x-1/2 -translate-y-1/2",
           "w-dialog max-h-[var(--media-tall)] overflow-y-auto",
-          "flex flex-col gap-4xl rounded-card border border-edge-strong bg-popover text-popover-foreground p-4xl",
+          "flex flex-col gap-4xl rounded-card border border-edge bg-popover text-popover-foreground p-4xl",
           "[box-shadow:var(--shadow-raised)] animate-raise",
           className,
         )}
@@ -55,7 +55,7 @@ export function DialogDescription({
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"
-      className={cn("m-0 text-label opacity-(--opacity-muted-faint)", className)}
+      className={cn("m-0 text-label text-ink-soft", className)}
       {...props}
     />
   );
@@ -80,7 +80,7 @@ export function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-wrap items-center justify-end gap-sm border-t border-edge-soft pt-lg",
+        "flex flex-wrap items-center justify-end gap-sm border-t border-edge pt-lg",
         className,
       )}
       {...props}

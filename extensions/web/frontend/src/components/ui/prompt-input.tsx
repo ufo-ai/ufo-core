@@ -119,12 +119,12 @@ export function PromptInputAttachments() {
           className="flex max-w-control-row items-center gap-xs rounded-control border border-edge px-sm py-2xs text-label"
         >
           <span className="truncate">{file.name}</span>
-          <span className="tabular-nums opacity-(--opacity-muted)">{formatSize(file.size)}</span>
+          <span className="tabular-nums text-ink-soft">{formatSize(file.size)}</span>
           <Button
             variant="row"
             aria-label={"Remove " + file.name}
             onClick={() => drop(id)}
-            className="border-0 p-0 opacity-(--opacity-muted) hover:bg-transparent hover:opacity-100"
+            className="border-0 p-0 text-ink-soft hover:bg-transparent hover:text-ink"
           >
             <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
               <path

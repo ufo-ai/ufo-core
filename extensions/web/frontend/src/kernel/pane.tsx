@@ -158,7 +158,7 @@ export function RecordPanel({
       }}
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col gap-(--size-record-gutter)",
-        "border-l border-edge-soft py-2xl",
+        "border-l border-edge py-2xl",
         "max-narrow:absolute max-narrow:inset-0 max-narrow:z-10 max-narrow:border-l-0",
         "max-narrow:bg-surface",
       )}

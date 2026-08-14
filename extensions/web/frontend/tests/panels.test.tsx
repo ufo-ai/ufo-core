@@ -623,7 +623,7 @@ test("a Slack row names its channel on its meta line, and those words are the wa
   expect(drawn).toContain("focus-visible:underline");
   expect(drawn).not.toContain("underline");
   expect(drawn).not.toContain("text-link");
-  expect(within(out).getByText("↗").className).toContain("opacity-(--opacity-muted)");
+  expect(within(out).getByText("↗").className).toContain("text-ink-soft");
   const own = screen.getByText("Rename the deploy job", { selector: "[data-part='primary']" });
   const mine = own.closest("li") as HTMLElement;
   expect(within(mine).queryByRole("link")).toBeNull();

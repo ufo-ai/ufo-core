@@ -820,10 +820,10 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(log.parentElement?.children).toHaveLength(3);
   expect(log.parentElement?.parentElement?.children).toHaveLength(2);
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
-  expect(screen.getByText("-old").className).toContain("bg-attention/25");
-  expect(screen.getByText("+new").className).toContain("bg-link/10");
+  expect(screen.getByText("-old").className).toContain("bg-attention");
+  expect(screen.getByText("+new").className).toContain("bg-affirm");
   expect(
-    screen.getAllByText("--- before").every((line) => !line.className.includes("bg-attention/25")),
+    screen.getAllByText("--- before").every((line) => !line.className.includes("bg-attention")),
   ).toBe(true);
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();

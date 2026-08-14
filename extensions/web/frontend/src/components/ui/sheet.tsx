@@ -23,7 +23,7 @@ export function Sheet({ open, onClose, title, children, footer }: SheetProps) {
           onInteractOutside={(event) => event.preventDefault()}
           className={cn(
             "fixed inset-y-0 right-0 left-auto z-10 w-drawer overflow-y-auto",
-            "bg-popover text-popover-foreground border-l border-edge-strong p-2xl [box-shadow:var(--shadow-raised)]",
+            "bg-popover text-popover-foreground border-l border-edge p-2xl [box-shadow:var(--shadow-raised)]",
             "flex flex-col gap-2xl",
           )}
         >
