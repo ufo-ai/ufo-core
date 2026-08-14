@@ -373,6 +373,7 @@ impl App {
 
     pub fn begin_turn(&mut self) {
         self.working = true;
+        self.prompt = PROMPT_IDLE.to_string();
         self.last_reply.clear();
         self.status.activity = Activity::Working {
             since: Instant::now(),
@@ -500,6 +501,9 @@ impl App {
     // ── keys ──────────────────────────────────────────────────────────────────────────────────
 
     pub fn on_key(&mut self, key: KeyEvent) -> Reply {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Reply::Exit;
+        }
         match key.code {
             KeyCode::PageUp => {
                 self.scroll(self.page());
@@ -523,11 +527,31 @@ impl App {
         }
     }
 
+    /// Pasted text reaches whichever entry holds input. Where a terminal brackets a paste the
+    /// member never types the characters, so an entry that ignored the event took nothing at all —
+    /// a masked entry above all, whose prompt is what asks for a pasted value. That entry holds one
+    /// value, so the newline a copied value carries, and every other control character, is dropped.
     pub fn on_paste(&mut self, text: String) -> Reply {
-        if matches!(self.focus, Focus::Compose) {
-            let width = self.entry_width();
-            self.ask
-                .apply(Key::Paste(text), &self.history.entries, width);
+        match self.focus {
+            Focus::Compose => {
+                let width = self.entry_width();
+                self.ask
+                    .apply(Key::Paste(text), &self.history.entries, width);
+            }
+            Focus::Path => {
+                let width = self.entry_width();
+                self.ask
+                    .apply(Key::Paste(text), &self.history.entries, width);
+                self.refilter_paths();
+            }
+            Focus::Secret => {
+                if let Some(entry) = self.secret.as_mut() {
+                    entry
+                        .value
+                        .extend(text.chars().filter(|ch| !ch.is_control()));
+                }
+            }
+            Focus::Choose | Focus::Keys => {}
         }
         Reply::None
     }
@@ -535,7 +559,6 @@ impl App {
     fn compose_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('c') if ctrl => return Reply::Exit,
             KeyCode::Char('o') if ctrl => {
                 self.copy_last_reply();
                 return Reply::None;
@@ -544,7 +567,7 @@ impl App {
                 self.focus = Focus::Keys;
                 return Reply::None;
             }
-            KeyCode::Char('@') if !ctrl => {
+            KeyCode::Char('@') if !ctrl && self.opens_a_mention() => {
                 let width = self.entry_width();
                 self.ask.apply(Key::Char('@'), &self.history.entries, width);
                 self.open_path_pick();
@@ -627,13 +650,21 @@ impl App {
                 entry.value.clear();
                 Reply::None
             }
-            KeyCode::Char('c') if ctrl => Reply::Exit,
             KeyCode::Char(ch) if !ctrl => {
                 entry.value.push(ch);
                 Reply::None
             }
             _ => Reply::None,
         }
+    }
+
+    /// Whether an `@` typed here starts a path mention: only at the start of a word, so an address
+    /// like `member@example.com` — what a sign-in prompt asks for — types straight through.
+    fn opens_a_mention(&self) -> bool {
+        self.ask.text[..self.ask.cursor]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
     }
 
     fn open_path_pick(&mut self) {
@@ -672,10 +703,14 @@ impl App {
                 let picked = pick.picker.current().map(str::to_string);
                 self.path_pick = None;
                 self.focus = Focus::Compose;
-                if let Some(path) = picked {
-                    let end = self.ask.cursor;
-                    self.ask.text.replace_range(token_start..end, &path);
-                    self.ask.cursor = token_start + path.len();
+                match picked {
+                    Some(path) => {
+                        let end = self.ask.cursor;
+                        self.ask.text.replace_range(token_start..end, &path);
+                        self.ask.cursor = token_start + path.len();
+                    }
+                    // Nothing is left to complete, so the key is the composer's: Enter still sends.
+                    None => return self.compose_key(key),
                 }
             }
             KeyCode::Backspace => {

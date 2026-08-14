@@ -3,7 +3,11 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+#[cfg(unix)]
+use std::time::Duration;
 
 struct Exchange {
     reply_lines: &'static [&'static str],
@@ -157,10 +161,49 @@ fn run_client(url: &str, args: &[&str], stdin: &str, home: &std::path::Path) -> 
 struct OnPty {
     keys: std::fs::File,
     child: std::process::Child,
+    painted: Arc<Mutex<Vec<u8>>>,
 }
 
 #[cfg(unix)]
-fn run_client_on_pty(url: &str, args: &[&str], home: &std::path::Path) -> OnPty {
+impl OnPty {
+    /// Type `keys` and let the dock repaint.
+    fn press(&mut self, keys: &[u8]) {
+        self.keys.write_all(keys).expect("keys reach the pty");
+        thread::sleep(Duration::from_millis(600));
+    }
+
+    /// The dock as it stands, replayed through a terminal emulator.
+    fn screen(&self) -> String {
+        let mut parser = vt100::Parser::new(24, 100, 0);
+        parser.process(&self.painted.lock().unwrap());
+        parser.screen().contents()
+    }
+
+    /// Everything ever painted, so a popup that came and went is still evidence.
+    fn painted(&self) -> String {
+        String::from_utf8_lossy(&self.painted.lock().unwrap()).to_string()
+    }
+
+    fn ended(&mut self) -> bool {
+        for _ in 0..40 {
+            if self.child.try_wait().expect("wait on the client").is_some() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+}
+
+/// `workspace` is the surface a signed-in client posts to; `None` leaves the client signed out, so
+/// it drives the gateway's onboarding prompts instead.
+#[cfg(unix)]
+fn run_client_on_pty(
+    url: &str,
+    args: &[&str],
+    home: &std::path::Path,
+    workspace: Option<&str>,
+) -> OnPty {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -177,7 +220,6 @@ fn run_client_on_pty(url: &str, args: &[&str], home: &std::path::Path) -> OnPty 
     let mut command = Command::new(env!("CARGO_BIN_EXE_ufo"));
     command
         .args(args)
-        .env("WORKSPACE_URL", url)
         .env("UFO_URL", url)
         .env("UFO_HOME", home)
         .env("UFO_CHANNEL", "e2e-tty")
@@ -185,6 +227,10 @@ fn run_client_on_pty(url: &str, args: &[&str], home: &std::path::Path) -> OnPty 
         .env("TMPDIR", &scratch_tmp)
         .env_remove("NO_COLOR")
         .env_remove("UFO_PLAIN");
+    match workspace {
+        Some(surface) => command.env("WORKSPACE_URL", surface),
+        None => command.env_remove("WORKSPACE_URL"),
+    };
     for slot in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
         let held = unsafe { libc::dup(follower) };
         assert!(held >= 0, "the follower duplicates");
@@ -205,12 +251,23 @@ fn run_client_on_pty(url: &str, args: &[&str], home: &std::path::Path) -> OnPty 
     unsafe { libc::close(follower) };
 
     let keys = unsafe { std::fs::File::from_raw_fd(leader) };
-    let mut painted = keys.try_clone().expect("the leader duplicates");
+    let mut reader = keys.try_clone().expect("the leader duplicates");
+    let painted = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&painted);
     thread::spawn(move || {
         let mut buffer = [0u8; 8192];
-        while painted.read(&mut buffer).is_ok_and(|read| read > 0) {}
+        while let Ok(read) = reader.read(&mut buffer) {
+            if read == 0 {
+                return;
+            }
+            sink.lock().unwrap().extend_from_slice(&buffer[..read]);
+        }
     });
-    OnPty { keys, child }
+    OnPty {
+        keys,
+        child,
+        painted,
+    }
 }
 
 fn scratch_home(name: &str) -> std::path::PathBuf {
@@ -473,7 +530,7 @@ fn esc_on_a_running_turn_posts_the_stop() {
         },
     ]);
     let home = scratch_home("stop");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home);
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
         .recv_timeout(std::time::Duration::from_secs(15))
@@ -493,5 +550,188 @@ fn esc_on_a_running_turn_posts_the_stop() {
         "Esc ends the turn on its own connection: {requests:?}"
     );
     assert_eq!(requests[1].body, "", "a stop admits no message");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The signed-out client at the gateway's own prompts: the address types through untouched, one
+/// Enter answers it, and the answered question leaves the composer while the turn runs.
+#[cfg(unix)]
+#[test]
+fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\tufo", "ask\tEnter your work email:"],
+        },
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &[
+                "say\tWe emailed a code to member@metalcraft.ai",
+                "ask\tEnter the code:",
+            ],
+        },
+        Exchange {
+            delay_ms: 2500,
+            reply_lines: &["say\tSigned in: member@metalcraft.ai", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("signin");
+    let mut session = run_client_on_pty(&served.url, &[], &home, None);
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the opening post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    session.press(b"member@metalcraft.ai\r");
+    assert!(
+        !session.painted().contains("Cargo.toml"),
+        "the address is no path mention, so nothing lists the directory: {}",
+        session.screen()
+    );
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("one Enter answers the email prompt");
+
+    thread::sleep(Duration::from_millis(800));
+    session.press(b"123456\r");
+    let entered = session.screen();
+    assert!(
+        !entered.contains("Enter the code:"),
+        "the answered question leaves the composer while the code is in flight: {entered}"
+    );
+
+    let requests = served.handle.join().unwrap();
+    thread::sleep(Duration::from_millis(600));
+    let signed_in = session.screen();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[1].body, "member@metalcraft.ai");
+    assert_eq!(requests[2].body, "123456");
+    assert!(
+        signed_in.contains("Signed in: member@metalcraft.ai"),
+        "the flow advances past the code prompt: {signed_in}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The path popup an `@` mention opens holds input, so it answers the keys that leave it: Enter
+/// sends the entry when the filter matches nothing, and an interrupt ends the session.
+#[cfg(unix)]
+#[test]
+fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\thello", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\tread it", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("mention");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the opening post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    session.press(b"read @");
+    let opened = session.screen();
+    assert!(
+        opened.contains("Cargo.toml"),
+        "an `@` after a space still completes a path: {opened}"
+    );
+
+    session.press(b"zzzznothing\r");
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("Enter sends the entry the popup could not complete");
+
+    thread::sleep(Duration::from_millis(800));
+    session.press(b"say @");
+    session.press(b"\x03");
+    assert!(
+        session.ended(),
+        "Ctrl-C ends the session while the popup holds input"
+    );
+
+    let requests = served.handle.join().unwrap();
+    assert_eq!(requests[1].body, "read @zzzznothing", "{requests:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A terminal that brackets a paste sends one paste event instead of the characters, so every
+/// entry that holds input must take it: the masked entry a `secret` opens, and the composer under
+/// the path popup.
+#[cfg(unix)]
+#[test]
+fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\thello", "secret\tsealed1\ts1\tPaste the key", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\tstored", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            reply_lines: &["say\tread it", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("paste");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the opening post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    session.press(b"\x1b[200~sk-live-abc123\n\x1b[201~");
+    let masked = session.screen();
+    assert!(
+        masked.contains(&"\u{2022}".repeat(14)),
+        "the pasted key fills the masked entry, and its newline is no character: {masked}"
+    );
+
+    session.press(b"\r");
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the pasted key answers the secret prompt");
+    thread::sleep(Duration::from_millis(800));
+
+    session.press(b"read @");
+    session.press(b"\x1b[200~Cargo.to\x1b[201~");
+    session.press(b"\r");
+    session.press(b"\r");
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the mention the pasted filter completed posts");
+
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    assert_eq!(
+        requests[1].slot_header.as_deref(),
+        Some("s1"),
+        "{requests:?}"
+    );
+    assert_eq!(
+        requests[1].body, "sk-live-abc123",
+        "the masked entry posts the pasted key, never an empty secret: {requests:?}"
+    );
+    assert_eq!(
+        requests[2].body, "read @Cargo.toml",
+        "the paste filtered the popup, so Enter completed that path: {requests:?}"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }

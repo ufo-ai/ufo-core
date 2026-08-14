@@ -391,8 +391,10 @@ impl Wire {
         let mut body = if first.is_empty() {
             Some(PostBody::Empty)
         } else {
+            // The opening message posts alone. A line that lands in the same instant is the next
+            // turn's, and joining it here would leave the turn it belongs to nothing to post.
             self.queue.push_back(first);
-            self.next_body()
+            Some(self.take_queue())
         };
         let mut attempts = 0u32;
         loop {
@@ -563,14 +565,7 @@ impl Wire {
                 return Some(reply);
             }
             if !self.queue.is_empty() {
-                let joined: Vec<String> = self.queue.drain(..).collect();
-                for message in &joined {
-                    self.record(message);
-                    let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
-                }
-                self.detached = false;
-                self.poll = None;
-                return Some(PostBody::Message(joined.join("\n\n")));
+                return Some(self.take_queue());
             }
             if let Some(seconds) = self.poll.take() {
                 if !self.detached {
@@ -586,6 +581,18 @@ impl Wire {
                 Err(_) => return None,
             }
         }
+    }
+
+    /// Everything queued goes out as one post, each message recorded and echoed to the member.
+    fn take_queue(&mut self) -> PostBody {
+        let joined: Vec<String> = self.queue.drain(..).collect();
+        for message in &joined {
+            self.record(message);
+            let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
+        }
+        self.detached = false;
+        self.poll = None;
+        PostBody::Message(joined.join("\n\n"))
     }
 
     fn drain_cmds(&mut self) {
