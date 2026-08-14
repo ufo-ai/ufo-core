@@ -99,6 +99,22 @@ test("the send variant keeps a boundary so it holds its height beside a field", 
   expect(buttonVariants({ variant: "send" })).toContain("border border-transparent");
 });
 
+test("a picked option is the filled chip, so it never reads lighter than a hovered neighbour", () => {
+  const classes = buttonVariants({ variant: "option" });
+  expect(classes).toContain("hover:bg-fill-hover");
+  expect(classes).toContain("aria-pressed:bg-ink");
+  expect(classes).toContain("aria-pressed:text-surface");
+  expect(classes).toContain("aria-pressed:border-ink");
+  expect(classes).not.toMatch(/aria-pressed:bg-fill-/);
+});
+
+test("a picked option holds that fill under the pointer and dims the way send does", () => {
+  const classes = buttonVariants({ variant: "option" });
+  expect(classes).toContain("aria-pressed:hover:bg-ink");
+  expect(classes).toContain("aria-pressed:hover:opacity-(--opacity-muted-soft)");
+  expect(buttonVariants({ variant: "send" })).toContain("hover:opacity-(--opacity-muted-soft)");
+});
+
 test("a dialog names itself, dims the surface behind it, and offers a way out", () => {
   render(
     <Dialog open>

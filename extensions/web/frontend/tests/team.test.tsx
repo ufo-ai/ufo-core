@@ -91,7 +91,7 @@ test("a search narrows the roster to the members whose address matches", async (
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.type(await screen.findByLabelText("Search members"), "LEAD");
+  await userEvent.type(await screen.findByLabelText("Search members"), "LEAD{enter}");
 
   expect(screen.getByText("lead@example.com")).toBeTruthy();
   expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
@@ -101,7 +101,7 @@ test("a search that matches nobody says so in a row, and the table holds", async
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} subagents={[]} member={ADMIN} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.type(await screen.findByLabelText("Search members"), "nobody");
+  await userEvent.type(await screen.findByLabelText("Search members"), "nobody{enter}");
 
   expect(screen.getByText("No member matches this search.")).toBeTruthy();
   expect(screen.getByRole("table")).toBeTruthy();

@@ -11,11 +11,12 @@ import {
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
 import { SILENT, Toast } from "@/components/ui/toast";
-import { Files, MessageLog, Meta } from "@/kernel/messages";
+import { MessageLog, Meta } from "@/kernel/messages";
 import { COLUMN } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
+import { formatSize } from "@/lib/size";
 import {
   answerQuestion,
   refreshTranscript,
@@ -24,7 +25,7 @@ import {
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type { Agent, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
+import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 const MAX_ANSWER_BUTTONS = 10;
 
@@ -128,7 +129,7 @@ export function Chat({
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
   const stalled = messages === null ? state.fault : null;
-  const trailing = state.live ? null : state.handoffs.files ?? null;
+  const trailing = state.handoffs.files ?? null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
 
@@ -242,6 +243,26 @@ export function Chat({
   );
 }
 
+function Files({ files }: { files: ChatFile[] }) {
+  return (
+    <div className="mt-2xs flex flex-col gap-hair">
+      {files.map((file) => (
+        <div key={file.filename}>
+          {file.url ? (
+            <a href={file.url}>{file.filename}</a>
+          ) : (
+            <span>{file.filename}</span>
+          )}
+          <span className="font-mono text-mono">
+            {" "}
+            · {formatSize(file.size_bytes)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Handoff({ children }: { children: ReactNode }) {
   return (
     <div className="flex max-w-bubble flex-col gap-sm self-start rounded-bubble border border-edge-control px-lg py-md">
@@ -336,7 +357,6 @@ function Ask({
               <Button
                 key={option.label}
                 variant="option"
-                className="aria-pressed:bg-fill-subtle"
                 aria-pressed={chosen.includes(option.label)}
                 title={option.description}
                 onClick={() =>

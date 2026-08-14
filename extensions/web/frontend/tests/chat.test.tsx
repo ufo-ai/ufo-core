@@ -1450,7 +1450,7 @@ test("a question stands under the reply that asked it, not at the foot of the lo
   expect(screen.getByTestId("log").lastElementChild?.textContent).toBe("one moment");
 });
 
-test("a files frame lists each shared file with its size", async () => {
+test("a settled turn names each shared file once, with its size", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
@@ -1458,12 +1458,21 @@ test("a files frame lists each shared file with its size", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
+  StreamFake.last().emit("message", { text: "Here it is." });
   StreamFake.last().emit("files", {
     files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
   });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
 
-  const link = await screen.findByRole("link", { name: "report.csv" });
-  expect(link.getAttribute("href")).toBe("/dl/report.csv");
+  expect(await screen.findByText(saying("Here it is."))).toBeTruthy();
+  const links = screen.getAllByRole("link", { name: "report.csv" });
+  expect(links).toHaveLength(1);
+  expect(links[0].getAttribute("href")).toBe("/dl/report.csv");
   expect(screen.getByText("· 2 kB")).toBeTruthy();
 });
 

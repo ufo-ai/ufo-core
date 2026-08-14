@@ -17,8 +17,9 @@ export type PaneView = {
   render: (place: Placement, onPlace: (place: Placement) => void) => ReactNode;
   /** Remount when the placement changes, so a mutation's outcome notice reaches the new mount. */
   remountOnPlace: boolean;
-  /** The placeholder of the search the page's own header carries, for a view that narrows on `q`.
-   *  The header owns the box because it outlives the read the view redraws under it. */
+  /** What the search the page's own header carries is labelled — the words for what it narrows,
+   *  never the bare verb, since one shell heads several tabs and a box called `Search` on every one
+   *  of them names none. The header owns the box because it outlives the read it redraws under. */
   search?: string;
   /** A view that heads its own page — the shell draws no header over it, because the controls
    *  reaching the whole page are the view's own and stand beside its title. */
@@ -29,6 +30,7 @@ function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>):
   return {
     label,
     remountOnPlace: true,
+    search: spec.search || spec.serverQuery ? "Search " + label.toLowerCase() : undefined,
     render: (place, onPlace) => (
       <Listing spec={spec} place={place} onPlace={onPlace} />
     ),
@@ -39,13 +41,15 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   team: {
     label: "Team",
     remountOnPlace: true,
+    search: "Search members",
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
   },
   sources: declared("Sources", SOURCES),
   connectors: {
     label: "Connectors",
     remountOnPlace: false,
-    render: () => <WorkspaceConnectors />,
+    search: "Search connectors",
+    render: (place) => <WorkspaceConnectors place={place} />,
   },
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
@@ -65,13 +69,13 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
   memory: {
     label: "Memory",
     remountOnPlace: false,
-    search: "Search",
+    search: "Search memory",
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
   artifacts: {
     label: "Artifacts",
     remountOnPlace: false,
-    search: "Search",
+    search: "Search artifacts",
     render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
   },
 };

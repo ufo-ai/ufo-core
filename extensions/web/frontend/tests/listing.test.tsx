@@ -6,7 +6,9 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import type { WorkspacePlace } from "@/lib/route";
 import { SOURCES } from "@/views/Sources";
+import { TabbedPane } from "@/views/TabbedPane";
 import { App } from "@/App";
 
 import {
@@ -54,25 +56,52 @@ function spec(
   };
 }
 
+/** A listing is drawn under the shell that heads it, because the search it narrows on is the
+ *  header's box and not its own. Mounting it bare would prove the narrowing against a control the
+ *  member never touches. */
 function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
   const placed: Placement[] = [];
-  function Harness() {
-    const [current, setCurrent] = useState(place);
-    return (
-      <MainAgentProvider agents={[AGENT]}>
+  const views = {
+    probe: {
+      label: "Probe",
+      remountOnPlace: false,
+      search: declaration.search || declaration.serverQuery ? "Search" : undefined,
+      render: (current: Placement, onPlace: (patch: Placement) => void) => (
         <Listing
           spec={declaration}
           place={current}
           onPlace={(patch) => {
             placed.push(patch);
-            setCurrent((held) => ({ ...held, ...patch }));
+            onPlace(patch);
           }}
+        />
+      ),
+    },
+  };
+  function Harness() {
+    const [current, setCurrent] = useState<WorkspacePlace>(place);
+    return (
+      <MainAgentProvider agents={[AGENT]}>
+        <TabbedPane
+          title="Probe"
+          group="probe"
+          tabs={["probe"] as const}
+          views={views}
+          view="probe"
+          place={current}
+          onPlace={(_, next) => setCurrent(next)}
         />
       </MainAgentProvider>
     );
   }
   render(<Harness />);
   return placed;
+}
+
+async function narrow(term: string) {
+  const box = screen.getByRole("searchbox");
+  await userEvent.clear(box);
+  await userEvent.type(box, term + "{enter}");
 }
 
 function headers(): string[] {
@@ -136,18 +165,19 @@ test("a listing with no rows states its blank, and names itself nowhere", async 
   mount(spec({ search: (row: Row) => row.name }));
 
   expect(await screen.findByText("Nothing listed yet.")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Probe" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 2, name: "Probe" })).toBeNull();
   expect(screen.queryAllByRole("columnheader")).toEqual([]);
-  expect(screen.queryByRole("searchbox")).toBeNull();
 });
 
-test("a listing search is the bar's own filled box at the control row width", async () => {
+test("a listing's search is the page header's box, never a second one on the records bar", async () => {
   wire({ "/workspace/probe": () => json({ rows: ROWS }) });
   mount(spec({ search: (row: Row) => row.name }));
 
-  const box = (await screen.findByRole("searchbox")).closest("form")!;
-  expect(box.className).toContain("w-(--container-control-row)");
-  expect(box.className).toContain("bg-fill-subtle");
+  await screen.findByText("alpha");
+  const header = screen.getByRole("heading", { level: 1, name: "Probe" }).parentElement!;
+  const box = await screen.findByRole("searchbox");
+  expect(header.contains(box)).toBe(true);
+  expect(screen.getAllByRole("searchbox")).toHaveLength(1);
 });
 
 test("a card listing renders each face and its row action", async () => {
@@ -884,12 +914,11 @@ test("search narrows rows to matches and states when nothing matches", async () 
   mount(spec({ search: (row) => row.name }));
 
   await screen.findByText("alpha");
-  await userEvent.type(screen.getByRole("searchbox"), "bet");
+  await narrow("bet");
   expect(screen.queryByText("alpha")).toBeNull();
   expect(screen.getByText("beta")).toBeTruthy();
 
-  await userEvent.clear(screen.getByRole("searchbox"));
-  await userEvent.type(screen.getByRole("searchbox"), "zzz");
+  await narrow("zzz");
   expect(await screen.findByText("Nothing matches.")).toBeTruthy();
   expect(screen.queryByText("Nothing listed yet.")).toBeNull();
   expect(screen.getByRole("searchbox")).toBeTruthy();
@@ -928,7 +957,7 @@ test("a tab and a search term compose", async () => {
 
   await screen.findByText("alpha");
   await userEvent.click(screen.getByRole("tab", { name: "Noted" }));
-  await userEvent.type(screen.getByRole("searchbox"), "gam");
+  await narrow("gam");
 
   expect(screen.queryByText("beta")).toBeNull();
   expect(screen.queryByText("alpha")).toBeNull();
@@ -946,7 +975,7 @@ test("a tab remains available when its searched set is empty", async () => {
   );
 
   await screen.findByText("alpha");
-  await userEvent.type(screen.getByRole("searchbox"), "alpha");
+  await narrow("alpha");
   expect(screen.getByRole("tab", { name: "Noted" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "Noted" }));
@@ -1009,7 +1038,7 @@ test("an applied intent keeps the selected tab and the typed search term", async
   await userEvent.click(
     await screen.findByRole("tab", { name: "Only you" }),
   );
-  await userEvent.type(screen.getByRole("searchbox"), "notion");
+  await narrow("notion");
   await userEvent.click(screen.getByRole("button", { name: "Resync" }));
 
   expect(await screen.findByText("Resync queued.")).toBeTruthy();
@@ -1132,7 +1161,7 @@ test("the sources declaration searches and filters by access with live counts", 
   expect(screen.getByText("rss")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
-  await userEvent.type(screen.getByRole("searchbox"), "notion");
+  await narrow("notion");
   expect(await screen.findByText("notion")).toBeTruthy();
   expect(screen.queryByText("rss")).toBeNull();
   expect(screen.getByRole("tab", { name: "Only you" })).toBeTruthy();
@@ -1154,7 +1183,7 @@ test("a re-read keeps the controls row and the caret in the search box", async (
   mount(spec({ search: (row) => row.name }));
 
   await screen.findByText("alpha");
-  await userEvent.type(screen.getByRole("searchbox"), "a");
+  await narrow("a");
   const read = screen.getByRole("searchbox");
   read.focus();
   expect((read as HTMLInputElement).value).toBe("a");
@@ -1240,7 +1269,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
   });
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  await userEvent.type(await screen.findByRole("searchbox"), "rss");
+  await narrow("rss");
   location.hash = "#/agents/" + AGENT.id + "/chat";
   await waitFor(() => expect(screen.queryByPlaceholderText("Search sources")).toBeNull());
   location.hash = "#/workspace/sources";
@@ -1250,7 +1279,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
     ((await screen.findByRole("searchbox")) as HTMLInputElement).value,
   ).toBe("");
 
-  await userEvent.type(screen.getByRole("searchbox"), "rss");
+  await narrow("rss");
   location.hash = "#/admin";
   await waitFor(() => expect(screen.queryByRole("searchbox")).toBeNull());
   location.hash = "#/workspace/sources";

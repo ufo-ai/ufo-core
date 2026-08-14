@@ -5,19 +5,18 @@ import { speakerName } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
-import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
-import type { ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
+import type { ChatQuestion, SubagentRun } from "@/lib/types";
 
 const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
 
 /** One conversation's messages, drawn the one way this portal draws them — the member's words in
  *  a bubble, the agent's as markdown, and under each reply what it did: the subagents it spawned,
- *  the tools it called, the files it shared, the account it asked to connect, what it cost. The
- *  live chat hands it the turn it is streaming and puts a composer under it; a transcript read
- *  back — an agent's conversations, a subagent's runs — hands it none and shows what landed. A
- *  conversation the member cannot reply to still reads exactly like the one they can.
+ *  the tools it called, the account it asked to connect, what it cost. The live chat hands it the
+ *  turn it is streaming and puts a composer under it; a transcript read back — an agent's
+ *  conversations, a subagent's runs — hands it none and shows what landed. A conversation the
+ *  member cannot reply to still reads exactly like the one they can.
  *
  *  A member message a running turn has not taken up yet states that in its own words — italic and
  *  muted, no line added beneath them: a turn absorbs what arrived at its round boundaries, so the
@@ -78,7 +77,6 @@ export function MessageLog({
         ) : (
           message.text
         )}
-        {message.files ? <Files files={message.files} /> : null}
         {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
         {message.meta ? <Meta>{message.meta}</Meta> : null}
         {message.question && question ? question(message.question) : null}
@@ -100,7 +98,6 @@ export function MessageLog({
             }
           />
           <StreamingBody text={live.text} />
-          {live.files ? <Files files={live.files} /> : null}
           {live.connectUrl ? <ConnectLink url={live.connectUrl} /> : null}
           {live.meter ? <Meta>{live.meter}</Meta> : null}
           {live.meta ? <Meta>{live.meta}</Meta> : null}
@@ -243,25 +240,5 @@ function ConnectLink({ url }: { url: string }) {
     <a href={url} target="_blank" rel="noopener">
       Connect account
     </a>
-  );
-}
-
-export function Files({ files }: { files: ChatFile[] }) {
-  return (
-    <div className="mt-2xs flex flex-col gap-hair">
-      {files.map((file) => (
-        <div key={file.filename}>
-          {file.url ? (
-            <a href={file.url}>{file.filename}</a>
-          ) : (
-            <span>{file.filename}</span>
-          )}
-          <span className="font-mono text-mono">
-            {" "}
-            · {formatSize(file.size_bytes)}
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }

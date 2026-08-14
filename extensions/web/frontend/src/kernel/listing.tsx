@@ -1,7 +1,6 @@
-import { Fragment, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Table, TableNote, Td, TdActs, Th } from "@/components/ui/table";
 import { BANDS } from "@/kernel/pane";
@@ -108,9 +107,7 @@ export function Listing<Payload, Row>({
   const state = usePanelRead<Payload>(spec.read + cursor(spec, place));
   const query = place.q ?? "";
   const picked = place.chip ?? null;
-  const [typed, setTyped] = useState(query);
 
-  const setQuery = (value: string) => onPlace({ q: value || undefined, after: undefined });
   const setPicked = (value: string | null) =>
     onPlace({ chip: value ?? undefined, after: undefined });
   const open = (row: Row) => onPlace({ open: spec.rowKey(row) });
@@ -154,24 +151,6 @@ export function Listing<Payload, Row>({
         bar={
           known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
             <>
-              {spec.serverQuery ? (
-                <Search
-                  label="Search"
-                  placeholder="Search"
-                  className="w-(--container-control-row)"
-                  value={typed}
-                  onChange={(event) => setTyped(event.target.value)}
-                  onSubmit={() => setQuery(typed)}
-                />
-              ) : spec.search && known?.length ? (
-                <Search
-                  label="Search"
-                  placeholder="Search"
-                  className="w-(--container-control-row)"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              ) : null}
               {spec.chips && (searched?.length || spec.serverQuery) ? (
                 <Filter
                   options={spec.chips.map((chip) => ({
@@ -258,20 +237,20 @@ export function Listing<Payload, Row>({
                   </tbody>
                 </Table>
               );
-            const grouped: { title: string | null; rows: Row[] }[] =
-              spec.group && matched.length
-                ? groupRows(matched, spec.group)
-                : [{ title: null, rows: matched }];
+            const families =
+              spec.group && matched.length ? groupRows(matched, spec.group) : null;
             return (
               <div className={BANDS}>
-                {grouped.map(({ title: groupTitle, rows }) =>
-                  groupTitle ? (
-                    <Section key={groupTitle} title={groupTitle}>
-                      {records(rows)}
-                    </Section>
-                  ) : (
-                    <Fragment key="all">{records(rows)}</Fragment>
-                  ),
+                {families ? (
+                  <div className={FAMILIES}>
+                    {families.map(({ title: familyTitle, rows }) => (
+                      <Section key={familyTitle} title={familyTitle}>
+                        {records(rows)}
+                      </Section>
+                    ))}
+                  </div>
+                ) : (
+                  records(matched)
                 )}
                 {spec.paged ? (
                   <Pager
@@ -311,6 +290,11 @@ export function Listing<Payload, Row>({
     </>
   );
 }
+
+/** The gap between two families of one listing, wider than the gap a `Section` leaves between its
+ *  own heading and its records. Stacked at the band gap the two distances are equal, and a family
+ *  name sits as far from the records it heads as from the family above it — so it heads neither. */
+const FAMILIES = "flex flex-col gap-8xl";
 
 function groupRows<Row>(rows: Row[], group: (row: Row) => string) {
   const grouped = new Map<string, Row[]>();

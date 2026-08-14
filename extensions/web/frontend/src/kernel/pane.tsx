@@ -1,5 +1,13 @@
 import { IconX } from "@tabler/icons-react";
-import { useEffect, useRef, type ComponentProps, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
 import { BesideHost } from "@/kernel/beside";
@@ -77,6 +85,24 @@ export function PageHeader({
       {action}
     </div>
   );
+}
+
+const PageActContext = createContext<HTMLElement | null>(null);
+
+/** The header's act slot, offered to whatever view the shell draws under it. A shell that switches
+ *  between tabs holds one header over all of them, so the act that makes a record cannot be declared
+ *  beside the tab: whether the member may take it at all arrives with the view's own read, long
+ *  after the header stood. The shell holds the slot and the view fills it from where it is. */
+export function PageActs({ host, children }: { host: HTMLElement | null; children: ReactNode }) {
+  return <PageActContext.Provider value={host}>{children}</PageActContext.Provider>;
+}
+
+/** Puts a view's one act on the header above it. A view drawn under no shell keeps the act where it
+ *  was returned, so a panel mounted on its own still states it. */
+export function usePageAct(act: ReactNode | null): ReactNode {
+  const host = useContext(PageActContext);
+  if (act === null) return null;
+  return host ? createPortal(act, host) : act;
 }
 
 /** The band that narrows the records: which family of them to show, on the page's own left edge and

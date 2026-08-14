@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Search } from "@/components/ui/field";
 import type { Placement } from "@/kernel/pager";
-import { BANDS, Page, PageHeader, PageToolbar, Pane } from "@/kernel/pane";
+import { BANDS, Page, PageActs, PageHeader, PageToolbar, Pane } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import { TabPanel, TabRow } from "@/kernel/tabs";
@@ -37,9 +37,14 @@ export function TabbedPane<Tab extends string>({
     remountOnPlace: views[view].remountOnPlace,
     onPlace: (next, step) => onPlace(view, next, step),
   });
+  const [act, setAct] = useState<HTMLElement | null>(null);
   const search = views[view].search;
   const headed = views[view].ownsHeader === true;
-  const registered = <Registered key={key} view={view} views={views} place={merged} onPlace={record} />;
+  const registered = (
+    <PageActs host={act}>
+      <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
+    </PageActs>
+  );
   return (
     <Pane>
       <Page>
@@ -49,12 +54,13 @@ export function TabbedPane<Tab extends string>({
             search={
               search ? (
                 <PaneSearch
-                  placeholder={search}
+                  label={search}
                   query={place.q ?? ""}
                   onSearch={(q) => record({ q: q || undefined, after: undefined })}
                 />
               ) : null
             }
+            action={<span ref={setAct} className="contents" />}
           />
         )}
         {tabs.length > 1 ? (
@@ -91,11 +97,11 @@ export function TabbedPane<Tab extends string>({
  *  takes the place's word for it only when the place itself names a different query — a filter
  *  picked beside a half-written search leaves that search standing. */
 function PaneSearch({
-  placeholder,
+  label,
   query,
   onSearch,
 }: {
-  placeholder: string;
+  label: string;
   query: string;
   onSearch: (query: string) => void;
 }) {
@@ -103,8 +109,8 @@ function PaneSearch({
   useEffect(() => setTyped(query), [query]);
   return (
     <Search
-      label="Search"
-      placeholder={placeholder}
+      label={label}
+      placeholder="Search"
       value={typed}
       onChange={(event) => setTyped(event.target.value)}
       onSubmit={() => onSearch(typed.trim())}

@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 
 import type { Placement } from "@/kernel/pager";
 import { Button } from "@/components/ui/button";
-import { Hint, Input, Search } from "@/components/ui/field";
+import { Hint, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
   Select,
@@ -14,7 +14,7 @@ import {
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { useBeside } from "@/kernel/beside";
-import { RecordPanel } from "@/kernel/pane";
+import { RecordPanel, usePageAct } from "@/kernel/pane";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -56,7 +56,7 @@ export function Team({
 }) {
   const mainAgent = useMainAgent();
   const [toast, setToast] = useState<ToastState>(place.notice ? { title: place.notice } : SILENT);
-  const [query, setQuery] = useState("");
+  const query = place.q ?? "";
   const [role, setRole] = useState("");
   const [adding, setAdding] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([BLANK]);
@@ -167,35 +167,26 @@ export function Team({
     close,
   );
 
+  const act = usePageAct(
+    state.phase === "ready" && state.payload.can_add && mainAgent ? (
+      <Button variant="send" size="bar" onClick={open}>
+        Add member
+      </Button>
+    ) : null,
+  );
+
   return (
     <>
+      {act}
       <Panel state={state}>
-        {({ members, can_add }) => {
+        {({ members }) => {
           const found = members.filter(
             (entry) =>
               entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
               (!role || (role === ADMINS) === Boolean(entry.admin)),
           );
           return (
-            <Section
-              bar={
-                <>
-                  <Filter options={ROLES} value={role} onChange={setRole} />
-                  <Search
-                    label="Search members"
-                    placeholder="Search"
-                    className="ml-auto w-(--container-control-row)"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                  {can_add && mainAgent ? (
-                    <Button variant="send" size="bar" onClick={open}>
-                      Add member
-                    </Button>
-                  ) : null}
-                </>
-              }
-            >
+            <Section bar={<Filter options={ROLES} value={role} onChange={setRole} />}>
               <DataTable
                 columns={COLUMNS}
                 rows={found}

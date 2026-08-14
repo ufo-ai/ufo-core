@@ -2869,7 +2869,7 @@ def test_a_description_past_the_listing_line_is_still_a_spec_this_model_reads() 
     """A listing line is bounded where it is drawn, never where it is stored: this model is what a
     read reconstructs a stored row into, so a bound here makes every row written before it
     unreadable for good. The portal's own proof carries the other half — the row that holds this
-    description still lists at `SUMMARY_MAX`."""
+    description still summarizes at `SUMMARY_MAX`, and sends its prompt whole."""
     sprawling = "d" * (SUMMARY_MAX * 3)
     assert ScheduledTaskSpec(description=sprawling).description == sprawling
 

@@ -18,8 +18,12 @@ export const buttonVariants = cva(
         outline:
           "border border-edge-control bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
         row: "border border-edge-control bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill-hover",
-        option:
-          "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs hover:bg-fill-hover",
+        option: cn(
+          "border border-edge-control-strong bg-transparent text-inherit px-lg py-xs",
+          "hover:bg-fill-hover",
+          "aria-pressed:bg-ink aria-pressed:text-surface aria-pressed:border-ink",
+          "aria-pressed:hover:bg-ink aria-pressed:hover:opacity-(--opacity-muted-soft)",
+        ),
       },
       size: {
         default: "",

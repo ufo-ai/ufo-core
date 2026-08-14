@@ -263,7 +263,7 @@ test("search and chip ride the hash by replacement, never as history entries", a
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("tab", { name: "Workspace" }));
-  await userEvent.type(screen.getByRole("searchbox"), "rss");
+  await userEvent.type(screen.getByRole("searchbox"), "rss{enter}");
 
   await waitFor(() => expect(location.hash).toContain("q=rss"));
   expect(location.hash).toContain("chip=Workspace");

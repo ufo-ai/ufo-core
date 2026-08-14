@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
@@ -171,18 +174,66 @@ test("an index carries the name, the kind's own prose and the one field it leads
   const name = await screen.findByText("daily-brief");
   const row = name.closest("tr");
   expect(row).not.toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Created By", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Prompt", "Next Run At", ""]);
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-brief");
   expect(said[1]).toBe("assistant");
-  expect(said[2]).toBe("mel@example.com");
-  expect(said[3]).toBe("write the daily brief");
-  expect(said[4]).toContain("in ");
+  expect(said[2]).toBe("write the daily brief");
+  expect(said[3]).toContain("in ");
   expect(screen.queryByText("#general")).toBeNull();
   const rowCells = [...(row?.querySelectorAll("td") ?? [])];
+  expect(rowCells[1].className).toContain("w-(--size-fact-column)");
+  expect(rowCells[2].querySelector("span")?.className).toContain("block truncate");
+  expect(rowCells[3].className).toContain("w-(--size-fact-column)");
   expect(rowCells[3].querySelector("span")?.className).toContain("block truncate");
-  expect(rowCells[4].className).toContain("w-(--size-fact-column)");
-  expect(rowCells[4].querySelector("span")?.className).toContain("block truncate");
+});
+
+/** The tracks are fixed pixels, so a table whose tracks outrun the page it is read on holds its
+ *  width and scrolls the column sideways — and what falls off the right is the act the row is
+ *  pressed by. The desktop the portal is read at has to clear the sum, sidebar and gutters included,
+ *  or every member scrolls to reach `Open`. */
+const DESKTOP = 1280;
+
+const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+
+function size(name: string): number {
+  const declared = new RegExp("\\" + name + ":\\s*(\\d+)px").exec(TOKENS);
+  if (!declared) throw new Error("theme.css declares no " + name);
+  return Number(declared[1]);
+}
+
+function pageFits(minWidth: string): boolean {
+  const tracks = minWidth
+    .replace(/^calc\(|\)$/g, "")
+    .split("+")
+    .reduce((total, term) => {
+      const [count, name] = term.split("*").map((part) => part.trim());
+      return total + Number(count) * size(name.replace(/^var\(|\)$/g, ""));
+    }, 0);
+  return size("--container-sidebar") + 2 * size("--size-page-gutter") + tracks <= DESKTOP;
+}
+
+test("an index fits the desktop it is read on, so the row's act never scrolls off", async () => {
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
+  mount();
+
+  await screen.findByText("daily-brief");
+  const across = screen.getByRole("table").style.minWidth;
+  expect(pageFits(across)).toBe(true);
+  expect(across).toBe(
+    "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
+  expect(
+    pageFits("calc(1 * var(--size-fact-column) + 4 * var(--size-prose-column) + 1 * var(--size-act))"),
+  ).toBe(false);
+});
+
+test("one agent's index fits that same desktop", async () => {
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
+  mountAgent();
+
+  await screen.findByText("daily-brief");
+  expect(pageFits(screen.getByRole("table").style.minWidth)).toBe(true);
 });
 
 test("a record's name is the record's, not a link away from it, and no uuid is a column", async () => {
@@ -216,7 +267,7 @@ test("a field the record lacks takes a dash rather than an empty cell", async ()
   mount();
 
   await screen.findByText("daily-brief");
-  expect(cells("daily-brief")[4]).toBe("—");
+  expect(cells("daily-brief")[3]).toBe("—");
 });
 
 test("a value the kind's spec declares as an enum reads as its own chip", async () => {
@@ -342,7 +393,7 @@ test("a filter that narrows to nothing keeps the control that clears it", async 
 
   expect(await screen.findByText("No scheduled task matches this search.")).toBeTruthy();
   expect(screen.queryByText(NO_TASKS)).toBeNull();
-  expect(headings()).toEqual(["Name", "Agent", "Created By", "Prompt", "Next Run At", ""]);
+  expect(headings()).toEqual(["Name", "Agent", "Prompt", "Next Run At", ""]);
   expect(screen.getByRole("tab", { name: "Paused" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("tab", { name: "All" }));
@@ -381,13 +432,12 @@ test("the order sits on the head of the column it orders, and only there", async
   expect(heads.map((head) => head.querySelector("button")?.textContent ?? null)).toEqual([
     "Name",
     null,
-    "Created By",
     "Prompt",
     "Next Run At",
     null,
   ]);
   expect(heads[0].getAttribute("aria-sort")).toBe("ascending");
-  expect(heads[4].getAttribute("aria-sort")).toBe("none");
+  expect(heads[3].getAttribute("aria-sort")).toBe("none");
 
   await userEvent.click(screen.getByRole("button", { name: "Name" }));
   expect(screen.getAllByRole("columnheader")[0].getAttribute("aria-sort")).toBe("descending");
@@ -517,6 +567,9 @@ test("a spec value with no space to break on wraps in its own block rather than 
   expect(prompt.row.className).toContain("flex-col");
 });
 
+/** One agent's index states who made each row, because the pane names the agent and nothing else on
+ *  the row answers whose it is. The index read across the audience states the agent instead: two
+ *  columns for one question is what pushed the row's act off the table. */
 test("a creator reads as You to its own member, the address to another, Workspace to none", async () => {
   wire({
     "/objects/scheduled_task": () =>
@@ -529,15 +582,26 @@ test("a creator reads as You to its own member, the address to another, Workspac
   render(
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={[AGENT]}>
-        <ObjectPane agentId={null} kind="scheduled_task" />
+        <ObjectPane agentId={AGENT_ID} kind="scheduled_task" />
       </MainAgentProvider>
     </Viewer.Provider>,
   );
 
   await screen.findByText("daily-brief");
-  expect(cells("daily-brief")[2]).toBe("mel@example.com");
-  expect(cells("mine")[2]).toBe("You");
-  expect(cells("standing")[2]).toBe("Workspace");
+  expect(headings()).toEqual(["Name", "Created By", "Prompt", "Next Run At", ""]);
+  expect(cells("daily-brief")[1]).toBe("mel@example.com");
+  expect(cells("mine")[1]).toBe("You");
+  expect(cells("standing")[1]).toBe("Workspace");
+});
+
+test("the index read across the audience names the agent and leaves the creator to the record", async () => {
+  wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
+  mount();
+
+  await screen.findByText("daily-brief");
+  expect(headings()).toContain("Agent");
+  expect(headings()).not.toContain("Created By");
+  expect(screen.queryByText("mel@example.com")).toBeNull();
 });
 
 test("a task detail's reports_to link lands on that conversation's detail page", async () => {

@@ -246,7 +246,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     "origin": listed.surface_label or "Portal",
                     "mine": listed.task.created_by_member_id == member_id,
                     "prompt": (
-                        (listed.task.description or listed.task.prompt)[:SUMMARY_MAX]
+                        listed.task.prompt
                         if task_content_visible(listed, member_id)
                         else PRIVATE_PROMPT
                     ),

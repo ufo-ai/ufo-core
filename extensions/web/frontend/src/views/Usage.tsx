@@ -150,7 +150,6 @@ function RangeControl({ range, onRange }: { range: Range; onRange: (range: Range
           key={entry}
           variant="option"
           aria-pressed={range === entry}
-          className={range === entry ? "bg-ink text-surface" : undefined}
           onClick={() => onRange(entry)}
         >
           {entry === "all" ? "All time" : entry.replace("d", " days")}

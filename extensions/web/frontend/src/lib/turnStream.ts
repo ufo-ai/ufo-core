@@ -95,14 +95,16 @@ export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): st
  *  cursor, so the turn's retained frames arrive from the first of them: whatever the chat had drawn
  *  belongs to the tail this one replaces — the turn the page stopped following, or an earlier source
  *  on this same turn — and holding it would glue two turns into one bubble, or stand the reply the
- *  replay rebuilds behind a copy of itself. A turn the page leaves is still the transcript's to
- *  state, on the next read of it. */
+ *  replay rebuilds behind a copy of itself. The files that tail listed go with it: the frame naming
+ *  them arrives with the terminal, so the list under the log is the turn being tailed. A turn the
+ *  page leaves is still the transcript's to state, on the next read of it. */
 export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
     live: liveTurn(),
     turn: { id: turnId, answering },
+    handoffs: { ...state.handoffs, files: null },
   }));
   attach(chatKey, turnId, answering, false);
 }
@@ -131,7 +133,6 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
   let redrawOnOpen = reattach;
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
   SOURCES.set(chatKey, source);
-  let sawFiles = false;
 
   const onLive = (change: (live: LiveTurn) => LiveTurn) =>
     updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
@@ -151,7 +152,6 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
           role: "assistant",
           text: live.text,
           ...(live.meta ? { meta: live.meta } : {}),
-          ...(live.files ? { files: live.files } : {}),
           ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
@@ -197,12 +197,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
 
   source.addEventListener("files", (event) => {
     const files = JSON.parse((event as MessageEvent).data).files as ChatFile[];
-    sawFiles = true;
-    updateChat(chatKey, (state) => ({
-      ...state,
-      handoffs: { ...state.handoffs, files },
-      live: { ...(state.live ?? liveTurn()), files },
-    }));
+    updateChat(chatKey, (state) => ({ ...state, handoffs: { ...state.handoffs, files } }));
   });
 
   source.addEventListener("credentials", (event) => {
@@ -235,7 +230,6 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
               {
                 role: "assistant",
                 text: live.text,
-                ...(live.files ? { files: live.files } : {}),
                 ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
                 ...(live.events.length ? { events: live.events } : {}),
                 ...(live.subagents.length ? { subagents: live.subagents } : {}),
@@ -350,7 +344,6 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
         text = text ? text + "\n" + fallback : fallback;
         if (!answering) handoffs.question = null;
       }
-      if (!sawFiles) handoffs.files = null;
       return { ...state, handoffs, live: { ...live, text, meta } };
     });
     record();

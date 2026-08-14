@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
 import { useBeside } from "@/kernel/beside";
+import type { Placement } from "@/kernel/pager";
 import { RecordPanel } from "@/kernel/pane";
 import {
   Notice,
@@ -66,10 +67,10 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
 /** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own tab
  *  states the same records narrowed to what that agent can actually reach; both read the one
  *  grant list, so nothing here needs a second endpoint. */
-export function WorkspaceConnectors() {
+export function WorkspaceConnectors({ place }: { place: Placement }) {
   const agents = useAgents();
   const [targetAgent, setTargetAgent] = useState("");
-  const [query, setQuery] = useState("");
+  const query = place.q ?? "";
   const [reloads, setReloads] = useState(0);
   const [handoff, setHandoff] = useState<NoticeState>(QUIET);
   const viewer = useViewer();
@@ -78,19 +79,10 @@ export function WorkspaceConnectors() {
   return (
     <Section
       bar={
-        <>
-          <Search
-            label="Search"
-            placeholder="Search"
-            className="w-(--container-control-row)"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          <Select value={targetAgent} onValueChange={setTargetAgent}>
-            <SelectTrigger aria-label="Agent" className={BAR_CONTROL}><SelectValue placeholder="Attach to agent" /></SelectTrigger>
-            <SelectContent>{agents.map((agent) => <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>)}</SelectContent>
-          </Select>
-        </>
+        <Select value={targetAgent} onValueChange={setTargetAgent}>
+          <SelectTrigger aria-label="Agent" className={BAR_CONTROL}><SelectValue placeholder="Attach to agent" /></SelectTrigger>
+          <SelectContent>{agents.map((agent) => <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>)}</SelectContent>
+        </Select>
       }
     >
       {handoff.text ? <Notice tone="quiet">{handoff.text}</Notice> : null}

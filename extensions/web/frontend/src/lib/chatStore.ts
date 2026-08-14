@@ -14,7 +14,6 @@ export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
-  files?: ChatFile[];
   connectUrl?: string;
   /** A send whose POST has not answered yet, carrying the send's own token — how the response
    *  settles its own bubble however the log has shifted around it, since an index recorded at send
@@ -32,7 +31,6 @@ export type LiveTurn = {
   activity: string | null;
   meter: string | null;
   meta: string | null;
-  files: ChatFile[] | null;
   connectUrl: string | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
@@ -42,6 +40,9 @@ export type LiveTurn = {
 export type Handoffs = {
   question?: ChatQuestion | null;
   credentials?: CredentialRequest | null;
+  /** What the tailed turn shared, and the one list the page holds: the wire carries these as a
+   *  handoff and a reload reads them back from that same field, so a second copy on the reply would
+   *  stand the file on two rows the moment the turn settles. */
   files?: ChatFile[] | null;
 };
 
@@ -88,7 +89,6 @@ export function liveTurn(): LiveTurn {
     activity: null,
     meter: null,
     meta: null,
-    files: null,
     connectUrl: null,
     events: [],
     subagents: [],

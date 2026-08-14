@@ -23,7 +23,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, mem_page, memory_item
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import ScheduleStore
-from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT, SUMMARY_MAX
+from ufo_ext_scheduled_tasks.tools import PRIVATE_PROMPT, SCHEDULED_TASK_OBJECT, SUMMARY_MAX
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
@@ -263,7 +263,8 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     member's alone, reaching an admin as a management row with its content elided (`spec` null,
     the summary saying so) and no one else at all. A task no member created is read the same way —
     by where it reports, so the private conversation elides it from the admin too. Each read is
-    walled by the agent named on it."""
+    walled by the agent named on it. The row's `prompt` is the task's own prompt, whole: the
+    summary is the line a bound is drawn on, and the column the portal reads is not."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -303,6 +304,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert row["paused"] is False
     assert row["next_run_at"] == NEXT_RUN.isoformat()
     assert row["summary"] == "0 9 * * * — daily brief"
+    assert row["prompt"] == "write the daily brief"
     assert (row["agent_id"], row["agent_name"]) == (str(agent_a), "assistant")
     mine = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=creator_headers
@@ -314,6 +316,8 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     by_name = {row["name"]: row for row in admin_view.json()["objects"]}
     assert by_name["daily-brief"]["summary"] == "0 9 * * * — private member task"
     assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — private member task"
+    assert by_name["daily-brief"]["prompt"] == PRIVATE_PROMPT
+    assert by_name["creatorless-sweep"]["prompt"] == PRIVATE_PROMPT
     management = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=admin_headers
     )
@@ -374,10 +378,9 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert sprawled.status_code == 200
     assert sprawled.json()["spec"]["description"] == sprawling
     listed = await client.get(index, headers=other_headers)
-    summary = next(
-        row["summary"] for row in listed.json()["objects"] if row["name"] == "long-digest"
-    )
-    assert len(summary) == SUMMARY_MAX
+    sprawled_row = next(row for row in listed.json()["objects"] if row["name"] == "long-digest")
+    assert len(sprawled_row["summary"]) == SUMMARY_MAX
+    assert sprawled_row["prompt"] == "post the long digest"
 
     crossed = await client.get(
         f"/surface/web/objects/scheduled_task?agent={agent_b}", headers=creator_headers

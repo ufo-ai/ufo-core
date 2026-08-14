@@ -251,7 +251,7 @@ function ObjectIndex({
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
         const acts = payload.applies && payload.spec_schema !== null && owner !== null;
-        const owned = payload.fields.includes(OWNER_FIELD);
+        const owned = agentId !== null && payload.fields.includes(OWNER_FIELD);
         const prose = payload.fields.includes(PROSE_FIELD) ? PROSE_FIELD : "summary";
         const shown = payload.fields.filter(
           (field) =>
@@ -262,8 +262,8 @@ function ObjectIndex({
         );
         const led = shown.slice(0, LEADING_FIELDS);
         const columns: Column[] = [{ label: heading("name", payload.spec_schema), sort: "name" }];
-        if (agentId === null) columns.push("Agent");
-        if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD });
+        if (agentId === null) columns.push({ label: "Agent", fact: true });
+        if (owned) columns.push({ label: OWNER_HEADING, sort: OWNER_FIELD, fact: true });
         columns.push({ label: heading(prose, payload.spec_schema), sort: prose });
         for (const field of led) {
           columns.push({ label: heading(field, payload.spec_schema), sort: field, fact: true });
@@ -367,8 +367,8 @@ function ObjectIndex({
                         {row.name}
                       </span>
                     </Td>
-                    {agentId === null ? <Td>{row.agent_name}</Td> : null}
-                    {owned ? <Td>{creator(row[OWNER_FIELD], viewer)}</Td> : null}
+                    {agentId === null ? <TdFact>{row.agent_name}</TdFact> : null}
+                    {owned ? <TdFact>{creator(row[OWNER_FIELD], viewer)}</TdFact> : null}
                     <Td>
                       <span className="block truncate">
                         {(prose === "summary" ? row.summary : row[prose]) || "—"}
