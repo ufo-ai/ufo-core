@@ -11,6 +11,19 @@ provider "aws" {
 
 # Kubernetes/Helm providers authenticate to the cluster the platform module creates,
 # via `aws eks get-token` (exec) — deferred to runtime, so first apply works.
+# The sandbox egress proxy runs in the region e2b places sandboxes in, not the platform's.
+provider "aws" {
+  alias  = "proxy"
+  region = var.proxy_region
+
+  default_tags {
+    tags = {
+      "flyingobject.ai/environment" = "testing"
+      "ManagedBy"                   = "terraform"
+    }
+  }
+}
+
 provider "kubernetes" {
   host                   = module.platform.cluster_endpoint
   cluster_ca_certificate = base64decode(module.platform.cluster_certificate_authority_data)

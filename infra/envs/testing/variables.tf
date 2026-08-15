@@ -59,3 +59,15 @@ variable "slack_connect_team_id" {
   default     = ""
   description = "Team ID of UFO's own operator Slack workspace. The gateway refuses to mutate channels in any other team."
 }
+
+variable "proxy_region" {
+  type        = string
+  default     = "us-west-2"
+  description = "Region the sandbox egress proxy runs in, chosen to sit near e2b's sandboxes."
+}
+
+variable "proxy_vpc_cidr" {
+  type        = string
+  default     = "10.1.0.0/16"
+  description = "CIDR for the proxy VPC. Must not overlap the platform VPC it peers with."
+}

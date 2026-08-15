@@ -6,8 +6,10 @@ output "cluster_name" {
   value = module.platform.cluster_name
 }
 
+# The endpoint the fleet dials, which is what the deploy's egress gate must prove. Naming the
+# record rather than the host also orders the gate after the proxy that answers it.
 output "sandbox_proxy_url" {
-  value = "https://sandbox-proxy.${module.platform.hostname}"
+  value = "https://${cloudflare_dns_record.sandbox_proxy.name}"
 }
 
 output "sandbox_proxy_ca_cert" {

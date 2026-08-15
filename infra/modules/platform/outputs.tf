@@ -98,3 +98,32 @@ output "db_instance_identifier" {
   description = "The RDS instance's own identifier, which is how CloudWatch tags every metric it reports for the database."
   value       = module.rds.db_instance_identifier
 }
+
+output "vpc_id" {
+  value       = module.vpc.vpc_id
+  description = "The platform VPC."
+}
+
+output "vpc_cidr_block" {
+  value       = module.vpc.vpc_cidr_block
+  description = "The platform VPC CIDR, routed from any peered network."
+}
+
+output "private_route_table_ids" {
+  value       = module.vpc.private_route_table_ids
+  description = "Private route tables that carry return traffic to a peered network."
+}
+
+output "rds_security_group_id" {
+  value       = aws_security_group.rds.id
+  description = "The Postgres security group, so a peered network can be admitted to it."
+}
+
+output "secret_arns" {
+  description = "Secrets Manager entries the colocated proxy reads, by their primary-region ARN."
+  value = {
+    postgres = aws_secretsmanager_secret.postgres.arn
+    platform = aws_secretsmanager_secret.platform.arn
+    api_keys = aws_secretsmanager_secret.api_keys.arn
+  }
+}

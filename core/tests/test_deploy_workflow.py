@@ -3424,9 +3424,9 @@ def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
             "testing",
             "db_connections_high",
             "avg(last_15m):avg:aws.rds.database_connections"
-            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 350",
-            "350",
-            "300",
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 360",
+            "360",
+            "330",
         ),
         (
             "prod",

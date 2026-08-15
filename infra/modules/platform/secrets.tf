@@ -58,6 +58,13 @@ locals {
 resource "aws_secretsmanager_secret" "postgres" {
   name = "${local.secret_prefix}/postgres"
   tags = local.tags
+
+  dynamic "replica" {
+    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
+    content {
+      region = replica.value
+    }
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "postgres" {
@@ -72,6 +79,13 @@ resource "aws_secretsmanager_secret_version" "postgres" {
 resource "aws_secretsmanager_secret" "platform" {
   name = "${local.secret_prefix}/platform"
   tags = local.tags
+
+  dynamic "replica" {
+    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
+    content {
+      region = replica.value
+    }
+  }
 }
 
 resource "tls_private_key" "egress_ca" {
@@ -158,17 +172,29 @@ resource "aws_acm_certificate_validation" "sandbox_proxy_public" {
 }
 
 resource "aws_secretsmanager_secret_version" "platform" {
+  lifecycle {
+    create_before_destroy = true
+  }
+
   secret_id = aws_secretsmanager_secret.platform.id
   secret_string = jsonencode({
-    "ufo-token-secret" = random_password.ufo_token.result
-    "egress-ca-cert"   = tls_self_signed_cert.egress_ca.cert_pem
-    "egress-ca-key"    = tls_private_key.egress_ca.private_key_pem
+    "ufo-token-secret"     = random_password.ufo_token.result
+    "egress-ca-cert"       = tls_self_signed_cert.egress_ca.cert_pem
+    "egress-ca-key"        = tls_private_key.egress_ca.private_key_pem
+    "serve-credential-key" = local.serve_credential_key
   })
 }
 
 resource "aws_secretsmanager_secret" "api_keys" {
   name = "${local.secret_prefix}/api-keys"
   tags = local.tags
+
+  dynamic "replica" {
+    for_each = var.secret_replica_region == "" ? [] : [var.secret_replica_region]
+    content {
+      region = replica.value
+    }
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "api_keys" {

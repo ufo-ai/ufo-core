@@ -37,6 +37,39 @@ locals {
 
   ufo_prerequisite_manifests = data.kubectl_file_documents.cluster_services.manifests
 
+  collector_peered_hostname = "otel-peered.${module.platform.hostname}"
+
+  # The colocated proxy runs outside this cluster and reaches the collector over the peering, so its
+  # telemetry lands in the same pipeline as everything else. Internal scheme: the address is private
+  # and reachable only from a peered network. Only this env has a peer.
+  peered_collector_manifests = {
+    "/api/v1/namespaces/${local.system_namespace}/services/otel-collector-peered" = yamlencode({
+      apiVersion = "v1"
+      kind       = "Service"
+      metadata = {
+        name      = "otel-collector-peered"
+        namespace = local.system_namespace
+        annotations = {
+          "external-dns.alpha.kubernetes.io/hostname"                    = local.collector_peered_hostname
+          "external-dns.alpha.kubernetes.io/cloudflare-proxied"          = "false"
+          "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
+          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+          "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internal"
+        }
+      }
+      spec = {
+        selector = { "app.kubernetes.io/name" = "otel-collector" }
+        type     = "LoadBalancer"
+        ports = [{
+          name       = "otlp-http"
+          port       = 4318
+          targetPort = "otlp-http"
+          protocol   = "TCP"
+        }]
+      }
+    })
+  }
+
   sandbox_proxy_manifests = {
     "/api/v1/namespaces/${local.system_namespace}/services/ufo-sandbox-proxy" = yamlencode({
       apiVersion = "v1"
@@ -74,6 +107,7 @@ locals {
     data.kubectl_file_documents.hosted.manifests,
     data.kubectl_file_documents.observability.manifests,
     local.sandbox_proxy_manifests,
+    local.peered_collector_manifests,
   ) : path => manifest if !strcontains(path, "/jobs/ufo-migrate-") }
 
   ufo_migrate_manifest = one([
@@ -121,7 +155,7 @@ locals {
 
     [sandbox]
     backend = "e2b"
-    proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
+    proxy_public_url = "https://${cloudflare_dns_record.sandbox_proxy.name}"
     ingress_public_url = "https://${module.platform.hostname}"
 
     [connect]
@@ -243,8 +277,9 @@ data "kubectl_file_documents" "cluster_services" {
 # Shared OpenTelemetry collection.
 data "kubectl_file_documents" "observability" {
   content = templatefile("${path.module}/../../templates/observability.yaml.tpl", {
-    namespace     = local.system_namespace
-    deployment_id = "testing"
+    namespace                 = local.system_namespace
+    collector_peered_hostname = local.collector_peered_hostname
+    deployment_id             = "testing"
     # 0.114.0 pinned by its amd64 digest: the :0.115.0 tag does not exist and the :0.116.0 build's
     # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
     collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"

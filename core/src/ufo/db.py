@@ -50,16 +50,20 @@ WORKSPACE_GUC = "app.workspace_id"
 #                       2 pods x 3 loops x (2 + 3)                               =  30 owner
 #   ufo-ingress         2 pods x 1 loop x (5 + 10)                               =  30
 #   ufo-sandbox-proxy   2 pods x 1 loop x (5 + 10)                               =  30
+#                       2 colocated tasks x 1 loop x (5 + 10), testing only      =  30
 #   ufo-gateway         2 pods x 1 loop x (5 + 10) through this module            =  30
 #                       2 pods x asyncpg `max_size` 4 (its own control-plane pool) =   8
 #   DBOS executor       2 pods x 20 on `*_dbos`, same instance (`max_overflow` 0) =  40
 #   DBOS client         2 pods x 5 on `*_dbos`                                    =  10
-#                                                                       ceiling  = 268 of 397
+#                                                                       ceiling  = 298 of 397
 #
 # The owner registry is sized apart because its consumers are serial — the background sweeps'
 # enumeration and the heartbeat, never a fan-out — and a pod with no owner DSN spends nothing on
 # it at all: `owner_tx` resolves the app pool's engine rather than a second pool for one URL. A PR
-# preview deploys its own serve against this instance, which is what the remaining 129 is held for.
+# preview deploys its own serve against this instance, which is what the remaining 99 is held for.
+# The colocated egress proxy is counted twice over because both run: the in-cluster one keeps its
+# own hostname while the colocated one serves the sandboxes, and the pair collapses to one line
+# again when the in-cluster deployment goes.
 #
 # `db_connections_high` brackets these two numbers: it warns above what the fleet is entitled to and
 # alerts below where Postgres refuses.

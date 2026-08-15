@@ -158,3 +158,9 @@ variable "redis_num_nodes" {
   default     = 2
   description = "Nodes in the replication group (primary + replicas). >1 enables automatic failover."
 }
+
+variable "secret_replica_region" {
+  type        = string
+  default     = ""
+  description = "Region the colocated proxy's secrets are replicated to, empty where no such proxy runs. ECS reads a task's secrets only from its own region."
+}
