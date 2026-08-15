@@ -2357,6 +2357,11 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
             seq=index + 1,
             inbound="share",
             speaker_member_id=member_m if conversation_id == own_conversation else member_n,
+            context=(
+                TurnContext(sender="n@example.com", source=SLACK_THREAD_PERMALINK)
+                if conversation_id == shared_conversation
+                else None
+            ),
         )
         async with workspace_tx() as connection:
             await connection.execute(
@@ -2385,6 +2390,8 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
     assert report["owner_email"] == "m@example.com"
     assert shared["origin"] == "Project"
     assert shared["conversation_id"] == str(shared_conversation)
+    assert (shared["surface"], shared["source"]) == ("slack", SLACK_THREAD_PERMALINK)
+    assert (report["surface"], report["source"]) == ("web", None)
     assert _names((await client.get(f"{ARTIFACTS_PATH}?q=report", headers=headers)).json()) == [
         "report.pdf"
     ]
@@ -2400,6 +2407,13 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
         "archive.zip"
     ]
     assert (await client.get(f"{ARTIFACTS_PATH}?media=bad", headers=headers)).status_code == 400
+    assert _names(
+        (await client.get(f"{ARTIFACTS_PATH}?scope=created", headers=headers)).json()
+    ) == ["archive.zip", "data.csv", "report.pdf"]
+    assert _names((await client.get(f"{ARTIFACTS_PATH}?scope=shared", headers=headers)).json()) == [
+        "shared.png"
+    ]
+    assert (await client.get(f"{ARTIFACTS_PATH}?scope=bad", headers=headers)).status_code == 400
 
 
 async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID) -> None:

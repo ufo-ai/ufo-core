@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
+import { Viewer } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
@@ -51,6 +52,8 @@ const artifact = (over: Record<string, unknown> = {}) => ({
   owner_email: "member@example.com",
   origin: null,
   conversation_id: "c1",
+  surface: "web",
+  source: null,
   ...over,
 });
 
@@ -80,6 +83,7 @@ function only(artifacts: unknown[]) {
 
 beforeEach(() => {
   useStreamFake();
+  localStorage.clear();
 });
 
 test("the artifact listing sends search and media filters to its read", async () => {
@@ -337,6 +341,46 @@ test("a type with no preview says to download it, and the viewer offers that dow
   ).toBeTruthy();
   const download = screen.getByRole("link", { name: "Download" });
   expect(download.getAttribute("download")).toBe("bundle.zip");
+});
+
+test("the viewer leads back to the conversation, and out to the Slack thread it came in on", async () => {
+  only([
+    artifact({
+      media_type: "application/zip",
+      filename: "bundle.zip",
+      surface: "slack",
+      source: "https://acme.slack.com/archives/C1/p1700000000000100",
+    }),
+  ]);
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await viewCard("bundle.zip"));
+  const conversation = await screen.findByRole("link", { name: "Conversation" });
+  expect(conversation.getAttribute("href")).toBe("#/c/c1");
+  const thread = screen.getByRole("link", { name: "Slack" });
+  expect(thread.textContent).toBe("Slack ↗");
+  expect(thread.getAttribute("href")).toBe(
+    "https://acme.slack.com/archives/C1/p1700000000000100",
+  );
+  expect(thread.getAttribute("target")).toBe("_blank");
+  expect(thread.getAttribute("rel")).toBe("noopener noreferrer");
+});
+
+test("a portal conversation's viewer draws no Slack way out", async () => {
+  only([artifact({ media_type: "application/zip", filename: "bundle.zip" })]);
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await viewCard("bundle.zip"));
+  expect(await screen.findByRole("link", { name: "Conversation" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "Slack" })).toBeNull();
 });
 
 test("an artifact with no link stays plain text and opens nothing", async () => {
@@ -838,4 +882,74 @@ test("an empty shelf states what lands in it", async () => {
   open();
 
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
+});
+
+test("the scope toggle defaults to All, and a picked scope narrows the files read", async () => {
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()] }),
+  });
+  open();
+
+  await screen.findByText("notes.txt");
+  const scopes = screen.getByRole("tablist", { name: "Scope" });
+  expect(within(scopes).getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+  expect(calls.some((url) => url.includes("scope="))).toBe(false);
+
+  await userEvent.click(within(scopes).getByRole("tab", { name: "Created by me" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=created"))).toBe(true));
+  expect(calls.some((url) => url.includes("/objects/site") && url.includes("scope="))).toBe(false);
+});
+
+test("a picked scope reads from the first page and is remembered across mounts", async () => {
+  const { calls } = wire({
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/workspace/artifacts": () => json({ artifacts: [artifact()], older: "page-2" }),
+  });
+  const view = open();
+
+  await userEvent.click(await screen.findByRole("button", { name: "Older" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("after=page-2"))).toBe(true));
+
+  await userEvent.click(screen.getByRole("tab", { name: "Shared with me" }));
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=shared"))).toBe(true));
+  expect(
+    calls.filter((url) => url.includes("scope=shared")).some((url) => url.includes("after=")),
+  ).toBe(false);
+
+  view.unmount();
+  calls.length = 0;
+  open();
+
+  const held = await screen.findByRole("tab", { name: "Shared with me" });
+  expect(held.getAttribute("aria-selected")).toBe("true");
+  await waitFor(() => expect(calls.some((url) => url.includes("scope=shared"))).toBe(true));
+});
+
+test("the scope toggle judges sites by their owner", async () => {
+  const mineSite = { ...DOCS, name: "mine-site", owner_email: "member@example.com" };
+  wire({
+    "/objects/site": () => objectIndex(SITE_KIND, [mineSite, DOCS]),
+    "/workspace/artifacts": () => json({ artifacts: [] }),
+  });
+  render(
+    <Viewer.Provider value="member@example.com">
+      <MainAgentProvider agents={[AGENT]}>
+        <PlacedSection section="artifacts" />
+      </MainAgentProvider>
+    </Viewer.Provider>,
+  );
+
+  expect(await screen.findByText("mine-site")).toBeTruthy();
+  expect(screen.getByText("docs-abc")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
+  await waitFor(() => expect(screen.queryByText("docs-abc")).toBeNull());
+  expect(screen.getByText("mine-site")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Shared with me" }));
+  expect(await screen.findByText("docs-abc")).toBeTruthy();
+  expect(screen.queryByText("mine-site")).toBeNull();
 });

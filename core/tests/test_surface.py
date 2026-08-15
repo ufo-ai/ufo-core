@@ -283,6 +283,7 @@ async def _seed_turn(
     admission_source: str = "internal",
     idempotency_key: str | None = None,
     created_at: datetime | None = None,
+    context: TurnContext | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = (
@@ -321,6 +322,7 @@ async def _seed_turn(
                 admission_source=admission_source,
                 idempotency_key=idempotency_key,
                 terminal=terminal,
+                context=None if context is None else context.model_dump(mode="json"),
                 created_at=created_at or sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1681,6 +1683,83 @@ async def test_artifact_listing_carries_the_conversation_owner_email(db: None, t
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     page = await context.list_artifacts(owner_id, admin=False, limit=10)
     assert [entry.owner_email for entry in page.rows] == ["owner@example.com"]
+
+
+async def test_artifact_listing_carries_the_conversations_surface_and_thread_source(
+    db: None, tmp_path
+) -> None:
+    workspace_id, _, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    artifact = SharedArtifact(
+        blob_key="artifacts/x/chart.png",
+        filename="chart.png",
+        subject=None,
+        media_type="image/png",
+        size_bytes=3,
+    )
+    await _seed_turn(
+        workspace_id,
+        "C1:1700000000.000100",
+        "done",
+        "files",
+        artifacts=(artifact,),
+        surface="slack",
+        member_id=member_id,
+        context=TurnContext(sender="Mel Okafor (m@example.com)", source=OPENING_PERMALINK),
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    page = await context.list_artifacts(member_id, admin=False, limit=10)
+    assert [(entry.surface, entry.source) for entry in page.rows] == [("slack", OPENING_PERMALINK)]
+    conversation_rows = await context.list_conversation_artifacts(
+        page.rows[0].conversation_id, limit=10
+    )
+    assert [(entry.surface, entry.source) for entry in conversation_rows] == [
+        ("slack", OPENING_PERMALINK)
+    ]
+
+
+async def test_artifact_listing_narrows_to_created_and_shared_scopes(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    other_id = await _seed_member_row(workspace_id, "n@example.com")
+    records = (
+        ("mine.pdf", member_id),
+        ("private.pdf", other_id),
+        ("workspace.pdf", None),
+    )
+    for filename, owner in records:
+        artifact = SharedArtifact(
+            blob_key=f"artifacts/x/{filename}",
+            filename=filename,
+            subject=None,
+            media_type="application/pdf",
+            size_bytes=3,
+        )
+        await _seed_turn(
+            workspace_id,
+            f"S:{filename}",
+            "done",
+            "files",
+            artifacts=(artifact,),
+            member_id=owner,
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    def names(page) -> set[str]:
+        return {entry.artifact.filename for entry in page.rows}
+
+    created = await context.list_artifacts(member_id, admin=False, limit=10, scope="created")
+    assert names(created) == {"mine.pdf"}
+    shared = await context.list_artifacts(member_id, admin=False, limit=10, scope="shared")
+    assert names(shared) == {"workspace.pdf"}
+    admin_created = await context.list_artifacts(member_id, admin=True, limit=10, scope="created")
+    assert names(admin_created) == {"mine.pdf"}
+    admin_shared = await context.list_artifacts(member_id, admin=True, limit=10, scope="shared")
+    assert names(admin_shared) == {"workspace.pdf"}
+    unscoped = await context.list_artifacts(member_id, admin=True, limit=10)
+    assert names(unscoped) == {"mine.pdf", "private.pdf", "workspace.pdf"}
+    with pytest.raises(ValueError, match="unknown artifact scope filter"):
+        await context.list_artifacts(member_id, admin=False, limit=10, scope="everyone")
 
 
 async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(

@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Filter } from "@/components/ui/filter";
+import { Filter, Segmented } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import { CardGrid } from "@/kernel/cards";
@@ -22,10 +22,11 @@ import {
   usePanelRead,
   type PanelState,
 } from "@/kernel/panel";
-import { ownerLabel, useViewer } from "@/lib/audience";
+import { ownerLabel, slackLink, useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { day } from "@/lib/moments";
+import { chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
 const SITE_KIND = "site";
@@ -44,6 +45,19 @@ const MEDIA: Record<string, string> = {
 };
 const FAMILIES = [SITE_FAMILY, ...Object.keys(MEDIA)];
 
+type Scope = "created" | "shared" | "all";
+
+const SCOPE_KEY = "artifacts-scope";
+const SCOPE_SEGMENTS = [
+  { label: "All", value: "all" },
+  { label: "Created by me", value: "created" },
+  { label: "Shared with me", value: "shared" },
+];
+
+function asScope(value: string | null): Scope {
+  return value === "created" || value === "shared" ? value : "all";
+}
+
 type Artifact = {
   filename: string;
   subject: string | null;
@@ -55,6 +69,8 @@ type Artifact = {
   owner_email: string | null;
   origin: string | null;
   conversation_id: string;
+  surface: string;
+  source: string | null;
 };
 
 type FilesPayload = {
@@ -192,6 +208,7 @@ function shelf(
   files: PanelState<FilesPayload>,
   viewer: string | null,
   after: string | undefined,
+  scope: Scope,
 ): PanelState<Shelf> {
   if (files.phase !== "ready") return files;
   if (sites.phase === "loading") return sites;
@@ -203,6 +220,10 @@ function shelf(
   const standing =
     sites.phase === "ready"
       ? sites.payload.objects.filter((row) => {
+          if (scope !== "all") {
+            const owned = viewer !== null && row[OWNER_FIELD] === viewer;
+            if ((scope === "created") !== owned) return false;
+          }
           const at = moment(typeof row.created_at === "string" ? row.created_at : null);
           return at < under && (!older || at >= oldestFile);
         })
@@ -237,6 +258,13 @@ export function Artifacts({
 }) {
   const mainAgent = useMainAgent();
   const viewer = useViewer();
+  const [scope, setScope] = useState<Scope>(() => asScope(localStorage.getItem(SCOPE_KEY)));
+  const holdScope = (value: string) => {
+    const next = asScope(value);
+    setScope(next);
+    localStorage.setItem(SCOPE_KEY, next);
+    onPlace({ after: undefined });
+  };
   const query = place.q ?? "";
   const picked = place.chip ?? "";
   const media = MEDIA[picked];
@@ -252,6 +280,7 @@ export function Artifacts({
   const fileParams = new URLSearchParams();
   if (query) fileParams.set("q", query);
   if (media) fileParams.set("media", media);
+  if (scope !== "all") fileParams.set("scope", scope);
   if (place.after) fileParams.set("after", place.after);
   const walked = usePanelRead<FilesPayload>(
     picked === SITE_FAMILY
@@ -263,6 +292,7 @@ export function Artifacts({
     picked === SITE_FAMILY ? NO_FILES : walked,
     viewer,
     place.after,
+    scope,
   );
 
   const at = objectAt(place.open);
@@ -286,6 +316,7 @@ export function Artifacts({
     <>
       {state.phase === "loading" ? null : (
         <PageToolbar>
+          <Segmented label="Scope" segments={SCOPE_SEGMENTS} value={scope} onPick={holdScope} />
           <Filter
             options={families.map((family) => ({ label: family, value: family }))}
             value={picked}
@@ -378,6 +409,8 @@ function Act({ card, onPlace }: { card: Card; onPlace: (place: Placement) => voi
 
 function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
   const viewer = useViewer();
+  const thread = slackLink(entry.surface, entry.source);
+  const out = "text-inherit no-underline hover:underline focus-visible:underline";
   const meta = [
     entry.subject,
     entry.owner_email ? ownerLabel(entry.owner_email, viewer) : null,
@@ -407,6 +440,16 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       }
     >
       <div className="font-mono text-small text-ink-soft">{meta}</div>
+      <div className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
+        <a href={chatHash(entry.conversation_id)} className={out}>
+          Conversation
+        </a>
+        {thread ? (
+          <a href={thread} target="_blank" rel="noopener noreferrer" className={out}>
+            Slack <span aria-hidden>↗</span>
+          </a>
+        ) : null}
+      </div>
       {isImage(entry) || entry.preview_url ? (
         <FullImage entry={entry} />
       ) : isTextMedia(entry.media_type) ? (

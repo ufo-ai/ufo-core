@@ -370,13 +370,17 @@ def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElem
 
 @dataclass(frozen=True)
 class ListedArtifact:
-    """One row of the portal's artifacts view with its owner, origin, and conversation."""
+    """One row of the portal's artifacts view with its owner, origin, and ways back: the
+    conversation that shared it, its surface, and — where the opening turn reported one — the
+    thread it came in on, the same string the conversations listing links by."""
 
     artifact: "SharedArtifact"
     created_at: datetime
     owner_email: str | None
     origin: str | None
     conversation_id: UUID
+    surface: str
+    source: str | None
 
 
 @dataclass(frozen=True)
@@ -2142,13 +2146,16 @@ class SurfaceContext:
         cursor: "ListingCursor | None" = None,
         q: str | None = None,
         media: str | None = None,
+        scope: str | None = None,
     ) -> "ListingPage[ListedArtifact]":
         """One keyset page of the files turns have shared, as the portal's artifacts view lists
         them: a member sees their own conversations' artifacts, an admin the workspace's — newest
         first, bounded, `shared_artifact.id` breaking a `created_at` tie so two files one turn
-        shared in the same instant page without repeating or skipping either. Each entry carries
-        the `SharedArtifact` the link minter signs, so the view links exactly what the writeback
-        delivery would."""
+        shared in the same instant page without repeating or skipping either. `scope` narrows to
+        the conversations the member owns (`created`) or to readable conversations they do not
+        (`shared`) — the latter for admins too, since shared-with-me is about the reader's own
+        audiences, never the admin widening. Each entry carries the `SharedArtifact` the link
+        minter signs, so the view links exactly what the writeback delivery would."""
         query = (
             sa.select(
                 tables.shared_artifact.c.id,
@@ -2180,6 +2187,18 @@ class SurfaceContext:
         )
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        match scope:
+            case None:
+                pass
+            case "created":
+                query = query.where(tables.conversation.c.member_id == member_id)
+            case "shared":
+                query = query.where(
+                    tables.conversation.c.member_id.is_distinct_from(member_id),
+                    tables.conversation.c.audience.in_(readable_audiences(member_id)),
+                )
+            case _:
+                raise ValueError(f"unknown artifact scope filter: {scope}")
         if q:
             query = query.where(
                 sa.or_(
@@ -2201,6 +2220,7 @@ class SurfaceContext:
                     )
                 )
             ).all()
+        sources = await self._conversation_sources(tuple({row.conversation_id for row in rows}))
         return page_of(
             rows,
             cursor,
@@ -2220,6 +2240,8 @@ class SurfaceContext:
                 owner_email=row.email,
                 origin=row.surface_label or (row.surface if row.surface != "web" else None),
                 conversation_id=row.conversation_id,
+                surface=row.surface,
+                source=sources.get(row.conversation_id),
             ),
             position=lambda row: (
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
@@ -2245,6 +2267,7 @@ class SurfaceContext:
                 tables.shared_artifact.c.preview_size_bytes,
                 tables.shared_artifact.c.created_at,
                 tables.member.c.email,
+                tables.conversation.c.surface,
             )
             .select_from(
                 tables.shared_artifact.join(
@@ -2269,6 +2292,7 @@ class SurfaceContext:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
+        source = (await self._conversation_sources((conversation_id,))).get(conversation_id)
         return tuple(
             ListedArtifact(
                 artifact=SharedArtifact(
@@ -2285,6 +2309,8 @@ class SurfaceContext:
                 owner_email=row.email,
                 origin=None,
                 conversation_id=conversation_id,
+                surface=row.surface,
+                source=source,
             )
             for row in rows
         )

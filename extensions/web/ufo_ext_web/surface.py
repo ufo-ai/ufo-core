@@ -139,6 +139,7 @@ ARTIFACT_LIST_LIMIT = 100
 RADAR_LIST_LIMIT = 20
 SCHEDULED_TASK_KIND = "scheduled_task"
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
+ARTIFACT_SCOPE_FILTERS = frozenset(("created", "shared"))
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 OTHER_CONVERSATION_LIMIT = 25
@@ -2376,6 +2377,9 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
     media = request.query_params.get("media") or None
     if media is not None and media not in ARTIFACT_MEDIA_FILTERS:
         return Response("invalid artifact media filter", status_code=400)
+    scope = request.query_params.get("scope") or None
+    if scope is not None and scope not in ARTIFACT_SCOPE_FILTERS:
+        return Response("invalid artifact scope filter", status_code=400)
     cursor: ListingCursor | None = None
     if raw_cursor:
         try:
@@ -2389,6 +2393,7 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
         cursor=cursor,
         q=q,
         media=media,
+        scope=scope,
     )
     return JSONResponse(
         {
@@ -2404,6 +2409,8 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
                     "preview_url": ctx.artifact_preview_link(entry.artifact),
                     "origin": entry.origin,
                     "conversation_id": str(entry.conversation_id),
+                    "surface": entry.surface,
+                    "source": entry.source,
                 }
                 for entry in page.rows
             ],
