@@ -2558,6 +2558,7 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
     assert turn_context == {
         "sender": "Bee Jones (bee@example.com)",
         "timezone": "America/New_York",
+        "question": None,
         "source": "https://acme.slack.com/archives/D9/p70?thread_ts=7.0&cid=D9",
     }
 
@@ -7655,7 +7656,7 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
     buttons = lone[2]["elements"]
     assert [b["text"]["text"] for b in buttons] == ["Ship", "Hold"]
     assert [b["action_id"] for b in buttons] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in buttons] == ["Ship", "Hold"]
+    assert [b["value"] for b in buttons] == ["Ship\nShip it?", "Hold\nShip it?"]
 
     pair = slack.slack_ask_blocks(
         AskUserInput(
@@ -7682,7 +7683,7 @@ def test_ask_blocks_render_title_every_question_and_choice_buttons() -> None:
     assert [block["type"] for block in pair] == ["section", "section", "actions", "section"]
     assert pair[1]["text"]["text"] == "*Release* — Ship it?\n• Ship — cut it now"
     assert [b["action_id"] for b in pair[2]["elements"]] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in pair[2]["elements"]] == ["Ship · Ship it?", "Hold · Ship it?"]
+    assert [b["value"] for b in pair[2]["elements"]] == ["Ship\nShip it?", "Hold\nShip it?"]
     assert pair[3]["text"]["text"] == "Name the tag?\n• v1 — the usual"
 
     multi = slack.slack_ask_blocks(
@@ -7738,7 +7739,7 @@ async def test_question_writeback_posts_answer_buttons(db: None, tmp_path, monke
     assert actions["type"] == "actions"
     assert [b["text"]["text"] for b in actions["elements"]] == ["Ship", "Hold"]
     assert [b["action_id"] for b in actions["elements"]] == ["ask:0:0", "ask:0:1"]
-    assert [b["value"] for b in actions["elements"]] == ["Ship", "Hold"]
+    assert [b["value"] for b in actions["elements"]] == ["Ship\nShip it?", "Hold\nShip it?"]
     assert reply["blocks"][-1]["type"] == "context"
 
 
@@ -7957,7 +7958,7 @@ async def test_a_click_on_a_conversation_this_workspace_has_none_of_reads_nothin
     assert _fetches(recorder, slack.SLACK_GET_PERMALINK_URL) == []
 
 
-async def test_a_click_whose_member_is_linked_still_sources_its_answer(
+async def test_a_click_whose_member_is_linked_names_its_sender_and_sources_its_answer(
     db: None, tmp_path, monkeypatch
 ) -> None:
     workspace_id, member_id = await _seed(member_email="bee@example.com")
@@ -7977,20 +7978,26 @@ async def test_a_click_whose_member_is_linked_still_sources_its_answer(
     _, client, _ = await _mount(
         monkeypatch, workspace_id, tmp_path, recorder, users={"U9": "bee@example.com"}
     )
-    click = _click_body()
+    click = _click_body(value="Ship\nShip it?")
     async with client:
         await client.post(INTERACTIVE_PATH, content=click, headers=_signed_form(click))
         await asyncio.gather(*slack._REWRITE_TASKS)
     async with workspace_tx() as connection:
-        context = (
+        inbound, context = (
             await connection.execute(
-                sa.select(tables.turn.c.context).where(tables.turn.c.workspace_id == workspace_id)
+                sa.select(tables.turn.c.inbound, tables.turn.c.context).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
             )
-        ).scalar_one()
+        ).one()
+    assert member_message_text(inbound) == "Ship"
     assert context["source"] == (
         "https://acme.slack.com/archives/C5/p999100?thread_ts=999.100&cid=C5"
     )
-    assert _fetches(recorder, slack.SLACK_USERS_INFO_URL) == []
+    assert context["sender"] == "Bee Jones (bee@example.com)"
+    assert context["timezone"] == "America/New_York"
+    assert context["question"] == "Ship it?"
+    assert len(_fetches(recorder, slack.SLACK_USERS_INFO_URL)) == 1
     assert len(_fetches(recorder, slack.SLACK_GET_PERMALINK_URL)) == 1
 
 
@@ -8144,7 +8151,7 @@ async def test_shared_interactive_routes_by_registered_team(
             )
         ).one()
     assert routed.workspace_id == workspace_id
-    assert member_message_text(routed.inbound) == ("[Answered by <@U9> via button] Ship")
+    assert member_message_text(routed.inbound) == "Ship"
     assert routed.speaker_member_id == member_id
     assert routed.conversation_id == conversation_id
     assert routed.member_id is None
@@ -8205,9 +8212,11 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(
-                sa.select(tables.turn.c.inbound, tables.turn.c.idempotency_key).where(
-                    tables.turn.c.workspace_id == workspace_id
-                )
+                sa.select(
+                    tables.turn.c.inbound,
+                    tables.turn.c.idempotency_key,
+                    tables.turn.c.context,
+                ).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).all()
         queue_key = (
@@ -8218,7 +8227,8 @@ async def test_first_click_wins_and_alone_rewrites_the_message(
             )
         ).scalar_one()
     assert len(turns) == 1
-    assert member_message_text(turns[0].inbound) == ("[Answered by <@U9> via button] Ship")
+    assert member_message_text(turns[0].inbound) == "Ship"
+    assert turns[0].context["question"] is None
     assert turns[0].idempotency_key == "C5:200.0:999.100:answer:0"
     assert queue_key == "C5:200.0"
 
@@ -8248,18 +8258,18 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
         {
             "type": "actions",
             "block_id": "b-ask-0",
-            "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship"}],
+            "elements": [{"type": "button", "action_id": "ask:0:0", "value": "Ship\nShip it?"}],
         },
         {
             "type": "actions",
             "block_id": "b-ask-1",
-            "elements": [{"type": "button", "action_id": "ask:1:0", "value": "v2 · Tag?"}],
+            "elements": [{"type": "button", "action_id": "ask:1:0", "value": "v2\nTag?"}],
         },
     ]
-    second = _click_body(
-        action_id="ask:1:0", value="v2 · Tag?", blocks=two_rows, block_id="b-ask-1"
+    second = _click_body(action_id="ask:1:0", value="v2\nTag?", blocks=two_rows, block_id="b-ask-1")
+    first = _click_body(
+        action_id="ask:0:0", value="Ship\nShip it?", blocks=two_rows, block_id="b-ask-0"
     )
-    first = _click_body(action_id="ask:0:0", value="Ship", blocks=two_rows, block_id="b-ask-0")
     async with client:
         await client.post(INTERACTIVE_PATH, content=second, headers=_signed_form(second))
         await asyncio.gather(*slack._REWRITE_TASKS)
@@ -8286,22 +8296,16 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
             )
         ).all()
     assert [(turn.idempotency_key, member_message_text(turn.inbound)) for turn in turns] == [
-        (
-            "C5:200.0:999.100:answer:1",
-            "[Answered by <@U9> via button] v2 · Tag?",
-        )
+        ("C5:200.0:999.100:answer:1", "v2")
     ]
     assert [
         (arrival.idempotency_key, member_message_text(arrival.body)) for arrival in arrivals
-    ] == [
-        (
-            "C5:200.0:999.100:answer:0",
-            "[Answered by <@U9> via button] Ship",
-        )
-    ]
+    ] == [("C5:200.0:999.100:answer:0", "Ship")]
     answered_at = "https://acme.slack.com/archives/C5/p999100?thread_ts=999.100&cid=C5"
     assert [turn.context["source"] for turn in turns] == [answered_at]
     assert [arrival.context["source"] for arrival in arrivals] == [answered_at]
+    assert [turn.context["question"] for turn in turns] == ["Tag?"]
+    assert [arrival.context["question"] for arrival in arrivals] == ["Ship it?"]
 
     rewrites = [
         json.loads(request.content)
@@ -8310,7 +8314,7 @@ async def test_each_question_row_takes_its_own_answer(db: None, tmp_path, monkey
     assert len(rewrites) == 2
     assert [block["type"] for block in rewrites[0]["blocks"]] == ["markdown", "actions", "context"]
     assert rewrites[0]["blocks"][1]["block_id"] == "b-ask-0"
-    assert "v2 · Tag?" in rewrites[0]["blocks"][2]["elements"][0]["text"]
+    assert "*v2*" in rewrites[0]["blocks"][2]["elements"][0]["text"]
     assert [block["type"] for block in rewrites[1]["blocks"]] == ["markdown", "context", "actions"]
     assert "Ship" in rewrites[1]["blocks"][1]["elements"][0]["text"]
 

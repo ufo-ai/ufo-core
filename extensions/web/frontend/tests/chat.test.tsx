@@ -187,6 +187,21 @@ test("a bubble another member spoke names them, and the viewer's own carries no 
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
 });
 
+test("a bubble that answered a question draws the question over the words", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "Ship", asked: "Ship it?" },
+        { role: "assistant", text: "Shipping." },
+      ],
+    }),
+  );
+  open();
+
+  const bubble = (await screen.findByText("Ship")).closest("[data-slot=message]");
+  expect(bubble && within(bubble as HTMLElement).getByText("Ship it?")).toBeTruthy();
+});
+
 test("a conversation reloaded while its turn runs shows the prompt, says so, and tails the turn", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();

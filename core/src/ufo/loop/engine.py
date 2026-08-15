@@ -543,10 +543,11 @@ def _parse_args(partials: list[str]) -> dict[str, object]:
 
 def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: datetime) -> str:
     """The <context> tag rendered before a member inbound: the admission moment (in the sender's
-    zone when the surface supplied one, else UTC), the sender the surface named, and the source it
-    named for the request. The persisted moment — the turn row's for the founding message, the queue
-    row's for a drained arrival — never the wall clock, so a queued, parked, or replayed message
-    keeps the time the member actually spoke."""
+    zone when the surface supplied one, else UTC), the sender the surface named, the question the
+    message answers when the surface knew one, and the source it named for the request. The
+    persisted moment — the turn row's for the founding message, the queue row's for a drained
+    arrival — never the wall clock, so a queued, parked, or replayed message keeps the time the
+    member actually spoke."""
     zone = ZoneInfo(context.timezone) if context is not None and context.timezone else UTC
     lines = [
         f"message_ref: {message_id}",
@@ -554,6 +555,8 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
     ]
     if context is not None and context.sender:
         lines.append(f"sender: {context.sender}")
+    if context is not None and context.question:
+        lines.append(f"question: {context.question}")
     if context is not None and context.source:
         lines.append(f"source: {context.source}")
     return "<context>\n" + "\n".join(lines) + "\n</context>\n"

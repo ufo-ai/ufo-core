@@ -968,6 +968,7 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     assert context == {
         "sender": "owner@example.com",
         "timezone": None,
+        "question": None,
         "source": (f"https://web/surface/web#/c/{opened} (owner@example.com)"),
     }
     transcript = await client.get(
@@ -9890,6 +9891,37 @@ def test_a_bubble_names_its_speaker_exactly_where_the_read_names_one() -> None:
     ]
 
 
+def test_a_bubble_carries_the_question_its_words_answered() -> None:
+    """The read hands the projection the question each answering message settled; the bubble
+    carries it for every speaker, the viewer's own included — an answer reads with what it
+    answered, and unlike the speaker label there is no bubble whose question the pane already
+    accounts for."""
+    theirs = "77777777-7777-7777-7777-777777777777"
+    mine = "88888888-8888-8888-8888-888888888888"
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content=f"<context>\nmessage_ref: {theirs}\n</context>\nShip"),
+            Message(role="assistant", content="Shipping."),
+            Message(role="user", content=f"<context>\nmessage_ref: {mine}\n</context>\nHold"),
+        ),
+        None,
+        frozenset({theirs, mine}),
+        frozenset(),
+        {theirs: "Mel Okafor (m@example.com)"},
+        asked={theirs: "Ship it?", mine: "Deploy now?"},
+    )
+    assert rendered == [
+        {
+            "role": "user",
+            "text": "Ship",
+            "speaker": "Mel Okafor (m@example.com)",
+            "asked": "Ship it?",
+        },
+        {"role": "assistant", "text": "Shipping."},
+        {"role": "user", "text": "Hold", "asked": "Deploy now?"},
+    ]
+
+
 async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -9981,7 +10013,9 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
                 inbound=fence_member_message(marker, ambient, "now the launch email", ""),
                 admission_source="member",
                 speaker_member_id=peer_id,
-                context=TurnContext(sender="Sam Frost (peer@example.com)").model_dump(mode="json"),
+                context=TurnContext(
+                    sender="Sam Frost (peer@example.com)", question="Announce where first?"
+                ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -9995,7 +10029,9 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
                 body=fence_member_message(marker, ambient, "and a blog post", ""),
                 admission_source="member",
                 speaker_member_id=member_id,
-                context=TurnContext(sender="Mel Okafor (m@example.com)").model_dump(mode="json"),
+                context=TurnContext(
+                    sender="Mel Okafor (m@example.com)", question="A blog post too?"
+                ).model_dump(mode="json"),
                 admitted_turn_id=running,
                 consumed_turn_id=None,
                 created_at=sa.func.now(),
@@ -10013,8 +10049,10 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         "role": "user",
         "text": "now the launch email",
         "speaker": "Sam Frost (peer@example.com)",
+        "asked": "Announce where first?",
     }
     assert tail[1]["text"] == "and a blog post"
+    assert tail[1]["asked"] == "A blog post too?"
     assert "speaker" not in tail[1]
 
     async with workspace_tx() as connection:
@@ -10057,11 +10095,16 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
 
     assert written.status_code == 200
     settled = written.json()["messages"][-3:]
-    assert settled[0] == {"role": "user", "text": "now the launch email"}
+    assert settled[0] == {
+        "role": "user",
+        "text": "now the launch email",
+        "asked": "Announce where first?",
+    }
     assert settled[1] == {
         "role": "user",
         "text": "and a blog post",
         "speaker": "Mel Okafor (m@example.com)",
+        "asked": "A blog post too?",
     }
     assert settled[2] == {"role": "assistant", "text": "Sent."}
 
@@ -10070,4 +10113,8 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         headers=cookie,
     )
 
-    assert own.json()["messages"][-2] == {"role": "user", "text": "and a blog post"}
+    assert own.json()["messages"][-2] == {
+        "role": "user",
+        "text": "and a blog post",
+        "asked": "A blog post too?",
+    }

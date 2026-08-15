@@ -1054,6 +1054,7 @@ def _rendered_messages(
     agent_origin: frozenset[str] = frozenset(),
     speakers: Mapping[str, str] | None = None,
     questions: Mapping[str, dict[str, object]] | None = None,
+    asked: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -1070,9 +1071,14 @@ def _rendered_messages(
     `questions` names what a turn still asks of the member, keyed by the turn that asked: the
     reply carries it, so the portal draws the question under the words that asked it rather than
     at the foot of the pane. A turn that asked and wrote nothing still renders its reply — the
-    question needs the reply it belongs to."""
+    question needs the reply it belongs to.
+
+    `asked` names the question a member's words answered, keyed like `speakers`: the bubble draws
+    it over the words, and carries it for every speaker, the viewer's own included — an answer
+    reads with what it answered."""
     subagents = subagents or {}
     questions = questions or {}
+    asked = asked or {}
     rendered: list[dict[str, object]] = []
     pending: list[dict[str, str]] = []
     answer = ""
@@ -1131,6 +1137,9 @@ def _rendered_messages(
         label = None if speakers is None or turn_id is None else speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
+        answered = None if turn_id is None else asked.get(turn_id)
+        if answered is not None:
+            bubble["asked"] = answered
         rendered.append(bubble)
     flush_reply(True)
     return rendered
@@ -1175,7 +1184,8 @@ async def _conversation_messages(
     `viewer`'s own: their bubbles are the unlabelled default, so the label marks exactly the words
     somebody else said. The transcript refers to a message by the turn it founded or, for one
     folded into a running turn, by its queue row, so the speakers map is keyed by both — a folded
-    message keeps its speaker after the turn writes it.
+    message keeps its speaker after the turn writes it. A bubble whose words answered a question
+    carries that question the same way, the viewer's own included.
 
     A question stands on the reply that asked it, because that is the reply it answers. Only the
     newest committed turn's: a later turn supersedes what an earlier one asked, so an older
@@ -1189,6 +1199,9 @@ async def _conversation_messages(
         str(arrival.id): arrival.sender
         for arrival in spoken
         if arrival.sender is not None and arrival.speaker_member_id != viewer
+    }
+    asked = {
+        str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
@@ -1221,6 +1234,12 @@ async def _conversation_messages(
                 and turn.speaker_member_id != viewer
             },
             asking,
+            asked
+            | {
+                str(turn.id): turn.context.question
+                for turn in turns
+                if turn.context is not None and turn.context.question is not None
+            },
         )
         if any(turn.subagent_profile is not None for turn in turns):
             for reply in rendered:
@@ -1239,6 +1258,8 @@ async def _conversation_messages(
             and detail.turn.speaker_member_id != viewer
         ):
             prompt["speaker"] = detail.turn.context.sender
+        if detail.turn.context is not None and detail.turn.context.question is not None:
+            prompt["asked"] = detail.turn.context.question
         rendered.append(prompt)
     draining = detail.turn.id if detail.turn.terminal is None else None
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
@@ -1251,6 +1272,9 @@ async def _conversation_messages(
         label = speakers.get(str(arrival.id))
         if label is not None:
             bubble["speaker"] = label
+        answered = asked.get(str(arrival.id))
+        if answered is not None:
+            bubble["asked"] = answered
         if (
             arrival.waiting
             and arrival.admission_source == MEMBER_ADMISSION

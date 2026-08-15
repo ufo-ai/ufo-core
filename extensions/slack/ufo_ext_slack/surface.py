@@ -1167,15 +1167,14 @@ def _mrkdwn_section(text: str) -> dict[str, object]:
 def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None:
     """The rendered ask for a reply whose turn ended on a question: the title, then every question
     as its own section, each single-choice question followed by a button row — an option's
-    description, which a button cannot carry, joins the section. The answer rides each button's
-    `value` — the label alone for a lone question, prefixed answer-first with its question when
-    siblings would make a bare label ambiguous — so the click carries the answer itself and the
-    interactive route never re-parses the message. A richer question (multi-select, free-text,
-    attachments, more options than a row holds) lists its options in the section and the member
-    answers by replying in the thread, the flow every question supports regardless."""
+    description, which a button cannot carry, joins the section. Each button's `value` carries the
+    answer and, on its own line beneath it, the question it answers — answer-first, so the value
+    cap cuts into the question and never the answer — and the interactive route never re-parses
+    the message. A richer question (multi-select, free-text, attachments, more options than a row
+    holds) lists its options in the section and the member answers by replying in the thread, the
+    flow every question supports regardless."""
     if question is None:
         return None
-    lone = len(question.questions) == 1
     rendered: list[dict[str, object]] = [_mrkdwn_section(f"*{question.title}*")]
     for q_index, ask in enumerate(question.questions):
         lines = [f"*{ask.header}* — {ask.question}" if ask.header else ask.question]
@@ -1201,9 +1200,7 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
                                 "text": option.label[:SLACK_BUTTON_TEXT_LIMIT],
                             },
                             "action_id": f"{ASK_ACTION_ID_PREFIX}{q_index}:{o_index}",
-                            "value": (option.label if lone else f"{option.label} · {ask.question}")[
-                                :SLACK_BUTTON_VALUE_LIMIT
-                            ],
+                            "value": f"{option.label}\n{ask.question}"[:SLACK_BUTTON_VALUE_LIMIT],
                         }
                         for o_index, option in enumerate(ask.options or ())
                     ],
@@ -1780,22 +1777,24 @@ async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None:
     return permalink if isinstance(permalink, str) and permalink else None
 
 
-def _turn_context(sender: SlackUser | None, source: str | None) -> TurnContext:
+def _turn_context(
+    sender: SlackUser | None, source: str | None, question: str | None = None
+) -> TurnContext:
     """The admitted turn's ambient context from the sender read plus the permalink to the member's
-    message; a timezone Slack reports that is not a known zone is dropped with a log rather than
-    failing the member's message."""
+    message, and for a button answer the question it answered; a timezone Slack reports that is not
+    a known zone is dropped with a log rather than failing the member's message."""
     if sender is None:
-        return TurnContext(source=source)
+        return TurnContext(source=source, question=question)
     line = (
         f"{sender.name} ({sender.email})"
         if sender.name and sender.email
         else sender.name or sender.email
     )
     try:
-        return TurnContext(sender=line, timezone=sender.timezone, source=source)
+        return TurnContext(sender=line, timezone=sender.timezone, question=question, source=source)
     except ValidationError:
         _LOG.warning("slack timezone %r is not a known zone; dropped", sender.timezone)
-        return TurnContext(sender=line, source=source)
+        return TurnContext(sender=line, question=question, source=source)
 
 
 async def _resolve_member(
@@ -2939,10 +2938,11 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
 @dataclass(frozen=True)
 class AnswerClick:
     """A verified button click on an ask_user question, reduced to what admission and the message
-    rewrite need. The answer rides the button `value`; the question's index (from the `action_id`)
-    keys admission per question, so each question's row takes its own first answer. The message's
-    delivered `blocks` and the clicked block's id let the rewrite swap exactly the answered row
-    while echoing everything else back unchanged."""
+    rewrite need. The button `value` rides the answer's label and, on the lines beneath it, the
+    question it answers — absent from a value that carries the label alone; the question's index
+    (from the `action_id`) keys admission per question, so each question's row takes its own first
+    answer. The message's delivered `blocks` and the clicked block's id let the rewrite swap
+    exactly the answered row while echoing everything else back unchanged."""
 
     slack_user_id: str
     channel: str
@@ -2952,6 +2952,7 @@ class AnswerClick:
     message_text: str
     question_index: int
     label: str
+    question: str | None
     block_id: str
     blocks: tuple[Mapping[str, object], ...]
 
@@ -3019,24 +3020,17 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
             if conversation_id is None:
                 return JSONResponse({"ok": True, "ignored": True})
             bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+            sender, answered_at = await asyncio.gather(
+                _slack_user(bot_token, click.slack_user_id),
+                _slack_permalink(bot_token, click.channel, click.message_ts),
+            )
             if member_id is None:
-                sender, answered_at = await asyncio.gather(
-                    _slack_user(bot_token, click.slack_user_id),
-                    _slack_permalink(bot_token, click.channel, click.message_ts),
-                )
                 member_id = await _resolve_member(ctx, click.slack_user_id, click.is_dm, sender)
-            else:
-                answered_at = await _slack_permalink(bot_token, click.channel, click.message_ts)
             if click.is_dm and member_id is not None:
                 conversation_id = await ctx.conversation_for(
                     click.queue_key, conversation_audience(member_id)
                 )
-            body = fence_member_message(
-                mint_marker(),
-                "",
-                f"[Answered by <@{click.slack_user_id}> via button] {click.label}",
-                "",
-            )
+            body = fence_member_message(mint_marker(), "", click.label, "")
             thread = MirroredThread(queue_key=click.queue_key, message_ts=click.message_ts)
             await _mirror_thread(conversation_id, thread)
             answer_key = f"{click.queue_key}:{click.message_ts}:answer:{click.question_index}"
@@ -3044,7 +3038,7 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
                 conversation_id,
                 body,
                 idempotency_key=answer_key,
-                context=TurnContext(source=answered_at),
+                context=_turn_context(sender, answered_at, click.question),
                 speaker_member_id=member_id,
             )
             if admitted.opened_run:
@@ -3146,6 +3140,7 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
         return None
     block_id = action.get("block_id")
     raw_blocks = message.get("blocks")
+    label, _, asked = value.partition("\n")
     return AnswerClick(
         slack_user_id=user_id,
         channel=channel_id,
@@ -3154,7 +3149,8 @@ def _to_click(raw: bytes, identity: SlackIdentity) -> AnswerClick | ConnectClick
         message_ts=_string_field(message, "ts"),
         message_text=str(message.get("text") or ""),
         question_index=int(question_index),
-        label=value,
+        label=label,
+        question=asked or None,
         block_id=block_id if isinstance(block_id, str) else "",
         blocks=tuple(
             block

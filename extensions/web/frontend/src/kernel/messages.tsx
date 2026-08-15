@@ -160,6 +160,9 @@ export function MessageLog({
             />
           )}
           <Said mine={message.role === "user"}>
+            {message.role === "user" && message.asked ? (
+              <div className="text-small text-ink-soft">{message.asked}</div>
+            ) : null}
             {message.role !== "user" ? (
               <Markdown text={message.text} />
             ) : message.arrival_id ? (

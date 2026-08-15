@@ -928,13 +928,15 @@ class QueuedArrival(BaseModel):
 
 class SpokenArrival(BaseModel):
     """One member-admitted queue row's attribution: the display line the admitting surface
-    reported and the member the words are attributed to — exactly what the turn it joined carries
-    for its own founding message. Drained rows included: the engine names a folded message by its
-    queue-row id in the transcript's `<context>` tag, so a projection labelling who spoke reads
-    these beside the turn rows, which only name the messages that founded turns."""
+    reported, the member the words are attributed to, and the question the words answered when the
+    surface knew one — exactly what the turn it joined carries for its own founding message.
+    Drained rows included: the engine names a folded message by its queue-row id in the
+    transcript's `<context>` tag, so a projection labelling who spoke reads these beside the turn
+    rows, which only name the messages that founded turns."""
 
     id: UUID
     sender: str | None
+    question: str | None
     speaker_member_id: UUID | None
 
 
@@ -3439,14 +3441,18 @@ class SurfaceContext:
                     )
                 )
             ).all()
-        return tuple(
-            SpokenArrival(
-                id=row.id,
-                sender=None if row.context is None else TurnContext(**row.context).sender,
-                speaker_member_id=row.speaker_member_id,
+        spoken = []
+        for row in rows:
+            context = None if row.context is None else TurnContext(**row.context)
+            spoken.append(
+                SpokenArrival(
+                    id=row.id,
+                    sender=None if context is None else context.sender,
+                    question=None if context is None else context.question,
+                    speaker_member_id=row.speaker_member_id,
+                )
             )
-            for row in rows
-        )
+        return tuple(spoken)
 
     async def read_transcript(self, conversation_id: UUID) -> Conversation | None:
         """The conversation's durable message transcript — assistant text and tool_use/tool_result

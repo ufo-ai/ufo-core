@@ -192,18 +192,20 @@ class Agent(BaseModel):
 
 class TurnContext(BaseModel):
     """Ambient facts the admitting surface knows about an inbound — who spoke, their IANA timezone,
-    and where they said it — carried on the turn row and rendered by the engine as the <context> tag
-    before the message. `source` is one line naming the request's origin in whatever form the
-    surface has: a permalink to the message itself where the surface addresses messages, else the
-    client and the member's address. The free-text fields are made safe at construction: sender and
-    source (both surface-reported) are flattened to one line without angle brackets so they cannot
-    forge tag structure, and a bad zone fails at the surface, never mid-turn."""
+    the question their message answers when the surface knew one, and where they said it — carried
+    on the turn row and rendered by the engine as the <context> tag before the message. `source` is
+    one line naming the request's origin in whatever form the surface has: a permalink to the
+    message itself where the surface addresses messages, else the client and the member's address.
+    The free-text fields are made safe at construction: sender, question, and source (all
+    surface-reported) are flattened to one line without angle brackets so they cannot forge tag
+    structure, and a bad zone fails at the surface, never mid-turn."""
 
     sender: str | None = None
     timezone: str | None = None
+    question: str | None = None
     source: str | None = None
 
-    @field_validator("sender", "source")
+    @field_validator("sender", "question", "source")
     @classmethod
     def _tag_safe_line(cls, value: str | None) -> str | None:
         if value is None:

@@ -4848,6 +4848,7 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
         update={
             "context": TurnContext(
                 sender="Marshall Rich",
+                question="Ship it?",
                 source="https://app.slack.com/client/T1/C9/thread/C9-100.5",
             )
         }
@@ -4859,6 +4860,7 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
         f"message_ref: {linked.id}\n"
         "time: Thursday 2026-07-09 18:32 UTC\n"
         "sender: Marshall Rich\n"
+        "question: Ship it?\n"
         "source: https://app.slack.com/client/T1/C9/thread/C9-100.5\n"
         "</context>\n"
         "hi"

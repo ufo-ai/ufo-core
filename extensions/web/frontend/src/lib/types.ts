@@ -144,6 +144,9 @@ export type Message = {
   role: string;
   text: string;
   speaker?: string;
+  /** The question these words answered, drawn over them so the answer reads with what it
+   *  answered. */
+  asked?: string;
   arrival_id?: string;
   events?: ActivityEvent[];
   subagents?: SubagentRun[];

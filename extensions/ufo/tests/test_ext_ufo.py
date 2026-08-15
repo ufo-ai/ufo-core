@@ -1159,6 +1159,7 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
     assert context == {
         "sender": "owner@example.com",
         "timezone": None,
+        "question": None,
         "source": "ufo cli (owner@example.com)",
     }
 
