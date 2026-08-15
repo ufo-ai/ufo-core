@@ -18,7 +18,16 @@ from ufo_ext_redis_hub.stream_hub import (
     frame_payload,
 )
 
-from ufo.hub import Absorbed, CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import (
+    Absorbed,
+    CostTick,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    SubagentActivity,
+    Terminal,
+    ToolCall,
+)
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
@@ -44,6 +53,15 @@ FRAMES: tuple[LiveFrame, ...] = (
     ToolCall(tool="bash", preview='{"command":"ls"}'),
     SkillLoad(skill="memory"),
     Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
+    SubagentActivity(
+        turn_id=UUID(int=9),
+        parent_turn_id=UUID(int=10),
+        conversation_id=UUID(int=11),
+        profile="general_purpose",
+        name="UK sports news",
+        tool="bash",
+        description="Checking the fixtures",
+    ),
 )
 
 

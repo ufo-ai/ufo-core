@@ -155,12 +155,13 @@ test("a reloaded conversation states its latest activity and opens onto the rest
   );
   open();
 
-  const summary = await screen.findByText("Loaded skill · coding");
+  const summary = await screen.findByText("Completed 2 steps");
   expect(screen.queryByText("Running the focused tests")).toBeNull();
+  expect(screen.queryByText("Loaded skill · coding")).toBeNull();
 
   await userEvent.click(summary);
   expect(screen.getByText("Running the focused tests")).toBeTruthy();
-  expect(screen.getAllByText("Loaded skill · coding")).toHaveLength(2);
+  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
 
   await userEvent.click(summary);
   expect(screen.queryByText("Running the focused tests")).toBeNull();
@@ -233,7 +234,7 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+  expect(screen.getByText("Completed 2 steps")).toBeTruthy();
   expect(document.querySelector(".shimmer")).toBeNull();
 });
 
@@ -258,12 +259,58 @@ test("a live subagent run nests under the reply it produced", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Fetching the page");
+  const summary = await screen.findByText("Completed 1 step");
   await userEvent.click(summary);
-  expect(
-    screen.getByRole("link", { name: /Subagent · general_purpose/ }).getAttribute("href"),
-  ).toBe("#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID);
+  const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
+  expect(link.getAttribute("href")).toBe(
+    "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
+  );
+  expect(screen.queryByText("Fetching the page")).toBeNull();
+
+  await userEvent.click(link.closest("summary")!);
+  expect(screen.getByText("Fetching the page")).toBeTruthy();
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
+});
+
+test("a live run states its name and current step, and clears the wait when it ends", async () => {
+  const conversationId = "66666666-6666-4666-8666-666666666666";
+  const childTurn = "88888888-8888-4888-8888-888888888888";
+  const frame = {
+    turn_id: childTurn,
+    parent_turn_id: TURN_ID,
+    conversation_id: conversationId,
+    profile: "general_purpose",
+    name: "UK sports news",
+    tool: "",
+    description: "",
+    preview: "",
+    skill: "",
+    status: "",
+  };
+  wire(transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("tool", {
+    tool: "spawn_subagent",
+    preview: "",
+    description: "Handing the research off",
+  });
+  StreamFake.last().emit("subagent_activity", frame);
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  StreamFake.last().emit("subagent_activity", {
+    ...frame,
+    tool: "fetch_url",
+    description: "Searching for latest MLS news",
+  });
+  expect(await screen.findByText("UK sports news")).toBeTruthy();
+  expect(screen.getByText(/Searching for latest MLS news/)).toBeTruthy();
+  expect(screen.getByText("Handing the research off")).toBeTruthy();
+
+  StreamFake.last().emit("subagent_activity", { ...frame, status: "done" });
+  await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
+  expect(screen.getByText("UK sports news")).toBeTruthy();
 });
 
 /** Where two strings stand relative to each other in the rendered page. */
@@ -296,7 +343,8 @@ test("what a reply did stands above the reply, in the order the turn did it", as
 
   // The tools ran before the agent wrote a word about them, so the disclosure states them where
   // they happened — above the answer they produced, never under it.
-  expect(await screen.findByText("Running the focused tests")).toBeTruthy();
+  await userEvent.click(await screen.findByText("Completed 1 step"));
+  expect(screen.getByText("Running the focused tests")).toBeTruthy();
   expect(order("Running the focused tests", "The tests pass.")).toBe(true);
 });
 
@@ -704,23 +752,30 @@ test("a reloaded conversation nests its subagent work under the reply and still 
   );
   open();
 
-  const summary = await screen.findByText("Searching");
-  expect(screen.queryByText("Fetching the page")).toBeNull();
+  const summary = await screen.findByText("Completed 2 steps");
+  expect(screen.queryByText("Reading the tree")).toBeNull();
 
   await userEvent.click(summary);
   expect(screen.getByText("Reading the tree")).toBeTruthy();
-  expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
-  expect(screen.getByText("Fetching the page")).toBeTruthy();
-  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
-  expect(screen.getByText("Nothing further.")).toBeTruthy();
-
   const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
   expect(link.getAttribute("href")).toBe(
     "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
   );
-  expect(
-    screen.getByRole("link", { name: /Subagent · deep_research/ }).getAttribute("href"),
-  ).toBe("#/subagents/deep_research/conversations/" + nestedId + "?root=" + conversationId);
+  expect(screen.queryByText("Fetching the page")).toBeNull();
+
+  await userEvent.click(link.closest("summary")!);
+  expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
+  expect(screen.getByText("Fetching the page")).toBeTruthy();
+  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
+  const nested = screen.getByRole("link", { name: /Subagent · deep_research/ });
+  expect(nested.getAttribute("href")).toBe(
+    "#/subagents/deep_research/conversations/" + nestedId + "?root=" + conversationId,
+  );
+  expect(screen.queryByText("Searching")).toBeNull();
+
+  await userEvent.click(nested.closest("summary")!);
+  expect(screen.getByText("Searching")).toBeTruthy();
+  expect(screen.getByText("Nothing further.")).toBeTruthy();
 
   await userEvent.click(summary);
   expect(screen.queryByText("Fetching the page")).toBeNull();
@@ -753,7 +808,7 @@ test("a line longer than the fold opens in place and closes again", async () => 
   );
   open();
 
-  await userEvent.click(await screen.findByText("Reading the tree"));
+  await userEvent.click(await screen.findByText("Completed 2 steps"));
   const more = await screen.findByRole("button", { name: "Show more" });
   const region = document.getElementById(String(more.getAttribute("aria-controls")));
   expect(more.getAttribute("aria-expanded")).toBe("false");
@@ -788,7 +843,7 @@ test("a line that fits is offered no control that would do nothing", async () =>
   );
   open();
 
-  await userEvent.click(await screen.findByText("Reading the tree"));
+  await userEvent.click(await screen.findByText("Completed 2 steps"));
   expect(screen.getByText("Checked the changelog.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
 });

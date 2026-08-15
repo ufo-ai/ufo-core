@@ -39,6 +39,7 @@ from ufo.loop.engine import (
     ADOPTED_CLAIM,
     MAIN_ROUND_LIMIT,
     AdoptionReplay,
+    RunLineage,
     TranscriptRepair,
     TurnEngine,
     TurnParked,
@@ -315,6 +316,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
         with span("turn.load"):
             turn, agent, audience = await _load_turn(UUID(turn_id))
+        lineage = await _run_lineage(turn)
         previous_turn_ended_at = (
             None
             if turn.admission_source == INTENT_ADMISSION
@@ -435,6 +437,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 speaker_member_id=None,
             ),
             hub=runtime.hub,
+            lineage=lineage,
             sandbox=sandbox,
             sandbox_for=(
                 None if turn.admission_source == INTENT_ADMISSION else sandbox_authorizer.authorize
@@ -583,6 +586,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.terminal,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.subagent_profile,
+                    tables.turn.c.subagent_name,
                     tables.turn.c.result_delivery,
                     tables.conversation.c.sandbox_conversation_id,
                     tables.turn.c.traceparent,
@@ -619,6 +623,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
+        subagent_name=row.subagent_name,
         result_delivery=row.result_delivery,
         sandbox_conversation_id=row.sandbox_conversation_id,
         traceparent=row.traceparent,
@@ -627,6 +632,31 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         turn,
         Agent(prompt=row.prompt, model=row.model, reasoning=row.reasoning),
         parse_audience(row.audience),
+    )
+
+
+async def _run_lineage(turn: Turn) -> RunLineage | None:
+    """Where a subagent turn's live activity publishes: the admitted ancestor whose stream every
+    surface tails, found by following parent links to the turn that has none. None for a turn that
+    is not a subagent's — its own stream is the tailed one."""
+    if turn.subagent_profile is None or turn.parent_turn_id is None:
+        return None
+    root = turn.parent_turn_id
+    async with workspace_tx() as connection:
+        while True:
+            parent = (
+                await connection.execute(
+                    sa.select(tables.turn.c.parent_turn_id).where(tables.turn.c.id == root)
+                )
+            ).scalar_one()
+            if parent is None:
+                break
+            root = parent
+    return RunLineage(
+        root_turn_id=root,
+        parent_turn_id=turn.parent_turn_id,
+        profile=turn.subagent_profile,
+        name=turn.subagent_name or "",
     )
 
 

@@ -3621,6 +3621,7 @@ class SurfaceContext:
             tables.turn.c.terminal,
             tables.turn.c.parent_turn_id,
             tables.turn.c.subagent_profile,
+            tables.turn.c.subagent_name,
             tables.turn.c.traceparent,
         )
 
@@ -3641,6 +3642,7 @@ class SurfaceContext:
             terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
             parent_turn_id=row.parent_turn_id,
             subagent_profile=row.subagent_profile,
+            subagent_name=row.subagent_name,
             traceparent=row.traceparent,
         )
 

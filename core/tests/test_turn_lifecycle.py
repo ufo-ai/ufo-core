@@ -37,7 +37,7 @@ from ufo.durability import replay_safe_client
 from ufo.ext.context import context_for
 from ufo.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
-from ufo.hub import CostTick, Hub, InProcessHub, Parked, Terminal
+from ufo.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
 from ufo.jobs import TurnDispatcher
 from ufo.loop import queue as loop_queue
 from ufo.loop.engine import (
@@ -259,7 +259,7 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s2",
                 partial_json='{"profile": "exhaust", "payload": {"value": 99}, '
-                '"user_description": "handing off the research"}',
+                '"user_description": "handing off the research", "name": "Fixture check"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -1663,6 +1663,59 @@ async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent
     assert parent_terminal.incomplete_reason is None
     assert child_terminal.incomplete_reason == "round_budget"
     assert RoundTripOutput.model_validate_json(child_terminal.text).echoed == 99
+
+
+async def test_a_childs_activity_mirrors_onto_the_parents_stream(surface: Turns) -> None:
+    """A surface tails the admitted turn's stream and nothing else, so the child engine mirrors
+    its member-facing moments there as SubagentActivity: the run starting, each dispatch it makes,
+    and the terminal that ends its row — every frame stamped with the run's identity and the
+    display name the spawn gave it, which also lands on the child turn and names its
+    conversation."""
+    seed = await _bootstrap()
+    _, hub, _ = _runtime_parts()
+    parent = await surface.admit(seed, "spawn-exhaust")
+
+    async def _collect() -> list[SubagentActivity]:
+        collected: list[SubagentActivity] = []
+        async for _cursor, frame in hub.subscribe(UUID(parent)):
+            if isinstance(frame, SubagentActivity):
+                collected.append(frame)
+            if isinstance(frame, Terminal):
+                break
+        return collected
+
+    collector = asyncio.ensure_future(_collect())
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.conversation_id,
+                    tables.turn.c.subagent_name,
+                ).where(tables.turn.c.parent_turn_id == UUID(parent))
+            )
+        ).one()
+        title = (
+            await connection.execute(
+                sa.select(tables.conversation.c.title).where(
+                    tables.conversation.c.id == child.conversation_id
+                )
+            )
+        ).scalar_one()
+    assert child.subagent_name == "Fixture check"
+    assert title == "Fixture check"
+    runs = await asyncio.wait_for(collector, STREAM_TIMEOUT_SECONDS)
+    assert [frame.status for frame in runs] == ["", "", "done"]
+    started, worked, _done = runs
+    assert (started.tool, started.skill) == ("", "")
+    assert (worked.tool, worked.description) == ("bash", "running a check")
+    assert {frame.turn_id for frame in runs} == {child.id}
+    assert {frame.parent_turn_id for frame in runs} == {UUID(parent)}
+    assert {frame.conversation_id for frame in runs} == {child.conversation_id}
+    assert {frame.profile for frame in runs} == {"exhaust"}
+    assert {frame.name for frame in runs} == {"Fixture check"}
 
 
 async def test_subagent_bills_under_its_profile_model_not_the_parents(

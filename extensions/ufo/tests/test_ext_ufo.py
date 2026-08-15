@@ -54,7 +54,16 @@ from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from ufo.hub import Absorbed, CostTick, InProcessHub, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import (
+    Absorbed,
+    CostTick,
+    InProcessHub,
+    Parked,
+    SkillLoad,
+    SubagentActivity,
+    Terminal,
+    ToolCall,
+)
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -111,6 +120,21 @@ def test_frame_map_covers_every_live_frame() -> None:
         b"note\trunning bash: listing\n",
     )
     assert directives_for(SkillLoad(skill="demo"), False) == (b"note\tloading skill: demo\n",)
+    run = SubagentActivity(
+        turn_id=UUID(int=1),
+        parent_turn_id=UUID(int=2),
+        conversation_id=UUID(int=3),
+        profile="general_purpose",
+        name="UK sports news",
+    )
+    assert directives_for(run, False) == ()
+    assert directives_for(
+        run.model_copy(update={"tool": "bash", "description": "listing"}), False
+    ) == (b"note\tUK sports news: running bash: listing\n",)
+    assert directives_for(run.model_copy(update={"name": "", "skill": "demo"}), False) == (
+        b"note\tgeneral_purpose: loading skill: demo\n",
+    )
+    assert directives_for(run.model_copy(update={"status": "done"}), False) == ()
     assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
         b"status\t3000 tok - $0.055000\n",
     )

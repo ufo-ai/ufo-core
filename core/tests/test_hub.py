@@ -2,7 +2,7 @@ import asyncio
 import json
 import threading
 from collections.abc import AsyncIterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from ufo.activity import tool_activity
 from ufo.hub import (
@@ -12,6 +12,7 @@ from ufo.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     ToolCall,
 )
@@ -233,6 +234,47 @@ async def test_publish_buffers_for_a_later_subscriber_and_does_not_leak_on_termi
     assert turn_id in hub._turns
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
     assert hub._turns == {}
+
+
+def _run_frame(root_turn_id: UUID) -> SubagentActivity:
+    return SubagentActivity(
+        turn_id=uuid4(),
+        parent_turn_id=root_turn_id,
+        conversation_id=uuid4(),
+        profile="general_purpose",
+        tool="bash",
+        description="still going",
+    )
+
+
+async def test_a_run_outliving_its_root_neither_revives_nor_founds_the_ring():
+    """A background child can publish after its root committed its terminal and the ring was
+    dropped. The frame has no tail it could reach, so it drops instead of rebuilding a stream
+    nothing will ever release — one pinned ring per background spawn for the process's life."""
+    hub = InProcessHub()
+    root = uuid4()
+    await hub.publish(root, TextDelta(text="x"))
+    await hub.publish(root, Terminal(frame=TerminalFrame(status="done")))
+    assert hub._turns == {} and hub._marks == {}
+
+    assert await hub.publish(root, _run_frame(root)) == ""
+    assert hub._turns == {} and hub._marks == {}
+
+    never_ran = uuid4()
+    assert await hub.publish(never_ran, _run_frame(never_ran)) == ""
+    assert hub._turns == {} and hub._marks == {}
+
+
+async def test_a_run_frame_reaches_the_ring_of_a_root_still_in_flight():
+    hub = InProcessHub()
+    root = uuid4()
+    await hub.publish(root, TextDelta(text="x"))
+    cursor = await hub.publish(root, _run_frame(root))
+    assert cursor == "2"
+    stream = hub.subscribe(root)
+    assert isinstance((await anext(stream))[1], TextDelta)
+    assert isinstance((await anext(stream))[1], SubagentActivity)
+    await stream.aclose()
 
 
 async def test_an_absorbed_frame_neither_ends_the_stream_nor_drops_the_ring():

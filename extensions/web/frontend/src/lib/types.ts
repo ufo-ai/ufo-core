@@ -115,13 +115,24 @@ export type ActivityEvent =
   | { kind: "note"; text: string };
 
 /** One subagent run beneath the reply that spawned it: the work it did, what it answered, and the
- *  runs it spawned in turn. `conversation_id` opens the whole record. */
+ *  runs it spawned in turn. `conversation_id` opens the whole record; `name` is the display name
+ *  its spawn gave it, and the row states the profile when there is none. `turn_id`,
+ *  `parent_turn_id`, `running`, and `current` exist only on a row the live stream is building —
+ *  the durable transcript states finished runs and carries none of them. */
 export type SubagentRun = {
   profile: string;
+  name?: string;
   conversation_id: string;
   events: ActivityEvent[];
   output: string;
   subagents: SubagentRun[];
+  turn_id?: string;
+  parent_turn_id?: string;
+  running?: boolean;
+  current?: string;
+  /** How many of the spawning turn's events had landed when this row appeared — where the row
+   *  interleaves into the activity list. Live-only; a durable run renders after the events. */
+  at?: number;
 };
 
 /** One message a conversation states. `arrival_id` names the inbound-queue row a message admitted

@@ -814,16 +814,20 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("parent answer").tagName).toBe("STRONG");
-  const summary = screen.getByText("Reading the deploy job.");
+  const summary = screen.getByText("Completed 2 steps");
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("bash ls")).toBeNull();
 
   await userEvent.click(summary);
   expect(screen.getByText("bash ls")).toBeTruthy();
+  const link = screen.getByRole("link", { name: /Subagent · research/ });
+  expect(link.getAttribute("href")).toBe(
+    "#/subagents/research/conversations/" + child + "?root=" + held,
+  );
+
+  await userEvent.click(link.closest("summary")!);
+  expect(screen.getByText("Reading the deploy job.")).toBeTruthy();
   expect(screen.getByText("It runs nightly.")).toBeTruthy();
-  expect(
-    screen.getByRole("link", { name: /Subagent · research/ }).getAttribute("href"),
-  ).toBe("#/subagents/research/conversations/" + child + "?root=" + held);
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
 });
 

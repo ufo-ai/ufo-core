@@ -172,6 +172,7 @@ class Subagents:
         background: bool = False,
         dedup_key: str | None = None,
         delivers_result: bool = False,
+        name: str = "",
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -188,7 +189,7 @@ class Subagents:
         )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
         if await self._admit(
-            conversation_id, turn_id, profile, typed_input.model_dump_json(), delivers_result
+            conversation_id, turn_id, profile, typed_input.model_dump_json(), delivers_result, name
         ):
             await self._enqueue(turn_id, conversation_id)
         if background:
@@ -453,6 +454,7 @@ class Subagents:
         profile: str,
         inbound: str,
         delivers_result: bool = False,
+        name: str = "",
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
         traceparent so the child's span joins the parent's trace, and with the spawning turn's own
@@ -477,7 +479,7 @@ class Subagents:
                     queue_key=str(turn_id),
                     member_id=audience_member(self.audience),
                     audience=str(self.audience),
-                    title=conversation_name(inbound),
+                    title=name or conversation_name(inbound),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -500,6 +502,7 @@ class Subagents:
                     parent_turn_id=self.parent.id,
                     result_delivery=DELIVERY_PENDING if delivers_result else None,
                     subagent_profile=profile,
+                    subagent_name=name or None,
                     traceparent=current_traceparent(),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),

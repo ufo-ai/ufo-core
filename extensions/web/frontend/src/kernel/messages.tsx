@@ -154,6 +154,7 @@ export function MessageLog({
               events={message.events ?? []}
               runs={message.subagents ?? []}
               root={conversationId}
+              live={false}
             />
           )}
           <Said mine={message.role === "user"}>
@@ -181,6 +182,7 @@ export function MessageLog({
                 events={row.live.events}
                 runs={row.live.subagents}
                 root={conversationId}
+                live
                 working={
                   row.live.reconnecting
                     ? "Reconnecting…"
@@ -264,62 +266,119 @@ function Working({ children }: { children: ReactNode }) {
   );
 }
 
+/** The reply's activity disclosure. Live it leads with what is happening — `Awaiting N subagents`
+ *  while runs are open, else the current step — and opens itself the moment a run appears, so the
+ *  member watches the rows work; settled it collapses to `Completed N steps`: the reply's own
+ *  steps, a run counting as one however much it did inside. A member's own toggle wins over the
+ *  default from then on. */
 function Activity({
   events,
   runs,
   root,
+  live,
   working,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   root: string | null;
+  live: boolean;
   working?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<boolean | null>(null);
   if (!events.length && !runs.length) {
     return working === undefined ? null : <Working>{working}</Working>;
   }
+  const openRuns = runs.filter((run) => run.running).length;
+  const steps = events.length + runs.length;
+  const summary = live
+    ? openRuns > 0
+      ? "Awaiting " + openRuns + " subagent" + (openRuns === 1 ? "" : "s")
+      : (working ?? latestActivity(events, runs))
+    : "Completed " + steps + " step" + (steps === 1 ? "" : "s");
+  const shown = open ?? (live && openRuns > 0);
   return (
     <details
       className="mt-2xs font-mono text-small text-ink-soft"
+      open={shown}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <Marker render={<summary className="cursor-pointer list-none" />}>
-        <MarkerContent className={cn(working !== undefined && "shimmer")}>
-          {working ?? latestActivity(events, runs)}
-        </MarkerContent>
+        <MarkerContent className={cn(live && "shimmer")}>{summary}</MarkerContent>
       </Marker>
-      {open ? <ActivityTree events={events} runs={runs} root={root} /> : null}
+      {shown ? (
+        <ActivityTree events={events} runs={runs} root={root} live={live} />
+      ) : null}
     </details>
   );
 }
 
 /** A run's link is rooted at the conversation that spawned it: the one being read for a run under
  *  a reply, and the run's own for the runs it spawned in turn — which is the one generation the
- *  read behind that link authorizes against. */
+ *  read behind that link authorizes against. Rows interleave where their run started (`at`);
+ *  a durable run carries no slot and stands after the events. */
 function ActivityTree({
   events,
   runs,
   root,
+  live,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   root: string | null;
+  live: boolean;
 }) {
   if (!events.length && !runs.length) return null;
+  const slot = (run: SubagentRun) =>
+    run.at === undefined || run.at > events.length ? events.length : run.at;
+  const rows: ReactNode[] = [];
+  const place = (index: number) => {
+    for (const run of runs) {
+      if (slot(run) === index) {
+        rows.push(
+          <RunRow key={run.conversation_id} run={run} root={root} live={live} />,
+        );
+      }
+    }
+  };
+  events.forEach((event, index) => {
+    place(index);
+    rows.push(
+      <li key={"event-" + index} className="whitespace-pre-wrap">
+        {event.kind === "note" ? (
+          <Reveal bare>{event.text}</Reveal>
+        ) : (
+          eventLabel(event, "done")
+        )}
+      </li>,
+    );
+  });
+  place(events.length);
   return (
     <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
-      {events.map((event, index) => (
-        <li key={index} className="whitespace-pre-wrap">
-          {event.kind === "note" ? (
-            <Reveal bare>{event.text}</Reveal>
-          ) : (
-            eventLabel(event, "done")
-          )}
-        </li>
-      ))}
-      {runs.map((run) => (
-        <li key={run.conversation_id} className="flex flex-col gap-hair">
+      {rows}
+    </ul>
+  );
+}
+
+/** One run's row: its name (the profile when the spawn gave none) linking to the run's own record,
+ *  with what it is doing now beside it while it works; opening the row shows the work it has done,
+ *  the runs it spawned in turn, and — once it answered — its answer. */
+function RunRow({
+  run,
+  root,
+  live,
+}: {
+  run: SubagentRun;
+  root: string | null;
+  live: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const running = live && run.running === true;
+  const current = running && run.current ? run.current : "";
+  return (
+    <li className="flex flex-col gap-hair">
+      <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer list-none">
           <a
             href={subagentConversationHash(
               run.profile,
@@ -327,21 +386,27 @@ function ActivityTree({
               root ?? undefined,
             )}
           >
-            Subagent · {run.profile}
+            {run.name || "Subagent · " + run.profile}
           </a>
-          <ActivityTree
-            events={run.events}
-            runs={run.subagents}
-            root={run.conversation_id}
-          />
-          {run.output ? (
-            <div className="whitespace-pre-wrap pl-lg">
-              <Reveal bare>{run.output}</Reveal>
-            </div>
-          ) : null}
-        </li>
-      ))}
-    </ul>
+          {current ? <span className="shimmer">{" · " + current}</span> : null}
+        </summary>
+        {open ? (
+          <>
+            <ActivityTree
+              events={run.events}
+              runs={run.subagents}
+              root={run.conversation_id}
+              live={live}
+            />
+            {run.output ? (
+              <div className="whitespace-pre-wrap pl-lg">
+                <Reveal bare>{run.output}</Reveal>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </details>
+    </li>
   );
 }
 

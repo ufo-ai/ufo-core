@@ -2,7 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { apiUrl } from "./api";
 
 type TailEvent = { kind: string; data: string };
-const EVENT_KINDS = ["text", "tool", "skill", "cost", "absorbed", "parked", "terminal"] as const;
+const EVENT_KINDS = [
+  "text",
+  "tool",
+  "skill",
+  "subagent_activity",
+  "cost",
+  "absorbed",
+  "parked",
+  "terminal",
+] as const;
 
 export function Tail(props: { turnId: string }) {
   const [events, setEvents] = useState<TailEvent[]>([]);

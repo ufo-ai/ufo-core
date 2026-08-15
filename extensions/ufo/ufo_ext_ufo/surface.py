@@ -41,6 +41,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     TextDelta,
     ToolCall,
@@ -188,6 +189,8 @@ def directives_for(
             return (directive("note", _activity(frame)),)
         case SkillLoad():
             return (directive("note", f"loading skill: {frame.skill}"),)
+        case SubagentActivity():
+            return _subagent_note(frame)
         case CostTick():
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
@@ -204,6 +207,19 @@ def directives_for(
 def _activity(frame: ToolCall) -> str:
     detail = frame.description or frame.preview
     return f"running {frame.tool}: {detail}" if detail else f"running {frame.tool}"
+
+
+def _subagent_note(frame: SubagentActivity) -> tuple[bytes, ...]:
+    """A run's dispatches narrate as notes under the run's name; its start and terminal are the
+    parent's spawn narration and result, so they add no line."""
+    label = frame.name or frame.profile
+    if frame.tool:
+        detail = frame.description or frame.preview
+        body = f"running {frame.tool}: {detail}" if detail else f"running {frame.tool}"
+        return (directive("note", f"{label}: {body}"),)
+    if frame.skill:
+        return (directive("note", f"{label}: loading skill: {frame.skill}"),)
+    return ()
 
 
 def _answer(

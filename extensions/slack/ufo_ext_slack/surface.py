@@ -114,6 +114,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     TextDelta,
     ToolCall,
@@ -2423,6 +2424,11 @@ class ThreadStatus:
                             )
                         case SkillLoad(skill=skill):
                             text = STATUS_SKILL_TEXT.format(skill=skill)
+                        case SubagentActivity() if frame.tool or frame.skill:
+                            label = frame.name or frame.profile
+                            worked = (frame.description or frame.skill or frame.tool).strip()
+                            stated = f"{label}: {worked}".rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
+                            text = STATUS_DESCRIBED_TEXT.format(description=stated)
                         case Absorbed():
                             text = STATUS_PICKED_UP_TEXT
                         case TextDelta():
@@ -2674,6 +2680,10 @@ class ThreadProgress:
                             activity.tool(tool, description)
                         case SkillLoad(skill=skill):
                             activity.skill(skill)
+                        case SubagentActivity() if frame.tool or frame.skill:
+                            label = frame.name or frame.profile
+                            worked = frame.description or frame.skill or frame.tool
+                            activity.tool(frame.tool or frame.skill, f"{label}: {worked}")
                         case TextDelta(text=text):
                             activity.stream(text)
                         case CostTick():

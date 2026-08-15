@@ -91,6 +91,92 @@ export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): st
   return event ? eventLabel(event, "done") : "";
 }
 
+/** One `subagent_activity` frame off the wire: a run starting (no tool, skill, or status), one of
+ *  its dispatches, or the terminal status that ends its row. */
+type RunFrame = {
+  turn_id: string;
+  parent_turn_id: string;
+  conversation_id: string;
+  profile: string;
+  name: string;
+  tool: string;
+  description: string;
+  preview: string;
+  skill: string;
+  status: string;
+};
+
+function runEvent(frame: RunFrame): ActivityEvent | null {
+  if (frame.tool) {
+    return {
+      kind: "tool",
+      name: frame.tool,
+      preview: frame.preview,
+      description: frame.description,
+    };
+  }
+  if (frame.skill) {
+    return { kind: "skill", name: frame.skill, preview: "", description: "" };
+  }
+  return null;
+}
+
+function holdsRun(runs: SubagentRun[], turnId: string): boolean {
+  return runs.some((run) => run.turn_id === turnId || holdsRun(run.subagents, turnId));
+}
+
+function advanceRun(run: SubagentRun, frame: RunFrame): SubagentRun {
+  const event = runEvent(frame);
+  return {
+    ...run,
+    ...(event ? { events: run.events.concat(event), current: eventLabel(event, "active") } : {}),
+    ...(frame.status ? { running: false, current: undefined } : {}),
+  };
+}
+
+/** Fold one run frame into a level of the tree owned by `ownerTurnId`. A frame whose parent is the
+ *  owner upserts its row at this level — appearing at `ownerEvents`, where the owner's activity
+ *  stands now; one whose parent is a row already here recurses under it; one whose parent the
+ *  stream never showed lands at this level rather than nowhere. */
+export function applyRunFrame(
+  runs: SubagentRun[],
+  frame: RunFrame,
+  ownerTurnId: string,
+  ownerEvents: number,
+): SubagentRun[] {
+  if (frame.parent_turn_id !== ownerTurnId && holdsRun(runs, frame.parent_turn_id)) {
+    return runs.map((run) =>
+      run.turn_id === frame.parent_turn_id || holdsRun(run.subagents, frame.parent_turn_id)
+        ? {
+            ...run,
+            subagents: applyRunFrame(
+              run.subagents,
+              frame,
+              run.turn_id ?? "",
+              run.events.length,
+            ),
+          }
+        : run,
+    );
+  }
+  if (!runs.some((run) => run.turn_id === frame.turn_id)) {
+    const fresh: SubagentRun = {
+      profile: frame.profile,
+      name: frame.name,
+      conversation_id: frame.conversation_id,
+      events: [],
+      output: "",
+      subagents: [],
+      turn_id: frame.turn_id,
+      parent_turn_id: frame.parent_turn_id,
+      running: true,
+      at: ownerEvents,
+    };
+    return runs.concat(advanceRun(fresh, frame));
+  }
+  return runs.map((run) => (run.turn_id === frame.turn_id ? advanceRun(run, frame) : run));
+}
+
 /** Tail one turn, drawing its live bubble from what this tail replays. A source opens with no
  *  cursor, so the turn's retained frames arrive from the first of them: whatever the chat had drawn
  *  belongs to the tail this one replaces — the turn the page stopped following, or an earlier source
@@ -225,14 +311,13 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       const fresh = arrivals.filter((id) => !state.absorbed.includes(id));
       const live = state.live;
       const reply: Bubble[] =
-        fresh.length && live && (live.text || live.subagents.length)
+        fresh.length && live && live.text
           ? [
               {
                 role: "assistant",
                 text: live.text,
                 ...(live.connectUrl ? { connectUrl: live.connectUrl } : {}),
                 ...(live.events.length ? { events: live.events } : {}),
-                ...(live.subagents.length ? { subagents: live.subagents } : {}),
               },
             ]
           : [];
@@ -263,7 +348,15 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
         live:
           live === null
             ? null
-            : { ...liveTurn(), meter: live.meter, reconnecting: live.reconnecting },
+            : {
+                ...liveTurn(),
+                meter: live.meter,
+                reconnecting: live.reconnecting,
+                // The runs stay live across the round boundary — they settle on the reply that
+                // closes the turn, where the durable transcript will state them — and their rows
+                // move ahead of the next round's events, which is when they started.
+                subagents: live.subagents.map((run) => ({ ...run, at: 0 })),
+              },
       };
     });
   });
@@ -293,13 +386,34 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     }));
   });
 
+  source.addEventListener("subagent_activity", (event) => {
+    const frame = JSON.parse((event as MessageEvent).data) as RunFrame;
+    onLive((live) => ({
+      ...live,
+      subagents: applyRunFrame(live.subagents, frame, turnId, live.events.length),
+    }));
+  });
+
+  /** The durable tree arrives with the terminal — each run's whole record, its notes and answer
+   *  included — and replaces the row the live frames built, keeping its place in the list. */
   source.addEventListener("subagent", (event) => {
     const run = JSON.parse((event as MessageEvent).data) as SubagentRun;
-    onLive((live) =>
-      live.subagents.some((entry) => entry.conversation_id === run.conversation_id)
-        ? live
-        : { ...live, subagents: live.subagents.concat(run) },
-    );
+    onLive((live) => {
+      const index = live.subagents.findIndex(
+        (entry) => entry.conversation_id === run.conversation_id,
+      );
+      if (index === -1) return { ...live, subagents: live.subagents.concat(run) };
+      const kept = live.subagents[index];
+      const settled = kept.at === undefined ? run : { ...run, at: kept.at };
+      return {
+        ...live,
+        subagents: [
+          ...live.subagents.slice(0, index),
+          settled,
+          ...live.subagents.slice(index + 1),
+        ],
+      };
+    });
   });
 
   source.addEventListener("cost", (event) => {

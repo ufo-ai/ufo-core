@@ -58,6 +58,7 @@ from ufo.sdk.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     TextDelta,
     ToolCall,
@@ -849,10 +850,12 @@ def _tool_event(block: ToolUseBlock) -> dict[str, str]:
 
 
 class SubagentNode(TypedDict):
-    """One subagent run as the conversation shows it: the profile and the conversation that holds
-    the whole record, the work it did, what it answered, and the runs it spawned in turn."""
+    """One subagent run as the conversation shows it: the display name its spawn gave it (empty
+    when it gave none — the row states the profile then), the profile and the conversation that
+    holds the whole record, the work it did, what it answered, and the runs it spawned in turn."""
 
     profile: str
+    name: str
     conversation_id: str
     events: list[dict[str, str]]
     output: str
@@ -960,6 +963,7 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
         spawned.append(turn)
         nodes[turn.id] = SubagentNode(
             profile=profile,
+            name=turn.subagent_name or "",
             conversation_id=str(turn.conversation_id),
             events=[],
             output=_run_answer("" if turn.terminal is None else turn.terminal.text),
@@ -2891,6 +2895,13 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case SkillLoad():
             return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case SubagentActivity():
+            return (
+                head
+                + b"event: subagent_activity\ndata: "
+                + frame.model_dump_json().encode()
+                + b"\n\n"
+            )
         case Absorbed():
             return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case TextDelta():

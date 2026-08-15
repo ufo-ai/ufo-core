@@ -260,16 +260,21 @@ test("a run's own page nests the work of the runs it spawned, each rooted at it"
   location.hash = "#/subagents/deep_research/conversations/" + RUN_ID;
   portal({});
 
-  const summary = await screen.findByText("Checking the state site.");
+  const summary = await screen.findByText("Completed 2 steps");
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("Reading the filing")).toBeNull();
 
   await userEvent.click(summary);
   expect(screen.getByText("Reading the filing")).toBeTruthy();
+  const link = screen.getByRole("link", { name: /Subagent · general_purpose/ });
+  expect(link.getAttribute("href")).toBe(
+    "#/subagents/general_purpose/conversations/" + NESTED_ID + "?root=" + RUN_ID,
+  );
+  expect(screen.queryByText("Checking the state site.")).toBeNull();
+
+  await userEvent.click(link.closest("summary")!);
+  expect(screen.getByText("Checking the state site.")).toBeTruthy();
   expect(screen.getByText("The state confirms March 31.")).toBeTruthy();
-  expect(
-    screen.getByRole("link", { name: /Subagent · general_purpose/ }).getAttribute("href"),
-  ).toBe("#/subagents/general_purpose/conversations/" + NESTED_ID + "?root=" + RUN_ID);
 });
 
 test("a run opened from the conversation that spawned it reads through that conversation", async () => {

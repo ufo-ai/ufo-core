@@ -12,7 +12,16 @@ from uuid import UUID
 
 from ufo_ext_web.surface import _event, _sse
 
-from ufo.hub import Absorbed, CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import (
+    Absorbed,
+    CostTick,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    SubagentActivity,
+    Terminal,
+    ToolCall,
+)
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
@@ -34,6 +43,15 @@ def sse_frames() -> dict[type, LiveFrame]:
         TextDelta: TextDelta(text="Looking at the workspace…"),
         ToolCall: ToolCall(tool="bash", preview="ls -la", description="Listing the workspace"),
         SkillLoad: SkillLoad(skill="calendar-triage"),
+        SubagentActivity: SubagentActivity(
+            turn_id=UUID("99999999-9999-4999-8999-999999999999"),
+            parent_turn_id=UUID("77777777-7777-4777-8777-777777777777"),
+            conversation_id=UUID(CONVERSATION_ID),
+            profile="deep_research",
+            name="Calendar check",
+            tool="fetch_url",
+            description="Reading the calendar",
+        ),
         CostTick: CostTick(cost_micro_usd=110, tokens=12),
         Absorbed: Absorbed(arrivals=(ARRIVAL_ID,)),
         Terminal: Terminal(
@@ -56,6 +74,7 @@ def _synthesized() -> list[bytes]:
             "subagent",
             {
                 "profile": "deep_research",
+                "name": "Calendar check",
                 "conversation_id": CONVERSATION_ID,
                 "events": [{"kind": "note", "text": "checking the calendar"}],
                 "output": "found it",
@@ -108,6 +127,7 @@ def sse_rows() -> list[dict[str, str]]:
         frames[TextDelta],
         frames[ToolCall],
         frames[SkillLoad],
+        frames[SubagentActivity],
         frames[CostTick],
         frames[Absorbed],
     ]

@@ -140,6 +140,7 @@ class Spawn(Protocol):
         background: bool = False,
         dedup_key: str | None = None,
         delivers_result: bool = False,
+        name: str = "",
     ) -> SpawnResult: ...
 
 

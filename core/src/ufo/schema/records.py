@@ -236,6 +236,7 @@ class Turn(BaseModel):
     terminal: TerminalFrame | None = None
     parent_turn_id: UUID | None = None
     subagent_profile: str | None = None
+    subagent_name: str | None = None
     result_delivery: ResultDelivery | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None

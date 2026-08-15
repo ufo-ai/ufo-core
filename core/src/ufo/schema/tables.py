@@ -167,6 +167,7 @@ turn = sa.Table(
     sa.Column("terminal", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("parent_turn_id", sa.Uuid, nullable=True),
     sa.Column("subagent_profile", sa.Text, nullable=True),
+    sa.Column("subagent_name", sa.Text, nullable=True),
     sa.Column("result_delivery", sa.Text, nullable=True),
     sa.Column("traceparent", sa.Text, nullable=True),
     sa.Column("idempotency_key", sa.Text, nullable=True),

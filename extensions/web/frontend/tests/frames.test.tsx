@@ -62,7 +62,7 @@ test("a settled turn states its latest call and opens onto the ones before it", 
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Loaded skill · calendar-triage");
+  const summary = await screen.findByText("Completed 3 steps");
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("bash ls")).toBeNull();
   expect(screen.queryByText("Loading skill · calendar-triage")).toBeNull();
@@ -70,7 +70,7 @@ test("a settled turn states its latest call and opens onto the ones before it", 
   await userEvent.click(summary);
   expect(screen.getByText("bash ls").closest("details")).toBe(summary.closest("details"));
   expect(screen.getByText("read notes.md")).toBeTruthy();
-  expect(screen.getAllByText("Loaded skill · calendar-triage")).toHaveLength(2);
+  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
 });
 
 test("one tool call states itself, with nothing more behind it", async () => {
@@ -83,11 +83,12 @@ test("one tool call states itself, with nothing more behind it", async () => {
     tokens: 5,
     cost_micro_usd: 1_000_000,
   });
-  const summary = await screen.findByText("bash ls");
+  const summary = await screen.findByText("Completed 1 step");
   expect(summary.closest("summary")).toBeTruthy();
+  expect(screen.queryByText("bash ls")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getAllByText("bash ls")).toHaveLength(2);
+  expect(screen.getByText("bash ls")).toBeTruthy();
 });
 
 test("a terminal subagent event nests its work under the reply", async () => {
@@ -108,7 +109,7 @@ test("a terminal subagent event nests its work under the reply", async () => {
     cost_micro_usd: 1,
   });
 
-  const summary = await screen.findByText("Reading the changelog.");
+  const summary = await screen.findByText("Completed 1 step");
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
 
@@ -117,6 +118,10 @@ test("a terminal subagent event nests its work under the reply", async () => {
   expect(card.getAttribute("href")).toBe(
     "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
   );
+  expect(screen.queryByText("Reading the changelog.")).toBeNull();
+
+  await userEvent.click(card.closest("summary")!);
+  expect(screen.getByText("Reading the changelog.")).toBeTruthy();
   expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
 });
 

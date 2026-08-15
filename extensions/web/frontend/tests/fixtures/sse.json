@@ -12,6 +12,10 @@
     "data": "{\"skill\":\"calendar-triage\"}"
   },
   {
+    "event": "subagent_activity",
+    "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"77777777-7777-4777-8777-777777777777\",\"conversation_id\":\"55555555-5555-4555-8555-555555555555\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"tool\":\"fetch_url\",\"description\":\"Reading the calendar\",\"preview\":\"\",\"skill\":\"\",\"status\":\"\"}"
+  },
+  {
     "event": "cost",
     "data": "{\"cost_micro_usd\":110,\"tokens\":12}"
   },
@@ -21,7 +25,7 @@
   },
   {
     "event": "subagent",
-    "data": "{\"profile\": \"deep_research\", \"conversation_id\": \"55555555-5555-4555-8555-555555555555\", \"events\": [{\"kind\": \"note\", \"text\": \"checking the calendar\"}], \"output\": \"found it\", \"subagents\": []}"
+    "data": "{\"profile\": \"deep_research\", \"name\": \"Calendar check\", \"conversation_id\": \"55555555-5555-4555-8555-555555555555\", \"events\": [{\"kind\": \"note\", \"text\": \"checking the calendar\"}], \"output\": \"found it\", \"subagents\": []}"
   },
   {
     "event": "connect_error",

@@ -54,7 +54,17 @@ from ufo.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.grants import GrantStore
-from ufo.hub import Absorbed, CostTick, Hub, LiveFrame, Parked, Terminal
+from ufo.hub import (
+    Absorbed,
+    CostTick,
+    Hub,
+    LiveFrame,
+    Parked,
+    SkillLoad,
+    SubagentActivity,
+    Terminal,
+    ToolCall,
+)
 from ufo.loop.compaction import (
     Compaction,
     is_context_overflow,
@@ -837,6 +847,18 @@ class AdoptionReplay:
     replaying: bool = False
 
 
+@dataclass(frozen=True)
+class RunLineage:
+    """Where a subagent turn's live activity publishes and how its row is labeled: the root turn
+    every surface tails, the turn its row nests under, and the profile and display name its spawn
+    gave it."""
+
+    root_turn_id: UUID
+    parent_turn_id: UUID
+    profile: str
+    name: str
+
+
 @dataclass(frozen=True, repr=False)
 class TurnEngine:
     turn: Turn
@@ -860,6 +882,7 @@ class TurnEngine:
     artifact_token_secret: str
     grants: GrantStore | None
     previous_turn_ended_at: datetime | None = None
+    lineage: RunLineage | None = None
     sandbox_for: SandboxFor | None = None
     subagents_for: SubagentsFor | None = None
     requestable_credentials: CredentialRequests | None = None
@@ -967,6 +990,7 @@ class TurnEngine:
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
+            await self._publish_run()
             system = self.system_prompt.content
             if self.turn.admission_source == SCHEDULED_ADMISSION:
                 system = await self._scheduled_system(system)
@@ -2214,7 +2238,9 @@ class TurnEngine:
                         is_error=True,
                     )
                 context = bound.context
-                await self._publish(tool_activity(call))
+                activity = tool_activity(call)
+                await self._publish(activity)
+                await self._publish_run(activity)
                 try:
                     tool = self.tools.get(call.name)
                     args = tool.input_model.model_validate(call.input)
@@ -2430,6 +2456,7 @@ class TurnEngine:
         if frame is None:
             return None
         await self._publish(Terminal(frame=frame))
+        await self._publish_run(status=frame.status)
         if committed:
             emit_metric(
                 "turn_terminal_total",
@@ -2607,6 +2634,41 @@ class TurnEngine:
         """The live leg never fails the turn; the durable terminal/parked state is authoritative."""
         try:
             await self.hub.publish(self.turn.id, frame)
+        except Exception as error:
+            log(
+                "hub.publish_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+
+    async def _publish_run(
+        self, activity: ToolCall | SkillLoad | None = None, status: str = ""
+    ) -> None:
+        """Mirror a subagent turn's member-facing moment — starting, a dispatch, its terminal —
+        onto the root turn's stream, the one every surface tails. A main turn has no lineage and
+        publishes nothing here. The live leg never fails the turn, as in `_publish`."""
+        if self.lineage is None:
+            return
+        tool, preview, description, skill = "", "", "", ""
+        match activity:
+            case ToolCall():
+                tool, preview, description = activity.tool, activity.preview, activity.description
+            case SkillLoad():
+                skill = activity.skill
+        frame = SubagentActivity(
+            turn_id=self.turn.id,
+            parent_turn_id=self.lineage.parent_turn_id,
+            conversation_id=self.turn.conversation_id,
+            profile=self.lineage.profile,
+            name=self.lineage.name,
+            tool=tool,
+            preview=preview,
+            description=description,
+            skill=skill,
+            status=status,
+        )
+        try:
+            await self.hub.publish(self.lineage.root_turn_id, frame)
         except Exception as error:
             log(
                 "hub.publish_failed",

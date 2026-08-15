@@ -765,6 +765,7 @@ async def test_spawn_subagent_keys_the_child_on_the_calls_idempotency_key(tmp_pa
         background: bool = False,
         dedup_key: str | None = None,
         delivers_result: bool = False,
+        name: str = "",
     ) -> SpawnResult:
         recorded.append((dedup_key, delivers_result))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)

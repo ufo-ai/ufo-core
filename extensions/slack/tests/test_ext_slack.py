@@ -72,6 +72,7 @@ from ufo.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     TextDelta,
     ToolCall,
@@ -4851,8 +4852,23 @@ async def test_a_channel_status_follows_the_turn_pins_the_text_and_clears_at_ter
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
         assert time.monotonic() < deadline, "status update never reached Slack"
         await asyncio.sleep(0.01)
-    await hub.publish(turn_id, TextDelta(text="Here is"))
+    await hub.publish(
+        turn_id,
+        SubagentActivity(
+            turn_id=uuid4(),
+            parent_turn_id=turn_id,
+            conversation_id=uuid4(),
+            profile="general_purpose",
+            name="UK sports news",
+            tool="fetch_url",
+            description="Searching the fixtures",
+        ),
+    )
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 3:
+        assert time.monotonic() < deadline, "run status never reached Slack"
+        await asyncio.sleep(0.01)
+    await hub.publish(turn_id, TextDelta(text="Here is"))
+    while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 4:
         assert time.monotonic() < deadline, "generating status never reached Slack"
         await asyncio.sleep(0.01)
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
@@ -4870,7 +4886,11 @@ async def test_a_channel_status_follows_the_turn_pins_the_text_and_clears_at_ter
     working = slack.STATUS_DESCRIBED_TEXT.format(description="Reading the repo")
     assert statuses[1]["status"] == working
     assert statuses[1]["loading_messages"] == [working]
-    assert statuses[2]["status"] == slack.STATUS_GENERATING_TEXT
+    run_status = slack.STATUS_DESCRIBED_TEXT.format(
+        description="UK sports news: Searching the fixtures"
+    )
+    assert statuses[2]["status"] == run_status
+    assert statuses[3]["status"] == slack.STATUS_GENERATING_TEXT
     assert statuses[-1] == {
         "channel_id": "C1",
         "thread_ts": "100.5",

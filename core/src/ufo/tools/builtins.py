@@ -366,6 +366,10 @@ class SpawnSubagentInput(BaseModel):
         description="What you are handing off, in plain language for the activity timeline — the "
         "work itself, never the profile name."
     )
+    name: str = Field(
+        default="",
+        description="A short display name for this run, at most four words, e.g. 'UK sports news'.",
+    )
 
 
 class LoadSkillInput(BaseModel):
@@ -977,6 +981,7 @@ async def spawn_subagent_handler(ctx: ToolContext, args: SpawnSubagentInput) -> 
             args.background,
             dedup_key=ctx.idempotency_key,
             delivers_result=args.background,
+            name=args.name,
         )
     except UnknownSubagentProfile as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)

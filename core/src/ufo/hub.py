@@ -78,7 +78,31 @@ class Absorbed(BaseModel):
     arrivals: tuple[UUID, ...]
 
 
-LiveFrame = TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad | Absorbed
+class SubagentActivity(BaseModel):
+    """One subagent run's member-facing progress, published on the stream of the root turn its
+    lineage serves — the turn a surface tails — so a page draws the child working while the parent
+    is blocked in the spawn. `turn_id` names the run, `parent_turn_id` the run it nests under, and
+    `conversation_id` the record that holds its whole transcript; `name` is the display name the
+    spawn gave the run, empty when it gave none, and `profile` stands in for it then. Three moments,
+    told apart by which fields carry values: all of `tool`, `skill`, and `status` empty marks the
+    run starting; `tool` with `description`/`preview` narrates a dispatch the way a ToolCall does,
+    `skill` a skill load; a non-empty `status` — the run's terminal status — ends its row."""
+
+    turn_id: UUID
+    parent_turn_id: UUID
+    conversation_id: UUID
+    profile: str
+    name: str = ""
+    tool: str = ""
+    description: str = ""
+    preview: str = ""
+    skill: str = ""
+    status: str = ""
+
+
+LiveFrame = (
+    TextDelta | Terminal | Parked | CostTick | ToolCall | SkillLoad | Absorbed | SubagentActivity
+)
 
 
 class Hub(Protocol):
@@ -137,6 +161,11 @@ class InProcessHub:
     restart would be filtered out as seen and lost. The mark is dropped on the turn's terminal,
     never on its park: a parked turn resumes under the same id, and its resumed run must not
     reissue the cursors the client already holds.
+
+    A SubagentActivity frame never founds or revives a stream: it mirrors a child's work onto the
+    root turn a surface tails, an in-flight root always holds its ring, and a root that ended has
+    no tail the frame could reach — so a background child that outlives its root drops these
+    frames rather than rebuilding the dropped ring and pinning it for the life of the process.
     """
 
     _turns: dict[UUID, _TurnStream] = field(default_factory=dict)
@@ -157,6 +186,9 @@ class InProcessHub:
 
     async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
         with self._lock:
+            held = self._turns.get(turn_id)
+            if isinstance(frame, SubagentActivity) and (held is None or held.ended):
+                return ""
             stream = self._stream(turn_id)
             stream.seq += 1
             cursor = str(stream.seq)

@@ -109,6 +109,7 @@ from ufo.hub import (
     LiveFrame,
     Parked,
     SkillLoad,
+    SubagentActivity,
     Terminal,
     ToolCall,
 )
@@ -257,6 +258,12 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         ToolCall: ToolCall(tool="bash", preview="ls"),
         SkillLoad: SkillLoad(skill="s"),
         Absorbed: Absorbed(arrivals=()),
+        SubagentActivity: SubagentActivity(
+            turn_id=uuid4(),
+            parent_turn_id=uuid4(),
+            conversation_id=uuid4(),
+            profile="general_purpose",
+        ),
     }
     assert set(frames) == set(get_args(LiveFrame))
     named = {
@@ -266,6 +273,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         ToolCall: b"event: tool\n",
         SkillLoad: b"event: skill\n",
         Absorbed: b"event: absorbed\n",
+        SubagentActivity: b"event: subagent_activity\n",
     }
     for kind, frame in frames.items():
         event = _sse("7", frame)
@@ -613,6 +621,7 @@ def test_transcript_projection_places_child_conversations_on_their_parent_replie
 def _node(profile: str, conversation_id: UUID) -> SubagentNode:
     return SubagentNode(
         profile=profile,
+        name="",
         conversation_id=str(conversation_id),
         events=[],
         output="",
@@ -1102,6 +1111,7 @@ async def test_transcript_route_returns_durable_tool_activity(
         member_id,
         turn_id,
         terminal_text='{"result": "Nothing is stale."}',
+        name="Lockfile check",
     )
     await Transcript(blob=blob, conversation_id=child_conversation).write(
         Conversation(
@@ -1153,6 +1163,7 @@ async def test_transcript_route_returns_durable_tool_activity(
             "subagents": [
                 {
                     "profile": "general_purpose",
+                    "name": "Lockfile check",
                     "conversation_id": str(child_conversation),
                     "events": [
                         {"kind": "note", "text": "Checking the lockfile."},
@@ -1167,6 +1178,7 @@ async def test_transcript_route_returns_durable_tool_activity(
                     "subagents": [
                         {
                             "profile": "deep_research",
+                            "name": "",
                             "conversation_id": str(grandchild_conversation),
                             "events": [],
                             "output": "Nothing further.",
@@ -4819,6 +4831,7 @@ async def _seed_subagent(
     parent_turn_id: UUID,
     terminal_text: str = "{}",
     profile: str = "general_purpose",
+    name: str = "",
 ) -> tuple[UUID, UUID]:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -4846,6 +4859,7 @@ async def _seed_subagent(
                 terminal=TerminalFrame(status="done", text=terminal_text).model_dump(mode="json"),
                 parent_turn_id=parent_turn_id,
                 subagent_profile=profile,
+                subagent_name=name or None,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -5124,6 +5138,7 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
 
     assert events["subagent"] == {
         "profile": "general_purpose",
+        "name": "",
         "conversation_id": str(child_conversation),
         "events": [
             {
@@ -5137,6 +5152,7 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
         "subagents": [
             {
                 "profile": "deep_research",
+                "name": "",
                 "conversation_id": str(grandchild_conversation),
                 "events": [],
                 "output": "",
@@ -8117,6 +8133,7 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
             "subagents": [
                 {
                     "profile": "deep_research",
+                    "name": "",
                     "conversation_id": str(child_conversation),
                     "events": [],
                     "output": "ok",
@@ -8292,6 +8309,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
             "subagents": [
                 {
                     "profile": "deep_research",
+                    "name": "",
                     "conversation_id": str(child_conversation),
                     "events": [
                         {"kind": "note", "text": "Reading the private file."},
