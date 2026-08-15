@@ -150,6 +150,7 @@ resource "aws_ecs_task_definition" "this" {
   family                   = "${var.name}-proxy-west"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
+  skip_destroy             = true
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.execution.arn
