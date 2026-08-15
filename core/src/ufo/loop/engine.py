@@ -514,8 +514,8 @@ def _dispatch_segments(
 ) -> Iterator[tuple[ToolUseBlock, ...]]:
     """Split a round's calls into dispatch groups that preserve the model's call order: a run of
     consecutive parallel-safe calls executes concurrently (bounded by MAX_PARALLEL_TOOL_CALLS),
-    and every other call — a mutation, an unknown name, anything with cross-call dependencies —
-    is its own in-order barrier, so an edit never races the read it depends on."""
+    and every other call — a position-read final act, an unknown name — is its own in-order
+    barrier, so the act the round is read by stays where the model put it."""
     segment: list[ToolUseBlock] = []
     for call in tool_calls:
         try:

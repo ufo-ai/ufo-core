@@ -359,6 +359,7 @@ ADD_MEMBER_TOOL_DEF = ToolDef(
     input_model=AddMemberInput,
     handler=AddMember().add,
     side_effecting=True,
+    parallel_safe=True,
 )
 
 MEMBER_OBJECT = ObjectKind(

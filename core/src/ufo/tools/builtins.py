@@ -1131,6 +1131,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=BashInput,
         handler=bash_handler,
         side_effecting=True,
+        parallel_safe=True,
     ),
     ToolDef(
         name="read",
@@ -1155,6 +1156,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=WriteInput,
         handler=write_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="edit",
@@ -1166,6 +1168,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=EditInput,
         handler=edit_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="glob",
@@ -1205,6 +1208,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="spawn_subagent",
@@ -1216,6 +1220,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=SpawnSubagentInput,
         handler=spawn_subagent_handler,
         side_effecting=True,
+        parallel_safe=True,
     ),
     ToolDef(
         name="ask_user",
@@ -1243,6 +1248,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=LoadSkillInput,
         handler=load_skill_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="connect_account",
@@ -1278,6 +1284,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=CancelSubagentInput,
         handler=cancel_subagent_handler,
+        parallel_safe=True,
     ),
     ToolDef(
         name="message_subagent",
@@ -1289,5 +1296,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=MessageSubagentInput,
         handler=message_subagent_handler,
         side_effecting=True,
+        parallel_safe=True,
     ),
 )

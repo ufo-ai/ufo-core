@@ -12,7 +12,11 @@ step memoization already makes re-executing it harmless. The same declaration de
 turn's guidance preemption: a keyed re-execution dedups (a spawn reattaches to its child, a send
 dedups at the provider) and must run, since skipping it strands the keyed work and a re-issued
 call would duplicate it under a fresh call id; only an unkeyed redo yields to queued member
-guidance. `ToolRegistry` is the frozen set the engine
+guidance. `parallel_safe` marks a tool whose same-round calls the engine may dispatch
+concurrently: the model owns not aiming two calls at one target, so independence is the default
+and a tool leaves it `False` only when the round reads it by position — a final act (a question,
+a connect, a credential request) is taken from the round's last call, so it stays an in-order
+barrier. `ToolRegistry` is the frozen set the engine
 dispatches against — it rejects a duplicate name at construction and fails loud on an unknown
 lookup."""
 

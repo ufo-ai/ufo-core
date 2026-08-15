@@ -48,6 +48,7 @@ class ArcTurn:
     parent_turn_id: UUID | None
     subagent_profile: str | None
     started_at: datetime | None = None
+    ended_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,7 @@ class ArcRun:
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.created_at,
+                        tables.turn.c.updated_at,
                     )
                     .where(
                         sa.or_(
@@ -354,4 +356,5 @@ def _arc_turn(row: sa.Row[tuple[object, ...]]) -> ArcTurn:
         parent_turn_id=row.parent_turn_id,
         subagent_profile=row.subagent_profile,
         started_at=row.created_at,
+        ended_at=row.updated_at if row.terminal is not None else None,
     )

@@ -159,6 +159,15 @@ def test_builtin_tools_are_trusted_by_default() -> None:
     assert all(tool.untrusted is False for tool in BUILTIN_TOOLS)
 
 
+def test_only_position_read_final_acts_barrier_a_rounds_dispatch() -> None:
+    """Same-round calls dispatch concurrently unless the round is read by the call's position:
+    ask_user, connect_account, and request_credentials land as the round's last call
+    (`_final_act`), so each stays an in-order barrier; every other tool owns its own target and
+    parallelizes."""
+    barriers = {tool.name for tool in BUILTIN_TOOLS if not tool.parallel_safe}
+    assert barriers == {"ask_user", "connect_account", "request_credentials"}
+
+
 def test_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
     assert {schema.name for schema in schemas} == {

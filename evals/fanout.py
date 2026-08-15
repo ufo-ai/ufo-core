@@ -18,6 +18,9 @@ cannot do without having read what came back.
 
 from __future__ import annotations
 
+from datetime import datetime
+from itertools import pairwise
+
 from evals.harness.arc import ArcCase, ArcObservation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
 from evals.objective_record import recorded_objective
@@ -165,6 +168,68 @@ async def _grade_plain_delegation(observation: ArcObservation) -> ArcVerdict:
     )
 
 
+async def _grade_workers_overlap(observation: ArcObservation) -> ArcVerdict:
+    """Whether a member's own fan-out phrasing gets overlapping workers, graded on run windows.
+
+    The conversation this case replays (metalcraft testing, 2026-08-15) asked for exactly this
+    message, was told the lookups would run in parallel, and got three foreground spawns in three
+    successive rounds — each child created about 100ms after the previous one's terminal. The
+    workspace cannot tell that run from a parallel one, and start spread alone cannot either once
+    children take unequal time, so the grader reads each worker's window: a fan-out is real when
+    every worker after the first started before the one before it ended."""
+    children = observation.children
+    if len(children) < MIN_WORKERS:
+        return ArcVerdict(
+            False,
+            f"only {len(children)} worker(s) were spawned for three independent lookups; the "
+            f"turn called {sorted(set(observation.opening_calls))}",
+        )
+    parents = {child.parent_turn_id for child in children}
+    if len(parents) != 1:
+        return ArcVerdict(
+            False,
+            f"{len(children)} workers were spread across {len(parents)} parent turns, so the "
+            "work was delegated a turn at a time rather than together",
+        )
+    spans: list[tuple[datetime, datetime | None]] = []
+    for child in children:
+        if child.started_at is None:
+            return ArcVerdict(False, "the observation carried no start time for every worker")
+        spans.append((child.started_at, child.ended_at))
+    windows = sorted(spans, key=lambda span: (span[0], span[1] or span[0]))
+    serial = [
+        (start - previous_end).total_seconds()
+        for (_, previous_end), (start, _) in pairwise(windows)
+        if previous_end is not None and start >= previous_end
+    ]
+    if serial:
+        gaps = ", ".join(f"{gap:.1f}s" for gap in serial)
+        return ArcVerdict(
+            False,
+            f"{len(serial)} of {len(windows) - 1} worker handoff(s) were serial — the next "
+            f"started only after the previous ended (gaps of {gaps})",
+        )
+    return ArcVerdict(
+        True,
+        f"{len(windows)} workers overlapped: each started before the one before it ended",
+    )
+
+
+_OVERLAP = ArcCase(
+    name="spawned_workers_overlap",
+    message="check the weather in 3 cities using subagents",
+    grader=_grade_workers_overlap,
+    grading=(
+        "Three workers are spawned under one parent turn and their run windows overlap — each "
+        "starts before the one before it ends. A next worker created only after the previous "
+        "one's terminal is the serial shape this case exists to catch, whatever the replies say "
+        "about parallelism."
+    ),
+    min_seconds=MIN_SECONDS,
+    deadline_seconds=600.0,
+)
+
+
 _PLAIN = ArcCase(
     name="plain_delegation_overlaps",
     message=(
@@ -189,4 +254,4 @@ _PLAIN = ArcCase(
 )
 
 
-CASES = (_FAN_OUT, _PLAIN)
+CASES = (_FAN_OUT, _PLAIN, _OVERLAP)
