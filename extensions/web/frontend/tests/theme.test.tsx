@@ -141,6 +141,39 @@ test("reply headings carry an emitted scale, not just declared tokens", () => {
   expect(css).toContain(":where(h4,h5,h6){font-size:var(--text-ui)");
 });
 
+test("a reply flows on the typeset register alone, and a code block sits snug in it", () => {
+  // Streamdown ships its own vertical rhythm (`space-y-4` on the root, `my-4` on the block
+  // wrappers, a typeset margin on the pre inside a stripped wrapper); stacked on the typeset flow
+  // it opens a well of blank space over every code block. One register governs: the wrappers take
+  // the typeset flow and the pre sits flush in the wrapper that places it.
+  const css = builtStyles().replace(/\s+/g, "");
+  expect(css).toContain(".typeset>:where(:not(:last-child)){margin-block-end:0}");
+  // Streamdown's `space-y-4` zeroes margin-block-start on the same children from the utilities
+  // layer, so the register's start margins must be restated with unlayered strength at the root:
+  // flow for a block, doubled over a heading, tightened under one, and zero on the first child.
+  expect(css).toContain(
+    ".typeset>:where(p,ul,ol,blockquote,pre,table,img,hr){margin-block-start:var(--typeset-flow)}",
+  );
+  expect(css).toContain(
+    ".typeset>:where(h1,h2,h3,h4,h5,h6){margin-block-start:calc(var(--typeset-flow)*2)}",
+  );
+  expect(css).toContain(
+    ".typeset>:where(:is(h1,h2,h3,h4,h5,h6)+*){margin-block-start:var(--spacing-sm)}",
+  );
+  expect(css).toContain(".typeset>:first-child{margin-block-start:0}");
+  expect(
+    /\.typeset:is\(div:has\(>pre\),div:has\(>table\),div:has\(>div>pre\),div:has\(>div>table\)\)\{[^}]*margin-block:var\(--typeset-flow\)0[^}]*\}/.test(
+      css,
+    ),
+  ).toBe(true);
+  expect(css).toContain(".typeset:is(div:has(>pre),div:has(>div>pre)):where(pre){margin-block:0}");
+  // A fence with no language still gets Streamdown's 32px header row, empty — a band of nothing
+  // over the code. A header with no name to state does not ship.
+  expect(css).toContain(
+    '.typeset:where([data-streamdown=code-block-header][data-language=""]){display:none}',
+  );
+});
+
 test("a quoted passage is dimmed by a token the theme declares", () => {
   // A name the theme never defines makes the declaration invalid, and the browser drops it — so
   // the quote renders at full weight and nothing says why.

@@ -665,12 +665,59 @@
    control, the table's scroll) is kept; the cards it sits in are not, so `pre` and `table` are the
    one surface each of them draws.
 
+   Streamdown spaces those cards on a rhythm of its own — `space-y-4` on the root, `my-4` on each
+   wrapper — and the typeset's own pre margin lands inside the stripped wrapper, where the flex gap
+   already places the surface. Stacked, they open a well of blank space over every code block. One
+   register governs: the root's rhythm is stood down, the wrappers take the typeset flow, and the
+   pre sits flush in the wrapper that places it.
+
+   `space-y-4` holds both margins of every non-last child — the end at 16px and the start at zero —
+   so standing its end margin down is half the job: the register's start margins, stated in the
+   layer below, still lose to that zero. At the root, where Streamdown's utilities compete, the
+   register is restated with unlayered strength; everywhere deeper the layered statement has no
+   competitor and stands.
+
    This is written outside every layer on purpose. Those wrappers are classed in Tailwind's own
    utilities, and `@layer utilities` outranks `@layer components` whatever the selectors weigh —
    the same rule written beside the rest of `typeset` compiles, matches, and loses. */
+.typeset > :where(:not(:last-child)) {
+  margin-block-end: 0;
+}
+
+.typeset > :where(p, ul, ol, blockquote, pre, table, img, hr) {
+  margin-block-start: var(--typeset-flow);
+}
+
+.typeset > :where(h1, h2, h3, h4, h5, h6) {
+  margin-block-start: calc(var(--typeset-flow) * 2);
+}
+
+.typeset > :where(:is(h1, h2, h3, h4, h5, h6) + *) {
+  margin-block-start: var(--spacing-sm);
+}
+
 .typeset :is(div:has(> pre), div:has(> table), div:has(> div > pre), div:has(> div > table)) {
   padding: 0;
   border: 0;
   border-radius: 0;
   background: none;
+  margin-block: var(--typeset-flow) 0;
+}
+
+.typeset
+  :is(h1, h2, h3, h4, h5, h6)
+  + :is(div:has(> pre), div:has(> table), div:has(> div > pre), div:has(> div > table)) {
+  margin-block-start: var(--spacing-sm);
+}
+
+.typeset :is(div:has(> pre), div:has(> div > pre)) :where(pre) {
+  margin-block: 0;
+}
+
+.typeset :where([data-streamdown="code-block-header"][data-language=""]) {
+  display: none;
+}
+
+.typeset > :first-child {
+  margin-block-start: 0;
 }
