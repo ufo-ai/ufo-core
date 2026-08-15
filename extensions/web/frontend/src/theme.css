@@ -228,6 +228,11 @@
   --grid-slot: minmax(0, 1fr) var(--container-record);
   --size-avatar: 24px;
   --size-band: 128px;
+  /* A band's document fingerprint: the page renders at reading width and scales to the edge of
+     legibility, so the width is the scale's reciprocal — the two move together or the fingerprint
+     misfits its band. */
+  --scale-fingerprint: 0.45;
+  --size-fingerprint: 222%;
   /* The page's own frame and the pitch its records are read at. A screen is a gutter, a stack of
      bands a `6xl` apart, and a column of `--size-record` rows; the two narrow columns hold a fact
      the eye compares straight down, and `--size-act` is the width the row's act is reserved, so

@@ -122,19 +122,22 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
   };
 }
 
-/** A markdown file's band reads its first lines as the document they render to, off the same link
- *  the viewer reads whole — the one preview an already-shared file can grow without a re-render.
- *  Other text stays pictureless: its characters render as themselves, which the viewer shows. The
- *  excerpt is `inert`: the band is decoration, so nothing in it takes a press or the keyboard. */
+/** A markdown file's band is its fingerprint: the document renders at reading width and scales to
+ *  the edge of legibility, so the band holds a dense picture of the page — its shape, headings,
+ *  and tables — rather than one full-sized opening line. It reads the same link the viewer reads
+ *  whole, the one preview an already-shared file can grow without a re-render; other text stays
+ *  pictureless, since its characters render as themselves and the viewer shows them. The
+ *  fingerprint is `inert`: the band is decoration, so nothing in it takes a press or the keyboard,
+ *  and the band's own overflow crops it. */
 function bandExcerpt(file: Artifact | null): ReactNode {
   if (!file?.url || file.media_type !== "text/markdown") return null;
   return (
-    <div inert className="p-md">
+    <div inert className="w-(--size-fingerprint) origin-top-left scale-(--scale-fingerprint)">
       <ArtifactText
         url={file.url}
         name={file.filename}
         mediaType={file.media_type}
-        display="excerpt"
+        display="inline"
       />
     </div>
   );
