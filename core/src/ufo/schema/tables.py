@@ -83,12 +83,24 @@ agent = sa.Table(
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("internet_access_allowed", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.Column("sandbox_size", sa.Text, nullable=False, server_default=sa.text("'small'")),
+    sa.Column("tools", sa.JSON, nullable=True),
+    sa.Column("provisioned_by", sa.Text, nullable=True),
+    sa.Column("provisioned_name", sa.Text, nullable=True),
+    sa.Column("provisioned_version", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
         "reasoning in ('auto', 'off', 'low', 'medium', 'high')", name="agent_reasoning"
     ),
     sa.CheckConstraint("sandbox_size in ('small', 'medium', 'large')", name="agent_sandbox_size"),
+    sa.CheckConstraint(
+        "(provisioned_by is null) = (provisioned_name is null) "
+        "and (provisioned_by is null) = (provisioned_version is null)",
+        name="agent_provenance",
+    ),
+    sa.UniqueConstraint(
+        "workspace_id", "provisioned_by", "provisioned_name", name="agent_provision_identity"
+    ),
     sa.UniqueConstraint("workspace_id", "name"),
     sa.UniqueConstraint("workspace_id", "id", name="agent_workspace_identity"),
     sa.Index(

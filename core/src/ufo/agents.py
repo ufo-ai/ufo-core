@@ -168,6 +168,9 @@ class AgentObjects:
         return {
             "main": row.is_main,
             "model": _effective_model(ctx, row.model),
+            "provisioned_by": row.provisioned_by,
+            "provisioned_name": row.provisioned_name,
+            "provisioned_version": row.provisioned_version,
         }
 
     async def apply(
@@ -278,6 +281,10 @@ class AgentObjects:
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.reasoning,
                         tables.agent.c.sandbox_size,
+                        tables.agent.c.tools,
+                        tables.agent.c.provisioned_by,
+                        tables.agent.c.provisioned_name,
+                        tables.agent.c.provisioned_version,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
                         sa.select(main.c.name)

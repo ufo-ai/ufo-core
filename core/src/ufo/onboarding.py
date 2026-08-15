@@ -22,6 +22,7 @@ from ufo.ext.manifest import Manifest
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import model_registry
 from ufo.o11y import log
+from ufo.provisioning import AgentProvisioning
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import create_member
@@ -100,6 +101,7 @@ class Onboarding:
         return await self._create_workspace()
 
     async def run_steps(self, onboarded: Onboarded) -> None:
+        await AgentProvisioning(self.manifests).apply(onboarded.workspace_id)
         await run_onboarding_steps(self.manifests, onboarded.workspace_id, self.credentials)
 
     def _require_credentials_for_steps(self) -> None:

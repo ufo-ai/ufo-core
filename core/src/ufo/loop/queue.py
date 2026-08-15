@@ -64,6 +64,7 @@ from ufo.o11y import (
     turn_profile,
     turn_span,
 )
+from ufo.provisioning import AgentProvisioning
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
@@ -88,6 +89,7 @@ from ufo.schema.records import (
     Agent,
     TerminalFrame,
     Turn,
+    TurnAdmissionSource,
     TurnContext,
 )
 from ufo.search import SearchProvider
@@ -99,6 +101,30 @@ from ufo.workspace import ws
 TURN_QUEUE_POLL_SECONDS = 0.1
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
+
+
+def _agent_tools(
+    all_tools: tuple[ToolDef, ...],
+    allowed: tuple[str, ...] | None,
+    admission: TurnAdmissionSource,
+) -> tuple[ToolDef, ...]:
+    """The tool set a turn runs with, intersected with the live registry so a name no active
+    extension answers is simply absent.
+
+    An agent naming no allowlist runs the member-facing set, which withholds every `profile_only`
+    primitive — a repository checkout bound to an admitted comparison is not a tool the workspace's
+    general agent may reach. An allowlist *is* the naming: a specialist that declares the checkout
+    holds it, and holds nothing else. So the primitive is reachable exactly where a declaration
+    says so, and the agent that never mentions it can neither hold it nor ask for it.
+
+    An allowlist governs what a model may call, so it does not reach a prepared intent, which takes
+    no model round: the panel's verb dispatches verbatim under the submitting member's authority,
+    admitted through the panel's own gate. Filtering that lane would refuse every panel mutation on
+    an agent that carries an allowlist — including the `connect_account` and `request_credentials`
+    that give it authority in the first place."""
+    if allowed is None or admission == INTENT_ADMISSION:
+        return tuple(tool for tool in all_tools if not tool.profile_only)
+    return tuple(tool for tool in all_tools if tool.name in allowed)
 
 
 def _subagent_tools(
@@ -113,6 +139,24 @@ def _subagent_tools(
         if tool.name in allowed or (tool.subagent_default and not profile.isolated_tools)
     )
     return selected
+
+
+_provisioned_workspaces: set[UUID] = set()
+
+
+async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
+    """Give a workspace the agents the active extensions ship, once per workspace per process.
+
+    Onboarding covers a new workspace. A workspace that existed before an extension shipped its
+    agent has no other moment to receive it: a boot-time sweep over the fleet would gate turn
+    admission on a write for every workspace, so the first turn of each workspace pays instead. The
+    call is idempotent, so later turns of the same workspace in another process settle on the rows
+    already there. A name the workspace already uses sends the shipped agent to a free variant, so a
+    collision costs the member's turn nothing."""
+    if workspace_id in _provisioned_workspaces:
+        return
+    await AgentProvisioning(runtime.manifests).apply(workspace_id)
+    _provisioned_workspaces.add(workspace_id)
 
 
 TURN_QUEUE = Queue(
@@ -200,6 +244,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                         )
                     )
                 ).one()
+            await _apply_provisions(runtime, workspace_uuid)
             with (
                 agent(row.agent_id),
                 turn_span(
@@ -366,7 +411,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         preload: tuple[LoadedSkill, ...] = ()
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
-            tools = ToolRegistry(tuple(tool for tool in all_tools if not tool.profile_only))
+            tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
             system_prompt = render_system_prompt(
                 agent.prompt,
                 sections,
@@ -593,6 +638,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.prompt,
                     tables.agent.c.model,
                     tables.agent.c.reasoning,
+                    tables.agent.c.tools,
                     tables.conversation.c.audience,
                 )
                 .select_from(
@@ -630,7 +676,12 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
     )
     return (
         turn,
-        Agent(prompt=row.prompt, model=row.model, reasoning=row.reasoning),
+        Agent(
+            prompt=row.prompt,
+            model=row.model,
+            reasoning=row.reasoning,
+            tools=None if row.tools is None else tuple(row.tools),
+        ),
         parse_audience(row.audience),
     )
 

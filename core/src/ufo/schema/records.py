@@ -184,6 +184,10 @@ class Agent(BaseModel):
     prompt: str
     model: str
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    tools: tuple[str, ...] | None = None
+    """The agent's tool allowlist, or None for the member-facing set. A name the live registry does
+    not answer is absent rather than an error: an extension the deploy stopped installing leaves the
+    agent short a tool, never unable to take a turn."""
 
 
 class TurnContext(BaseModel):

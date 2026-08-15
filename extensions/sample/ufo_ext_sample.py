@@ -47,6 +47,8 @@ from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.listings import ListingCursor, ListingPage
 from ufo.sdk.manifest import (
+    AgentProvision,
+    AgentSpec,
     CdpProviderSpec,
     ConnectorProvider,
     ConversationSlotContext,
@@ -131,6 +133,8 @@ JOB_NAME = "sample_tick"
 ROUTE_PATH = "hook"
 ONBOARDING_NAME = "sample_setup"
 SUBAGENT_NAME = "sample_probe"
+PROVISIONED_AGENT_NAME = "sample-probe-agent"
+PROVISIONED_AGENT_PROMPT = "Probe agent: answer from the workspace's own records."
 API_SLOT = "sample_api"
 UNDECLARED_SLOT = "sample_unset"
 INJECTION_HOST = "api.sample.test"
@@ -1188,6 +1192,18 @@ def manifest() -> Manifest:
         ),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        agents=(
+            AgentProvision(
+                name=PROVISIONED_AGENT_NAME,
+                spec=AgentSpec(
+                    model="auto",
+                    reasoning="auto",
+                    internet_access_allowed=False,
+                    prompt=PROVISIONED_AGENT_PROMPT,
+                ),
+                tools=(TOOL_NAME,),
+            ),
+        ),
         subagents=(
             SubagentProfile(
                 name=SUBAGENT_NAME,

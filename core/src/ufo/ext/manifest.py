@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ufo.agents import AgentSpec
 from ufo.audience import SHARED_AUDIENCE, Audience
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
@@ -491,6 +492,30 @@ class HookSpec:
     tools: tuple[str, ...] = ()
 
 
+AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")
+
+
+@dataclass(frozen=True)
+class AgentProvision:
+    """A durable workspace agent an extension ships. Activation creates the ordinary `agent` row and
+    stops owning it: the workspace's copy is the live configuration, and no later version of this
+    extension writes it again. The row records the version that created it.
+    `tools` None is the member-facing tool set; a tuple is an allowlist,
+    intersected with the live registry at turn load so an inactive extension contributes nothing.
+    It sits here rather than on `AgentSpec` because the spec is what `object_apply agent` writes: an
+    allowlist may name a primitive held back from ordinary turns, so it is shipped, never typed."""
+
+    name: str
+    spec: AgentSpec
+    tools: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not AGENT_NAME_RE.match(self.name):
+            raise ValueError(f"agent provision name {self.name!r} is not an object name")
+        if not (self.spec.prompt or "").strip():
+            raise ValueError(f"agent provision {self.name!r} has no prompt")
+
+
 SUBAGENT_ROUND_LIMIT = 50
 
 
@@ -597,6 +622,7 @@ class Manifest:
     embeds: tuple[EmbedBackendSpec, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
+    agents: tuple[AgentProvision, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
     runtime_skills: RuntimeSkillProvider | None = None
     subagent_tool_grants: tuple[SubagentToolGrant, ...] = ()

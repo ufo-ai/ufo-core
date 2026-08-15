@@ -3,6 +3,9 @@
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
+from ufo.agents import (
+    AgentSpec as AgentSpec,
+)
 from ufo.credentials import (
     CredentialSource as CredentialSource,
 )
@@ -89,6 +92,9 @@ from ufo.ext.conversation_slots import (
 )
 from ufo.ext.conversation_slots import (
     TasksSlotPayload as TasksSlotPayload,
+)
+from ufo.ext.manifest import (
+    AgentProvision as AgentProvision,
 )
 from ufo.ext.manifest import (
     CdpProviderSpec as CdpProviderSpec,
