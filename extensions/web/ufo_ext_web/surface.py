@@ -134,7 +134,6 @@ MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
 RADAR_LIST_LIMIT = 20
-RADAR_TEXT_MAX = 1_500
 SCHEDULED_TASK_KIND = "scheduled_task"
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 OBJECT_FANOUT_LIMIT = 50
@@ -2320,21 +2319,19 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
 def _radar_run(
     ctx: SurfaceContext,
     run: ScheduledRun,
-    agent_names: Mapping[UUID, str],
     task_names: Mapping[UUID, str],
 ) -> dict[str, object]:
     task_id = None if run.idempotency_key is None else scheduled_fire_task_id(run.idempotency_key)
     return {
         "turn_id": str(run.turn_id),
         "conversation_id": str(run.conversation_id),
-        "title": run.conversation_title,
-        "origin": run.origin,
         "agent_id": str(run.agent_id),
-        "agent_name": agent_names.get(run.agent_id),
         "fired_at": _iso(run.fired_at),
         "status": run.status,
         "task": None if task_id is None else task_names.get(task_id),
-        "text": run.text[:RADAR_TEXT_MAX],
+        "surface": run.surface,
+        "source": run.source,
+        "text": run.text,
         "artifacts": [
             {
                 "filename": artifact.filename,
@@ -2403,11 +2400,10 @@ async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     page = await ctx.list_scheduled_runs(
         member_id, limit=RADAR_LIST_LIMIT, cursor=cursor, agent_id=agent_id
     )
-    agent_names = {agent.id: agent.name for agent in audience.agents}
     task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
     return JSONResponse(
         {
-            "runs": [_radar_run(ctx, run, agent_names, task_names) for run in page.rows],
+            "runs": [_radar_run(ctx, run, task_names) for run in page.rows],
             "older": None if page.older is None else page.older.encode(),
             "newer": None if page.newer is None else page.newer.encode(),
         }

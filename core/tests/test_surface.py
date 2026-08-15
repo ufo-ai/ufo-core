@@ -1686,10 +1686,11 @@ async def test_artifact_listing_carries_the_conversation_owner_email(db: None, t
 async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
     db: None, tmp_path
 ) -> None:
-    """The runs page lists only scheduled admissions whose conversation content the reader reads —
-    the shared conversations' runs and their own. A run's reply is transcript content, so another
-    member's private conversation and a room never list, whoever asks — and each run carries its
-    key, terminal text, and shared files whole, previews included."""
+    """The runs page lists only terminal scheduled admissions whose conversation content the
+    reader reads — the shared conversations' runs and their own. A run's reply is transcript
+    content, so another member's private conversation and a room never list, whoever asks; a turn
+    still going has no reply and never lists either — and each run carries its key, terminal text,
+    and shared files whole, previews included."""
     workspace_id, agent_id, _ = await _seed()
     member_id = await _seed_member_row(workspace_id, "m@example.com")
     other_id = await _seed_member_row(workspace_id, "n@example.com")
@@ -1730,6 +1731,7 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
         audience=str(room_audience("slack", "C123")),
         admission_source="scheduled",
     )
+    await _seed_turn(workspace_id, "R5", "running", "", admission_source="scheduled")
     await _seed_turn(workspace_id, "R3", "done", "typed")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     page = await context.list_scheduled_runs(member_id, limit=10)
@@ -1738,6 +1740,7 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
     assert (run.status, run.text) == ("done", "the digest")
     assert run.idempotency_key is not None
     assert run.idempotency_key.startswith("11111111-1111-4111-8111-111111111111:")
+    assert (run.surface, run.source) == (SURFACE, None)
     assert run.agent_id == agent_id
     assert [artifact.filename for artifact in run.artifacts] == ["brief.pdf", "chart.png"]
     assert run.artifacts[0].preview_blob_key == "artifacts/x/brief.png"

@@ -80,14 +80,13 @@ const SECOND_TASK_ROW = owned(
 const RUN = {
   turn_id: "0b7e2d43-5a86-4f19-9c3d-8e64a02b7c15",
   conversation_id: CONVO_ID,
-  title: "Morning digest",
-  origin: "#general",
   agent_id: AGENT_ID,
-  agent_name: "assistant",
   fired_at: "2026-08-14T09:00:00+00:00",
   status: "done",
   task: "daily-brief",
-  text: "All quiet.",
+  surface: "web",
+  source: null,
+  text: "All quiet.\n\nNothing needs a follow-up.",
   artifacts: [],
 };
 
@@ -731,7 +730,7 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("Morning digest")).toBeTruthy();
+  expect(await screen.findByText("All quiet.")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
   expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
 
@@ -760,7 +759,7 @@ test("the radar tab of an agent narrows the feed and both kinds to its namespace
   location.hash = "#/agents/" + AGENT_ID + "/radar";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("Morning digest")).toBeTruthy();
+  expect(await screen.findByText("All quiet.")).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
   expect(screen.queryByRole("heading", { level: 1, name: "Radar" })).toBeNull();
 
@@ -1046,13 +1045,13 @@ test("Radar shows one family at a time and the switcher names which", async () =
   mountRadar();
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("Morning digest")).toBeTruthy();
+  expect(await screen.findByText("All quiet.")).toBeTruthy();
   expect(reads.every((read) => read.includes("/workspace/radar"))).toBe(true);
 
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
 
   expect(await screen.findByText("daily-brief")).toBeTruthy();
-  expect(screen.queryByText("Morning digest")).toBeNull();
+  expect(screen.queryByText("All quiet.")).toBeNull();
 
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
 

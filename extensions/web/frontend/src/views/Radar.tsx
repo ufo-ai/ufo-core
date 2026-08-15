@@ -3,8 +3,9 @@ import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
+import { slackLink } from "@/lib/audience";
 import { Markdown } from "@/lib/markdown";
-import { day } from "@/lib/moments";
+import { day, relativeMoment } from "@/lib/moments";
 import { chatHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 
@@ -33,29 +34,23 @@ type RadarArtifact = {
 type RadarRun = {
   turn_id: string;
   conversation_id: string;
-  title: string | null;
-  origin: string | null;
   agent_id: string;
-  agent_name: string | null;
   fired_at: string;
   status: string;
   task: string | null;
+  surface: string;
+  source: string | null;
   text: string;
   artifacts: RadarArtifact[];
 };
 
 type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
 
-/** A run that ended well needs no mark beside its own reply; every other outcome is stated. */
+/** A run that ended well needs no mark beside its own reply; the other endings are stated. */
 const STATUS_NOTES: Record<string, string> = {
   failed: "Failed",
   cancelled: "Stopped",
-  running: "Running",
-  queued: "Running",
-  parked: "Waiting",
 };
-
-const WORKING = new Set(["running", "queued", "parked"]);
 
 function objectAt(open: string | undefined): ObjectAddress | null {
   if (!open?.startsWith(OBJECT_PREFIX)) return null;
@@ -147,14 +142,23 @@ function Feed({
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
-        if (!payload.runs.length)
+        const stories = payload.runs.filter(newsworthy);
+        if (!stories.length)
           return (
-            <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
+            <>
+              <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
+              {payload.older || payload.newer ? (
+                <div className="mt-4xl">
+                  <Pager payload={payload} onPlace={onPlace} />
+                </div>
+              ) : null}
+            </>
           );
+        const now = new Date();
         return (
           <>
             <div className="flex flex-col gap-4xl">
-              {editions(payload.runs).map((edition) => (
+              {editions(stories).map((edition) => (
                 <section key={edition.date} className="flex flex-col">
                   <div className="flex items-center gap-lg">
                     <h2 className="m-0 font-mono text-mono font-normal uppercase text-ink-soft">
@@ -164,7 +168,7 @@ function Feed({
                   </div>
                   <ol className="m-0 flex list-none flex-col p-0">
                     {edition.runs.map((run) => (
-                      <Story key={run.turn_id} run={run} onPlace={onPlace} />
+                      <Story key={run.turn_id} run={run} now={now} onPlace={onPlace} />
                     ))}
                   </ol>
                 </section>
@@ -180,6 +184,15 @@ function Feed({
   );
 }
 
+/** Whether a run is a story at all. A run that ended well with nothing but a line — no files, no
+ *  reply to read past its first breath — is a no-op check, and a feed of them buries the runs
+ *  that produced something. A failure is news whatever its length, and a file shared under one
+ *  line is the file's story. */
+function newsworthy(run: RadarRun): boolean {
+  if (run.status !== "done" || run.artifacts.length) return true;
+  return run.text.trim().includes("\n");
+}
+
 /** The page's runs under the calendar day each fired on, in the order the page already holds. */
 function editions(runs: RadarRun[]): { date: string; runs: RadarRun[] }[] {
   const grouped: { date: string; runs: RadarRun[] }[] = [];
@@ -192,55 +205,42 @@ function editions(runs: RadarRun[]): { date: string; runs: RadarRun[] }[] {
   return grouped;
 }
 
-/** One run as a story: the headline opens the conversation the run reported into, the byline names
- *  the task that fired it — pressed, it opens that task's record, where the prompt and schedule
- *  are read — beside who ran it and how it ended, the body is the reply, and what it shared stands
- *  under it with its picture where one exists. */
-function Story({ run, onPlace }: { run: RadarRun; onPlace: (place: Placement) => void }) {
+/** One run as a story: the task that fired it is the headline — pressed, it opens that task's
+ *  record, where the prompt and schedule are read — what it shared stands next with its picture
+ *  where one exists, then the whole reply, and the foot states when it ran beside the ways out:
+ *  the conversation it reported into, the thread on the surface it came from, and any outcome. */
+function Story({
+  run,
+  now,
+  onPlace,
+}: {
+  run: RadarRun;
+  now: Date;
+  onPlace: (place: Placement) => void;
+}) {
   const note = STATUS_NOTES[run.status];
+  const thread = slackLink(run.surface, run.source);
+  const out =
+    "text-inherit no-underline hover:underline focus-visible:underline";
   return (
     <li className="flex flex-col gap-sm border-b border-edge py-4xl last:border-b-0">
       <h3 className="m-0 font-display text-title font-normal">
-        <a href={chatHash(run.conversation_id)} className="text-ink no-underline hover:underline">
-          {run.title || run.task || "Scheduled run"}
-        </a>
-      </h3>
-      <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
         {run.task ? (
           <button
             type="button"
             onClick={() =>
               onPlace({ open: OBJECT_PREFIX + TASK_KIND + "/" + run.task, agent: run.agent_id })
             }
-            className="m-0 border-0 bg-transparent p-0 font-mono text-mono text-ink-soft underline underline-offset-2 hover:text-ink"
+            className="m-0 border-0 bg-transparent p-0 text-left font-display text-title font-normal text-ink hover:underline"
           >
             {run.task}
           </button>
-        ) : null}
-        {[run.agent_name, run.origin].filter(Boolean).map((part) => (
-          <span key={part}>{part}</span>
-        ))}
-        {note ? (
-          <span
-            className={
-              run.status === "failed"
-                ? "[color:var(--color-attention-ink)]"
-                : WORKING.has(run.status)
-                  ? "animate-working"
-                  : undefined
-            }
-          >
-            {note}
-          </span>
-        ) : null}
-      </p>
-      {run.text ? (
-        <div className="line-clamp-6 text-body leading-reading">
-          <Markdown text={run.text} />
-        </div>
-      ) : null}
+        ) : (
+          "Scheduled run"
+        )}
+      </h3>
       {run.artifacts.length ? (
-        <ul className="m-0 mt-sm flex list-none flex-wrap gap-lg p-0">
+        <ul className="m-0 flex list-none flex-wrap gap-lg p-0">
           {run.artifacts.map((artifact) => (
             <li key={artifact.filename}>
               <Shared artifact={artifact} />
@@ -248,6 +248,31 @@ function Story({ run, onPlace }: { run: RadarRun; onPlace: (place: Placement) =>
           ))}
         </ul>
       ) : null}
+      {run.text ? (
+        <div className="text-body leading-reading">
+          <Markdown text={run.text} />
+        </div>
+      ) : null}
+      <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
+        <span>{relativeMoment(run.fired_at, now)}</span>
+        <a href={chatHash(run.conversation_id)} className={out}>
+          Conversation
+        </a>
+        {thread ? (
+          <a href={thread} target="_blank" rel="noopener noreferrer" className={out}>
+            Slack <span aria-hidden>↗</span>
+          </a>
+        ) : null}
+        {note ? (
+          <span
+            className={
+              run.status === "failed" ? "[color:var(--color-attention-ink)]" : undefined
+            }
+          >
+            {note}
+          </span>
+        ) : null}
+      </p>
     </li>
   );
 }

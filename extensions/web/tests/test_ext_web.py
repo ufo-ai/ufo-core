@@ -2674,6 +2674,7 @@ async def _seed_scheduled_run(
     text: str,
     fired: datetime,
     artifact: tuple[str, str] | None = None,
+    context: TurnContext | None = None,
 ) -> UUID:
     run_id = uuid4()
     async with workspace_tx() as connection:
@@ -2688,6 +2689,7 @@ async def _seed_scheduled_run(
                 inbound="fired",
                 admission_source="scheduled",
                 idempotency_key=key,
+                context=None if context is None else context.model_dump(mode="json"),
                 terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
                 created_at=fired,
                 updated_at=fired,
@@ -2747,6 +2749,7 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         text="12 items, 2 stale",
         fired=fired,
         artifact=("queue.png", "image/png"),
+        context=TurnContext(source="https://acme.slack.com/archives/C42/p1"),
     )
     private_conversation = await _seed_agent_conversation(
         workspace_id,
@@ -2794,8 +2797,8 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     assert "prompt" not in run
     assert run["text"] == "12 items, 2 stale"
     assert run["status"] == "done"
-    assert run["origin"] == "#eng"
-    assert run["agent_name"] == "assistant"
+    assert run["surface"] == "slack"
+    assert run["source"] == "https://acme.slack.com/archives/C42/p1"
     assert run["conversation_id"] == str(shared_conversation)
     assert [entry["filename"] for entry in run["artifacts"]] == ["queue.png"]
     assert run["artifacts"][0]["url"].startswith("https://web/")
@@ -2859,7 +2862,7 @@ async def test_radar_pages_by_keyset_and_bounds_the_story(
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     first = (await client.get(RADAR_PATH, headers=headers)).json()
     assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
-    assert len(first["runs"][0]["text"]) == web_surface.RADAR_TEXT_MAX
+    assert len(first["runs"][0]["text"]) == 2_000
     assert first["runs"][0]["task"] is None
     assert first["newer"] is None and first["older"] is not None
     second = (
