@@ -624,7 +624,7 @@ async def test_member_turn_trace_joins_admission_and_names_its_stages(
         "transcript.load",
         "model.round",
     } <= stages
-    assert [event.name for event in spans["model.round"].events] == ["model.first_event"]
+    assert [event.name for event in spans["model.round"].events] == ["model.first_visible_event"]
 
 
 async def test_turn_round_trip_bills_and_persists(surface: Turns) -> None:

@@ -13,7 +13,7 @@ from opentelemetry._logs import SeverityNumber
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.metrics import Counter, Histogram
+from opentelemetry.metrics import Counter, Histogram, UpDownCounter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import Counter as CounterInstrument
@@ -68,6 +68,7 @@ METRICS = (
     "db_pool_exhausted_total",
     "model_cache_round_total",
     "model_cache_tokens_total",
+    "model_provider_retry_total",
     "model_round_tokens_total",
     "tool_call_total",
     "source_sync_failed_total",
@@ -83,7 +84,16 @@ MAIN_PROFILE = "main"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
     "model_round_ms": ("model", "provider", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
-    "model_first_event_ms": (
+    "model_first_visible_event_ms": (
+        "model",
+        "provider",
+        PROFILE_DIMENSION,
+        "ttl",
+        "round",
+        "gap",
+        "result",
+    ),
+    "model_provider_start_ms": (
         "model",
         "provider",
         PROFILE_DIMENSION,
@@ -94,6 +104,9 @@ HISTOGRAMS = {
     ),
     "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
     "turn_ms": ("status", PROFILE_DIMENSION),
+}
+UP_DOWN_METRICS = {
+    "model_round_active": ("model", "provider", PROFILE_DIMENSION),
 }
 HISTOGRAM_AGGREGATION: dict[type, Aggregation] = {
     HistogramInstrument: ExponentialBucketHistogramAggregation()
@@ -220,6 +233,7 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 
 _counters: dict[str, Counter] = {}
 _histograms: dict[str, Histogram] = {}
+_up_down_counters: dict[str, UpDownCounter] = {}
 
 
 def init_o11y(otlp_endpoint: str | None) -> None:
@@ -559,3 +573,18 @@ def emit_histogram(name: str, value: int, /, **dimensions: str) -> None:
         )
         _histograms[name] = histogram
     histogram.record(value, attributes=_bounded_error_class(dimensions))
+
+
+def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None:
+    """Add a signed amount to a registered current-state metric."""
+    declared = UP_DOWN_METRICS.get(name)
+    if declared is None:
+        raise ValueError(f"unknown up-down metric: {name}")
+    undeclared = sorted(set(dimensions) - set(declared))
+    if undeclared:
+        raise ValueError(f"undeclared dimensions on {name}: {', '.join(undeclared)}")
+    counter = _up_down_counters.get(name)
+    if counter is None:
+        counter = metrics.get_meter(INSTRUMENTATION_NAME).create_up_down_counter(f"ufo.{name}")
+        _up_down_counters[name] = counter
+    counter.add(amount, attributes=dimensions)

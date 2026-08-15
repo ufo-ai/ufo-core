@@ -29,6 +29,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
@@ -270,7 +271,9 @@ def zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def collect(client: AnthropicClient | OpenAIClient) -> list[ModelEvent]:
-    return [event async for event in client.complete(REQUEST)]
+    return [
+        event async for event in client.complete(REQUEST) if not isinstance(event, ModelStreamStart)
+    ]
 
 
 class CapturingCreate(ScriptedCreate):
@@ -624,23 +627,104 @@ PROVIDERS = [
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-@pytest.mark.parametrize("status", [429, 500])
-async def test_retryable_status_retries_then_succeeds(
-    harness: ProviderHarness, status: int
+async def test_provider_clients_mark_stream_start_before_visible_output(
+    harness: ProviderHarness,
 ) -> None:
-    create = ScriptedCreate(provider_error(harness.error_type, status), (harness.ok_events(), None))
-    events = await collect(harness.build(create))
-    assert create.calls == 2
-    assert events[0] == TextDelta(text="ok")
-    assert isinstance(events[-1], Usage)
+    create = ScriptedCreate((harness.ok_events(), None))
+    events = [event async for event in harness.build(create).complete(REQUEST)]
+    assert events[0] == ModelStreamStart()
+    assert events[1] == TextDelta(text="ok")
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-async def test_client_error_does_not_retry(harness: ProviderHarness) -> None:
+@pytest.mark.parametrize("status", [429, 500])
+async def test_retryable_status_retries_then_succeeds(
+    harness: ProviderHarness,
+    status: int,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    emitted: list[tuple[str, dict[str, str]]] = []
+
+    def meter(name: str, **dimensions: str) -> None:
+        emitted.append((name, dimensions))
+
+    monkeypatch.setattr("ufo.models.anthropic.emit_metric", meter)
+    monkeypatch.setattr("ufo.models.openai.emit_metric", meter)
+    create = ScriptedCreate(provider_error(harness.error_type, status), (harness.ok_events(), None))
+    client = harness.build(create)
+    with caplog.at_level(logging.INFO):
+        events = await collect(client)
+    assert create.calls == 2
+    assert events[0] == TextDelta(text="ok")
+    assert isinstance(events[-1], Usage)
+    assert emitted == [
+        (
+            "model_provider_retry_total",
+            {"provider": client.spec.provider, "model": REQUEST.model, "kind": "status"},
+        )
+    ]
+    retry = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_status_retry"
+    )
+    assert retry.ufo["status_code"] == status
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_client_error_does_not_retry(
+    harness: ProviderHarness, caplog: pytest.LogCaptureFixture
+) -> None:
     create = ScriptedCreate(provider_error(harness.error_type, 400), (harness.ok_events(), None))
-    with pytest.raises(harness.error_type):
-        await collect(harness.build(create))
+    client = harness.build(create)
+    with caplog.at_level(logging.INFO), pytest.raises(harness.error_type):
+        await collect(client)
     assert create.calls == 1
+    failure = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_status_error"
+    )
+    assert failure.ufo == {
+        "provider": client.spec.provider,
+        "model": REQUEST.model,
+        "attempts": 1,
+        "status_code": 400,
+    }
+
+
+async def test_bedrock_retry_is_attributed_to_bedrock(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    emitted: list[tuple[str, dict[str, str]]] = []
+
+    def meter(name: str, **dimensions: str) -> None:
+        emitted.append((name, dimensions))
+
+    monkeypatch.setattr("ufo.models.anthropic.emit_metric", meter)
+    create = ScriptedCreate(
+        provider_error(anthropic.APIStatusError, 429),
+        (
+            [
+                anthropic_message_start(input_tokens=1),
+                anthropic_text("ok"),
+                anthropic_output(1),
+            ],
+            None,
+        ),
+    )
+    client = AnthropicClient(
+        client=anthropic_sdk(create), spec=replace(ANTHROPIC_SPEC, provider="bedrock")
+    )
+    with caplog.at_level(logging.INFO):
+        await collect(client)
+    assert emitted == [
+        (
+            "model_provider_retry_total",
+            {"provider": "bedrock", "model": REQUEST.model, "kind": "status"},
+        )
+    ]
+    retry = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_status_retry"
+    )
+    assert retry.ufo["provider"] == "bedrock"
 
 
 KEYED_ANTHROPIC_SPEC = replace(
@@ -711,7 +795,7 @@ async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
     with pytest.raises(harness.error_type):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [TextDelta(text="partial")]
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert create.calls == 1
 
 
@@ -769,7 +853,7 @@ async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness
     with pytest.raises(harness.timeout_type):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [TextDelta(text="partial")]
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert create.calls == 1
 
 
@@ -814,7 +898,7 @@ async def test_remote_protocol_error_after_first_yield_does_not_retry(
     with pytest.raises(httpx.RemoteProtocolError):
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
-    assert received == [TextDelta(text="partial")]
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert create.calls == 1
 
 
@@ -936,7 +1020,7 @@ async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
             client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
         ).complete(REQUEST):
             received.append(event)
-    assert received == [TextDelta(text="partial")]
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert create.calls == 1
 
 

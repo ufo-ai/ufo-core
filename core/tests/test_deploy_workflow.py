@@ -3373,7 +3373,13 @@ def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
     assert "p95:ufo.db_tx_acquire_ms{$env} by {path}" in dashboards
     assert "p99:ufo.db_tx_acquire_ms{$env} by {path}" in dashboards
     assert "sum:ufo.db_pool_exhausted_total{$env} by {path}.as_count()" in dashboards
-    assert "p50:ufo.model_round_ms{$env,!error_class:*} by {provider}" in dashboards
+    assert "p50:ufo.model_provider_start_ms{$env} by {provider,model,profile}" in dashboards
+    assert "p95:ufo.model_first_visible_event_ms{$env} by {provider,model,profile}" in dashboards
+    assert "sum:ufo.model_round_active{$env} by {provider,model,profile}" in dashboards
+    assert (
+        "sum:ufo.model_provider_retry_total{$env} by {provider,model,kind}.as_count()" in dashboards
+    )
+    assert "first token wait" not in dashboards
 
 
 def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
@@ -3396,7 +3402,7 @@ def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
     assert 'resource "datadog_dashboard" "prompt_cache"' in dashboard
     assert "ufo.model_cache_round_total" in dashboard
     assert "ufo.model_cache_tokens_total" in dashboard
-    assert "ufo.model_first_event_ms" in dashboard
+    assert "ufo.model_first_visible_event_ms" in dashboard
     assert "by {round,kind,ttl}" in dashboard
     assert "by {result,gap}" in dashboard
     assert "gap:5m_1h,kind:cache_read" in dashboard

@@ -283,6 +283,7 @@ async def test_crash_mid_turn_recovers_without_re_executing_completed_work(
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
+    monkeypatch.setattr(o11y, "_up_down_counters", {})
     crashed = [False]
     registry = ModelRegistry(
         specs={

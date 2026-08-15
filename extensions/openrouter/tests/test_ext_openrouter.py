@@ -39,6 +39,7 @@ from ufo.models.interface import (
     Message,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     TextDelta,
     ToolSchema,
 )
@@ -135,7 +136,7 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(3, 2))]
     )
     events = [event async for event in _client(create).complete(REQUEST)]
-    assert events[0] == TextDelta(text="ok")
+    assert events[:2] == [ModelStreamStart(), TextDelta(text="ok")]
     assert events[-1] == Usage(input_tokens=3, output_tokens=2)
     kwargs = create.calls[0]
     assert kwargs["model"] == "google/gemini-2.5-pro"
@@ -208,7 +209,9 @@ async def test_dead_provider_completion_reroutes_excluding_that_provider() -> No
     create = ScriptedCreate(dead, good)
     events = [event async for event in _client(create).complete(REQUEST)]
     assert len(create.calls) == 2
-    assert events[0] == TextDelta(text="recovered")
+    assert [event for event in events if isinstance(event, TextDelta)] == [
+        TextDelta(text="recovered")
+    ]
     assert events[-1] == Usage(input_tokens=2, output_tokens=3)
     assert create.calls[1]["extra_body"]["provider"] == {"ignore": ["deadco"]}
 

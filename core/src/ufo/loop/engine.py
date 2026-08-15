@@ -70,6 +70,7 @@ from ufo.models.interface import (
     ModelClient,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     PromptCacheTtl,
     ReasoningBlock,
     ReasoningItemBlock,
@@ -84,7 +85,15 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.pricing import Pricing
-from ufo.o11y import emit_histogram, emit_metric, formatted_stack, log, span, turn_profile
+from ufo.o11y import (
+    emit_histogram,
+    emit_metric,
+    emit_up_down_metric,
+    formatted_stack,
+    log,
+    span,
+    turn_profile,
+)
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1836,47 +1845,68 @@ class TurnEngine:
                     await flush()
 
         started = time.monotonic()
-        first_event_ms: int | None = None
-        with span(
-            "model.round",
-            model=request.model,
-            provider=self.provider,
-            round="first" if round_input.first_round else "later",
-        ) as round_span:
-            pacer = asyncio.ensure_future(pace())
-            try:
-                async for event in self.model.complete(request):
-                    if first_event_ms is None:
-                        first_event_ms = int((time.monotonic() - started) * 1000)
-                        round_span.add_event("model.first_event")
-                    match event:
-                        case TextDelta(text=chunk):
-                            parts.append(chunk)
-                            buffer.append(chunk)
-                            pending += len(chunk)
-                            if pending >= DELTA_FLUSH_BYTES:
-                                await flush()
-                        case ToolCallStart(id=call_id, name=name):
-                            call_names[call_id] = name
-                            call_json[call_id] = []
-                            call_order.append(call_id)
-                        case ToolCallDelta(id=call_id, partial_json=partial):
-                            call_json[call_id].append(partial)
-                        case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
-                            reasoning.append(event)
-                        case Usage():
-                            usages.append(event)
-            except Exception as caught:
-                error = caught
-            finally:
-                stop.set()
+        provider_start_ms: int | None = None
+        first_visible_event_ms: int | None = None
+        active_dimensions = {
+            "model": request.model,
+            "provider": self.provider,
+            "profile": self.profile,
+        }
+        emit_up_down_metric("model_round_active", 1, **active_dimensions)
+        try:
+            with span(
+                "model.round",
+                model=request.model,
+                provider=self.provider,
+                round="first" if round_input.first_round else "later",
+            ) as round_span:
+                pacer = asyncio.ensure_future(pace())
                 try:
-                    await pacer
+                    async for event in self.model.complete(request):
+                        match event:
+                            case ModelStreamStart():
+                                if provider_start_ms is None:
+                                    provider_start_ms = int((time.monotonic() - started) * 1000)
+                                    round_span.add_event("model.provider_start")
+                            case TextDelta(text=chunk):
+                                if chunk and first_visible_event_ms is None:
+                                    first_visible_event_ms = int(
+                                        (time.monotonic() - started) * 1000
+                                    )
+                                    round_span.add_event("model.first_visible_event")
+                                parts.append(chunk)
+                                buffer.append(chunk)
+                                pending += len(chunk)
+                                if pending >= DELTA_FLUSH_BYTES:
+                                    await flush()
+                            case ToolCallStart(id=call_id, name=name):
+                                if first_visible_event_ms is None:
+                                    first_visible_event_ms = int(
+                                        (time.monotonic() - started) * 1000
+                                    )
+                                    round_span.add_event("model.first_visible_event")
+                                call_names[call_id] = name
+                                call_json[call_id] = []
+                                call_order.append(call_id)
+                            case ToolCallDelta(id=call_id, partial_json=partial):
+                                call_json[call_id].append(partial)
+                            case ThinkingBlock() | RedactedThinkingBlock() | ReasoningItemBlock():
+                                reasoning.append(event)
+                            case Usage():
+                                usages.append(event)
                 except Exception as caught:
-                    if error is None:
-                        error = caught
-            wall_ms = int((time.monotonic() - started) * 1000)
-            await flush()
+                    error = caught
+                finally:
+                    stop.set()
+                    try:
+                        await pacer
+                    except Exception as caught:
+                        if error is None:
+                            error = caught
+                wall_ms = int((time.monotonic() - started) * 1000)
+                await flush()
+        finally:
+            emit_up_down_metric("model_round_active", -1, **active_dimensions)
         emit_histogram(
             "model_round_ms",
             wall_ms,
@@ -1888,10 +1918,18 @@ class TurnEngine:
         round_usage = _total_usage(usages)
         cache_result = "hit" if round_usage.cache_read_tokens else "miss"
         emit_metric("model_cache_round_total", **cache_dimensions, result=cache_result)
-        if first_event_ms is not None:
+        if provider_start_ms is not None:
             emit_histogram(
-                "model_first_event_ms",
-                first_event_ms,
+                "model_provider_start_ms",
+                provider_start_ms,
+                model=request.model,
+                **cache_dimensions,
+                result=cache_result,
+            )
+        if first_visible_event_ms is not None:
+            emit_histogram(
+                "model_first_visible_event_ms",
+                first_visible_event_ms,
                 model=request.model,
                 **cache_dimensions,
                 result=cache_result,

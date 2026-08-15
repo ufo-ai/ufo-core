@@ -38,6 +38,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     ReasoningItemBlock,
     TextBlock,
     TextDelta,
@@ -276,6 +277,7 @@ async def test_responses_path_translates_images_tools_and_usage() -> None:
     )
     events = [event async for event in _responses_client(scripted).complete(request)]
     assert events == [
+        ModelStreamStart(),
         ToolCallStart(id="call-1", name="read"),
         ToolCallDelta(id="call-1", partial_json='{"path":"a.png"}'),
         TextDelta(text="done"),
@@ -300,6 +302,7 @@ async def test_responses_path_yields_the_reasoning_items_once_the_stream_closes(
     )
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert events == [
+        ModelStreamStart(),
         TextDelta(text="done"),
         ReasoningItemBlock(id="rs_1", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)),
         ReasoningItemBlock(id="rs_2", encrypted_content="bW9yZQ"),
@@ -329,6 +332,8 @@ async def test_responses_reasoning_without_an_answer_is_an_empty_completion() ->
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
     assert events == [
+        ModelStreamStart(),
+        ModelStreamStart(),
         TextDelta(text="recovered"),
         ReasoningItemBlock(
             id="rs_kept", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)
@@ -354,6 +359,8 @@ async def test_responses_stream_dying_after_a_reasoning_item_retries_once(
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
     assert events == [
+        ModelStreamStart(),
+        ModelStreamStart(),
         TextDelta(text="recovered"),
         ReasoningItemBlock(
             id="rs_kept", encrypted_content="ZW5jcnlwdGVk", summary=("weighing it",)
@@ -502,7 +509,11 @@ async def test_responses_path_retries_status_then_succeeds(
     scripted = ScriptedResponses(_provider_error(status), (_completed_events(), None))
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
-    assert events == [TextDelta(text="ok"), Usage(input_tokens=1, output_tokens=1)]
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
 
 
 async def test_responses_path_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,7 +555,11 @@ async def test_responses_path_retries_timeout_then_succeeds(
     scripted = ScriptedResponses(_provider_timeout(), (_completed_events(), None))
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
-    assert events == [TextDelta(text="ok"), Usage(input_tokens=1, output_tokens=1)]
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
 
 
 async def test_responses_path_retries_disconnect_then_succeeds(
@@ -556,7 +571,11 @@ async def test_responses_path_retries_disconnect_then_succeeds(
     with caplog.at_level(logging.INFO):
         events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
-    assert events == [TextDelta(text="ok"), Usage(input_tokens=1, output_tokens=1)]
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="ok"),
+        Usage(input_tokens=1, output_tokens=1),
+    ]
     retry = next(
         record
         for record in caplog.records
@@ -593,7 +612,7 @@ async def test_responses_path_does_not_retry_after_first_yield(tail: Exception) 
     with pytest.raises(type(tail)):
         async for event in _responses_client(scripted).complete(_request()):
             received.append(event)
-    assert received == [TextDelta(text="partial")]
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert scripted.calls == 1
 
 
@@ -602,7 +621,10 @@ async def test_responses_path_persistent_empty_degrades_to_usage() -> None:
     scripted = ScriptedResponses(*([empty] * (MAX_EMPTY_PROVIDER_RETRIES + 1)))
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == MAX_EMPTY_PROVIDER_RETRIES + 1
-    assert events == [Usage(input_tokens=1, output_tokens=0)]
+    assert events == [
+        *[ModelStreamStart()] * (MAX_EMPTY_PROVIDER_RETRIES + 1),
+        Usage(input_tokens=1, output_tokens=0),
+    ]
 
 
 async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it() -> None:

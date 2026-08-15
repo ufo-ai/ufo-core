@@ -199,13 +199,12 @@ resource "datadog_dashboard" "model_latency" {
   widget {
     note_definition {
       content          = <<-EOT
-        Compare backends on `first token wait`, not on `whole round`: a round's wall clock is
-        dominated by how many tokens it emitted, so a model asked to think longer reads as a slower
-        provider. `generation rate` is the token-normalized view and is what a routing decision
-        should rest on.
+        `provider response start` measures transport and provider admission. `first visible event`
+        adds hidden reasoning and any retry before text or a tool call. `whole round` adds output
+        generation. Read all three by model and profile before changing a route.
 
         Read a difference only where `rounds by provider` is high enough to carry a percentile and
-        `failed rounds` is flat.
+        `failed rounds` and `provider retries` are flat.
       EOT
       background_color = "yellow"
       font_size        = "14"
@@ -216,13 +215,13 @@ resource "datadog_dashboard" "model_latency" {
 
   widget {
     timeseries_definition {
-      title = "first token wait by provider"
+      title = "provider response start by model and profile"
       request {
-        q            = "p50:ufo.model_first_event_ms{$env} by {provider}"
+        q            = "p50:ufo.model_provider_start_ms{$env} by {provider,model,profile}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_first_event_ms{$env} by {provider}"
+        q            = "p95:ufo.model_provider_start_ms{$env} by {provider,model,profile}"
         display_type = "line"
       }
     }
@@ -230,14 +229,48 @@ resource "datadog_dashboard" "model_latency" {
 
   widget {
     timeseries_definition {
-      title = "whole round by provider"
+      title = "first visible event wait by model and profile"
       request {
-        q            = "p50:ufo.model_round_ms{$env,!error_class:*} by {provider}"
+        q            = "p50:ufo.model_first_visible_event_ms{$env} by {provider,model,profile}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_round_ms{$env,!error_class:*} by {provider}"
+        q            = "p95:ufo.model_first_visible_event_ms{$env} by {provider,model,profile}"
         display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "whole round by model and profile"
+      request {
+        q            = "p50:ufo.model_round_ms{$env,!error_class:*} by {provider,model,profile}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.model_round_ms{$env,!error_class:*} by {provider,model,profile}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "active model rounds"
+      request {
+        q            = "sum:ufo.model_round_active{$env} by {provider,model,profile}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "provider retries"
+      request {
+        q            = "sum:ufo.model_provider_retry_total{$env} by {provider,model,kind}.as_count()"
+        display_type = "bars"
       }
     }
   }
@@ -256,7 +289,7 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "rounds by provider"
       request {
-        q            = "count:ufo.model_round_ms{$env,!error_class:*} by {provider}"
+        q            = "count:ufo.model_round_ms{$env,!error_class:*} by {provider,model,profile}"
         display_type = "bars"
       }
     }
@@ -266,23 +299,15 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "failed rounds by provider and class"
       request {
-        q            = "count:ufo.model_round_ms{$env,error_class:*} by {provider,error_class}"
+        q            = "count:ufo.model_round_ms{$env,error_class:*} by {provider,model,profile,error_class}"
         display_type = "bars"
       }
     }
   }
 
-  widget {
-    toplist_definition {
-      title = "first token wait by model"
-      request {
-        q = "p95:ufo.model_first_event_ms{$env} by {model,provider}"
-      }
-    }
-  }
 }
 
-# Where a turn spends its wall clock, and what it spent it on. The four `_ms` distributions arrive as
+# Where a turn spends its wall clock, and what it spent it on. The latency distributions arrive as
 # sketches and answer percentiles because `metrics.tf` enables them.
 #
 # The board is ordered as the question is asked: the turn first, then the model rounds inside it, then
@@ -396,13 +421,13 @@ resource "datadog_dashboard" "turns" {
 
   widget {
     timeseries_definition {
-      title = "round wall clock against time to first event"
+      title = "round wall clock against first visible event"
       request {
         q            = "p95:ufo.model_round_ms{$env}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_first_event_ms{$env}"
+        q            = "p95:ufo.model_first_visible_event_ms{$env}"
         display_type = "line"
       }
     }
@@ -937,7 +962,7 @@ resource "datadog_dashboard" "prompt_cache" {
         limit value.
 
         The board does not link a first-round hit to the prior turn's round count. Use it to select
-        a policy, then compare that policy with the same token and first-event measures.
+        a policy, then compare that policy with the same token and visible-event measures.
       EOT
       background_color = "yellow"
       font_size        = "14"
@@ -1014,13 +1039,13 @@ resource "datadog_dashboard" "prompt_cache" {
 
   widget {
     timeseries_definition {
-      title = "first-event latency by cache result and idle gap"
+      title = "first visible event wait by cache result and idle gap"
       request {
-        q            = "p50:ufo.model_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p50:ufo.model_first_visible_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_first_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
+        q            = "p95:ufo.model_first_visible_event_ms{$env,$profile,provider:anthropic,round:first} by {result,gap}"
         display_type = "line"
       }
     }

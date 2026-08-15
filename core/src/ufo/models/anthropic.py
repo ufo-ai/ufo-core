@@ -16,6 +16,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
@@ -29,7 +30,7 @@ from ufo.models.interface import (
     trim_images,
 )
 from ufo.models.spec import KEY_REJECTED_STATUS, ModelSpec
-from ufo.o11y import log
+from ufo.o11y import emit_metric, log
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -124,7 +125,7 @@ class AnthropicClient:
         Every provider failure except a deterministic 4xx client error (400-499 other than 429)
         retries with retry-after-aware exponential backoff, and request timeouts or a dropped
         connection retry on the same backoff and shared attempt budget (each retry logged,
-        exhaustion logged and re-raising the fault) — both only until the first event is yielded;
+        exhaustion logged and re-raising the fault) — both only until visible output is yielded;
         any failure after that raises immediately. A streamed request surfaces its timeout or a
         peer disconnect as a raw httpx error during iteration (the SDK wraps only the create
         call), so the retry catches both. A mid-stream
@@ -197,7 +198,11 @@ class AnthropicClient:
                 )
             try:
                 stream = await self.client.messages.create(**create_kwargs)
+                stream_started = False
                 async for event in stream:
+                    if not stream_started:
+                        stream_started = True
+                        yield ModelStreamStart()
                     match event:
                         case anthropic.types.RawMessageStartEvent(message=message):
                             input_tokens = message.usage.input_tokens
@@ -269,7 +274,7 @@ class AnthropicClient:
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
                         "model.provider_transport_error",
-                        provider="anthropic",
+                        provider=self.spec.provider,
                         model=request.model,
                         attempts=attempt,
                         error_class=type(error).__name__,
@@ -277,28 +282,63 @@ class AnthropicClient:
                     raise
                 log(
                     "model.provider_transport_retry",
-                    provider="anthropic",
+                    provider=self.spec.provider,
                     model=request.model,
                     attempt=attempt,
                     error_class=type(error).__name__,
+                    wait_seconds=delay,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="transport",
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
                 if error.status_code == KEY_REJECTED_STATUS:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt + 1,
+                        status_code=error.status_code,
+                    )
                     raise self.spec.key_rejected() from error
                 attempt += 1
                 deterministic_client_error = (
                     400 <= error.status_code < 500 and error.status_code != 429
                 )
                 if yielded or deterministic_client_error or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt,
+                        status_code=error.status_code,
+                    )
                     raise
                 header = error.response.headers.get("retry-after")
                 try:
                     wait = max(float(header), 0.0) if header is not None else delay
                 except ValueError:
                     wait = delay
+                log(
+                    "model.provider_status_retry",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    attempt=attempt,
+                    status_code=error.status_code,
+                    wait_seconds=wait,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="status",
+                )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
@@ -317,6 +357,12 @@ class AnthropicClient:
                 and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES
             ):
                 empty_attempt += 1
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="empty",
+                )
                 continue
             for block in reasoning:
                 yield block

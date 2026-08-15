@@ -53,6 +53,7 @@ from ufo.models.interface import (
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     ReasoningItemBlock,
     RedactedThinkingBlock,
     TextBlock,
@@ -66,7 +67,7 @@ from ufo.models.interface import (
     trim_images,
 )
 from ufo.models.spec import KEY_REJECTED_STATUS, ModelSpec
-from ufo.o11y import log
+from ufo.o11y import emit_metric, log
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -350,7 +351,7 @@ class OpenAIClient:
         429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
         or a dropped connection (a raw httpx error the SDK does not wrap once streaming starts)
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
-        and re-raising the fault) — both only until the first event is yielded; any failure after
+        and re-raising the fault) — both only until visible output is yielded; any failure after
         that raises immediately. A 401 is the provider refusing the key this spec resolved, so it
         raises that spec's credential fault instead of the SDK's auth error — the round says which
         slot or env to replace, and the verdict is deterministic per key, so nothing retries it.
@@ -370,7 +371,11 @@ class OpenAIClient:
             finish_reason: str | None = None
             try:
                 stream = await self.client.chat.completions.create(**self._chat_kwargs(request))
+                stream_started = False
                 async for chunk in stream:
+                    if not stream_started:
+                        stream_started = True
+                        yield ModelStreamStart()
                     if chunk.usage is not None:
                         details = chunk.usage.prompt_tokens_details
                         cached_tokens = (details.cached_tokens or 0) if details is not None else 0
@@ -409,7 +414,7 @@ class OpenAIClient:
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
                         "model.provider_transport_error",
-                        provider="openai",
+                        provider=self.spec.provider,
                         model=request.model,
                         attempts=attempt,
                         error_class=type(error).__name__,
@@ -417,26 +422,61 @@ class OpenAIClient:
                     raise
                 log(
                     "model.provider_transport_retry",
-                    provider="openai",
+                    provider=self.spec.provider,
                     model=request.model,
                     attempt=attempt,
                     error_class=type(error).__name__,
+                    wait_seconds=delay,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="transport",
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
                 if error.status_code == KEY_REJECTED_STATUS:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt + 1,
+                        status_code=error.status_code,
+                    )
                     raise self.spec.key_rejected() from error
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt,
+                        status_code=error.status_code,
+                    )
                     raise
                 header = error.response.headers.get("retry-after")
                 try:
                     wait = max(float(header), 0.0) if header is not None else delay
                 except ValueError:
                     wait = delay
+                log(
+                    "model.provider_status_retry",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    attempt=attempt,
+                    status_code=error.status_code,
+                    wait_seconds=wait,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="status",
+                )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
@@ -452,6 +492,12 @@ class OpenAIClient:
                 and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES
             ):
                 empty_attempt += 1
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="empty",
+                )
                 continue
             yield usage
             return
@@ -484,7 +530,11 @@ class OpenAIClient:
             usage: Usage | None = None
             try:
                 stream = await self.client.responses.create(**responses_request(request))
+                stream_started = False
                 async for event in stream:
+                    if not stream_started:
+                        stream_started = True
+                        yield ModelStreamStart()
                     match event:
                         case ResponseTextDeltaEvent(delta=text):
                             yielded = True
@@ -561,7 +611,7 @@ class OpenAIClient:
                 if yielded or attempt > MAX_PROVIDER_RETRIES:
                     log(
                         "model.provider_transport_error",
-                        provider="openai",
+                        provider=self.spec.provider,
                         model=request.model,
                         attempts=attempt,
                         error_class=type(error).__name__,
@@ -569,26 +619,61 @@ class OpenAIClient:
                     raise
                 log(
                     "model.provider_transport_retry",
-                    provider="openai",
+                    provider=self.spec.provider,
                     model=request.model,
                     attempt=attempt,
                     error_class=type(error).__name__,
+                    wait_seconds=delay,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="transport",
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
             except STREAM_STATUS_ERRORS as error:
                 if error.status_code == KEY_REJECTED_STATUS:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt + 1,
+                        status_code=error.status_code,
+                    )
                     raise self.spec.key_rejected() from error
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt,
+                        status_code=error.status_code,
+                    )
                     raise
                 header = error.response.headers.get("retry-after")
                 try:
                     wait = max(float(header), 0.0) if header is not None else delay
                 except ValueError:
                     wait = delay
+                log(
+                    "model.provider_status_retry",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    attempt=attempt,
+                    status_code=error.status_code,
+                    wait_seconds=wait,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="status",
+                )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
@@ -596,6 +681,12 @@ class OpenAIClient:
                 raise RuntimeError("model stream produced no usage")
             if not yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="empty",
+                )
                 continue
             for block in reasoning:
                 yield block

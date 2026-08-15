@@ -85,6 +85,7 @@ from ufo.sdk.models import (
     ModelPrice,
     ModelRequest,
     ModelSpec,
+    ModelStreamStart,
     ReasoningSupport,
     TextDelta,
     Usage,
@@ -922,6 +923,7 @@ class SampleModelClient:
     model: str
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield ModelStreamStart()
         yield TextDelta(text=SAMPLE_MODEL_REPLY)
         yield Usage(input_tokens=1, output_tokens=1)
 

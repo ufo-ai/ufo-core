@@ -198,13 +198,14 @@ def test_emit_histogram_caches_instruments():
 
 def _reader(monkeypatch) -> InMemoryMetricReader:
     """Route what the emitters record onto a reader the test reads back, installing no global meter
-    provider. Both instrument caches hold instruments bound to the provider they were created
+    provider. The instrument caches hold instruments bound to the provider they were created
     against, so they are emptied alongside it."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
+    monkeypatch.setattr(o11y, "_up_down_counters", {})
     return reader
 
 
@@ -439,6 +440,25 @@ def test_a_subagent_profile_splits_the_latency_series_from_the_main_agents(monke
     }
 
 
+def test_active_model_rounds_return_to_zero_with_bounded_dimensions(monkeypatch):
+    reader = _reader(monkeypatch)
+    dimensions = {"model": "claude-opus-5", "provider": "bedrock", "profile": "coding"}
+    o11y.emit_up_down_metric("model_round_active", 1, **dimensions)
+    o11y.emit_up_down_metric("model_round_active", -1, **dimensions)
+    metric = next(
+        metric
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    )
+    (point,) = metric.data.data_points
+    assert metric.name == "ufo.model_round_active"
+    assert point.value == 0
+    assert dict(point.attributes) == dimensions
+    with pytest.raises(ValueError, match="undeclared dimensions on model_round_active: turn_id"):
+        o11y.emit_up_down_metric("model_round_active", 1, turn_id="unbounded")
+
+
 def test_histograms_resolve_a_millisecond_and_a_day_as_delta_exponential(monkeypatch):
     """The production pairing, held against the SDK that implements it. One instrument carries a
     cached file read and a turn that ran for a day: an exponential histogram spends buckets on
@@ -518,7 +538,7 @@ def _init_o11y_against_an_intake(
     monkeypatch,
 ) -> tuple[MeterProvider, list[ExportMetricsServiceRequest], HTTPServer]:
     """`init_o11y` pointed at a real OTLP/HTTP intake: the provider it installed, the export
-    requests that reach the intake, and the server to shut down. Both instrument caches are emptied
+    requests that reach the intake, and the server to shut down. The instrument caches are emptied
     alongside the provider they bind to."""
     exported: list[ExportMetricsServiceRequest] = []
 
@@ -543,6 +563,7 @@ def _init_o11y_against_an_intake(
     monkeypatch.setattr(o11y, "_bridge_warning_logs", lambda provider: None)
     monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
+    monkeypatch.setattr(o11y, "_up_down_counters", {})
     o11y.init_o11y(f"http://127.0.0.1:{server.server_port}")
     provider = installed[0]
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
@@ -803,7 +824,8 @@ def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
     workspace_id = uuid4()
     with ws(workspace_id), o11y.turn_span(uuid4(), uuid4(), None, None, None):
         with o11y.span("model.round", model="claude-opus-5", round=1, secret="x") as opened:
-            opened.add_event("model.first_event")
+            opened.add_event("model.provider_start")
+            opened.add_event("model.first_visible_event")
     child, parent = exporter.get_finished_spans()
     assert child.name == "model.round"
     assert parent.name == "turn"
@@ -812,4 +834,7 @@ def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
     assert child.attributes["ufo.round"] == 1
     assert child.attributes["ufo.workspace_id"] == str(workspace_id)
     assert "ufo.secret" not in child.attributes
-    assert [event.name for event in child.events] == ["model.first_event"]
+    assert [event.name for event in child.events] == [
+        "model.provider_start",
+        "model.first_visible_event",
+    ]

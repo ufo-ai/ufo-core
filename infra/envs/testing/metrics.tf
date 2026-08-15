@@ -33,8 +33,15 @@ resource "datadog_metric_tag_configuration" "model_round_ms" {
   tags                = ["env", "error_class", "host", "model", "profile", "provider", "service"]
 }
 
-resource "datadog_metric_tag_configuration" "model_first_event_ms" {
-  metric_name         = "ufo.model_first_event_ms"
+resource "datadog_metric_tag_configuration" "model_first_visible_event_ms" {
+  metric_name         = "ufo.model_first_visible_event_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "gap", "host", "model", "profile", "provider", "result", "round", "service", "ttl"]
+}
+
+resource "datadog_metric_tag_configuration" "model_provider_start_ms" {
+  metric_name         = "ufo.model_provider_start_ms"
   metric_type         = "distribution"
   include_percentiles = true
   tags                = ["env", "gap", "host", "model", "profile", "provider", "result", "round", "service", "ttl"]
@@ -75,8 +82,14 @@ resource "datadog_metric_metadata" "model_round_ms" {
   unit   = "millisecond"
 }
 
-resource "datadog_metric_metadata" "model_first_event_ms" {
-  metric = "ufo.model_first_event_ms"
+resource "datadog_metric_metadata" "model_first_visible_event_ms" {
+  metric = "ufo.model_first_visible_event_ms"
+  type   = "gauge"
+  unit   = "millisecond"
+}
+
+resource "datadog_metric_metadata" "model_provider_start_ms" {
+  metric = "ufo.model_provider_start_ms"
   type   = "gauge"
   unit   = "millisecond"
 }

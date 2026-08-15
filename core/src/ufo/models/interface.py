@@ -1,6 +1,7 @@
 """The model interface: the ModelClient protocol and the wire types it speaks."""
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
@@ -167,8 +168,14 @@ class ToolCallDelta(BaseModel):
     partial_json: str
 
 
+@dataclass(frozen=True)
+class ModelStreamStart:
+    """The first event received from one provider stream attempt."""
+
+
 ModelEvent = (
-    TextDelta
+    ModelStreamStart
+    | TextDelta
     | ToolCallStart
     | ToolCallDelta
     | ThinkingBlock

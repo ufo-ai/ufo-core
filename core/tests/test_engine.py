@@ -113,6 +113,7 @@ from ufo.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
+    ModelStreamStart,
     PromptCacheTtl,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -652,20 +653,21 @@ class ManualClock:
         return self.now
 
 
-FIRST_EVENT_SECONDS = 0.25
+PROVIDER_START_SECONDS = 0.05
+FIRST_VISIBLE_EVENT_SECONDS = 0.25
 REST_OF_STREAM_SECONDS = 1.75
 
 
 @dataclass(frozen=True)
 class ClockedModel:
-    """Advances the clock as it streams: the first event lands FIRST_EVENT_SECONDS into the round
-    and the stream ends REST_OF_STREAM_SECONDS after that, so time to first event and round wall
-    clock are two different known numbers. Its usage carries all four token kinds."""
+    """Advances the clock through provider start, visible output, and stream completion."""
 
     clock: ManualClock
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        self.clock.now += FIRST_EVENT_SECONDS
+        self.clock.now += PROVIDER_START_SECONDS
+        yield ModelStreamStart()
+        self.clock.now += FIRST_VISIBLE_EVENT_SECONDS - PROVIDER_START_SECONDS
         yield TextDelta(text="answer")
         self.clock.now += REST_OF_STREAM_SECONDS
         yield Usage(input_tokens=11, output_tokens=5, cache_read_tokens=7, cache_write_1h_tokens=3)
@@ -1585,13 +1587,14 @@ async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Pa
 
 def _metric_capture(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
     """Route what the turn emits onto a reader the test reads back, installing no global meter
-    provider. Both instrument caches hold instruments bound to the provider they were created
+    provider. The instrument caches hold instruments bound to the provider they were created
     against, so they are emptied alongside it."""
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     monkeypatch.setattr(o11y.metrics, "get_meter", provider.get_meter)
     monkeypatch.setattr(o11y, "_counters", {})
     monkeypatch.setattr(o11y, "_histograms", {})
+    monkeypatch.setattr(o11y, "_up_down_counters", {})
     return reader
 
 
@@ -1628,7 +1631,7 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     ]
     assert {
         (point.count, point.attributes["round"], point.attributes["gap"])
-        for point in points["ufo.model_first_event_ms"]
+        for point in points["ufo.model_first_visible_event_ms"]
     } == {
         (1, "first", "new"),
         (1, "later", "within_turn"),
@@ -1678,7 +1681,7 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["result"])
-        for point in points["ufo.model_first_event_ms"]
+        for point in points["ufo.model_first_visible_event_ms"]
     } == {("first", "5m_1h", "miss"), ("later", "within_turn", "miss")}
     assert [
         (point.attributes["path"], point.attributes["status"], point.value)
@@ -1707,11 +1710,10 @@ async def test_previous_turn_end_is_loaded_for_cache_gap_measurement(db: None) -
     assert await _previous_turn_ended_at(turn) == ended_at
 
 
-async def test_a_metered_round_separates_first_event_latency_from_the_round_wall(
+async def test_a_metered_round_separates_provider_start_visible_output_and_round_wall(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two histograms carry two different measurements of the same round: the wall clock spans
-    the whole stream, and the first-event latency stops at the first event the model yielded."""
+    """The three histograms locate provider admission, visible output, and stream completion."""
     clock = ManualClock()
     monkeypatch.setattr("ufo.loop.engine.time", clock)
     reader = _metric_capture(monkeypatch)
@@ -1719,8 +1721,17 @@ async def test_a_metered_round_separates_first_event_latency_from_the_round_wall
     frame = await _engine(turn, ClockedModel(clock), tmp_path).run()
     assert frame.status == "done"
     points = _exported_metrics(reader)
-    assert [point.sum for point in points["ufo.model_first_event_ms"]] == [250]
+    assert [point.sum for point in points["ufo.model_provider_start_ms"]] == [50]
+    assert [point.sum for point in points["ufo.model_first_visible_event_ms"]] == [250]
     assert [point.sum for point in points["ufo.model_round_ms"]] == [2000]
+    assert [
+        (point.value, dict(point.attributes)) for point in points["ufo.model_round_active"]
+    ] == [
+        (
+            0,
+            {"model": "claude-opus-4-8", "provider": "anthropic", "profile": "main"},
+        )
+    ]
     assert {
         (point.attributes["kind"], point.value) for point in points["ufo.model_round_tokens_total"]
     } == {("input", 11), ("output", 5), ("cache_read", 7), ("cache_write", 3)}
@@ -1737,9 +1748,7 @@ async def test_a_metered_round_separates_first_event_latency_from_the_round_wall
 async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_spent(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A round that streamed before it died reports how fast the model started answering, on the one
-    first-event series — the model did start, and the failure is already a dimension of the wall
-    clock, which is the measurement the failure changes."""
+    """A round that produced visible output before it died records that output wait once."""
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
     model = UsageThenErrorModel()
@@ -1755,7 +1764,7 @@ async def test_a_failed_round_meters_its_error_class_and_the_tokens_it_already_s
             "error_class": "RuntimeError",
         }
     ]
-    assert [dict(point.attributes) for point in points["ufo.model_first_event_ms"]] == [
+    assert [dict(point.attributes) for point in points["ufo.model_first_visible_event_ms"]] == [
         {
             "model": "claude-opus-4-8",
             "provider": "anthropic",
@@ -1781,7 +1790,7 @@ async def test_a_round_pairs_its_model_with_the_route_that_served_it(
         frame = await _engine(turn, EchoModel(), tmp_path, model_id=model, provider=provider).run()
         assert frame.status == "done"
     points = _exported_metrics(reader)
-    for name in ("ufo.model_round_ms", "ufo.model_first_event_ms"):
+    for name in ("ufo.model_round_ms", "ufo.model_first_visible_event_ms"):
         assert {
             (point.attributes["model"], point.attributes["provider"]) for point in points[name]
         } == set(routes)
@@ -1791,7 +1800,7 @@ async def test_a_round_pairs_its_model_with_the_route_that_served_it(
     } == {(model, provider, kind) for model, provider in routes for kind in ("input", "output")}
 
 
-async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
+async def test_a_round_that_yielded_nothing_records_no_start_or_visible_latency(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reader = _metric_capture(monkeypatch)
@@ -1799,7 +1808,8 @@ async def test_a_round_that_yielded_nothing_records_no_first_event_latency(
     with pytest.raises(ModelStreamError):
         await _engine(turn, StreamErrorModel(), tmp_path).run()
     points = _exported_metrics(reader)
-    assert "ufo.model_first_event_ms" not in points
+    assert "ufo.model_provider_start_ms" not in points
+    assert "ufo.model_first_visible_event_ms" not in points
     assert "ufo.model_round_tokens_total" not in points
     assert [dict(point.attributes) for point in points["ufo.model_round_ms"]] == [
         {

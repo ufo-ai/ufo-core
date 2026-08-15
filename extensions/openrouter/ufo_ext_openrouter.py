@@ -40,6 +40,7 @@ from ufo.sdk.models import (
     ModelRequest,
     ModelResponseTruncated,
     ModelSpec,
+    ModelStreamStart,
     ReasoningSupport,
     TextDelta,
     ToolCallDelta,
@@ -48,6 +49,7 @@ from ufo.sdk.models import (
     openai_messages,
     openai_sdk_client,
 )
+from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "openrouter"
@@ -282,8 +284,8 @@ def _usage_of(usage: CompletionUsage) -> Usage:
 class OpenRouterModelClient:
     """The OpenRouter backend behind the `ModelClient` protocol: it streams ModelEvents from the
     Chat Completions wire, ending with one Usage, exactly as core's OpenAIClient does, and adds
-    OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until the first
-    event yields; finish_reason=length raises ModelResponseTruncated. A normal completion that
+    OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until visible
+    output yields; finish_reason=length raises ModelResponseTruncated. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
     nudge. The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter
@@ -307,7 +309,11 @@ class OpenRouterModelClient:
                 stream = await self.client.chat.completions.create(
                     **self._create_kwargs(request, frozenset(ignore_providers))
                 )
+                stream_started = False
                 async for chunk in stream:
+                    if not stream_started:
+                        stream_started = True
+                        yield ModelStreamStart()
                     provider = _chunk_provider(chunk) or provider
                     if chunk.usage is not None:
                         usage = _usage_of(chunk.usage)
@@ -338,12 +344,33 @@ class OpenRouterModelClient:
                 attempt += 1
                 retryable = error.status_code == 429 or error.status_code >= 500
                 if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+                    log(
+                        "model.provider_status_error",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempts=attempt,
+                        status_code=error.status_code,
+                    )
                     raise
                 header = error.response.headers.get("retry-after")
                 try:
                     wait = max(float(header), 0.0) if header is not None else delay
                 except ValueError:
                     wait = delay
+                log(
+                    "model.provider_status_retry",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    attempt=attempt,
+                    status_code=error.status_code,
+                    wait_seconds=wait,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="status",
+                )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
@@ -358,6 +385,12 @@ class OpenRouterModelClient:
             if dead and provider is not None and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
                 ignore_providers.add(provider)
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="empty",
+                )
                 continue
             yield usage
             return
