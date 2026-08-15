@@ -1,14 +1,10 @@
 """The core-registered `agent` object kind: the workspace's agent as a workspace object.
 
-Each agent field has exactly one write path, so this kind and the governance proposal path can
-never conflict. Spec holds the model, reasoning effort, and public-internet policy, applied
-directly and admin-gated over the `agent` table; `prompt` belongs to `Governance`'s proposal CAS
-and appears here read-only in status beside its digest (the `from_digest` a proposal presents, so
-`object_get agent` is the read half of the proposal flow) — except at birth: create takes the
-initial prompt, the one write that is not an edit, and every later prompt change goes through the
-proposal path. Create is admin-gated on the main agent's lane and never copies grants,
-credentials, sources, or derived data — a new agent starts empty. Delete raises; a non-admin
-mutation raises `AdminRequired`."""
+The spec holds the prompt, model, reasoning effort, sandbox size, and public-internet policy.
+`object_apply` is their one member write path. In chat, only the main agent can change a prompt;
+an admin prepared intent can change any field. Create is admin-gated on the main agent's lane and
+never copies grants, credentials, sources, or derived data. Delete raises; a non-admin mutation
+raises `AdminRequired`."""
 
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -19,7 +15,6 @@ from sqlalchemy.exc import IntegrityError
 
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
-from ufo.governance import prompt_digest
 from ufo.models.interface import AUTO_MODEL
 from ufo.objects import (
     AdminRequired,
@@ -35,20 +30,22 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_SANDBOX_SIZE, ReasoningEffort, SandboxSize
+from ufo.schema.records import (
+    DEFAULT_SANDBOX_SIZE,
+    INTENT_ADMISSION,
+    ReasoningEffort,
+    SandboxSize,
+)
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"
 AGENT_UNDELETABLE = "agents cannot be deleted through objects"
-AGENT_EDIT_GATE = (
-    "editing an agent requires a workspace admin; editing another agent also requires "
-    "the main agent"
-)
+AGENT_EDIT_GATE = "editing an agent requires a workspace admin"
 AGENT_CREATE_GATE = "creating an agent requires a workspace admin, on the main agent"
 AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
-AGENT_PROMPT_IS_PROPOSED = (
-    "an existing agent's prompt changes through the governed proposal path, never object_apply"
+AGENT_TURN_EDIT_GATE = (
+    "an agent turn may change only a prompt, and only the workspace main agent may do it"
 )
 
 
@@ -65,9 +62,7 @@ class AgentSpec(BaseModel):
     model: str = Field(
         description=(
             "The model id the agent runs on, or 'auto' to follow the deploy's configured model — "
-            "status reports the concrete model an 'auto' agent resolves to. The system prompt is "
-            "not part of this spec — prompt changes go through the governed proposal path; read "
-            "the current prompt and its digest from status."
+            "status reports the concrete model an 'auto' agent resolves to."
         )
     )
     internet_access_allowed: bool = Field(
@@ -94,17 +89,15 @@ class AgentSpec(BaseModel):
     prompt: str | None = Field(
         default=None,
         description=(
-            "The agent's system prompt — accepted only when creating an agent. An existing "
-            "agent's prompt changes through the governed proposal path; read it from status."
+            "The complete system prompt. Omit it on an update to keep the current prompt. A "
+            "change takes effect on the next turn."
         ),
     )
 
 
 @dataclass(frozen=True)
 class AgentObjects:
-    """Handlers over the `agent` table: apply rewrites the model, reasoning effort, and internet
-    policy in place and creates a missing agent, admin-gated; past birth the prompt is
-    proposal-owned and rendered read-only in status."""
+    """Admin-gated handlers over the complete `agent` row."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         async with workspace_tx() as connection:
@@ -137,29 +130,29 @@ class AgentObjects:
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None:
         row = await self._row(name)
-        return (
-            None
-            if row is None
-            else ObjectDetail(
-                spec=AgentSpec(
-                    model=row.model,
-                    internet_access_allowed=row.internet_access_allowed,
-                    reasoning=row.reasoning,
-                    sandbox_size=row.sandbox_size,
-                ),
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-                links=(
-                    ()
-                    if row.is_main
-                    else (
-                        ObjectLink(
-                            relation="scoped_to",
-                            target=ObjectRef(kind=AGENT_KIND, name=row.main_agent),
-                        ),
-                    )
-                ),
-            )
+        if row is None:
+            return None
+        spec = AgentSpec(
+            model=row.model,
+            internet_access_allowed=row.internet_access_allowed,
+            reasoning=row.reasoning,
+            sandbox_size=row.sandbox_size,
+            prompt=row.prompt,
+        )
+        return ObjectDetail(
+            spec=spec,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            links=(
+                ()
+                if row.is_main
+                else (
+                    ObjectLink(
+                        relation="scoped_to",
+                        target=ObjectRef(kind=AGENT_KIND, name=row.main_agent),
+                    ),
+                )
+            ),
         )
 
     async def status(
@@ -174,8 +167,6 @@ class AgentObjects:
             return None
         return {
             "main": row.is_main,
-            "prompt": row.prompt,
-            "prompt_digest": prompt_digest(row.prompt),
             "model": _effective_model(ctx, row.model),
         }
 
@@ -191,28 +182,49 @@ class AgentObjects:
         if old is None:
             await self._create(ctx, name, spec)
             return
-        if spec.prompt is not None:
-            raise VerbNotSupported(AGENT_PROMPT_IS_PROPOSED)
         row = await self._row(name)
         if row is None:
             raise UnknownObject(f"no agent object named {name!r}")
-        if not await ctx.speaker_is_admin() or (
-            row.id != ctx.turn.agent_id and not await ctx.agent_is_main()
-        ):
+        if not await ctx.speaker_is_admin():
             raise AdminRequired(AGENT_EDIT_GATE)
+        next_prompt = row.prompt if spec.prompt is None else spec.prompt
+        prompt_changed = next_prompt != row.prompt
+        next_sandbox_size = (
+            spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
+        )
+        settings_changed = (
+            spec.model,
+            spec.internet_access_allowed,
+            spec.reasoning,
+            next_sandbox_size,
+        ) != (
+            row.model,
+            row.internet_access_allowed,
+            row.reasoning,
+            row.sandbox_size,
+        )
+        if ctx.turn.admission_source != INTENT_ADMISSION and (
+            not await ctx.agent_is_main() or settings_changed
+        ):
+            raise AdminRequired(AGENT_TURN_EDIT_GATE)
+        if not next_prompt.strip():
+            raise ValueError("an agent prompt cannot be empty")
+        if not prompt_changed and not settings_changed:
+            return
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
                 .values(
+                    prompt=next_prompt,
                     model=spec.model,
                     internet_access_allowed=spec.internet_access_allowed,
                     reasoning=spec.reasoning,
-                    sandbox_size=spec.sandbox_size,
+                    sandbox_size=next_sandbox_size,
                     updated_at=sa.func.now(),
                 )
                 .where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
-                    tables.agent.c.name == name,
+                    tables.agent.c.id == row.id,
                 )
             )
 
@@ -254,8 +266,6 @@ class AgentObjects:
         raise VerbNotSupported(AGENT_UNDELETABLE)
 
     async def _row(self, name: str) -> sa.Row | None:
-        """The named agent plus the workspace main agent's name, so a child agent's owning-scope
-        link costs no second round trip."""
         main = tables.agent.alias("main_agent")
         async with workspace_tx() as connection:
             return (
@@ -288,27 +298,25 @@ class AgentObjects:
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its model, reasoning effort, and public-internet policy, readable by "
-        "all members, updatable and creatable by a workspace admin. It cannot be deleted through "
-        "objects."
+        "A workspace agent: its prompt, model, reasoning effort, and public-internet policy, "
+        "readable by all members, updatable and creatable by a workspace admin. It cannot be "
+        "deleted through objects."
     ),
     guidance=(
-        "A workspace agent as an object. Apply {model, internet_access_allowed, reasoning, "
-        "sandbox_size} to change its model, public-internet access, reasoning effort, or sandbox "
-        "size — admin only, taking effect on the next turn. Blocking public internet leaves "
+        "A workspace agent as an object. In chat, the main agent may apply the current spec with "
+        "only prompt changed — admin only, taking effect on the next turn. Omit prompt to keep it "
+        "unchanged. The admin portal may also change model, internet_access_allowed, reasoning, "
+        "and sandbox_size. Blocking public internet leaves "
         "exact model, credential, connector, and transfer hosts available. Reasoning 'auto' lets "
         "an Anthropic model set its own thinking depth per request and falls to the provider "
         "default elsewhere; a fixed level pins it. Sandbox size ('small', 'medium', 'large') "
         "picks the cpu/memory tier a new conversation's sandbox is provisioned at, where the "
         "deploy's sandbox backend offers sizes; existing conversations keep the sandbox they "
         "have. Applying a name no agent holds "
-        "creates one — admin only, from the main agent, and the spec then requires `prompt`, the "
-        "one write that is not an edit; a new agent starts empty, inheriting no grants, "
-        "credentials, sources, or memory. An existing agent's prompt is read-only here: changes "
-        "use the governed proposal path, and status carries its current value and digest. The "
-        "main agent may manage other agents; a child agent may only manage itself, and its "
-        "`scoped_to` link names the main agent it runs under. Delete is "
-        "refused. Confirm before changing settings."
+        "creates one — admin only, from the main agent, and the spec then requires `prompt`; a new "
+        "agent starts empty, inheriting no grants, credentials, sources, or memory. A child's "
+        "`scoped_to` link names the main agent it runs under. Delete is refused. Confirm before "
+        "changing settings."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),

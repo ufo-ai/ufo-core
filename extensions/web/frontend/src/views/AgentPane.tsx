@@ -50,7 +50,7 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
         onPick={onTab}
       />
       <TabPanel group="agent" current={tab} className={BANDS} data-testid="panel">
-        {tab === "overview" ? <Overview agent={agent} /> : null}
+        {tab === "overview" ? <Overview key={agent.id} agent={agent} /> : null}
         {tab === "automations" ? <Automations key={agent.id} agentId={agent.id} /> : null}
         {tab === "conversations" ? (
           <Conversations key={key} agent={agent} place={merged} onPlace={record} />

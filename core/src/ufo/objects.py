@@ -852,6 +852,10 @@ class ObjectExplainInput(BaseModel):
 
 class ObjectApplyInput(BaseModel):
     manifest: str
+    create_only: bool = Field(
+        default=False,
+        description="Refuse if an object with this kind and name already exists.",
+    )
     agent: str = Field(
         default="",
         description=(
@@ -1063,6 +1067,9 @@ class ObjectVerbs:
         bound_ctx = self._bound_ctx(ctx, bound)
         with object_agent(target):
             existing = await bound.kind.store.get(bound_ctx, name)
+            if args.create_only and existing is not None:
+                article = "an" if kind_name[0].lower() in "aeiou" else "a"
+                raise ValueError(f"{article} {kind_name} named {name!r} already exists")
             operation: AgentTargetVerb = "create" if existing is None else "update"
             if target is not None and operation not in bound.kind.agent_target_verbs:
                 raise VerbNotSupported(

@@ -97,6 +97,7 @@ test("an admin creates an agent from the bar, and the workspace answers with it"
   expect(posted[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/intents");
   expect(JSON.parse(posted[0].body)).toEqual({
     verb: "apply",
+    create_only: true,
     kind: "agent",
     name: "research",
     spec: {

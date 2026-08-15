@@ -1,6 +1,6 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { REFUSAL_HEADER } from "@/lib/api";
@@ -13,6 +13,7 @@ import {
   MEMBER,
   PlacedWorkspace,
   SECOND,
+  SECOND_ID,
   NO_ARTIFACTS,
   NO_TASKS,
   SITE_KIND,
@@ -47,7 +48,7 @@ const OVERVIEW = {
     prompt: "be useful",
     prompt_digest: "abc123",
   },
-  spec: { model: "opus", reasoning: "high" },
+  spec: { model: "opus", reasoning: "high", internet_access_allowed: true },
   spec_schema: {
     properties: {
       model: { type: "string" },
@@ -104,7 +105,7 @@ test("the overview states the agent's facts, renders its schema, and submits a s
   expect(fact("Updated")).toBe("Jul 30 2026");
   expect(fact("Prompt digest")).toBe("abc123");
   expect(fact("Web audience")).toBe("Every member");
-  expect(screen.getByText("be useful")).toBeTruthy();
+  expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be useful");
 
   await pick("reasoning", "low");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -114,9 +115,133 @@ test("the overview states the agent's facts, renders its schema, and submits a s
     verb: "apply",
     kind: "agent",
     name: "assistant",
-    spec: { reasoning: "low", model: "opus" },
+    spec: { reasoning: "low", model: "opus", internet_access_allowed: true },
   });
   expect(await screen.findByText("Applied.")).toBeTruthy();
+  expect((screen.getByLabelText("reasoning") as HTMLElement).textContent).toContain("low");
+
+  await userEvent.clear(screen.getByLabelText("Prompt"));
+  await userEvent.type(screen.getByLabelText("Prompt"), "review every request");
+  await userEvent.click(screen.getByRole("button", { name: "Save prompt" }));
+  await waitFor(() => expect(posted.length).toBe(2));
+  expect(posted[1]).toEqual({
+    verb: "apply",
+    kind: "agent",
+    name: "assistant",
+    spec: { prompt: "review every request" },
+  });
+  expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(
+    "review every request",
+  );
+});
+
+test("switching agents discards unsaved overview edits", async () => {
+  wire({
+    "/overview": (url) =>
+      json(
+        url.includes(SECOND_ID)
+          ? {
+              ...OVERVIEW,
+              agent: { ...OVERVIEW.agent, name: "second", prompt: "be second" },
+            }
+          : OVERVIEW,
+      ),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />,
+  );
+  await userEvent.clear(await screen.findByLabelText("Prompt"));
+  await userEvent.type(screen.getByLabelText("Prompt"), "do not carry this");
+
+  location.hash = "#/agents/" + SECOND_ID;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  await waitFor(() =>
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be second"),
+  );
+});
+
+test("overview polling preserves dirty edits", async () => {
+  const posted: unknown[] = [];
+  let reads = 0;
+  wire({
+    "/overview": () => {
+      reads += 1;
+      return json(
+        reads === 1
+          ? OVERVIEW
+          : {
+              ...OVERVIEW,
+              agent: {
+                ...OVERVIEW.agent,
+                prompt: "changed elsewhere",
+              },
+              spec: { ...OVERVIEW.spec, reasoning: "medium" },
+            },
+      );
+    },
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: false, message: "Agent changed." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  vi.useFakeTimers();
+  try {
+    render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue("be useful")).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("internet_access_allowed"));
+    fireEvent.change(screen.getByLabelText("Prompt"), {
+      target: { value: "review every request" },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reads).toBe(2);
+    expect((screen.getByLabelText("internet_access_allowed") as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(
+      "review every request",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await act(async () => await Promise.resolve());
+    fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
+    await act(async () => await Promise.resolve());
+    expect(posted).toMatchObject([
+      {
+        spec: { internet_access_allowed: false },
+      },
+      {
+        spec: { prompt: "review every request" },
+      },
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a non-admin reads an agent prompt but cannot edit it", async () => {
+  wire({
+    "/overview": () => json({ ...OVERVIEW, audience: null }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
+  expect(await screen.findByText("be useful")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Save prompt" })).toBeNull();
 });
 
 test("the agents index states what a row is, and leaves the address list to its own page", async () => {

@@ -51,7 +51,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `workspace` | The team unit: name, config digest. Members are unlimited — one flat fee per workspace, nothing bounded or counted here. |
 | `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. Clearing it is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding, bound to one agent — the agent every conversation the surface creates lands on (a new binding lands on the workspace's explicit main agent). Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
-| `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope. Exactly one per workspace is `is_main`: onboarding creates it, unbound surfaces route to it, and it may update any agent's settings without crossing member or audience boundaries. |
+| `agent` | A configured agent: name, prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, memory scope. Exactly one per workspace is `is_main`: onboarding creates it, unbound surfaces route to it, and it may update any agent's prompt without crossing member or audience boundaries. |
 | `connection` | One member-owned broker account identity per `(workspace, provider, account)`. It holds no secret. `shared` controls disclosure and `account_label` names the account. `connect_account` creates or reuses it and refuses to reassign another member's account. Deleting it atomically stops its sources, tombstones their pages, and removes every connector grant. |
 | `connector_grant` | One connection → agent attachment. It records the granting conversation; sharing lives on the connection. `connect_account` creates the intended edge. The `connector_grant` object flips the connection's sharing flag or revokes only the current agent's edge. Account resolution admits the exact acting member's private attachments plus shared connections, preferring private; egress remains agent-scoped. |
 | `source` | One member-owned, agent-neutral synced dataset. `shared` widens its member audience; it never grants an agent access. Sync uses the owner's connection independently of agent grants and stores one physical copy. |
@@ -324,8 +324,8 @@ source-page changes under a resumable cursor), `transaction()` over the extensio
 an off-turn handler hands the agent a payload too large for context and it reads it with its file
 tools next turn — scoped to the ambient workspace, never another's), and
 `agents.propose_change(...)` — the governed promotion path: an extension never edits agent config
-directly; it opens a proposal (prompt, skills, tool grants) that applies through the same
-grant/approval flow chat uses. This is what makes a full self-improvement extension expressible —
+directly; it opens a proposal (prompt, skills, tool grants) that applies through Governance
+approval. This is what makes a full self-improvement extension expressible —
 mine trajectories, evaluate candidates via `invoke`, promote through `propose_change` — not just
 prompt files on disk. Extensions never see raw DB handles or other workspaces.
 
@@ -594,9 +594,12 @@ the kind's refusal, the turn is the audit record, and the per-conversation parti
 member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
 chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
 at stream time, never in a transcript or an intent response. The Agents screen creates an agent
-through the same lane — admin-only, on the main agent's lane, taking the initial prompt, the one
-prompt write that is not an edit — and the boot read carries the kind's spec schema only to a
-member it admits a create from, so the act is drawn exactly where the lane honours it. The
+through the same lane — admin-only, on the main agent's lane, taking the initial prompt — and the
+boot read carries the kind's spec schema only to a member it admits a create from, so the act is
+drawn exactly where the lane honours it. An admin
+replaces any existing prompt or setting from the agent page's prepared intent. In chat, only the
+main agent may replace an agent prompt, including its own; a child agent may replace none. The
+agent kind writes the complete row directly, and the turn is the audit record. The
 administration view mutates through the lane as well: member role and seat changes through the
 member kind's guards, and web-audience grants riding the target agent's own lane to the same store
 the chat verbs write.

@@ -26,7 +26,7 @@ from ufo.sdk.objects import AgentSpec
 from ufo.sdk.surfaces import CredentialSlotView, SurfaceContext, TerminalFrame, ToolIntent
 from ufo_ext_web.audience import granted_emails, web_extension
 
-INTENT_MAX_CHARS = 16_384
+INTENT_MAX_BYTES = 65_536
 INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
@@ -60,6 +60,7 @@ class ApplyIntent(BaseModel):
     ]
     name: str
     spec: dict[str, JsonValue] | None = None
+    create_only: bool = False
 
     @classmethod
     def kinds(cls) -> frozenset[str]:
@@ -99,6 +100,8 @@ class ApplyIntent(BaseModel):
             raise ValueError("attach and detach pair with the connector_grant kind exactly")
         if self.verb == "detach" and self.spec is not None:
             raise ValueError("a detach intent carries no spec")
+        if self.create_only and (self.verb != "apply" or self.kind != "agent"):
+            raise ValueError("create_only pairs with applying the agent kind exactly")
         return self
 
 
@@ -254,11 +257,13 @@ def _tool_intent(
             manifest = yaml.safe_dump(
                 {"kind": submitted.kind, "name": submitted.name, "spec": submitted.spec or {}},
                 sort_keys=False,
+                allow_unicode=True,
             )
             return ToolIntent(
                 tool="object_apply",
                 input={
                     "manifest": manifest,
+                    "create_only": submitted.create_only,
                     "user_description": (
                         f"Apply {submitted.kind} {submitted.name} from the portal."
                     ),
@@ -294,17 +299,53 @@ async def submit_intent(
     cannot serve refuses before a turn exists, because a stored unknown id would wedge the agent's
     every later turn at setup."""
     body = await request.body()
-    if len(body) > INTENT_MAX_CHARS:
-        return Response(f"Intent exceeds {INTENT_MAX_CHARS} characters.", status_code=413)
+    if len(body) > INTENT_MAX_BYTES:
+        return JSONResponse(
+            {
+                "applied": False,
+                "message": f"Intent exceeds {INTENT_MAX_BYTES} bytes.",
+            },
+            status_code=413,
+        )
     try:
         submitted = PanelIntent.model_validate({"submitted": json.loads(body)}).submitted
     except (ValidationError, ValueError):
         return JSONResponse({"error": "malformed intent"}, status_code=400)
+    submitted_fields = (
+        frozenset(submitted.spec)
+        if isinstance(submitted, ApplyIntent)
+        and submitted.kind == "agent"
+        and submitted.spec is not None
+        else frozenset()
+    )
+    if (
+        isinstance(submitted, ApplyIntent)
+        and submitted.verb == "apply"
+        and submitted.kind == "agent"
+        and submitted_fields == {"prompt"}
+    ):
+        detail = await ctx.agent_detail(agent_id)
+        if detail is None or detail.name != submitted.name:
+            return JSONResponse({"applied": False, "message": "No such agent."})
+        if submitted.spec is None:
+            raise RuntimeError("a prompt-only agent intent has no spec")
+        prompt = submitted.spec["prompt"]
+        submitted = submitted.model_copy(
+            update={
+                "spec": {
+                    "model": detail.model,
+                    "internet_access_allowed": detail.internet_access_allowed,
+                    "reasoning": detail.reasoning,
+                    "sandbox_size": detail.sandbox_size,
+                    "prompt": prompt,
+                }
+            }
+        )
     if isinstance(submitted, ApplyIntent) and submitted.kind == "agent" and submitted.spec:
         model = submitted.spec.get("model")
         if model not in ctx.models:
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
-        if submitted.spec.get("sandbox_size") is not None and not ctx.sandbox_sizes:
+        if "sandbox_size" in submitted_fields and not ctx.sandbox_sizes:
             return JSONResponse(
                 {"applied": False, "message": "This deploy does not offer sandbox sizes."}
             )
@@ -316,12 +357,24 @@ async def submit_intent(
             return JSONResponse(
                 {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
             )
+    intent = _tool_intent(submitted, slot)
+    if intent.tool == "object_apply":
+        manifest = intent.input.get("manifest")
+        if not isinstance(manifest, str):
+            raise RuntimeError("an object apply intent has no manifest")
+        if len(manifest.encode()) > INTENT_MAX_BYTES:
+            return JSONResponse(
+                {
+                    "applied": False,
+                    "message": f"Intent exceeds {INTENT_MAX_BYTES} bytes.",
+                },
+                status_code=413,
+            )
     conversation_id = await ctx.conversation_for(
         f"intent/{agent_id}/{email}",
         conversation_audience(member_id),
         agent_id=agent_id,
     )
-    intent = _tool_intent(submitted, slot)
     admitted = await ctx.admit(
         conversation_id,
         intent.model_dump_json(),
@@ -372,9 +425,8 @@ def agent_create_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
 
 
 def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
-    """The settings form's field source: the writable spec schema minus `prompt`, which is
-    create-only — an existing agent's prompt changes through the governed proposal path, and a
-    field the update verb refuses must not render on the update form."""
+    """The settings form's field source: the writable spec schema minus `prompt`, which the
+    overview renders in its own multiline control."""
     schema = AgentSpec.model_json_schema()
     hidden = {"prompt"} if sandbox_sizes else {"prompt", "sandbox_size"}
     schema["properties"] = {

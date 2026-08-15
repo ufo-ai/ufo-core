@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Facts, Group } from "@/components/ui/facts";
-import { Hint } from "@/components/ui/field";
+import { Field, Hint, Textarea } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
@@ -32,6 +32,11 @@ export function Overview({ agent }: { agent: Agent }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<OverviewPayload>("/agents/" + agent.id + "/overview", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState<Record<string, SpecValue> | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [promptDirty, setPromptDirty] = useState(false);
+  const [promptSaved, setPromptSaved] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
 
@@ -40,15 +45,31 @@ export function Overview({ agent }: { agent: Agent }) {
   useEffect(() => {
     if (!payload) return;
     const properties = payload.spec_schema.properties ?? {};
-    setValues(
-      Object.fromEntries(
-        Object.keys(properties).map((key) => [
-          key,
-          initialSpecValue(properties[key], payload.spec[key]),
-        ]),
-      ),
+    const projected = Object.fromEntries(
+      Object.keys(properties).map((key) => [
+        key,
+        initialSpecValue(properties[key], payload.spec[key]),
+      ]),
     );
-  }, [payload]);
+    const settingsLanded =
+      settingsSaved !== null &&
+      Object.keys(properties).every((key) => projected[key] === settingsSaved[key]);
+    if (!settingsDirty || settingsLanded) {
+      setValues(projected);
+      if (settingsLanded) {
+        setSettingsDirty(false);
+        setSettingsSaved(null);
+      }
+    }
+    const promptLanded = promptSaved !== null && payload.agent.prompt === promptSaved;
+    if (!promptDirty || promptLanded) {
+      setPrompt(payload.agent.prompt);
+      if (promptLanded) {
+        setPromptDirty(false);
+        setPromptSaved(null);
+      }
+    }
+  }, [payload, promptDirty, promptSaved, settingsDirty, settingsSaved]);
 
   return (
     <Panel state={state} shape="form">
@@ -67,7 +88,28 @@ export function Overview({ agent }: { agent: Agent }) {
           });
           setBusy(false);
           setNotice(outcomeNotice(outcome));
-          if (outcome.applied) setReloads((count) => count + 1);
+          if (outcome.applied) {
+            setSettingsSaved({ ...values });
+            setReloads((count) => count + 1);
+          }
+        }
+
+        async function savePrompt(event: FormEvent) {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          const outcome = await postIntent(agent.id, {
+            verb: "apply",
+            kind: "agent",
+            name: ready.agent.name,
+            spec: { prompt },
+          });
+          setBusy(false);
+          setNotice(outcomeNotice(outcome));
+          if (outcome.applied) {
+            setPromptSaved(prompt);
+            setReloads((count) => count + 1);
+          }
         }
 
         return (
@@ -110,7 +152,11 @@ export function Overview({ agent }: { agent: Agent }) {
                     ]),
                   )}
                   options={{ model: ready.models }}
-                  onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
+                  onChange={(key, value) => {
+                    setSettingsDirty(true);
+                    setSettingsSaved(null);
+                    setValues((current) => ({ ...current, [key]: value }));
+                  }}
                 />
                 {ready.deploy.sandbox_internet ? null : (
                   <Hint className="m-0 mt-md">
@@ -127,14 +173,33 @@ export function Overview({ agent }: { agent: Agent }) {
             </Group>
 
             <Group title="Prompt">
-              <p className="m-0 py-md text-label text-ink-soft">
-                Prompt changes go through the governed proposal path in chat.
-              </p>
-              <Reveal bare>
-                <pre className="m-0 font-sans text-label text-ink-soft whitespace-pre-wrap wrap-anywhere">
-                  {ready.agent.prompt}
-                </pre>
-              </Reveal>
+              {ready.audience !== null && ready.audience !== undefined ? (
+                <form onSubmit={savePrompt}>
+                  <Field label="Prompt" htmlFor="agent-prompt">
+                    <Textarea
+                      id="agent-prompt"
+                      required
+                      value={prompt}
+                      onChange={(event) => {
+                        setPromptDirty(true);
+                        setPromptSaved(null);
+                        setPrompt(event.target.value);
+                      }}
+                    />
+                  </Field>
+                  <div className="mt-lg flex justify-end">
+                    <Button type="submit" variant="send" size="bar" busy={busy}>
+                      Save prompt
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <Reveal bare>
+                  <pre className="m-0 font-sans text-label text-ink-soft whitespace-pre-wrap wrap-anywhere">
+                    {ready.agent.prompt}
+                  </pre>
+                </Reveal>
+              )}
             </Group>
           </>
         );

@@ -5647,6 +5647,28 @@ async def test_a_delete_intent_carrying_a_spec_is_malformed(
     assert turns == 0
 
 
+async def test_an_oversized_intent_returns_a_portal_refusal(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        content="é".encode() * (web_panels.INTENT_MAX_BYTES // 2 + 1),
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 413
+    assert refused.json() == {
+        "applied": False,
+        "message": f"Intent exceeds {web_panels.INTENT_MAX_BYTES} bytes.",
+    }
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
 async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -6666,6 +6688,66 @@ async def test_overview_projects_spec_schema_ceiling_and_admin_audience(
     assert stranger.status_code == 404
 
 
+async def test_admin_updates_agent_prompt_through_the_intent_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(sandbox_size="large")
+            .where(tables.agent.c.id == agent_id)
+        )
+    prompt = "検" * 11_000
+    intent = {
+        "verb": "apply",
+        "kind": "agent",
+        "name": "assistant",
+        "spec": {"prompt": prompt},
+    }
+    changed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=intent,
+        headers=headers,
+    )
+    assert changed.status_code == 200
+    assert changed.json()["applied"] is True
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.prompt,
+                    tables.agent.c.model,
+                    tables.agent.c.internet_access_allowed,
+                    tables.agent.c.reasoning,
+                    tables.agent.c.sandbox_size,
+                ).where(tables.agent.c.id == agent_id)
+            )
+        ).one()
+        proposal_count = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.proposal))
+        ).scalar_one()
+        turn = (
+            await connection.execute(
+                sa.select(tables.turn.c.admission_source, tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(changed.json()["turn_id"])
+                )
+            )
+        ).one()
+    assert tuple(row) == (
+        prompt,
+        "claude-opus-4-8",
+        True,
+        "high",
+        "large",
+    )
+    assert proposal_count == 0
+    assert turn.admission_source == "intent"
+    assert json.loads(turn.inbound)["tool"] == "object_apply"
+
+
 async def test_concurrent_intents_serialize_on_the_members_intent_conversation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -6869,13 +6951,49 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
 async def test_an_oversized_intent_answers_413(web: tuple[AsyncClient, UUID, UUID]) -> None:
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    body = dict(INTENT_BODY, spec={"model": "x" * 20_000, "internet_access_allowed": False})
+    body = dict(
+        INTENT_BODY,
+        spec={"model": "x" * (web_panels.INTENT_MAX_BYTES + 1), "internet_access_allowed": False},
+    )
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=body,
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert refused.status_code == 413
+
+
+async def test_an_expanded_intent_answers_413_before_admission(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    body = {
+        "verb": "apply",
+        "kind": "agent",
+        "name": "assistant",
+        "spec": {"prompt": "x" * (web_panels.INTENT_MAX_BYTES - 100)},
+    }
+    encoded = json.dumps(body, separators=(",", ":")).encode()
+    assert len(encoded) <= web_panels.INTENT_MAX_BYTES
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        content=encoded,
+        headers={
+            "content-type": "application/json",
+            "cookie": f"{SESSION_COOKIE}={token}",
+        },
+    )
+    assert refused.status_code == 413
+    assert refused.json() == {
+        "applied": False,
+        "message": f"Intent exceeds {web_panels.INTENT_MAX_BYTES} bytes.",
+    }
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
 
 
 async def test_overview_reports_the_deploy_internet_ceiling_when_granted(
@@ -6953,13 +7071,14 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
 ) -> None:
     """The administration view's create rides the same lane as every panel mutation: an admin's
     create intent on the main agent's lane lands a fresh non-main row with exactly the submitted
-    configuration; without a prompt, under a taken name, or from a non-admin the kind's refusal
-    returns — and nothing is created."""
+    configuration. A taken name refuses without changing its row. Without a prompt or from a
+    non-admin, the kind refuses and nothing is created."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     envelope = {
         "verb": "apply",
+        "create_only": True,
         "kind": "agent",
         "name": "research",
         "spec": {
@@ -6998,15 +7117,32 @@ async def test_an_admin_creates_an_agent_through_the_intent_lane(
     assert "research" in [agent["name"] for agent in listed.json()["agents"]]
     duplicate = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
-        json=envelope,
+        json={
+            **envelope,
+            "spec": {**envelope["spec"], "prompt": "replace the existing prompt"},
+        },
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
-    assert duplicate.json()["applied"] is False
-    assert "proposal path" in duplicate.json()["message"]
+    assert duplicate.json() == {
+        "applied": False,
+        "message": "an agent named 'research' already exists",
+        "turn_id": duplicate.json()["turn_id"],
+    }
+    async with workspace_tx() as connection:
+        prompt = (
+            await connection.execute(
+                sa.select(tables.agent.c.prompt).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == "research",
+                )
+            )
+        ).scalar_one()
+    assert prompt == "be curious"
     promptless = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={
             "verb": "apply",
+            "create_only": True,
             "kind": "agent",
             "name": "second",
             "spec": {

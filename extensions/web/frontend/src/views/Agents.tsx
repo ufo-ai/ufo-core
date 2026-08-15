@@ -146,7 +146,7 @@ export function Agents({
    *  lane, so that is the lane the intent rides. A create that landed is read back through the one
    *  answer to what agents exist, which the table, the sidebar, and the router all draw from. */
   async function create(lane: string, envelope: SpecEnvelope): Promise<NoticeState> {
-    const outcome = await postIntent(lane, envelope);
+    const outcome = await postIntent(lane, { ...envelope, create_only: true });
     if (outcome.applied) {
       onAgents();
       setToast({ title: "Created " + envelope.name + "." });
