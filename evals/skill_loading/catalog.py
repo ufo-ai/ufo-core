@@ -530,6 +530,12 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-skill",),
     ),
     SkillLoadCase(
+        "coding-github-app-api-identity",
+        "Have a coding agent publish a pull-request review as our installed ufo GitHub App.",
+        expected="coding",
+        forbidden=("create-skill",),
+    ),
+    SkillLoadCase(
         "createskill-capture-workflow",
         "Capture the weekly-report process described in notes/weekly-report-process.md as a "
         "reusable custom skill for this agent so its future turns produce the report the same way.",
@@ -551,6 +557,13 @@ CASES: tuple[SkillLoadCase, ...] = (
         "scripts/preflight.py into a skill I can load in later turns.",
         expected="create-skill",
         workspace_files=(RELEASE_CHECKLIST, PREFLIGHT_SCRIPT),
+    ),
+    SkillLoadCase(
+        "createskill-github-review-process",
+        "Create a reusable skill from this process: inspect a GitHub pull request, list blocking "
+        "findings, and publish the result. Do not review a pull request now.",
+        expected="create-skill",
+        forbidden=("coding",),
     ),
     SkillLoadCase(
         "explore-customers-profile",

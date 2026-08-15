@@ -12,6 +12,33 @@ from evals.harness.capability import (
 from evals.harness.scorers import combine, exact_scorer, lane_scorer
 
 BACKGROUND_FLAG = TypeAdapter(bool)
+GITHUB_APP_API_COMMAND = 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api'
+
+
+def github_app_api_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loaded = False
+        for call in output.calls:
+            if call.name == "connect_account":
+                return CapabilityVerdict(False, "attempted a connector connection")
+            if call.name == "load_skill" and call.succeeded and call.input == {"name": "coding"}:
+                loaded = True
+                continue
+            if not loaded or call.name != "spawn_subagent" or not call.succeeded:
+                continue
+            match call.input:
+                case {"profile": "coding", "payload": {"objective": str(objective)}}:
+                    if GITHUB_APP_API_COMMAND in objective:
+                        return CapabilityVerdict(True, "loaded coding and delegated App API auth")
+                case _:
+                    continue
+        return CapabilityVerdict(False, "no coding objective carries the App API auth command")
+
+    return DescribedGrader(
+        "coding loads before a coding spawn whose objective carries the installed-App gh command, "
+        "without a connector connection",
+        grade,
+    )
 
 
 def parallel_checkout_scorer() -> Grader:
@@ -93,5 +120,13 @@ CASES = (
         parallel_checkout_scorer(),
         web_dependent=True,
         digest_tag="delegation:coding-subagent-parallel-checkouts",
+    ),
+    CapabilityCase(
+        "coding-subagent-github-app-api",
+        "The workspace already installed the ufo GitHub App. Delegate to a coding subagent to "
+        "state how it would make a GitHub API write as that App. Do not make the request and do "
+        "not connect another GitHub account.",
+        github_app_api_scorer(),
+        digest_tag="delegation:coding-subagent-github-app-api",
     ),
 )

@@ -10,9 +10,9 @@ parent decides what reaches the member. Core wraps the prompt with the shared ci
 discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
 to that child.
 
-The pack also declares the git credential slot, because a checkout is the work it routes: a
-workspace that fills it gets authenticated `git clone` and `git push` for private repositories,
-with the token swapped onto the wire at the egress proxy and only a sentinel inside the sandbox."""
+The pack also declares the GitHub credential slots, because repository work includes Git and API
+calls. A workspace that installs the App gets authenticated Git and API access, with short-lived
+installation tokens swapped onto each wire and only sentinels inside the sandbox."""
 
 import os
 from pathlib import Path
@@ -36,7 +36,7 @@ from ufo_ext_coding.connect import (
     github_installed,
     install_workspace,
 )
-from ufo_ext_coding.github_app import GIT_SLOT, app_tokens
+from ufo_ext_coding.github_app import API_SLOT, GIT_SLOT, GitHubAPIAuth, app_tokens
 
 NAME = "coding"
 VERSION = "0.1.0"
@@ -83,6 +83,9 @@ GIT_APP_KEY_ENV = "GITHUB_APP_PRIVATE_KEY"
 GIT_HOST = "github.com"
 GIT_SENTINEL = "UFO_SENTINEL_GIT_GITHUB"
 GIT_BASIC_USER = "x-access-token"
+GITHUB_API_HOST = "api.github.com"
+GITHUB_API_SENTINEL = "UFO_SENTINEL_API_GITHUB"
+GITHUB_API_AUTH_ENV = "UFO_GITHUB_API_AUTH"
 GIT_INSTALLATION = CredentialSlot(
     name=GIT_INSTALLATION_SLOT,
     description="Which ufo GitHub App installation this workspace uses. Filled by installing the "
@@ -108,19 +111,37 @@ def github_app_id() -> str | None:
     return registration[GIT_APP_ID_ENV]
 
 
+GITHUB_APP_TOKENS = None if github_app_id() is None else app_tokens(GIT_INSTALLATION_SLOT)
+GITHUB_API_TOKENS = (
+    None if GITHUB_APP_TOKENS is None else app_tokens(GIT_INSTALLATION_SLOT, permissions=None)
+)
 GIT_CREDENTIAL = CredentialSlot(
     name=GIT_SLOT,
     description="A GitHub token with repository contents read and write — a fine-grained personal "
     "access token scoped to the repositories the agent works in. Only needed for a repository "
     "outside an organization that installed the ufo GitHub App; where the App is installed, its "
     "own token is minted per turn instead.",
-    source=None if github_app_id() is None else app_tokens(GIT_INSTALLATION_SLOT),
+    source=GITHUB_APP_TOKENS,
     injection=InjectionTarget(
         host=GIT_HOST,
         header="Authorization",
         sentinel=GIT_SENTINEL,
         dimension="requests",
         git_basic_user=GIT_BASIC_USER,
+    ),
+)
+GITHUB_API_CREDENTIAL = CredentialSlot(
+    name=API_SLOT,
+    description="GitHub API authentication from the installed ufo GitHub App or the stored "
+    "fine-grained personal access token fallback.",
+    member_filled=False,
+    source=GitHubAPIAuth(tokens=GITHUB_API_TOKENS, fallback_slot=GIT_SLOT),
+    injection=InjectionTarget(
+        host=GITHUB_API_HOST,
+        header="Authorization",
+        sentinel=GITHUB_API_SENTINEL,
+        env=GITHUB_API_AUTH_ENV,
+        dimension="requests",
     ),
 )
 
@@ -140,13 +161,12 @@ def manifest() -> Manifest:
         version=VERSION,
         subagents=(CODING_PROFILE,),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
-        credentials=(GIT_INSTALLATION, GIT_CREDENTIAL),
+        credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),
         tools=(
             ToolDef(
                 name="connect_github",
                 description="Install the workspace's ufo GitHub App for private clone, push, and "
-                "PR work: hands an admin the App install link. Admin-only. GitHub operations "
-                "still need the separate connector connection.",
+                "GitHub API work: hands an admin the App install link. Admin-only.",
                 input_model=ConnectGitHubInput,
                 handler=connect_github,
             ),

@@ -264,11 +264,9 @@ def test_coding_prompt_wraps_with_citation_and_fills_the_skill_index() -> None:
     assert "list_skills" not in coding.CODING_PROFILE.tool_names
 
 
-def test_coding_manifest_declares_the_git_credential_the_proxy_swaps() -> None:
-    """The pack that routes repo work declares the credential a checkout needs: one slot, injected
-    on `github.com` as the Basic password half, so the sandbox holds a sentinel and the proxy holds
-    the swap. A bearer here would be refused by git's smart-HTTP even for a public repository."""
-    installation, slot = coding.manifest().credentials
+def test_coding_manifest_declares_the_github_credentials_the_proxy_swaps() -> None:
+    """The Git and API wires get the same credential in their required authentication shapes."""
+    installation, slot, api = coding.manifest().credentials
     assert installation.name == "github_app_installation"
     assert installation.injection is None
     assert installation.member_filled is False
@@ -278,6 +276,22 @@ def test_coding_manifest_declares_the_git_credential_the_proxy_swaps() -> None:
     assert (slot.injection.host, slot.injection.header) == ("github.com", "Authorization")
     assert slot.injection.git_basic_user == "x-access-token"
     assert slot.injection.env is None
+    assert api.name == "github_api_auth"
+    assert api.member_filled is False
+    assert api.injection is not None
+    assert (api.injection.host, api.injection.header) == ("api.github.com", "Authorization")
+    assert api.injection.env == "UFO_GITHUB_API_AUTH"
+    assert api.injection.git_basic_user is None
+    assert isinstance(api.source, coding.GitHubAPIAuth)
+    assert api.source.tokens is coding.GITHUB_API_TOKENS
+
+
+def test_coding_prompt_and_skill_consume_the_github_api_credential() -> None:
+    command = 'GH_TOKEN="$UFO_GITHUB_API_AUTH"'
+    skill = (coding.SKILLS_ROOT / "coding" / "SKILL.md").read_text()
+
+    assert command in coding.CODING_PROMPT
+    assert command in skill
 
 
 def test_the_connect_tool_and_its_return_leg_ship_together() -> None:

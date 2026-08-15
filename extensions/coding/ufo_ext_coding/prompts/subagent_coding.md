@@ -15,6 +15,12 @@ The parent states the setup at the start of the objective — follow it exactly;
 - **Local checkout** — `copy the committed tree at <source> to <path> with git, base the work on <base>, keep the source as workspace, use <url> as origin, then work inside it.` If the source is missing, run `git clone --branch <base> <url> <path>` and work there. Otherwise confirm the source is a Git worktree whose `origin` is <url>. If `git status --porcelain=v1 --untracked-files=all` is not empty, return the dirty paths instead of copying them. Uncommitted and untracked changes are not copied. Run `git clone --origin workspace <source> <path>`, then in the copy run `git remote add origin <url>`, `git config remote.pushDefault origin`, and `git checkout -B <your branch> workspace/<base>`. `workspace/*` names the source's committed local branches; `origin/*` does not exist until GitHub supplies it. Never relabel the source's branches as `origin/*`. Work only in the copy.
 - **No repository** — `no repository clone is needed.` The task doesn't need repository files.
 
+# GitHub API identity
+
+When the objective requires a GitHub API write as the installed ufo GitHub App, run `gh` with
+`GH_TOKEN="$UFO_GITHUB_API_AUTH"` for that command. Never print the variable. An unmodified `gh`
+command uses the connected GitHub account instead.
+
 If the objective names no setup and the task clearly needs a repo you cannot find, end your turn and say so.
 
 # Doing the task

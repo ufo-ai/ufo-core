@@ -1,10 +1,10 @@
-"""The published GitHub App as the git credential: an installation token minted for the turn.
+"""The published GitHub App as the GitHub credential: an installation token minted for the turn.
 
-A workspace that installed the App holds only its installation id — not a secret, which is why it
-lives in an ordinary credential slot the member fills in chat like any other. The deploy holds the
-App's private key, signs a short-lived JWT with it, and exchanges that for an installation token
-scoped to what the org granted at install time. The token expires in an hour and is minted at rule
-derivation, so it lives about as long as the turn that uses it and never reaches the sandbox.
+A workspace that installed the App holds a sealed installation binding written by the callback.
+The deploy holds the App's private key, signs a short-lived JWT with it, and exchanges that for an
+installation token scoped to what the org granted at install time. The token expires in an hour and
+is minted at rule derivation, so it lives about as long as the turn that uses it and never reaches
+the sandbox.
 
 A workspace with no installation mints nothing and the slot's stored value answers instead — the
 member's own token, for a repository outside any org that installed the App.
@@ -38,10 +38,11 @@ from ufo.sdk.credentials import (
 
 GITHUB_API = "https://api.github.com"
 GIT_SLOT = "github_git_token"
+API_SLOT = "github_api_auth"
 JWT_LIFETIME_SECONDS = 540
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 MINT_TIMEOUT_SECONDS = 10
-INSTALLATION_PERMISSIONS = {"contents": "write"}
+GIT_INSTALLATION_PERMISSIONS = (("contents", "write"),)
 
 
 def _segment(payload: dict[str, object]) -> bytes:
@@ -62,6 +63,7 @@ class GitHubAppTokens:
     app_id: str
     private_key: rsa.RSAPrivateKey
     installation_slot: str
+    permissions: tuple[tuple[str, str], ...] | None = GIT_INSTALLATION_PERMISSIONS
     transport: httpx.AsyncBaseTransport | None = None
     minted: dict[tuple[UUID, str], tuple[str, float]] = field(default_factory=dict)
     _minting: dict[tuple[UUID, str], asyncio.Task[tuple[str, float]]] = field(
@@ -134,7 +136,9 @@ class GitHubAppTokens:
                         "Authorization": f"Bearer {self._jwt()}",
                         "Accept": "application/vnd.github+json",
                     },
-                    json={"permissions": INSTALLATION_PERMISSIONS},
+                    json=(
+                        {} if self.permissions is None else {"permissions": dict(self.permissions)}
+                    ),
                 )
             except httpx.HTTPError as error:
                 raise CredentialMintFailed(
@@ -163,7 +167,36 @@ class GitHubAppTokens:
         return b".".join((head, body, urlsafe_b64encode(signature).rstrip(b"="))).decode()
 
 
-def app_tokens(installation_slot: str) -> GitHubAppTokens:
+@dataclass(frozen=True)
+class GitHubAPIAuth:
+    """GitHub API bearer authentication from the App or the stored PAT fallback."""
+
+    tokens: GitHubAppTokens | None
+    fallback_slot: str
+
+    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
+        if self.tokens is not None and await self.tokens.bound(workspace_id, store):
+            return True
+        try:
+            await store.get(workspace_id, self.fallback_slot)
+        except CredentialSlotUnset:
+            return False
+        return True
+
+    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
+        token = None if self.tokens is None else await self.tokens.secret(workspace_id, store)
+        if token is None:
+            try:
+                token = await store.get(workspace_id, self.fallback_slot)
+            except CredentialSlotUnset:
+                return None
+        return f"Bearer {token}"
+
+
+def app_tokens(
+    installation_slot: str,
+    permissions: tuple[tuple[str, str], ...] | None = GIT_INSTALLATION_PERMISSIONS,
+) -> GitHubAppTokens:
     """Read the deploy's App registration loud: a configured id with no readable key is a deploy
     that would answer every git request with the member's fallback token and no signal why. The key
     is the PEM itself, not a path — one secret value the deploy sets beside every other, rather than
@@ -174,4 +207,9 @@ def app_tokens(installation_slot: str) -> GitHubAppTokens:
     )
     if not isinstance(key, rsa.RSAPrivateKey):
         raise RuntimeError("GITHUB_APP_PRIVATE_KEY is not an RSA private key")
-    return GitHubAppTokens(app_id=app_id, private_key=key, installation_slot=installation_slot)
+    return GitHubAppTokens(
+        app_id=app_id,
+        private_key=key,
+        installation_slot=installation_slot,
+        permissions=permissions,
+    )

@@ -2632,6 +2632,29 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
     assert not (await grader(CapabilityOutput("done", (setup, first, missing_remote)))).passed
 
 
+async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector() -> None:
+    coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
+    spawn = ToolInvocation(
+        "spawn_subagent",
+        {
+            "profile": "coding",
+            "payload": {
+                "objective": "Repository setup: no repository clone is needed. Use "
+                + coding_subagent.GITHUB_APP_API_COMMAND
+                + " for the write."
+            },
+        },
+        "done",
+        True,
+    )
+    connector = ToolInvocation("connect_account", {"provider": "github"}, "connected", True)
+    grader = coding_subagent.github_app_api_scorer()
+
+    assert (await grader(CapabilityOutput("done", (coding, spawn)))).passed
+    assert not (await grader(CapabilityOutput("done", (spawn, coding)))).passed
+    assert not (await grader(CapabilityOutput("done", (coding, connector, spawn)))).passed
+
+
 async def test_github_connection_graders_accept_the_shipped_routes() -> None:
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
     github_app = ToolInvocation("connect_github", {}, "admin required", True, True)

@@ -1889,6 +1889,29 @@ def test_inject_swaps_only_the_matching_sentinel_and_forces_close() -> None:
     assert out.endswith(b"connection: close\r\n")
 
 
+def test_inject_accepts_the_auth_scheme_a_cli_adds_to_a_bare_sentinel() -> None:
+    raw = InjectionRule(
+        host="api.github.com",
+        header="authorization",
+        sentinel="SENTINEL_GITHUB",
+        real="github_pat_real",
+    )
+    shaped = InjectionRule(
+        host="api.github.com",
+        header="authorization",
+        sentinel="SENTINEL_APP",
+        real="Bearer ghs_real",
+    )
+
+    out = _inject(
+        [b"authorization: token SENTINEL_GITHUB\r\n", b"authorization: token SENTINEL_APP\r\n"],
+        [raw, shaped],
+    )
+
+    assert b"authorization: token github_pat_real\r\n" in out
+    assert b"authorization: Bearer ghs_real\r\n" in out
+
+
 def test_inject_swaps_every_key_a_provider_takes_on_one_request() -> None:
     """A provider that authenticates with two keys is two InjectionRules on one host, and one
     request carries both: each header is swapped from its own sentinel, so `DD-API-KEY` and

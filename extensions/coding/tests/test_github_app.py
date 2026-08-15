@@ -12,7 +12,12 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa
-from ufo_ext_coding.github_app import GitHubAppTokens
+from ufo_ext_coding.github_app import (
+    GIT_INSTALLATION_PERMISSIONS,
+    GIT_SLOT,
+    GitHubAPIAuth,
+    GitHubAppTokens,
+)
 
 from ufo.credentials import (
     CredentialMintFailed,
@@ -26,6 +31,7 @@ from ufo.credentials import (
 from ufo.db import workspace_tx
 from ufo.ext.context import CredentialAccess
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.proxy.rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.schema import tables
 from ufo.workspace import init_workspace_credentials, ws
@@ -35,12 +41,17 @@ INSTALLATION = "149082716"
 SLOT = "github_app_installation"
 
 
-def _tokens(**kwargs: object) -> GitHubAppTokens:
+def _tokens(
+    *,
+    permissions: tuple[tuple[str, str], ...] | None = GIT_INSTALLATION_PERMISSIONS,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> GitHubAppTokens:
     return GitHubAppTokens(
         app_id=APP_ID,
         private_key=rsa.generate_private_key(public_exponent=65537, key_size=2048),
         installation_slot=SLOT,
-        **kwargs,
+        permissions=permissions,
+        transport=transport,
     )
 
 
@@ -87,10 +98,10 @@ async def test_another_workspaces_binding_is_refused() -> None:
         await _tokens().secret(mine, _Store(fernet=fernet))
 
 
-async def test_an_unopenable_binding_withholds_the_git_host_and_no_other() -> None:
+async def test_an_unopenable_binding_withholds_the_github_hosts_and_no_other() -> None:
     """The incident, end to end through the real source and the real derivation. The stored value is
     the production one: a blob the credential Fernet decrypts but that is not a sealed state — a
-    shape no `seal_installation` produces. github.com alone is withheld, while every other slot's
+    shape no `seal_installation` produces. Both GitHub hosts are withheld, while every other slot's
     injection and scope survive the same call, which is what keeps the workspace's internet and
     grant rules from unwinding with it."""
     fernet = Fernet(Fernet.generate_key())
@@ -105,16 +116,28 @@ async def test_an_unopenable_binding_withholds_the_git_host_and_no_other() -> No
             (workspace_id, "datadog_api_key"): "dd-api-real",
         }
     )
+    tokens = _tokens()
     slots = (
         CredentialSlot(
             name="github_git_token",
             description="git",
-            source=_tokens(),
+            source=tokens,
             injection=InjectionTarget(
                 host="github.com",
                 header="Authorization",
                 sentinel="UFO_SENTINEL_GIT_GITHUB",
                 git_basic_user="x-access-token",
+            ),
+        ),
+        CredentialSlot(
+            name="github_api_auth",
+            description="api",
+            member_filled=False,
+            source=GitHubAPIAuth(tokens=tokens, fallback_slot=GIT_SLOT),
+            injection=InjectionTarget(
+                host="api.github.com",
+                header="Authorization",
+                sentinel="UFO_SENTINEL_API_GITHUB",
             ),
         ),
         CredentialSlot(
@@ -131,7 +154,10 @@ async def test_an_unopenable_binding_withholds_the_git_host_and_no_other() -> No
     assert [rule.host for rule in rules if isinstance(rule, InjectionRule)] == [other_host]
     assert ScopeRule(allowed_hosts=frozenset({other_host})) in rules
     assert not [
-        rule for rule in rules if isinstance(rule, ScopeRule) and "github.com" in rule.allowed_hosts
+        rule
+        for rule in rules
+        if isinstance(rule, ScopeRule)
+        and rule.allowed_hosts.intersection(("github.com", "api.github.com"))
     ]
 
 
@@ -164,6 +190,140 @@ async def test_a_bound_workspace_mints_and_reuses_the_token_until_it_nears_expir
     scheme, _, jwt = call.headers["authorization"].partition(" ")
     assert scheme == "Bearer"
     assert len(jwt.split(".")) == 3
+
+
+async def test_the_api_credential_exports_a_sentinel_and_injects_the_app_bearer() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    calls: list[httpx.Request] = []
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(201, json={"token": "ghs_minted", "expires_at": expires})
+
+    slot = CredentialSlot(
+        name="github_api_auth",
+        description="api",
+        member_filled=False,
+        source=GitHubAPIAuth(
+            tokens=_tokens(permissions=None, transport=httpx.MockTransport(github)),
+            fallback_slot=GIT_SLOT,
+        ),
+        injection=InjectionTarget(
+            host="api.github.com",
+            header="Authorization",
+            sentinel="UFO_SENTINEL_API_GITHUB",
+            env="UFO_GITHUB_API_AUTH",
+        ),
+    )
+    store = _Store(fernet=fernet)
+
+    rules = await derive_credential_rules((slot,), workspace_id, store)
+    with ws(workspace_id):
+        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(uuid4(), uuid4())
+
+    assert (
+        InjectionRule(
+            host="api.github.com",
+            header="Authorization",
+            sentinel="UFO_SENTINEL_API_GITHUB",
+            real="Bearer ghs_minted",
+        )
+        in rules
+    )
+    assert exported["UFO_GITHUB_API_AUTH"] == "UFO_SENTINEL_API_GITHUB"
+    assert "ghs_minted" not in exported.values()
+    assert len(calls) == 1
+    assert loads(calls[0].content) == {}
+
+
+async def test_the_api_credential_uses_the_git_pat_without_a_second_member_slot() -> None:
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES[(workspace_id, GIT_SLOT)] = "github_pat_member"
+    store = _Store(fernet=Fernet(Fernet.generate_key()))
+    slot = CredentialSlot(
+        name="github_api_auth",
+        description="api",
+        member_filled=False,
+        source=GitHubAPIAuth(tokens=None, fallback_slot=GIT_SLOT),
+        injection=InjectionTarget(
+            host="api.github.com",
+            header="Authorization",
+            sentinel="UFO_SENTINEL_API_GITHUB",
+            env="UFO_GITHUB_API_AUTH",
+        ),
+    )
+
+    rules = await derive_credential_rules((slot,), workspace_id, store)
+    with ws(workspace_id):
+        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(uuid4(), uuid4())
+
+    assert (
+        InjectionRule(
+            host="api.github.com",
+            header="Authorization",
+            sentinel="UFO_SENTINEL_API_GITHUB",
+            real="Bearer github_pat_member",
+        )
+        in rules
+    )
+    assert exported["UFO_GITHUB_API_AUTH"] == "UFO_SENTINEL_API_GITHUB"
+
+
+async def test_an_api_permission_failure_does_not_withhold_the_git_credential() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    workspace_id = uuid4()
+    VALUES.clear()
+    VALUES.update(
+        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+    async def github(request: httpx.Request) -> httpx.Response:
+        if loads(request.content) == {"permissions": {"contents": "write"}}:
+            return httpx.Response(201, json={"token": "ghs_git", "expires_at": expires})
+        return httpx.Response(422, text="installation permissions require approval")
+
+    transport = httpx.MockTransport(github)
+    git_tokens = _tokens(transport=transport)
+    api_tokens = _tokens(permissions=None, transport=transport)
+    slots = (
+        CredentialSlot(
+            name=GIT_SLOT,
+            description="git",
+            source=git_tokens,
+            injection=InjectionTarget(
+                host="github.com",
+                header="Authorization",
+                sentinel="UFO_SENTINEL_GIT_GITHUB",
+                git_basic_user="x-access-token",
+            ),
+        ),
+        CredentialSlot(
+            name="github_api_auth",
+            description="api",
+            member_filled=False,
+            source=GitHubAPIAuth(tokens=api_tokens, fallback_slot=GIT_SLOT),
+            injection=InjectionTarget(
+                host="api.github.com",
+                header="Authorization",
+                sentinel="UFO_SENTINEL_API_GITHUB",
+            ),
+        ),
+    )
+
+    rules = await derive_credential_rules(slots, workspace_id, _Store(fernet=fernet))
+
+    injections = [rule for rule in rules if isinstance(rule, InjectionRule)]
+    assert [rule.host for rule in injections] == ["github.com"]
+    assert injections[0].real.startswith("Basic ")
 
 
 async def test_concurrent_cache_misses_share_one_installation_token_mint() -> None:

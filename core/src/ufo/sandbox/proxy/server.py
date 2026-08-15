@@ -1277,26 +1277,39 @@ def _has_crlf(value: str) -> bool:
 
 def _inject(headers: list[bytes], candidates: list[InjectionRule]) -> bytes:
     """Rewrite the header block: swap a header the sandbox set to a candidate's sentinel for that
-    candidate's real secret — selection is by the exact sentinel seen, so among two accounts on one
-    host each sentinel draws only its own token, and a foreign or absent sentinel is passed upstream
-    unchanged (never another account's token). Force `Connection: close` so each request is a fresh
-    MITM that re-applies the swap."""
+    candidate's real secret. Authorization clients may add `token` or `Bearer` before the sentinel;
+    the exact sentinel still selects the credential. A foreign or absent sentinel passes upstream
+    unchanged. Force `Connection: close` so each request is a fresh MITM that re-applies the
+    swap."""
     rebuilt = bytearray()
     for line in headers:
         field_name, _, value = line.partition(b":")
         name = field_name.strip().lower()
         if name in (b"connection", b"proxy-connection"):
             continue
+        supplied = value.strip()
+        parts = supplied.split(maxsplit=1)
         chosen = next(
             (
                 c
                 for c in candidates
-                if name == c.header.encode().lower() and value.strip() == c.sentinel.encode()
+                if name == c.header.encode().lower()
+                and (
+                    supplied == c.sentinel.encode()
+                    or (
+                        len(parts) == 2
+                        and parts[0].lower() in (b"token", b"bearer")
+                        and parts[1] == c.sentinel.encode()
+                    )
+                )
             ),
             None,
         )
         if chosen is not None:
-            rebuilt += chosen.header.encode() + b": " + chosen.real.encode() + b"\r\n"
+            real = chosen.real.encode()
+            if len(parts) == 2 and b" " not in real:
+                real = parts[0] + b" " + real
+            rebuilt += chosen.header.encode() + b": " + real + b"\r\n"
         else:
             rebuilt += line
     rebuilt += b"connection: close\r\n"

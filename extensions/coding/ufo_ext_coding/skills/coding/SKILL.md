@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Load before working in a source tree — code files (.py, .ts, .go, etc), a repo, or a diff, and before a first clone or any GitHub-connection answer. E.g. trace how something works across files; implement a described change; find and fix a failing test; clone a private repo.
+description: Load when the member asks to inspect or change source code, work in a repository or diff, clone a repository, or answer how GitHub is connected.
 ---
 # Coding Subagent Routing
 
@@ -48,6 +48,10 @@ For a repository outside any organization that installed the App, the fallback i
 
 With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential.
 
+For a GitHub API write that must appear as the installed ufo GitHub App, tell the coding subagent to
+run `GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...`. Keep the assignment on that command and never
+print the variable. An unmodified `gh` command uses the connected GitHub account instead.
+
 **A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. A working connector is never a reason to skip `connect_github` when private git access is missing. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and an admin needs to run the connect flow — never cite the grant as evidence that a clone should work.
 
 ## Finding the Repository
@@ -70,8 +74,8 @@ When a task involves both discovery and coding (e.g., "find tickets and implemen
 ## Returned files
 
 A coding subagent has no `share_file`. Its files remain in the shared `/workspace` for the parent to
-deliver under the shared delivery register. A push uses the workspace's git connection; opening a
-PR additionally needs the GitHub connector.
+deliver under the shared delivery register. A push uses the workspace's git connection. A GitHub
+API write uses either the installed App assignment above or the GitHub connector.
 
 ## Examples
 
