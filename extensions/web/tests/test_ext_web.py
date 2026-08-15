@@ -4684,6 +4684,82 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     assert "Domain" not in cookie
 
 
+async def test_static_assets_publish_on_the_first_page_and_serve_from_the_store(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0031: the first page a pod serves waits for its built assets to land in the shared
+    store, and the asset route answers a name outside its own build from that store with the same
+    ETag semantics as a local asset — so a page from one build resolves on a pod running another.
+    A name outside the published shape, an undeclared suffix, and an unknown hash stay 404, and
+    the route stays session-gated."""
+    client, workspace_id, _agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
+    web_surface._STORED_ASSETS.clear()
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    page = await client.get("/surface/web", headers=headers)
+    assert page.status_code == 200
+    assert web_surface.STATIC_ASSETS
+    for name in web_surface.STATIC_ASSETS:
+        assert await blob.exists("static/web/" + name)
+
+    await blob.put("static/web/assets/peer-AbC123.js", b"export const peer = 1;\n")
+    path = "/surface/web/static/assets/peer-AbC123.js"
+    served = await client.get(path, headers=headers)
+    assert served.status_code == 200
+    assert served.text == "export const peer = 1;\n"
+    assert served.headers["content-type"].startswith("text/javascript")
+    assert served.headers["cache-control"] == "no-cache"
+    revalidated = await client.get(
+        path, headers={**headers, "if-none-match": served.headers["etag"]}
+    )
+    assert revalidated.status_code == 304
+    missing = await client.get("/surface/web/static/assets/gone-XYZ.js", headers=headers)
+    assert missing.status_code == 404
+    undeclared = await client.get("/surface/web/static/assets/peer-AbC123.map", headers=headers)
+    assert undeclared.status_code == 404
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
+async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The publish is loud: a store that refuses the write fails the page that awaited it, and the
+    next page runs the publish again — a pod never serves a reference nothing can answer."""
+    client, workspace_id, _agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    real_put = FilesystemBlobStore.put
+    real_exists = FilesystemBlobStore.exists
+
+    async def refuse(self: FilesystemBlobStore, key: str, data: bytes) -> None:
+        raise RuntimeError("store refused the write")
+
+    async def absent(self: FilesystemBlobStore, key: str) -> bool:
+        return False
+
+    monkeypatch.setattr(FilesystemBlobStore, "put", refuse)
+    monkeypatch.setattr(FilesystemBlobStore, "exists", absent)
+    with pytest.raises(RuntimeError, match="store refused the write"):
+        await client.get("/surface/web", headers=headers)
+
+    monkeypatch.setattr(FilesystemBlobStore, "put", real_put)
+    monkeypatch.setattr(FilesystemBlobStore, "exists", real_exists)
+    page = await client.get("/surface/web", headers=headers)
+    assert page.status_code == 200
+    for name in web_surface.STATIC_ASSETS:
+        assert await blob.exists("static/web/" + name)
+
+
 async def test_a_clicked_conversation_survives_the_sign_in_it_lands_in(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

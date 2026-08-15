@@ -24,6 +24,7 @@ privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 import asyncio
 import json
 import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -90,6 +91,7 @@ from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
     AgentSummary,
+    BlobStore,
     ConnectRequestInvalid,
     CredentialRequest,
     CredentialRequestInvalid,
@@ -259,11 +261,69 @@ def _static_response(request: Request) -> Response | None:
     if asset is None:
         return None
     body, media_type = asset
-    etag = STATIC_ETAGS[name]
+    return _asset_response(request, body, media_type, STATIC_ETAGS[name])
+
+
+def _asset_response(request: Request, body: bytes, media_type: str, etag: str) -> Response:
     headers = {"etag": etag, "cache-control": "no-cache"}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return Response(body, media_type=media_type, headers=headers)
+
+
+STATIC_STORE_PREFIX = "static/web/"
+STORED_ASSET_NAME = re.compile(r"assets/[A-Za-z0-9._-]+")
+STORED_ASSETS_MAX = 64
+
+_ASSET_PUBLISH: asyncio.Task[None] | None = None
+_STORED_ASSETS: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
+
+
+async def _publish_assets(blob: BlobStore) -> None:
+    for name, (body, _media_type) in STATIC_ASSETS.items():
+        key = STATIC_STORE_PREFIX + name
+        if not await blob.exists(key):
+            await blob.put(key, body)
+
+
+def _assets_published(blob: BlobStore) -> "asyncio.Task[None]":
+    """This process's one publish of its built assets into the shared store (RFC 0031): every pod
+    writes its own set before it serves its first page, so a hash a page names is in the store
+    before any pod is asked for it — the causal order that makes a mixed-version roll harmless.
+    Keys carry Vite's content hash, so a key present is a key already correct and is skipped. A
+    failed publish fails the page that awaited it and is replaced here, so the next page retries
+    rather than serving a reference nothing can answer."""
+    global _ASSET_PUBLISH
+    task = _ASSET_PUBLISH
+    if task is None or (task.done() and task.exception() is not None):
+        task = asyncio.create_task(_publish_assets(blob))
+        _ASSET_PUBLISH = task
+    return task
+
+
+async def _stored_asset(blob: BlobStore, request: Request) -> Response:
+    """An asset of another build, served from the shared store: the answer for a page minted by a
+    pod on a different build than this one (RFC 0031). Only a name shaped like this surface's own
+    publishes is looked up — one leaf under `assets/` with a declared suffix — and a store hit is
+    held in a bounded process dictionary of immutable entries, then served exactly as a local
+    asset. A store miss stays the 404 it always was: an asset that never existed."""
+    name = request.url.path.removeprefix(STATIC_PREFIX)
+    if STORED_ASSET_NAME.fullmatch(name) is None:
+        return Response("no such asset", status_code=404)
+    media_type = ASSET_MEDIA_TYPES.get(Path(name).suffix)
+    if media_type is None:
+        return Response("no such asset", status_code=404)
+    held = _STORED_ASSETS.get(name)
+    if held is None:
+        key = STATIC_STORE_PREFIX + name
+        if not await blob.exists(key):
+            return Response("no such asset", status_code=404)
+        body = await blob.get(key)
+        held = (body, media_type, f'"{sha256(body).hexdigest()[:32]}"')
+        _STORED_ASSETS[name] = held
+        while len(_STORED_ASSETS) > STORED_ASSETS_MAX:
+            _STORED_ASSETS.popitem(last=False)
+    return _asset_response(request, *held)
 
 
 async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
@@ -281,6 +341,7 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     and no page is ever stale while looking current."""
     if PORTAL_HTML is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
+    await _assets_published(ctx.blob)
     return HTMLResponse(PORTAL_HTML, headers={"cache-control": "no-store"})
 
 
@@ -308,8 +369,10 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
 async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
     """Serve a portal stylesheet or module to a request whose session resolved. Only the shell
     names these, and the shell serves to a session, so an unresolved request is a 401 rather than
-    a transfer. The assets carry no workspace data."""
-    return _static_response(request) or Response("no such asset", status_code=404)
+    a transfer. The assets carry no workspace data. A name this build does not hold is answered
+    from the shared store, where every pod published its own build before serving pages — so a
+    page from one build resolves on a pod running another."""
+    return _static_response(request) or await _stored_asset(ctx.blob, request)
 
 
 async def open_session(ctx: SurfaceContext, request: Request) -> Response:
