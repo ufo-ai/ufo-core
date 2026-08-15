@@ -1139,6 +1139,49 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
     }
 
 
+async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    for channel, zone in (("kept", "America/New_York"), ("dropped", "Mars/Olympus_Mons")):
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            response = await client.post(
+                f"/surface/ufo/{channel}",
+                content=b"hello",
+                headers={"authorization": f"Bearer {token}", "x-ufo-timezone": zone},
+            )
+        assert response.status_code == 200
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        sent = await client.post(
+            "/surface/ufo/sent",
+            content=b"hello",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-send": "1",
+                "x-ufo-send-id": str(uuid4()),
+                "x-ufo-timezone": "Europe/Berlin",
+            },
+        )
+    assert sent.status_code == 200
+    await _post(client, "sent", token, b"")
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.conversation.c.queue_key, tables.turn.c.context)
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).all()
+    zones = {row.queue_key: row.context["timezone"] for row in rows}
+    assert zones == {
+        "owner@example.com:kept": "America/New_York",
+        "owner@example.com:dropped": None,
+        "owner@example.com:sent": "Europe/Berlin",
+    }
+
+
 async def _post_send(
     client: AsyncClient, token: str, body: bytes, send_id: UUID, cwd: str | None = None
 ) -> Response:

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from functools import partial
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -43,6 +45,7 @@ from ufo.sdk.hub import (
     TextDelta,
     ToolCall,
 )
+from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
     ConnectRequestInvalid,
     Conversation,
@@ -75,6 +78,7 @@ UNSEND_HEADER = "x-ufo-unsend"
 SINCE_HEADER = "x-ufo-since"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
+TIMEZONE_HEADER = "x-ufo-timezone"
 CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
@@ -442,6 +446,21 @@ def _resumed_from(request: Request, turn_id: UUID) -> str:
     return cursor if named == str(turn_id) else ""
 
 
+def _turn_context(email: str, request: Request) -> TurnContext:
+    """The admitted turn's ambient context: the member as sender, and the zone their client
+    reported so the turn's time reads as the member's own; a reported zone that is not a known
+    IANA name is dropped with a log rather than failing the member's message."""
+    source = f"{SOURCE} ({email})"
+    zone = request.headers.get(TIMEZONE_HEADER, "").strip()
+    if not zone:
+        return TurnContext(sender=email, source=source)
+    try:
+        return TurnContext(sender=email, timezone=zone, source=source)
+    except ValidationError:
+        log("ufo.timezone_dropped", zone=zone)
+        return TurnContext(sender=email, source=source)
+
+
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
@@ -517,7 +536,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
                 await ctx.admit(
                     conversation_id,
                     body,
-                    context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+                    context=_turn_context(email, request),
                     speaker_member_id=member_id,
                 )
             ).turn_id
@@ -605,7 +624,7 @@ async def _send(
         conversation_id,
         body,
         idempotency_key=f"{conversation_id}{QUEUE_KEY_SEPARATOR}send{QUEUE_KEY_SEPARATOR}{send_id}",
-        context=TurnContext(sender=email, source=f"{SOURCE} ({email})"),
+        context=_turn_context(email, request),
         speaker_member_id=member_id,
     )
     ack = directive(

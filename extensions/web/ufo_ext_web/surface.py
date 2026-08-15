@@ -123,6 +123,7 @@ UPLOAD_CHUNK_BYTES = 65_536
 WEB_INBOX_DIR = "web-inbox"
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
+TIMEZONE_HEADER = "x-ufo-timezone"
 STOP_TURN_HEADER = "x-ufo-stop-turn"
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
@@ -502,6 +503,20 @@ async def _own_chat(
     return record
 
 
+def _turn_context(email: str, request: Request, source: str) -> TurnContext:
+    """The admitted turn's ambient context: the member as sender, the zone their browser reported
+    so the turn's time reads as the member's own, and where they said it; a reported zone that is
+    not a known IANA name is dropped with a log rather than failing the member's message."""
+    zone = request.headers.get(TIMEZONE_HEADER, "").strip()
+    if not zone:
+        return TurnContext(sender=email, source=source)
+    try:
+        return TurnContext(sender=email, timezone=zone, source=source)
+    except ValidationError:
+        log("web.timezone_dropped", zone=zone)
+        return TurnContext(sender=email, source=source)
+
+
 def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str:
     """Where a portal message was said, as the agent carries it into anything it creates: the
     portal URL that opens this conversation, plus who asked. The portal routes on the fragment
@@ -779,8 +794,8 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     admitted = await ctx.admit(
         conversation_id,
         inbound,
-        context=TurnContext(
-            sender=email, source=_chat_source(ctx.public_base_url, conversation_id, email)
+        context=_turn_context(
+            email, request, _chat_source(ctx.public_base_url, conversation_id, email)
         ),
         idempotency_key=key,
         speaker_member_id=member_id,

@@ -972,6 +972,35 @@ async def test_web_turn_round_trip_admits_streams_and_links_identity(
     ]
 
 
+async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    turns: dict[str, str] = {}
+    for zone in ("America/New_York", "Mars/Olympus_Mons"):
+        STREAM_GATE.arm()
+        admitted = await client.post(
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
+            content=b"hello",
+            headers={"cookie": f"{SESSION_COOKIE}={token}", "x-ufo-timezone": zone},
+        )
+        assert admitted.status_code == 200
+        turns[zone] = admitted.json()["turn_id"]
+        await _consume(client, token, turns[zone])
+    async with workspace_tx() as connection:
+        contexts = {
+            str(row.id): row.context
+            for row in await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.context).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        }
+    assert contexts[turns["America/New_York"]]["timezone"] == "America/New_York"
+    assert contexts[turns["Mars/Olympus_Mons"]]["timezone"] is None
+
+
 def test_title_excerpt_waits_for_an_assistant_reply_and_bounds_both_sides() -> None:
     opening = Message(role="user", content="Draft the onboarding plan")
     assert web_surface._title_excerpt((opening,)) == ""

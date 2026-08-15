@@ -30,6 +30,7 @@ struct Request {
     send_header: Option<String>,
     send_id: Option<String>,
     unsend_header: Option<String>,
+    timezone_header: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
@@ -97,6 +98,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         mut send_header,
         mut send_id,
         mut unsend_header,
+        mut timezone_header,
     ) = loop {
         let read = stream.read(&mut buffer).expect("read");
         raw.extend_from_slice(&buffer[..read]);
@@ -111,6 +113,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         let mut send = None;
         let mut send_key = None;
         let mut unsend = None;
+        let mut timezone = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -134,8 +137,21 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
             if lower.starts_with("x-ufo-unsend:") {
                 unsend = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-timezone:") {
+                timezone = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
-        break (end + 4, length, op, slot, stop, send, send_key, unsend);
+        break (
+            end + 4,
+            length,
+            op,
+            slot,
+            stop,
+            send,
+            send_key,
+            unsend,
+            timezone,
+        );
     };
     while raw.len() < headers_end + content_length {
         let read = stream.read(&mut buffer).expect("read body");
@@ -153,6 +169,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         send_header: send_header.take(),
         send_id: send_id.take(),
         unsend_header: unsend_header.take(),
+        timezone_header: timezone_header.take(),
     }
 }
 
@@ -333,6 +350,11 @@ fn plain_session_round_trips_ask_and_exit() {
     assert!(stdout.contains("The answer."), "stdout: {stdout}");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].body, "hi");
+    assert_eq!(
+        requests[1].timezone_header,
+        iana_time_zone::get_timezone().ok()
+    );
+    assert!(requests[1].timezone_header.is_some(), "{requests:?}");
     let leftovers: Vec<_> = std::fs::read_dir(home.join("tmp"))
         .expect("scratch tmp readable")
         .flatten()
@@ -623,6 +645,11 @@ fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
     assert_eq!(requests[1].send_header.as_deref(), Some("1"));
     assert_eq!(requests[1].body, "while the turn ran");
     assert!(requests[1].send_id.is_some());
+    assert_eq!(
+        requests[1].timezone_header,
+        iana_time_zone::get_timezone().ok()
+    );
+    assert!(requests[1].timezone_header.is_some(), "{requests:?}");
     assert_eq!(
         requests[2].body, "",
         "the scheduled poll still fires: {requests:?}"

@@ -460,6 +460,11 @@ export async function refreshTranscript(
  *  that did not land is reported, since the member pressed it and nothing else on the page says
  *  the turn is still going. */
 
+function timezoneHeader(): Record<string, string> {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return zone ? { "x-ufo-timezone": zone } : {};
+}
+
 /** Admit one message and tail what it landed on.
  *
  *  Whether this delivery opened the run it names is admission's answer, taken under the
@@ -527,6 +532,7 @@ export async function sendMessage(
       method: "POST",
       body,
       credentials: "same-origin",
+      headers: timezoneHeader(),
     });
   } catch {
     settled(chatKey, null);
@@ -597,6 +603,7 @@ export async function answerQuestion(
       headers: {
         "x-ufo-answer-turn": turnId,
         "x-ufo-answer-question": String(questionIndex),
+        ...timezoneHeader(),
       },
     });
   } catch {

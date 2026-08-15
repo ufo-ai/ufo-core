@@ -1,6 +1,6 @@
 [package]
 name = "ufo"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 
 [[bin]]
@@ -12,6 +12,7 @@ base64 = "0.22"
 crossterm = "0.28"
 fancy-regex = "0.14"
 getrandom = "0.3"
+iana-time-zone = "0.1"
 pulldown-cmark = { version = "0.12", default-features = false }
 ratatui = { version = "0.29", default-features = false }
 rustls-native-certs = "0.7"

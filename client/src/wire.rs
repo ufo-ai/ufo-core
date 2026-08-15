@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -174,6 +175,14 @@ fn build_agent() -> ureq::Agent {
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT)
         .build()
+}
+
+/// The system's IANA timezone, read once: every posted message carries it so the agent reads the
+/// member's local time. A system whose zone cannot be named sends no header.
+fn system_timezone() -> Option<&'static str> {
+    static ZONE: OnceLock<Option<String>> = OnceLock::new();
+    ZONE.get_or_init(|| iana_time_zone::get_timezone().ok())
+        .as_deref()
 }
 
 impl Session {
@@ -356,6 +365,9 @@ impl Session {
             .set("x-ufo-tty", if self.tty { "1" } else { "0" })
             .set("x-ufo-installed", if self.installed { "1" } else { "0" })
             .set("x-ufo-script", env!("CARGO_PKG_VERSION"));
+        if let Some(zone) = system_timezone() {
+            request = request.set("x-ufo-timezone", zone);
+        }
         if let Some(token) = &self.token {
             request = request.set("authorization", &format!("Bearer {token}"));
         }
@@ -399,6 +411,9 @@ impl SendLane {
             .set("x-ufo-session", &self.session_id)
             .set("x-ufo-send", "1")
             .set("x-ufo-send-id", &header_safe(send_id));
+        if let Some(zone) = system_timezone() {
+            request = request.set("x-ufo-timezone", zone);
+        }
         if let Some(token) = &self.token {
             request = request.set("authorization", &format!("Bearer {token}"));
         }

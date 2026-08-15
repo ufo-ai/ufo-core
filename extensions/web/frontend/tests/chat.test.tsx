@@ -1388,8 +1388,29 @@ test("a question submits its choice once, and only once a choice exists", async 
   const headers = posts[0].headers as Record<string, string>;
   expect(headers["x-ufo-answer-turn"]).toBe(TURN_ID);
   expect(headers["x-ufo-answer-question"]).toBe("0");
+  expect(headers["x-ufo-timezone"]).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   expect(posts[0].body).toBe("left");
   await waitFor(() => expect(screen.queryByRole("button", { name: "right" })).toBeNull());
+});
+
+test("a posted message reports the browser's timezone", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript(),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
+    },
+  });
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  const headers = posts[0].headers as Record<string, string>;
+  expect(headers["x-ufo-timezone"]).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
 });
 
 test("a multi-select question sends every label it holds in one answer", async () => {
