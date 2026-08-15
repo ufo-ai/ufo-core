@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from "react";
 
+import { IconChevronRight } from "@tabler/icons-react";
+
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { Message, MessageContent, MessageHeader } from "@/components/ui/message";
@@ -298,12 +300,16 @@ function Activity({
   const shown = open ?? (live && openRuns > 0);
   return (
     <details
-      className="mt-2xs font-mono text-small text-ink-soft"
+      className="group/activity mt-2xs font-mono text-small text-ink-soft"
       open={shown}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <Marker render={<summary className="cursor-pointer list-none" />}>
         <MarkerContent className={cn(live && "shimmer")}>{summary}</MarkerContent>
+        <IconChevronRight
+          aria-hidden
+          className="size-icon shrink-0 transition-transform group-open/activity:rotate-90"
+        />
       </Marker>
       {shown ? (
         <ActivityTree events={events} runs={runs} root={root} live={live} />
@@ -377,9 +383,10 @@ function RunRow({
   const current = running && run.current ? run.current : "";
   return (
     <li className="flex flex-col gap-hair">
-      <details onToggle={(event) => setOpen(event.currentTarget.open)}>
-        <summary className="cursor-pointer list-none">
+      <details className="group/run" onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary className="flex cursor-pointer list-none items-center gap-sm">
           <a
+            className="shrink-0"
             href={subagentConversationHash(
               run.profile,
               run.conversation_id,
@@ -388,7 +395,13 @@ function RunRow({
           >
             {run.name || "Subagent · " + run.profile}
           </a>
-          {current ? <span className="shimmer">{" · " + current}</span> : null}
+          {current ? (
+            <span className="shimmer min-w-0 truncate">{"· " + current}</span>
+          ) : null}
+          <IconChevronRight
+            aria-hidden
+            className="size-icon shrink-0 transition-transform group-open/run:rotate-90"
+          />
         </summary>
         {open ? (
           <>

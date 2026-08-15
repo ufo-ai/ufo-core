@@ -156,6 +156,7 @@ test("a reloaded conversation states its latest activity and opens onto the rest
   open();
 
   const summary = await screen.findByText("Completed 2 steps");
+  expect(summary.closest("summary")!.querySelector("svg")).toBeTruthy();
   expect(screen.queryByText("Running the focused tests")).toBeNull();
   expect(screen.queryByText("Loaded skill · coding")).toBeNull();
 
@@ -761,6 +762,7 @@ test("a reloaded conversation nests its subagent work under the reply and still 
   expect(link.getAttribute("href")).toBe(
     "#/subagents/general_purpose/conversations/" + conversationId + "?root=" + CONVO_ID,
   );
+  expect(link.closest("summary")!.querySelector("svg")).toBeTruthy();
   expect(screen.queryByText("Fetching the page")).toBeNull();
 
   await userEvent.click(link.closest("summary")!);
