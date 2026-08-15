@@ -80,7 +80,7 @@ Each section's source file has full details.
 
 **Tools** — Web research done. SVG logo generated. Visuals authored throughout — SVG, CSS gradients, and real assets (heroes, sections, editorial), no placeholders. Every page screenshotted via Playwright at desktop AND mobile. Issues fixed before next page.
 
-**Tokens** (`01-design-tokens.md`) — Fluid `clamp()` type scale. 4px spacing. OKLCH colors. base.css included. Light + dark mode with toggle. Nexus palette when no user direction.
+**Tokens** (`01-design-tokens.md`) — Fluid `clamp()` type scale. 4px spacing. OKLCH colors. base.css included. Light + dark mode with toggle. The default palette when no user direction.
 
 **Typography** (`02-typography.md`) — Distinctive loaded fonts (not system defaults). Display + body pairing, 2 fonts max. 3 text levels. ≤5 type styles/page. Display only at `--text-xl`+ (24px).
 

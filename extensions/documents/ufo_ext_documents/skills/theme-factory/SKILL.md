@@ -11,7 +11,7 @@ metadata:
 
 This skill provides a curated collection of professional font and color themes, each with carefully selected color palettes and font pairings. Once a theme is chosen, it can be applied to any non-web artifact.
 
-**Design philosophy:** All themes follow the design-foundations principle of **1 accent + neutrals**. Each theme has one dominant accent color — use it sparingly (headings, key data, icons). The remaining palette colors are neutral/muted surface and text tones. See `.skills/design-foundations/references/color.md` for the full color philosophy and the Nexus palette. If no theme is selected, default to the Nexus palette.
+**Design philosophy:** All themes follow the design-foundations principle of **1 accent + neutrals**. Each theme has one dominant accent color — use it sparingly (headings, key data, icons). The remaining palette colors are neutral/muted surface and text tones. See `.skills/design-foundations/references/color.md` for the full color philosophy and the default palette. If no theme is selected, use that default palette.
 
 ## Purpose
 

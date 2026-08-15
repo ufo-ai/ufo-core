@@ -71,6 +71,29 @@ SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
 CORE_SKILLS_DIR = CORE_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox"})
 SKILL_MANIFEST = "SKILL.md"
+DESIGN_SKILLS = Path("extensions/documents/ufo_ext_documents/skills")
+SITE_SKILL_SHARED = Path("extensions/sites/ufo_ext_sites/skills/website-building/shared")
+DESIGN_PALETTE = DESIGN_SKILLS / "design-foundations/references/color.md"
+PALETTE_RESTATEMENTS = (
+    DESIGN_SKILLS / "design-foundations/references/dataviz.md",
+    DESIGN_SKILLS / "office-pptx" / SKILL_MANIFEST,
+    DESIGN_SKILLS / "pdf/libraries/reportlab.md",
+    SITE_SKILL_SHARED / "01-design-tokens.md",
+    SITE_SKILL_SHARED / "06-css-and-tailwind.md",
+    Path("extensions/repl/ufo_ext_repl/skills/data-visualization") / SKILL_MANIFEST,
+)
+HEX = r"#[0-9A-Fa-f]{6}"
+PALETTE_DECLARATION = re.compile(
+    rf"--((?:bkgd-[123]00)|(?:text|accent)-(?:primary|secondary)):\s*"
+    rf"(?:light-dark\(({HEX}),\s*({HEX})\)|({HEX}));"
+)
+PALETTE_ROW = re.compile(rf"^\|\s*`--([\w-]+)`\s*\|\s*`({HEX})`\s*\|\s*(?:`({HEX})`\s*\|)?", re.M)
+PAIRING_ROW = re.compile(
+    rf"^\|[^|]+\|\s*(body|18px\+)\s*\|\s*`({HEX})`\s*\|\s*`({HEX})`\s*\|\s*([\d.]+):1\s*\|$", re.M
+)
+FILL_LABEL_ROW = re.compile(rf"^\|\s*`({HEX})`\s*\|\s*([\d.]+):1\s*\|$", re.M)
+AA_RATIOS = {"body": 4.5, "18px+": 3.0}
+PRINTED_RATIO_TOLERANCE = 0.05
 MIGRATION_DIR_PART = "migrations"
 CORE_OWNER = "core"
 NAME_SEPARATOR = "-"
@@ -1433,6 +1456,87 @@ def _portal_style_failures() -> list[str]:
     return failures
 
 
+def _luminance(color: str) -> float:
+    channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(foreground: str, background: str) -> float:
+    lighter, darker = sorted((_luminance(foreground), _luminance(background)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _ratio_failures(pairings: list[tuple[str, str, str, float]]) -> list[str]:
+    failures = []
+    for size, background, text, printed in pairings:
+        measured = _contrast(text, background)
+        if abs(measured - printed) > PRINTED_RATIO_TOLERANCE:
+            failures.append(
+                f"{DESIGN_PALETTE}: {text} on {background} is {measured:.2f}:1, printed {printed}:1"
+            )
+        if measured < AA_RATIOS[size]:
+            failures.append(
+                f"{DESIGN_PALETTE}: {text} on {background} is {measured:.2f}:1 — "
+                f"{size} text needs {AA_RATIOS[size]}:1"
+            )
+    return failures
+
+
+def _skill_palette_failures() -> list[str]:
+    """The portal theme is the palette, and a generated deck, page or chart resolves no CSS
+    variable — so `color.md` restates those steps as hexes, and every skill that repeats the
+    palette repeats it from there. Two ways that drifts, both silent: a step that no longer matches
+    the theme paints an artifact in a colour the product stopped using, and a pairing below AA
+    ships text a reader cannot read. So the steps are compared to the theme declaration for
+    declaration, every ratio the file prints is recomputed from its own two hexes, and a doc that
+    restates the palette may write no hex `color.md` has not declared."""
+    theme, palette = ROOT / PORTAL_THEME, ROOT / DESIGN_PALETTE
+    if not theme.is_file() or not palette.is_file():
+        return [f"{DESIGN_PALETTE}: the theme or the palette reference is missing"]
+    painted = {
+        step: (light.upper(), dark.upper()) if light else (single.upper(), single.upper())
+        for step, light, dark, single in PALETTE_DECLARATION.findall(theme.read_text())
+    }
+    text = palette.read_text()
+    restated = {
+        step: (light.upper(), (dark or light).upper())
+        for step, light, dark in PALETTE_ROW.findall(text)
+    }
+    failures = [
+        f"{DESIGN_PALETTE}: --{step} is {restated.get(step)}, the theme paints {painted[step]}"
+        for step in sorted(painted)
+        if restated.get(step) != painted[step]
+    ]
+    failures.extend(
+        f"{DESIGN_PALETTE}: --{step} is not a step {PORTAL_THEME} declares"
+        for step in sorted(set(restated) - set(painted))
+    )
+    ink = painted["text-primary"][0]
+    pairings = [
+        (size, background, foreground, float(printed))
+        for size, background, foreground, printed in PAIRING_ROW.findall(text)
+    ]
+    pairings.extend(
+        ("body", fill, ink, float(printed)) for fill, printed in FILL_LABEL_ROW.findall(text)
+    )
+    if not pairings:
+        return [*failures, f"{DESIGN_PALETTE}: no pairing states the contrast it clears"]
+    failures.extend(_ratio_failures(pairings))
+    declared = {found.upper() for found in re.findall(HEX, text)}
+    for path in PALETTE_RESTATEMENTS:
+        restatement = ROOT / path
+        if not restatement.is_file():
+            failures.append(f"{path}: the doc that restates the palette is missing")
+            continue
+        written = {found.upper() for found in re.findall(HEX, restatement.read_text())}
+        failures.extend(
+            f"{path}: {hex_color} is not a colour {DESIGN_PALETTE} declares"
+            for hex_color in sorted(written - declared)
+        )
+    return failures
+
+
 def main() -> int:
     failures = []
     trees: dict[Path, ast.Module] = {}
@@ -1479,6 +1583,7 @@ def main() -> int:
     failures.extend(_lexical_containment_failures(ingress_trees))
     failures.extend(_set_cookie_failures(trees))
     failures.extend(_skill_failures())
+    failures.extend(_skill_palette_failures())
     skill_trees = {
         path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))
         for path in _skill_scripts()

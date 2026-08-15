@@ -174,6 +174,6 @@ Beyond baseline in `shared/08-standards.md`:
 
 If the subject is genuinely ambiguous, ask: site type? audience? primary action? tone? brand assets? reference sites?
 
-**Default (minimal input):** Even with minimal input, **infer art direction from the subject.** A photographer's portfolio gets moody tones and a refined serif. A bakery gets warm earth tones and a friendly rounded sans. A tech startup gets cool neutrals and a geometric sans. Derive font and color choices from the content — see `shared/02-typography.md` → "Font Pairing by Concept" for starting points. Only fall back to Nexus palette + Satoshi/General Sans when the request is truly generic with no topic to infer from.
+**Default (minimal input):** Even with minimal input, **infer art direction from the subject.** A photographer's portfolio gets moody tones and a refined serif. A bakery gets warm earth tones and a friendly rounded sans. A tech startup gets cool neutrals and a geometric sans. Derive font and color choices from the content — see `shared/02-typography.md` → "Font Pairing by Concept" for starting points. Only fall back to the default palette + Satoshi/General Sans when the request is truly generic with no topic to infer from.
 
 **Key shared files:** `shared/03-motion.md` (scroll effects, GSAP SVG), `shared/07-toolkit.md` (SVG patterns/filters).

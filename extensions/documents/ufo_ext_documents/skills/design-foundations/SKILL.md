@@ -19,7 +19,7 @@ Artifact-agnostic design guidance — works for CSS, PowerPoint, matplotlib, PDF
 
 | File                       | Covers                                                                                                | Read when                                                                             |
 | -------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `references/color.md`      | "Earn Every Color", the Nexus default palette (light/dark/extended hexes), custom-palette derivation, contrast rules | Picking any hex — an accent, a surface, a semantic color — or deriving a palette from user direction |
+| `references/color.md`      | "Earn Every Color", the default palette (surface steps, text tones, accent and semantic hexes), custom-palette derivation, contrast rules | Picking any hex — an accent, a surface, a semantic color — or deriving a palette from user direction |
 | `references/typography.md` | Measure/leading/scale rules, display-vs-body floors, serif-vs-sans, Font Strategy by Format, brand fonts, blacklist, size hierarchy, Slides and PDF pairings | Choosing a typeface or pairing, or setting sizes for a specific output format          |
 | `references/dataviz.md`    | Chart color sequence, chart type selection, data-ink rules, chart typography, KPI cards               | Building a chart, graph, or KPI tile in any medium                                     |
 

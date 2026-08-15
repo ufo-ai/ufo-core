@@ -56,7 +56,7 @@ The template's `index.css` ships with `red` placeholder values that must be repl
 
 When deriving a custom palette, use HSL values in `H S% L%` format (no `hsl()` wrapper) and maintain both `:root` and `.dark` variants following the same variable structure in `index.css`.
 
-If the subject gives no clear color signal AND the user provided no direction after being asked, fall back to the Nexus HSL values from `.skills/website-building/shared/01-design-tokens.md` → "Nexus HSL Equivalents" section.
+If the subject gives no clear color signal AND the user provided no direction after being asked, fall back to the HSL values from `.skills/website-building/shared/01-design-tokens.md` → "HSL Equivalents" section.
 
 ### Webapp-Specific Type and Font Rules
 
@@ -194,7 +194,7 @@ If the subject gives no clear color signal AND the user provided no direction af
 - When defining custom properties in `index.css` that will be used by a tailwind config, always use H S% L% (space separated with percentages after Saturation and Lightness) (and do not wrap in hsl()).
   - For example:
     --my-var: 23 10% 23%;
-- Analyze the comments inside of `index.css` to determine how to set colors — replacing every `red` placeholder. **Infer a palette from the product's subject matter first** (see "Replacing `red` Placeholders" above). Use Nexus HSL values from `.skills/website-building/shared/01-design-tokens.md` only as a last-resort fallback when both inference and asking the user yield no direction. Do NOT forget to replace every single instance of `red`. Pay attention to what you see in index.css.
+- Analyze the comments inside of `index.css` to determine how to set colors — replacing every `red` placeholder. **Infer a palette from the product's subject matter first** (see "Replacing `red` Placeholders" above). Use the default palette's HSL values from `.skills/website-building/shared/01-design-tokens.md` only as a last-resort fallback when both inference and asking the user yield no direction. Do NOT forget to replace every single instance of `red`. Pay attention to what you see in index.css.
 - Use the `@`-prefixed paths to import shadcn components and hooks.
 - Use icons from `lucide-react` to signify actions and provide visual cues. Use `react-icons/si` for company logos.
 - User may attach assets (images, etc.) in their request.
@@ -258,7 +258,7 @@ Read `references/environment.md` — pre-installed packages, dev server setup, d
 
 These files come from the `website-building` dependency and live under `.skills/website-building/shared/` — NOT under `shared/`.
 
-- `.skills/website-building/shared/01-design-tokens.md` — **Always read.** Type scale, spacing system, Nexus palette, base stylesheet. Provides the fallback design system when the user gives no art direction.
+- `.skills/website-building/shared/01-design-tokens.md` — **Always read.** Type scale, spacing system, the default palette, base stylesheet. Provides the fallback design system when the user gives no art direction.
 - `.skills/website-building/shared/02-typography.md` — **Always read.** Font selection (Fontshare preferred), display vs. body rules, font blacklist, variable font features.
 - `.skills/website-building/shared/03-motion.md` — **Read when the app has animation.** Easing blueprint (which curve for which context), duration quick-reference, spring presets, scroll-driven CLS rules, AnimatePresence patterns. The webapp elevation system for hover/active states is noted inside — the rest of the guidance (easing curves, timing, page transitions, stagger patterns) applies fully.
 - `.skills/website-building/shared/05-taste.md` — **Read for any user-facing app.** Design taste principles: simplicity, fluidity, feedback, restraint. Defines the "feel" quality bar — progressive disclosure, context-preserving overlays, micro-interactions.

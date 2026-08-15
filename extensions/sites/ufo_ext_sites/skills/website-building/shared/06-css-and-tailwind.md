@@ -165,19 +165,19 @@ shadcn/ui uses its own CSS variable naming convention. Map your palette to shadc
 
 ```css
 :root {
-  /* Nexus light → shadcn variables (H S% L% format) */
-  --background: 0 0% 97%; /* --color-bg #F7F7F7 */
-  --foreground: 0 0% 14%; /* --color-text #232323 */
-  --card: 0 0% 98%; /* --color-surface #F9F9F9 */
-  --card-foreground: 0 0% 14%;
-  --primary: 26 90% 37%; /* --color-primary #B45309 */
-  --primary-foreground: 0 0% 98%;
-  --accent: 43 96% 56%; /* --color-accent #FBBF24 — amber highlight, dark text on it */
-  --accent-foreground: 0 0% 9%;
-  --muted-foreground: 0 0% 44%; /* --color-text-muted #6F6F6F */
-  --destructive: 320 57% 40%; /* --color-error #A12C7B */
-  --border: 0 0% 82%; /* --color-border #D1D1D1 */
-  --ring: 26 90% 37%;
+  /* Default palette, light → shadcn variables (H S% L% format) */
+  --background: 40 23% 97%; /* --color-bg #FAF9F7 */
+  --foreground: 180 2% 10%; /* --color-text #191A1A */
+  --card: 30 8% 95%; /* --color-surface #F4F3F2 */
+  --card-foreground: 180 2% 10%;
+  --primary: 205 100% 35%; /* --color-primary #0069B5 */
+  --primary-foreground: 40 23% 97%;
+  --accent: 205 100% 50%; /* --color-accent #0095FF — a fill, dark text on it */
+  --accent-foreground: 180 2% 10%;
+  --muted-foreground: 0 0% 40%; /* --color-text-muted #676767 */
+  --destructive: 356 100% 41%; /* --color-error #D0000E */
+  --border: 30 5% 92%; /* --color-border #EBEAE9 */
+  --ring: 205 100% 35%;
 }
 ```
 

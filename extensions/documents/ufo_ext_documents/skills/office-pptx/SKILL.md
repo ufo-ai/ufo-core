@@ -47,7 +47,7 @@ Render equations with Unicode math symbols only. Do not use OMML or generate equ
 
 Build every palette as **1 accent + neutral surface + neutral text**. The accent is for emphasis only (headings, key data, section markers) — everything else stays neutral. See `.skills/design-foundations/references/color.md` for the full "Earn Every Color" philosophy, contrast rules, and the custom-palette workflow (user hue → derive surfaces by desaturating → test contrast).
 
-**When no topic-specific color is obvious**, fall back to the Nexus palette: deep amber `#B45309` primary on neutral gray `#F7F7F7` (see `.skills/design-foundations/references/color.md` → Default Palette).
+**When no topic-specific color is obvious**, fall back to the default palette: `#191A1A` text on `#FAF9F7`, `#0095FF` for a fill and `#0069B5` for accent text (see `.skills/design-foundations/references/color.md` → The Default Palette).
 
 ### For Each Slide
 

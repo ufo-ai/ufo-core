@@ -97,7 +97,7 @@ dialog[open] {
 }
 .gradient-border {
   --gradient-angle: 0deg;
-  border-image: linear-gradient(var(--gradient-angle), var(--color-primary), var(--color-blue)) 1;
+  border-image: linear-gradient(var(--gradient-angle), var(--color-primary), var(--color-accent)) 1;
   animation: spin 3s linear infinite; /* linear is correct for continuous rotation */
 }
 @keyframes spin {

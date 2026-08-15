@@ -6,22 +6,24 @@ Principles for charts, graphs, and data visualizations across all formats (web, 
 
 ## Chart Color Sequence
 
-Use in order for data series (bar, pie, line, scatter):
+Use in order for data series (bar, pie, line, scatter). Every entry is one of the two accents, a step derived from one, or a neutral — see `.skills/design-foundations/references/color.md`:
 
-| #   | Hex       | Name                                                                          |
-| --- | --------- | ----------------------------------------------------------------------------- |
-| 1   | `#F59E0B` | Amber (chart primary — deeper than the UI accent `#FBBF24` for light surfaces) |
-| 2   | `#3F3F3F` | Charcoal                                                                      |
-| 3   | `#A3A3A3` | Silver                                                                        |
-| 4   | `#92400E` | Umber                                                                         |
-| 5   | `#FDE68A` | Pale amber                                                                    |
-| 6   | `#006494` | Blue                                                                          |
-| 7   | `#944454` | Mauve                                                                         |
-| 8   | `#6E6E6E` | Graphite                                                                      |
+| #   | Hex       | Name                          |
+| --- | --------- | ----------------------------- |
+| 1   | `#0095FF` | Blue (the accent)             |
+| 2   | `#FF6700` | Orange (the second accent)    |
+| 3   | `#676767` | Graphite                      |
+| 4   | `#7DC7FB` | Pale blue                     |
+| 5   | `#AE4600` | Umber                         |
+| 6   | `#C6C4C4` | Silver                        |
+| 7   | `#0069B5` | Deep blue                     |
+| 8   | `#00A963` | Green                         |
 
 **Fit chart colors to the art direction.** Data viz naturally needs multiple colors to communicate — that's fine. But choose them thoughtfully: for sequential data, use monochromatic shades of the primary accent. For categorical data that needs distinct hues, use the curated sequence above — it's designed to be harmonious. When the project has a custom palette, derive chart colors from it rather than defaulting to unrelated hues. The chart colors should feel like part of the same design system as the rest of the page.
 
-**Rules:** ≤5 series per chart (use small multiples beyond that). Sequential data: single hue, varying lightness — pale amber `#FDE68A` to umber `#92400E` reads naturally here. Diverging data: amber `#F59E0B` positive, blue `#006494` negative. Highlight key series at full opacity, dim others to 40-60% or gray them out.
+**Rules:** ≤5 series per chart (use small multiples beyond that). Sequential data: single hue, varying lightness — pale blue `#7DC7FB` through `#0095FF` to deep blue `#0069B5`. Diverging data: orange `#FF6700` positive, blue `#0095FF` negative. Highlight key series at full opacity, dim others to 40-60% or gray them out.
+
+A series label sitting on a filled mark is `#191A1A`. A label beside the mark on a light surface takes the text step for that hue, not the fill.
 
 **Colorblind safety:** Never color alone — add labels/patterns/markers. Avoid red/green only. Blue+orange is safer.
 
@@ -67,6 +69,6 @@ Use in order for data series (bar, pie, line, scatter):
 
 - **Value:** Large, bold — dominant element
 - **Label:** Small, muted
-- **Delta:** Colored arrow + %. Green up, red down, gray flat
+- **Delta:** Colored arrow + %. Up `#007645`, down `#D0000E`, flat `#676767` on a light surface; `#00A963`, `#FF2332` and `#A7A9A9` on a dark one
 - **Sparkline (optional):** Tiny trend line, no axes
 - **Animate** value on change/appear

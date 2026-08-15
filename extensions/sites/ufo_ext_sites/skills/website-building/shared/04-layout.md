@@ -132,7 +132,7 @@ Borders, border-radius, and shadows are detail work — the difference between "
 
 ### Shadows
 
-- **Tone-match shadows to the surface.** The Nexus palette's `--shadow-sm`, `--shadow-md`, and `--shadow-lg` variables use a neutral shadow color. Reference them directly:
+- **Tone-match shadows to the surface.** The default palette's `--shadow-sm`, `--shadow-md`, and `--shadow-lg` variables use a neutral shadow color. Reference them directly:
   ```css
   .card {
     box-shadow: var(--shadow-sm);

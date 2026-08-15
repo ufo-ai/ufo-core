@@ -83,7 +83,7 @@ body = ParagraphStyle(
     fontSize=10,
     leading=14,
     spaceAfter=8,
-    textColor=HexColor("#1a1a1a"),
+    textColor=HexColor("#191A1A"),
 )
 ```
 
@@ -91,7 +91,7 @@ body = ParagraphStyle(
 
 ```python
 from reportlab.platypus import Table, TableStyle
-from reportlab.lib import colors
+from reportlab.lib.colors import HexColor
 
 data = [
     ["Milestone", "Status", "Owner"],
@@ -102,13 +102,13 @@ data = [
 
 table = Table(data, colWidths=[180, 100, 120])
 table.setStyle(TableStyle([
-    ("BACKGROUND", (0, 0), (-1, 0), HexColor("#2d2d2d")),
-    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    ("BACKGROUND", (0, 0), (-1, 0), HexColor("#191A1A")),
+    ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#FAF9F7")),
     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
     ("FONTSIZE", (0, 0), (-1, -1), 10),
     ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#f5f5f5")]),
+    ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#EBEAE9")),
+    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [HexColor("#FAF9F7"), HexColor("#F4F3F2")]),
     ("TOPPADDING", (0, 0), (-1, -1), 6),
     ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
 ]))
