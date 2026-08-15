@@ -22,7 +22,6 @@ import sqlalchemy as sa
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pydantic import ValidationError
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
@@ -368,22 +367,6 @@ async def _deploy(
         )
 
 
-async def _register_public(
-    workspace: Workspace, conversation_id: UUID, creator_member_id: UUID, audience: Audience
-) -> str:
-    with ws(workspace.id):
-        await HostedSites(workspace.id, workspace_tx).register(
-            conversation_id,
-            SITE,
-            APP_SERVE_PORT,
-            creator_member_id,
-            "public",
-            audience,
-            True,
-        )
-    return site_url(PUBLIC_BASE_URL, workspace.id, conversation_id, SITE)
-
-
 async def _stored(workspace: Workspace) -> tuple[sa.Row, ...]:
     async with workspace_tx() as connection:
         return tuple(
@@ -447,16 +430,20 @@ async def test_default_visibility_follows_the_conversation_audience(
     assert row.conversation_id == conversation_id
 
 
-async def test_a_new_site_refuses_public_visibility(db: None) -> None:
+async def test_an_explicit_visibility_wins_and_a_redeploy_keeps_it(db: None) -> None:
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(member_id)
     conversation_id = await _seed_conversation(workspace, audience, member_id)
 
-    with pytest.raises(ValidationError, match="public sharing is not available"):
-        await _deploy(workspace, conversation_id, audience, member_id, visibility="public")
+    hosted = await _deploy(workspace, conversation_id, audience, member_id, visibility="public")
+    assert hosted["visibility"] == "public"
 
-    assert await _stored(workspace) == ()
+    again = await _deploy(workspace, conversation_id, audience, member_id)
+    assert again["visibility"] == "public"
+    assert again["site_url"] == hosted["site_url"]
+    (row,) = await _stored(workspace)
+    assert row.visibility == "public"
 
 
 async def test_registering_retires_another_site_on_the_same_port(db: None) -> None:
@@ -484,7 +471,7 @@ async def test_only_the_creator_may_re_gate_a_site_through_a_deploy(db: None) ->
     await _deploy(workspace, conversation_id, audience, creator_id)
 
     with pytest.raises(NotTheSiteCreator, match="who can open it"):
-        await _deploy(workspace, conversation_id, audience, other_id, visibility="private")
+        await _deploy(workspace, conversation_id, audience, other_id, visibility="public")
 
     (row,) = await _stored(workspace)
     assert row.visibility == "workspace"
@@ -528,7 +515,7 @@ async def test_a_speakerless_turn_cannot_name_a_visibility(db: None) -> None:
             project_path="/workspace/dist",
             site_name=SITE,
             entry_point="index.html",
-            visibility="workspace",
+            visibility="public",
         )
 
     (row,) = await _stored(workspace)
@@ -821,7 +808,7 @@ async def test_flipping_to_workspace_opens_the_frame_for_another_member(
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
     frame = await client.get(link, headers=_cookie(creator_token))
-    assert "value=public" not in frame.text
+    assert "value=public" in frame.text
 
     flipped = await client.post(
         f"{link}/visibility",
@@ -852,7 +839,7 @@ async def test_a_deep_link_frames_the_site_at_that_path(deployment: Deployment) 
     creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
-    link = await _register_public(workspace, conversation_id, creator_id, audience)
+    link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
 
     deep = await client.get(f"{link}/send", headers=_cookie(creator_token))
     assert deep.status_code == 200
@@ -874,7 +861,7 @@ async def test_a_deep_link_frames_the_site_at_that_path(deployment: Deployment) 
     assert flipped.status_code == 303
 
 
-async def test_the_visibility_post_refuses_a_non_creator_a_missing_csrf_and_a_public_widen(
+async def test_the_visibility_post_refuses_a_non_creator_and_a_missing_csrf_then_widens(
     deployment: Deployment,
 ) -> None:
     client, workspace = deployment.client, deployment.workspace
@@ -919,18 +906,17 @@ async def test_the_visibility_post_refuses_a_non_creator_a_missing_csrf_and_a_pu
         data={"visibility": "public", "csrf": csrf},
         headers=_cookie(creator_token),
     )
-    assert widened.status_code == 400
-    assert "not available" in widened.text
+    assert widened.status_code == 303
 
     (row,) = await _stored(workspace)
-    assert row.visibility == "workspace"
+    assert row.visibility == "public"
 
 
 async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_public(
     deployment: Deployment,
 ) -> None:
     client, workspace = deployment.client, deployment.workspace
-    creator_id, _creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
@@ -942,10 +928,12 @@ async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_p
     assert LOGIN_PATH in RESERVED_HOST_PREFIXES
     assert "<iframe" not in anonymous.text
 
-    with ws(workspace.id):
-        await HostedSites(workspace.id, workspace_tx).set_visibility(
-            conversation_id, SITE, "public"
-        )
+    frame = await client.get(link, headers=_cookie(creator_token))
+    await client.post(
+        f"{link}/visibility",
+        data={"visibility": "public", "csrf": _csrf(frame.text)},
+        headers=_cookie(creator_token),
+    )
 
     public = await client.get(link)
     assert public.status_code == 200
@@ -1059,18 +1047,14 @@ async def test_the_site_kind_reads_and_regates_a_hosted_site(db: None) -> None:
                 {"kind": SITE_KIND, "name": name, "spec": {"visibility": "workspace"}}
             ),
         )
-        with pytest.raises(ValueError, match="public sharing is not available"):
-            await _verb(
-                "object_apply",
-                workspace,
-                conversation_id,
-                creator_id,
-                manifest=yaml.safe_dump(
-                    {"kind": SITE_KIND, "name": name, "spec": {"visibility": "public"}}
-                ),
-            )
-        await HostedSites(workspace.id, workspace_tx).set_visibility(
-            conversation_id, SITE, "public"
+        widened = await _verb(
+            "object_apply",
+            workspace,
+            conversation_id,
+            creator_id,
+            manifest=yaml.safe_dump(
+                {"kind": SITE_KIND, "name": name, "spec": {"visibility": "public"}}
+            ),
         )
         narrowed = await _verb(
             "object_apply",
@@ -1090,6 +1074,7 @@ async def test_the_site_kind_reads_and_regates_a_hosted_site(db: None) -> None:
         {"relation": "created_in", "target": {"kind": "conversation", "name": str(conversation_id)}}
     ]
     assert applied["result"] == "updated"
+    assert widened["result"] == "updated"
     assert narrowed["result"] == "updated"
     (row,) = await _stored(workspace)
     assert row.visibility == "private"

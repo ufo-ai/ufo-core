@@ -28,9 +28,8 @@ nothing, since a scratch server is not a deliverable."""
 
 import json
 import shlex
-from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -81,12 +80,10 @@ VISIBILITY_NEEDS_A_SPEAKER = (
     "visibility argument, or have the member say what it should be"
 )
 VISIBILITY_DESCRIPTION = (
-    "Who may open the hosted link: private (you alone) or workspace (any member). Omit unless the "
-    "member asked — a new site defaults from where it was built, "
+    "Who may open the hosted link: private (you alone), workspace (any member), or public (anyone "
+    "with the link). Omit unless the member asked — a new site defaults from where it was built, "
     "and an existing one keeps the visibility it has."
 )
-PUBLIC_VISIBILITY_UNAVAILABLE = "public sharing is not available for new sites"
-type NewVisibility = Literal["private", "workspace"]
 
 
 class WebsiteInput(BaseModel):
@@ -127,25 +124,18 @@ class DeployWebsiteInput(BaseModel):
     )
     site_name: str = Field(description="A name for the served site; it names the hosted link.")
     entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
-    visibility: NewVisibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
+    visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
     user_description: str = Field(
         description="Which site you are putting online, in plain language for the activity "
         "timeline."
     )
-
-    @field_validator("visibility", mode="before")
-    @classmethod
-    def refuse_public_visibility(cls, value: str | None) -> str | None:
-        if value == "public":
-            raise ValueError(PUBLIC_VISIBILITY_UNAVAILABLE)
-        return value
 
 
 class PublishWebsiteInput(BaseModel):
     project_path: str = Field(description="The web app project directory.")
     dist_path: str = Field(description="Directory of the built static output to serve.")
     app_name: str = Field(description="A name for the published app; it names the hosted link.")
-    visibility: NewVisibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
+    visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
     run_command: str | None = Field(
         default=None, description="Optional backend command to run alongside the static files."
     )
@@ -155,13 +145,6 @@ class PublishWebsiteInput(BaseModel):
     user_description: str = Field(
         description="Which app you are publishing, in plain language for the activity timeline."
     )
-
-    @field_validator("visibility", mode="before")
-    @classmethod
-    def refuse_public_visibility(cls, value: str | None) -> str | None:
-        if value == "public":
-            raise ValueError(PUBLIC_VISIBILITY_UNAVAILABLE)
-        return value
 
 
 def _json_result(payload: dict[str, object]) -> ToolResult:
