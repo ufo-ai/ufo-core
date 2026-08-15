@@ -1,4 +1,7 @@
+import { useState, type ReactNode } from "react";
+
 import { Filter } from "@/components/ui/filter";
+import { ArtifactText } from "@/kernel/artifact";
 import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageHeader, PageToolbar } from "@/kernel/pane";
@@ -190,7 +193,7 @@ function Feed({
  *  line is the file's story. */
 function newsworthy(run: RadarRun): boolean {
   if (run.status !== "done" || run.artifacts.length) return true;
-  return run.text.trim().includes("\n");
+  return replyText(run.text).includes("\n");
 }
 
 /** The page's runs under the calendar day each fired on, in the order the page already holds. */
@@ -205,10 +208,30 @@ function editions(runs: RadarRun[]): { date: string; runs: RadarRun[] }[] {
   return grouped;
 }
 
+/** A reply that arrives wrapped whole in one `<response>` element is the words inside it — the
+ *  wrapper is the wire's, not the reply's — and an empty pair is no reply at all. */
+function replyText(text: string): string {
+  const trimmed = text.trim();
+  const wrapped = trimmed.match(/^<response>([\s\S]*)<\/response>$/);
+  return (wrapped ? wrapped[1] : trimmed).trim();
+}
+
+/** A markdown file the run shared is the run's own document: it reads inline as the story rather
+ *  than standing as a chip the member must download to open. One whose link is not minted cannot
+ *  be read here and stays a chip. */
+function isDocument(artifact: RadarArtifact): boolean {
+  return (
+    artifact.url !== null &&
+    (artifact.media_type === "text/markdown" || artifact.filename.endsWith(".md"))
+  );
+}
+
 /** One run as a story: the task that fired it is the headline — pressed, it opens that task's
- *  record, where the prompt and schedule are read — what it shared stands next with its picture
- *  where one exists, then the whole reply, and the foot states when it ran beside the ways out:
- *  the conversation it reported into, the thread on the surface it came from, and any outcome. */
+ *  record, where the prompt and schedule are read — and under it the dateline of ways out: when
+ *  it ran, the conversation it reported into, the thread on the surface it came from, and any
+ *  outcome. What it shared stands next with its picture where one exists, then the reply and the
+ *  documents it wrote: a markdown file reads inline, as the whole story where the run said
+ *  nothing else, else behind `Show more` under the reply. */
 function Story({
   run,
   now,
@@ -220,6 +243,18 @@ function Story({
 }) {
   const note = STATUS_NOTES[run.status];
   const thread = slackLink(run.surface, run.source);
+  const body = replyText(run.text);
+  const documents = run.artifacts.filter(isDocument);
+  const files = run.artifacts.filter((artifact) => !isDocument(artifact));
+  const pages = documents.map((artifact) => (
+    <ArtifactText
+      key={artifact.filename}
+      url={artifact.url}
+      name={artifact.filename}
+      mediaType="text/markdown"
+      display="frame"
+    />
+  ));
   const out =
     "text-inherit no-underline hover:underline focus-visible:underline";
   return (
@@ -239,20 +274,6 @@ function Story({
           "Scheduled run"
         )}
       </h3>
-      {run.artifacts.length ? (
-        <ul className="m-0 flex list-none flex-wrap gap-lg p-0">
-          {run.artifacts.map((artifact) => (
-            <li key={artifact.filename}>
-              <Shared artifact={artifact} />
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {run.text ? (
-        <div className="text-body leading-reading">
-          <Markdown text={run.text} />
-        </div>
-      ) : null}
       <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
         <span>{relativeMoment(run.fired_at, now)}</span>
         <a href={chatHash(run.conversation_id)} className={out}>
@@ -273,7 +294,38 @@ function Story({
           </span>
         ) : null}
       </p>
+      {files.length ? (
+        <ul className="m-0 flex list-none flex-wrap gap-lg p-0">
+          {files.map((artifact) => (
+            <li key={artifact.filename}>
+              <Shared artifact={artifact} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {body ? (
+        <div className="text-body leading-reading">
+          <Markdown text={body} />
+        </div>
+      ) : null}
+      {pages.length ? body ? <Reveal>{pages}</Reveal> : pages : null}
     </li>
+  );
+}
+
+/** A document held back until asked for: the reply above it already tells the story, so the full
+ *  text arrives on one press and stays. */
+function Reveal({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  if (open) return <>{children}</>;
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen(true)}
+      className="w-fit border-0 bg-transparent p-0 font-mono text-mono text-ink-soft underline underline-offset-2 hover:text-ink"
+    >
+      Show more
+    </button>
   );
 }
 
