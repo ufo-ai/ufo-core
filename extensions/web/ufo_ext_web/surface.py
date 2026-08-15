@@ -2428,7 +2428,7 @@ def _radar_run(
         "task": None if task_id is None else task_names.get(task_id),
         "surface": run.surface,
         "source": run.source,
-        "text": run.text,
+        "text": "" if run.status == "done" else run.text,
         "artifacts": [
             {
                 "filename": artifact.filename,
@@ -2471,9 +2471,10 @@ async def _radar_task_names(
 
 async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
     """One keyset page of what ran on its own — the scheduled turns reporting into conversations
-    whose content this reader reads, an admin's page included, each naming the task that fired it,
-    the reply it closed with, and links to the files it shared. `agent` narrows the page to one
-    agent the audience holds."""
+    whose content this reader reads, an admin's page included, each naming the task that fired it
+    and linking the files it shared: what a run made is its published report, so a successful
+    run's reply carries no text here and only a run that did not end well says why. `agent`
+    narrows the page to one agent the audience holds."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved

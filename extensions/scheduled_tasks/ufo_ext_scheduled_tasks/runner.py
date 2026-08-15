@@ -24,6 +24,11 @@ from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
 
 CLAIM_LEASE_SECONDS = 300
+REPORT_INSTRUCTION = (
+    "If this run produced something worth reporting, write the report to a markdown file and "
+    "share_file it — the shared file is the run's published result. A run with nothing to report "
+    "shares nothing."
+)
 FINAL_FIRE_INSTRUCTION = (
     "This is the final permitted fire. Complete the scheduled task and settle its result; an "
     "external-tool failure is a result, not a reason to retry after the check-in. Then call "
@@ -84,7 +89,7 @@ class ScheduledTaskRunner:
         runtime_instruction = (
             FINAL_FIRE_INSTRUCTION
             if task.expires_at is not None and following_fire >= task.expires_at
-            else None
+            else REPORT_INSTRUCTION
         )
         if not await store.claim_holds(task):
             return None

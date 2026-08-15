@@ -86,8 +86,17 @@ const RUN = {
   task: "daily-brief",
   surface: "web",
   source: null,
-  text: "All quiet.\n\nNothing needs a follow-up.",
-  artifacts: [],
+  text: "",
+  artifacts: [
+    {
+      filename: "roll-up.pdf",
+      subject: null,
+      media_type: "application/pdf",
+      size_bytes: 5,
+      url: "/dl/roll-up.pdf",
+      preview_url: null,
+    },
+  ],
 };
 
 const TASK_DETAIL = {
@@ -730,7 +739,7 @@ test("the radar section is reached by its own hash and leads with the feed", asy
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("All quiet.")).toBeTruthy();
+  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
   expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
 
@@ -759,7 +768,7 @@ test("the radar tab of an agent narrows the feed and both kinds to its namespace
   location.hash = "#/agents/" + AGENT_ID + "/radar";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("All quiet.")).toBeTruthy();
+  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
   expect(screen.queryByRole("heading", { level: 1, name: "Radar" })).toBeNull();
 
@@ -1045,13 +1054,13 @@ test("Radar shows one family at a time and the switcher names which", async () =
   mountRadar();
 
   expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText("All quiet.")).toBeTruthy();
+  expect(await screen.findByText("roll-up.pdf")).toBeTruthy();
   expect(reads.every((read) => read.includes("/workspace/radar"))).toBe(true);
 
   await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
 
   expect(await screen.findByText("daily-brief")).toBeTruthy();
-  expect(screen.queryByText("All quiet.")).toBeNull();
+  expect(screen.queryByText("roll-up.pdf")).toBeNull();
 
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
 

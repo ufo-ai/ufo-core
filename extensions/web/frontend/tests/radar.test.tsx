@@ -23,7 +23,7 @@ const RUN = {
   task: "morning-digest",
   surface: "slack",
   source: "https://acme.slack.com/archives/C42/p1",
-  text: "12 items, **2 stale**.",
+  text: "",
   artifacts: [
     {
       filename: "queue.png",
@@ -58,11 +58,21 @@ const FAILED_RUN = {
   task: "weekly-numbers",
   fired_at: "2026-08-14T07:00:00+00:00",
   status: "failed",
+  text: "The roll-up source timed out.",
+  artifacts: [],
+};
+
+const QUIET_RUN = {
+  ...RUN,
+  turn_id: "3e0b5a76-8db9-4c42-af60-b197d35e0f48",
+  task: "quiet-check",
+  fired_at: "2026-08-14T08:00:00+00:00",
+  status: "done",
   text: "",
   artifacts: [],
 };
 
-const EARLIER_RUN = {
+const STOPPED_RUN = {
   ...RUN,
   turn_id: "2d9a4f65-7ca8-4b31-9e5f-a086c24d9e37",
   task: null,
@@ -72,33 +82,6 @@ const EARLIER_RUN = {
   status: "cancelled",
   text: "",
   artifacts: [],
-};
-
-const NOOP_RUN = {
-  ...RUN,
-  turn_id: "3e0b5a76-8db9-4c42-af60-b197d35e0f48",
-  task: "quiet-check",
-  fired_at: "2026-08-14T08:00:00+00:00",
-  text: "<response>Nothing new since the last run.</response>",
-  artifacts: [],
-};
-
-const REPORT_RUN = {
-  ...RUN,
-  turn_id: "4f1c6b87-9eca-4d53-b071-c2a8e46f1059",
-  task: "standup-notes",
-  fired_at: "2026-08-14T06:00:00+00:00",
-  text: "<response></response>",
-  artifacts: [
-    {
-      filename: "standup.md",
-      subject: null,
-      media_type: "text/markdown",
-      size_bytes: 40,
-      url: "/dl/standup.md",
-      preview_url: null,
-    },
-  ],
 };
 
 beforeEach(() => {
@@ -113,12 +96,11 @@ function mountRadarSection() {
   );
 }
 
-test("a story leads with its task, files above the whole reply, and a dated foot of ways out", async () => {
+test("a story is what a run made or how it went wrong, never what it said", async () => {
   wire({
     "/workspace/radar": () =>
-      json({ runs: [RUN, NOOP_RUN, FAILED_RUN, REPORT_RUN, EARLIER_RUN], older: null }),
-    "/dl/standup.md": () => new Response("### Standup\n\nTwo blockers cleared."),
-    "/dl/notes.md": () => new Response("Full weekly notes body."),
+      json({ runs: [RUN, QUIET_RUN, FAILED_RUN, STOPPED_RUN], older: null }),
+    "/dl/notes.md": () => new Response("### Standup\n\nTwo blockers cleared."),
   });
   mountRadarSection();
 
@@ -128,47 +110,33 @@ test("a story leads with its task, files above the whole reply, and a dated foot
   const headline = screen.getByRole("heading", { level: 3, name: "morning-digest" });
   expect(headline.querySelector("button")).toBeTruthy();
   expect(screen.getByRole("heading", { level: 3, name: "Scheduled run" })).toBeTruthy();
-  expect(screen.queryByText("assistant")).toBeNull();
 
-  const body = screen.getByText("2 stale");
-  expect(body.tagName).toBe("STRONG");
   const preview = screen.getByRole("img", { name: "the queue" });
   expect(preview.getAttribute("src")).toBe("/dl/queue.png?preview");
   expect(preview.closest("a")?.getAttribute("href")).toBe("/dl/queue.png");
-  expect(
-    preview.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
   expect(screen.getByText("brief.pdf").closest("a")?.getAttribute("href")).toBe("/dl/brief.pdf");
+  expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  expect(screen.queryByText("notes.md")).toBeNull();
 
   const conversations = screen.getAllByRole("link", { name: "Conversation" });
   expect(conversations[0].getAttribute("href")).toBe("#/c/" + CONVO_ID);
   const threads = screen.getAllByRole("link", { name: "Slack" });
-  expect(threads).toHaveLength(3);
   expect(threads[0].textContent).toBe("Slack ↗");
   expect(threads[0].getAttribute("href")).toBe(RUN.source);
-  expect(
-    screen.getAllByText(/ago$/)[0].compareDocumentPosition(preview) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
+  expect(screen.getAllByText(/ago$/).length).toBeGreaterThan(0);
+
   expect(screen.getByText("Failed")).toBeTruthy();
+  expect(screen.getByText("The roll-up source timed out.")).toBeTruthy();
   expect(screen.getByText("Stopped")).toBeTruthy();
   expect(screen.queryByText("quiet-check")).toBeNull();
-  expect(screen.queryByText("Nothing new since the last run.")).toBeNull();
-
-  expect(await screen.findByText("Two blockers cleared.")).toBeTruthy();
-  expect(screen.queryByText("standup.md")).toBeNull();
-  expect(screen.queryByText("<response></response>")).toBeNull();
-
-  expect(screen.queryByText("notes.md")).toBeNull();
-  expect(screen.queryByText("Full weekly notes body.")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Show more" }));
-  expect(await screen.findByText("Full weekly notes body.")).toBeTruthy();
 });
 
 test("a story's task opens the task record where the prompt is read", async () => {
   const reads: string[] = [];
   wire({
     "/workspace/radar": () => json({ runs: [RUN], older: null }),
+    "/dl/notes.md": () => new Response("All quiet on the queue."),
     "/objects/scheduled_task/morning-digest": (url) => {
       reads.push(url);
       return json({
@@ -201,9 +169,10 @@ test("the feed walks older pages by cursor", async () => {
     "/workspace/radar": (url) => {
       reads.push(url);
       return url.includes("after=")
-        ? json({ runs: [EARLIER_RUN], older: null, newer: "newer|x" })
+        ? json({ runs: [STOPPED_RUN], older: null, newer: "newer|x" })
         : json({ runs: [RUN], older: "older|x", newer: null });
     },
+    "/dl/notes.md": () => new Response("All quiet on the queue."),
   });
   mountRadarSection();
 

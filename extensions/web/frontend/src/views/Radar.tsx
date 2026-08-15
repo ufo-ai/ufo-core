@@ -1,5 +1,3 @@
-import { useState, type ReactNode } from "react";
-
 import { Filter } from "@/components/ui/filter";
 import { ArtifactText } from "@/kernel/artifact";
 import { ObjectDetail, ObjectPane, type ObjectAddress } from "@/kernel/objects";
@@ -187,13 +185,11 @@ function Feed({
   );
 }
 
-/** Whether a run is a story at all. A run that ended well with nothing but a line — no files, no
- *  reply to read past its first breath — is a no-op check, and a feed of them buries the runs
- *  that produced something. A failure is news whatever its length, and a file shared under one
- *  line is the file's story. */
+/** Whether a run is a story at all: what it made, or how it went wrong. A run publishes by
+ *  sharing files — the fire asks for exactly that act — so a successful run that shared nothing
+ *  chose not to report and is absent; its conversation holds it. A failure is always news. */
 function newsworthy(run: RadarRun): boolean {
-  if (run.status !== "done" || run.artifacts.length) return true;
-  return replyText(run.text).includes("\n");
+  return run.status !== "done" || run.artifacts.length > 0;
 }
 
 /** The page's runs under the calendar day each fired on, in the order the page already holds. */
@@ -206,14 +202,6 @@ function editions(runs: RadarRun[]): { date: string; runs: RadarRun[] }[] {
     else grouped.push({ date, runs: [run] });
   }
   return grouped;
-}
-
-/** A reply that arrives wrapped whole in one `<response>` element is the words inside it — the
- *  wrapper is the wire's, not the reply's — and an empty pair is no reply at all. */
-function replyText(text: string): string {
-  const trimmed = text.trim();
-  const wrapped = trimmed.match(/^<response>([\s\S]*)<\/response>$/);
-  return (wrapped ? wrapped[1] : trimmed).trim();
 }
 
 /** A markdown file the run shared is the run's own document: it reads inline as the story rather
@@ -229,9 +217,10 @@ function isDocument(artifact: RadarArtifact): boolean {
 /** One run as a story: the task that fired it is the headline — pressed, it opens that task's
  *  record, where the prompt and schedule are read — and under it the dateline of ways out: when
  *  it ran, the conversation it reported into, the thread on the surface it came from, and any
- *  outcome. What it shared stands next with its picture where one exists, then the reply and the
- *  documents it wrote: a markdown file reads inline, as the whole story where the run said
- *  nothing else, else behind `Show more` under the reply. */
+ *  outcome. The body is what the run made, never what it said: files with their pictures where
+ *  one exists, markdown documents read inline whole. Only a run that did not end well speaks in
+ *  text, because a failure explains itself; the reply a successful run posted lives in its
+ *  conversation, one link away. */
 function Story({
   run,
   now,
@@ -243,7 +232,6 @@ function Story({
 }) {
   const note = STATUS_NOTES[run.status];
   const thread = slackLink(run.surface, run.source);
-  const body = replyText(run.text);
   const documents = run.artifacts.filter(isDocument);
   const files = run.artifacts.filter((artifact) => !isDocument(artifact));
   const pages = documents.map((artifact) => (
@@ -303,29 +291,13 @@ function Story({
           ))}
         </ul>
       ) : null}
-      {body ? (
+      {run.status !== "done" && run.text ? (
         <div className="text-body leading-reading">
-          <Markdown text={body} />
+          <Markdown text={run.text} />
         </div>
       ) : null}
-      {pages.length ? body ? <Reveal>{pages}</Reveal> : pages : null}
+      {pages}
     </li>
-  );
-}
-
-/** A document held back until asked for: the reply above it already tells the story, so the full
- *  text arrives on one press and stays. */
-function Reveal({ children }: { children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  if (open) return <>{children}</>;
-  return (
-    <button
-      type="button"
-      onClick={() => setOpen(true)}
-      className="w-fit border-0 bg-transparent p-0 font-mono text-mono text-ink-soft underline underline-offset-2 hover:text-ink"
-    >
-      Show more
-    </button>
   );
 }
 

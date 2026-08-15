@@ -2684,6 +2684,7 @@ async def _seed_scheduled_run(
     *,
     seq: int = 1,
     key: str | None = None,
+    status: str = "done",
     text: str,
     fired: datetime,
     artifact: tuple[str, str] | None = None,
@@ -2698,12 +2699,12 @@ async def _seed_scheduled_run(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 seq=seq,
-                status="done",
+                status=status,
                 inbound="fired",
                 admission_source="scheduled",
                 idempotency_key=key,
                 context=None if context is None else context.model_dump(mode="json"),
-                terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
+                terminal=TerminalFrame(status=status, text=text).model_dump(mode="json"),
                 created_at=fired,
                 updated_at=fired,
             )
@@ -2764,6 +2765,15 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         artifact=("queue.png", "image/png"),
         context=TurnContext(source="https://acme.slack.com/archives/C42/p1"),
     )
+    failed_run = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        seq=2,
+        status="failed",
+        text="the queue read timed out",
+        fired=fired + timedelta(minutes=3),
+    )
     private_conversation = await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -2804,11 +2814,13 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     m_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     ).json()
-    assert [run["turn_id"] for run in m_view["runs"]] == [str(shared_run)]
-    run = m_view["runs"][0]
+    assert [run["turn_id"] for run in m_view["runs"]] == [str(failed_run), str(shared_run)]
+    failed = m_view["runs"][0]
+    assert (failed["status"], failed["text"]) == ("failed", "the queue read timed out")
+    run = m_view["runs"][1]
     assert run["task"] == "morning-digest"
     assert "prompt" not in run
-    assert run["text"] == "12 items, 2 stale"
+    assert run["text"] == ""
     assert run["status"] == "done"
     assert run["surface"] == "slack"
     assert run["source"] == "https://acme.slack.com/archives/C42/p1"
@@ -2819,20 +2831,24 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     n_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).json()
-    assert {run["turn_id"] for run in n_view["runs"]} == {str(shared_run), str(private_run)}
+    assert {run["turn_id"] for run in n_view["runs"]} == {
+        str(shared_run),
+        str(failed_run),
+        str(private_run),
+    }
     resumed = next(run for run in n_view["runs"] if run["turn_id"] == str(private_run))
     assert resumed["task"] is None
-    assert resumed["text"] == "resumed"
+    assert resumed["text"] == ""
     admin_view = (
         await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
-    assert [run["turn_id"] for run in admin_view["runs"]] == [str(shared_run)]
+    assert [run["turn_id"] for run in admin_view["runs"]] == [str(failed_run), str(shared_run)]
     narrowed = (
         await client.get(
             f"{RADAR_PATH}?agent={agent_id}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
         )
     ).json()
-    assert [run["turn_id"] for run in narrowed["runs"]] == [str(shared_run)]
+    assert [run["turn_id"] for run in narrowed["runs"]] == [str(failed_run), str(shared_run)]
     unknown = await client.get(
         f"{RADAR_PATH}?agent={uuid4()}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
     )
@@ -2845,7 +2861,7 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
     assert anonymous.status_code == 401
 
 
-async def test_radar_pages_by_keyset_and_bounds_the_story(
+async def test_radar_pages_by_keyset(
     web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, workspace_id, agent_id = web
@@ -2875,7 +2891,7 @@ async def test_radar_pages_by_keyset_and_bounds_the_story(
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     first = (await client.get(RADAR_PATH, headers=headers)).json()
     assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
-    assert len(first["runs"][0]["text"]) == 2_000
+    assert first["runs"][0]["text"] == ""
     assert first["runs"][0]["task"] is None
     assert first["newer"] is None and first["older"] is not None
     second = (

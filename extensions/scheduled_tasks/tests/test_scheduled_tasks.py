@@ -23,6 +23,7 @@ from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import (
     FINAL_FIRE_INSTRUCTION,
+    REPORT_INSTRUCTION,
     ScheduledTaskRunner,
     fire_body,
 )
@@ -783,7 +784,10 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
             "<scheduled_task>\n"
             f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
             "</scheduled_task>\n"
-            "check inbox"
+            "check inbox\n"
+            "<scheduled_task_instruction>\n"
+            f"{REPORT_INSTRUCTION}\n"
+            "</scheduled_task_instruction>"
         )
         assert turns[0]["admission_source"] == "scheduled"
         assert turns[0]["status"] == "queued"
@@ -1482,7 +1486,10 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         "<scheduled_task>\n"
         f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
         "</scheduled_task>\n"
-        "check inbox"
+        "check inbox\n"
+        "<scheduled_task_instruction>\n"
+        f"{REPORT_INSTRUCTION}\n"
+        "</scheduled_task_instruction>"
     )
 
 
