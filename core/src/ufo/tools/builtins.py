@@ -1156,7 +1156,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=WriteInput,
         handler=write_handler,
-        parallel_safe=True,
     ),
     ToolDef(
         name="edit",
@@ -1168,7 +1167,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=EditInput,
         handler=edit_handler,
-        parallel_safe=True,
     ),
     ToolDef(
         name="glob",
@@ -1208,7 +1206,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
-        parallel_safe=True,
     ),
     ToolDef(
         name="spawn_subagent",

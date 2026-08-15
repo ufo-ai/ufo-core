@@ -14,9 +14,11 @@ dedups at the provider) and must run, since skipping it strands the keyed work a
 call would duplicate it under a fresh call id; only an unkeyed redo yields to queued member
 guidance. `parallel_safe` marks a tool whose same-round calls the engine may dispatch
 concurrently: the model owns not aiming two calls at one target, so independence is the default
-and a tool leaves it `False` only when the round reads it by position — a final act (a question,
-a connect, a credential request) is taken from the round's last call, so it stays an in-order
-barrier. `ToolRegistry` is the frozen set the engine
+and a tool leaves it `False` for one of two reasons. A final act (a question, a connect, a
+credential request) is read from the round's last call, so its position is the semantics; and a
+file tool whose own guard or staging reads same-round state — write and edit consult the paths
+the turn has read, share_file's preflight measures a file another call may still be producing —
+would race the very sequence its description prescribes. `ToolRegistry` is the frozen set the engine
 dispatches against — it rejects a duplicate name at construction and fails loud on an unknown
 lookup."""
 

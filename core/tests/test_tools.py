@@ -159,13 +159,22 @@ def test_builtin_tools_are_trusted_by_default() -> None:
     assert all(tool.untrusted is False for tool in BUILTIN_TOOLS)
 
 
-def test_only_position_read_final_acts_barrier_a_rounds_dispatch() -> None:
-    """Same-round calls dispatch concurrently unless the round is read by the call's position:
+def test_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round() -> None:
+    """Same-round calls dispatch concurrently unless the engine itself needs the order:
     ask_user, connect_account, and request_credentials land as the round's last call
-    (`_final_act`), so each stays an in-order barrier; every other tool owns its own target and
+    (`_final_act`); write and edit consult the paths the turn has read, and share_file's
+    preflight measures a file a same-round call may still be producing — each would race the
+    sequence its own description prescribes. Every other tool owns its own target and
     parallelizes."""
     barriers = {tool.name for tool in BUILTIN_TOOLS if not tool.parallel_safe}
-    assert barriers == {"ask_user", "connect_account", "request_credentials"}
+    assert barriers == {
+        "ask_user",
+        "connect_account",
+        "request_credentials",
+        "write",
+        "edit",
+        "share_file",
+    }
 
 
 def test_registry_schemas_cover_every_tool() -> None:
