@@ -6877,16 +6877,40 @@ async def test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothin
     """The window between a turn committing and its tail saying so. `_finish_turn` writes the row
     and tells the hub nothing, which is the real shape: the tail learns by polling. The poller may
     already have delivered the reply inside that window, so a checkpoint coming due in it would put
-    an update *after* the answer in the member's own thread. A signal is published first, because a
-    signalless checkpoint is skipped anyway and would prove nothing; a second is published after the
-    commit so the next checkpoint has something it would post."""
+    an update *after* the answer in the member's own thread.
+
+    The commit lands inside the reporter's own first post, which is what makes the case the reporter
+    can be held to: a checkpoint decides on the terminal state it read a moment earlier, so a commit
+    timed against the wall clock can always land in that decision's own gap and put a legitimately
+    decided post after it. Committing while the reporter is blocked in its post orders the two
+    without timing — the row is durable before the reporter can reach its next checkpoint, so every
+    later checkpoint comes due on a committed turn and the count may never grow past this one post.
+    A signal is published first, because a signalless checkpoint is skipped anyway and would prove
+    nothing; a second rides the commit so the next checkpoint has something it would post."""
     caplog.set_level(logging.INFO, logger="ufo")
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 0.05)
     monkeypatch.setattr(slack, "PROGRESS_CAP_SECONDS", 0.1)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
-    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    base = _mock_transport(recorder, {})
+    committed = asyncio.Event()
+
+    async def committing(request: httpx.Request) -> httpx.Response:
+        response = base.handler(request)
+        posting = str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+        if posting and not committed.is_set():
+            await _finish_turn(turn_id, "migrated")
+            await hub.publish(
+                turn_id,
+                ToolCall(tool="bash", preview="{}", description="still working, apparently"),
+            )
+            committed.set()
+        return response
+
+    _, client, _ = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(committing), hub=hub
+    )
     mention = _event_body(
         type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
     )
@@ -6906,20 +6930,13 @@ async def test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothin
                 )
             ).scalar_one()
         await _arm_followers(workspace_id, turn_id, hub)
+        task = slack._PROGRESS_TASKS[turn_id]
         await hub.publish(
             turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
         )
-        deadline = time.monotonic() + 10
-        while posts() == 0:
-            assert time.monotonic() < deadline, "the reporter never posted while the turn ran"
-            await asyncio.sleep(0.01)
-        await _finish_turn(turn_id, "migrated")
-        settled = posts()
-        await hub.publish(
-            turn_id, ToolCall(tool="bash", preview="{}", description="still working, apparently")
-        )
-        await asyncio.wait_for(slack._PROGRESS_TASKS[turn_id], timeout=10)
-    assert posts() == settled, "a checkpoint posted after the turn had committed"
+        await asyncio.wait_for(task, timeout=10)
+    assert committed.is_set(), "the reporter never posted while the turn ran"
+    assert posts() == 1, "a checkpoint posted after the turn had committed"
 
 
 async def test_a_dead_tail_abandons_the_progress_task_and_says_which(
