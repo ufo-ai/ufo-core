@@ -155,7 +155,7 @@ locals {
 
     [sandbox]
     backend = "e2b"
-    proxy_public_url = "https://${cloudflare_dns_record.sandbox_proxy.name}"
+    proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
 
     [connect]
