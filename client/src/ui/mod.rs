@@ -125,6 +125,7 @@ pub enum Reply {
     None,
     Send(String),
     Clipboard(ClipEntry),
+    Attach(std::path::PathBuf),
     Recall { text: String, arrival_id: String },
     Choice(String),
     ChoiceCancelled,
@@ -685,6 +686,9 @@ impl App {
     pub fn on_paste(&mut self, text: String) -> Reply {
         match self.focus {
             Focus::Compose => {
+                if let Some(source) = crate::clipboard::dropped_image(&text) {
+                    return Reply::Attach(source);
+                }
                 let width = self.entry_width();
                 self.ask
                     .apply(Key::Paste(text), &self.history.entries, width);

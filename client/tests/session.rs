@@ -1007,6 +1007,135 @@ fn a_clipboard_deadline_frees_ctrl_v() {
 
 #[cfg(unix)]
 #[test]
+fn a_dropped_image_path_attaches_as_an_image() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\thello", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tseen", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-drop");
+    let source = home.join("shot one.png");
+    let png = [0x89u8, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 7, 7];
+    std::fs::write(&source, png).unwrap();
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the first post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+    let dropped = format!(
+        "\x1b[200~{} \x1b[201~",
+        source.display().to_string().replace(' ', "\\ ")
+    );
+    session
+        .keys
+        .write_all(dropped.as_bytes())
+        .expect("the dropped path reaches the pty");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.screen().contains("[Image #1]") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped path never attached: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    assert_eq!(
+        std::fs::read(home.join(&relative)).expect("the dropped image is copied into the stash"),
+        png
+    );
+    session.keys.write_all(b"\r").expect("Enter sends");
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(
+        requests[1].body,
+        format!("[Image #1: {relative}]"),
+        "the send names the stashed copy, never the dropped path"
+    );
+    assert!(
+        source.exists(),
+        "the member's own file is copied, never moved"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_v_with_a_copied_image_file_attaches_it() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\thello", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tseen", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("tty-filecopy");
+    let source = home.join("copied.png");
+    let png = [0x89u8, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 3, 3];
+    std::fs::write(&source, png).unwrap();
+    let file_clipboard = format!(
+        "#!/bin/sh\ncase \"$*\" in *PNGf*) exit 1;; *furl*) printf '{}\\n';; *image/png*) exit 1;; \
+         *uri-list*) printf 'file://{}\\n';; *) exit 1;; esac\n",
+        source.display(),
+        source.display()
+    );
+    stub_clipboard(
+        &home,
+        &[
+            ("osascript", &file_clipboard),
+            ("pbpaste", "#!/bin/sh\nexit 0\n"),
+            ("wl-paste", &file_clipboard),
+            ("xclip", &file_clipboard),
+        ],
+    );
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the first post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+    session.keys.write_all(b"\x16").expect("Ctrl+V");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.screen().contains("[Image #1]") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the copied file never attached: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    assert_eq!(
+        std::fs::read(home.join(&relative)).expect("the copied file lands in the stash"),
+        png
+    );
+    session.keys.write_all(b"\r").expect("Enter sends");
+    let requests = served.handle.join().unwrap();
+    let _ = session.child.wait();
+    assert_eq!(
+        requests[1].body,
+        format!("[Image #1: {relative}]"),
+        "{requests:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
 fn an_image_at_the_path_popup_names_the_drop() {
     let served = serve(vec![Exchange {
         delay_ms: 0,

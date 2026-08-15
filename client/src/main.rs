@@ -757,6 +757,13 @@ struct Gate {
     exit: Option<i32>,
 }
 
+fn attach_dropped(app: &mut App, source: &std::path::Path, cwd: &std::path::Path) {
+    match clipboard::stash_copy(source, cwd) {
+        Ok(path) => app.paste_image(&path),
+        Err(error) => app.note(&error),
+    }
+}
+
 fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
     let host = session
         .workspace_url
@@ -832,6 +839,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::Term(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => {
                 match app.on_key(key) {
                     Reply::None => {}
+                    Reply::Attach(source) => attach_dropped(&mut app, &source, &stash_cwd),
                     Reply::Clipboard(entry) => {
                         if !clip_pending {
                             clip_pending = true;
@@ -921,7 +929,9 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 app.paint();
             }
             LoopEvent::Term(TermEvent::Paste(text)) => {
-                app.on_paste(text);
+                if let Reply::Attach(source) = app.on_paste(text) {
+                    attach_dropped(&mut app, &source, &stash_cwd);
+                }
                 app.paint();
             }
             LoopEvent::Clip(entry, result) => {
@@ -944,7 +954,9 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         }
                     }
                     Ok(Clip::Text(text)) => {
-                        app.on_paste(text);
+                        if let Reply::Attach(source) = app.on_paste(text) {
+                            attach_dropped(&mut app, &source, &stash_cwd);
+                        }
                     }
                     Ok(Clip::Empty) => app.note("The clipboard holds nothing to paste."),
                 }
