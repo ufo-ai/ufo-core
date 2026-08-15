@@ -633,9 +633,11 @@ the body by — a chunked body, whose length no header can state, is refused rat
 only then does the parse buffer each part within that length (in memory up to the parser's spool
 threshold, a temp file past it); a plain text body is instead bounded by the bytes actually read,
 and the workspace write accumulates one size-capped body per file before the turn runs. A terminal
-paste never uploads: the client saves the clipboard image to a local temp file and the message
-names its path as `[Image #N: path]`, so the bytes cross only when the agent reads that path
-through the op lane's existing image read and its cap. Outbound, the portal renders `artifact_link` downloads instead of
+paste never uploads: the client saves the clipboard image under the workspace's `.ufo/images` —
+capped at the image read's own bound, swept by the client at exit — and the message names the
+workspace-relative path as `[Image #N: path]`, so the bytes cross only when the agent reads that
+path through the workspace-scoped image read. The read runs off the client's loop and lands only
+in the entry whose Ctrl+V asked for it. Outbound, the portal renders `artifact_link` downloads instead of
 an upload. The portal renders agent replies as markdown through one sanitizing chokepoint: raw
 HTML in a reply renders as visible text, never as elements; links open in a new tab carrying
 `noopener noreferrer`; and an image renders only from the portal's own origin, so a reply can

@@ -7,7 +7,7 @@ use crate::ops::fileops::text::{
 };
 
 const READ_DEFAULT_LIMIT: f64 = 2000.0;
-const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+pub const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 const IMAGE_MEDIA_TYPES: &[(&str, &str)] = &[
     (".png", "image/png"),

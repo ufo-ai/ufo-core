@@ -1,7 +1,7 @@
 //! Executing the ops a `run` directive asks of this terminal.
 
 mod exec;
-mod fileops;
+pub mod fileops;
 
 use std::fs;
 use std::path::{Path, PathBuf};

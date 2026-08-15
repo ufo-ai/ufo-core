@@ -5,7 +5,7 @@ mod changes;
 mod fs_edit;
 mod fs_glob;
 mod fs_grep;
-mod fs_read;
+pub mod fs_read;
 mod fs_write;
 mod text;
 

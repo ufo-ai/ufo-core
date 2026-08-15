@@ -20,7 +20,7 @@ use crate::ops::OpRuntime;
 use crate::ui::history::{list_conversations, record_conversation, PastConversation};
 use crate::ui::picker::{PickOutcome, Picker};
 use crate::ui::plain::Plain;
-use crate::ui::{App, Reply};
+use crate::ui::{App, ClipEntry, Reply};
 use crate::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
 
 const HELP: &str = "\
@@ -134,6 +134,7 @@ fn main() {
     update_resume(&session, tty && !json);
     config::sweep_retired(&home);
     let scratch = workdir.clone();
+    let stash_cwd = launch_dir.clone();
     let runtime = OpRuntime {
         workdir,
         cwd: launch_dir,
@@ -146,6 +147,7 @@ fn main() {
         run_plain(session, runtime, home, message)
     };
     let _ = std::fs::remove_dir_all(&scratch);
+    clipboard::sweep_stash(&stash_cwd);
     process::exit(code);
 }
 
@@ -740,7 +742,7 @@ impl Wire {
 enum LoopEvent {
     Term(TermEvent),
     Wire(WireEvent),
-    Clip(Result<Clip, String>),
+    Clip(ClipEntry, Result<Clip, String>),
     StdinClosed,
 }
 
@@ -767,7 +769,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         .to_string();
     let channel_name = session.channel.clone();
     let cwd = runtime.cwd.clone();
-    let stash_dir = runtime.workdir.clone();
+    let stash_cwd = runtime.cwd.clone();
     let workspace_url = session.workspace_url.clone();
 
     let raw = ui::RawGuard::new();
@@ -830,12 +832,12 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::Term(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => {
                 match app.on_key(key) {
                     Reply::None => {}
-                    Reply::Clipboard => {
+                    Reply::Clipboard(entry) => {
                         if !clip_pending {
                             clip_pending = true;
                             let notify = stop_evt.clone();
                             thread::spawn(move || {
-                                let _ = notify.send(LoopEvent::Clip(clipboard::read()));
+                                let _ = notify.send(LoopEvent::Clip(entry, clipboard::read()));
                             });
                         }
                     }
@@ -922,18 +924,29 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 app.on_paste(text);
                 app.paint();
             }
-            LoopEvent::Clip(result) => {
+            LoopEvent::Clip(entry, result) => {
                 clip_pending = false;
                 match result {
-                    Ok(Clip::Image(bytes)) => match clipboard::stash_image(&bytes, &stash_dir) {
-                        Ok(path) => app.paste_image(&path),
-                        Err(error) => app.note(&error),
-                    },
+                    Err(error) => app.note(&error),
+                    Ok(_) if !app.entry_still(entry) => {
+                        app.note(
+                            "The entry changed while the clipboard was read; press Ctrl+V again.",
+                        );
+                    }
+                    Ok(Clip::Image(bytes)) => {
+                        if entry == ClipEntry::Compose {
+                            match clipboard::stash_image(&bytes, &stash_cwd) {
+                                Ok(path) => app.paste_image(&path),
+                                Err(error) => app.note(&error),
+                            }
+                        } else {
+                            app.note("An image pastes into the message entry only.");
+                        }
+                    }
                     Ok(Clip::Text(text)) => {
                         app.on_paste(text);
                     }
                     Ok(Clip::Empty) => app.note("The clipboard holds nothing to paste."),
-                    Err(error) => app.note(&error),
                 }
                 app.paint();
             }
@@ -1136,7 +1149,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     let code = loop {
         let event = match evt_rx.recv() {
             Ok(LoopEvent::Wire(event)) => event,
-            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::Clip(_)) | Ok(LoopEvent::StdinClosed) => {
+            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::Clip(..)) | Ok(LoopEvent::StdinClosed) => {
                 continue
             }
             Err(_) => break 0,
@@ -1340,7 +1353,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     Err(event) => emit_json(&event),
                 }
             }
-            LoopEvent::Term(_) | LoopEvent::Clip(_) => {}
+            LoopEvent::Term(_) | LoopEvent::Clip(..) => {}
             LoopEvent::StdinClosed => {
                 stdin_open = false;
                 if !in_turn {

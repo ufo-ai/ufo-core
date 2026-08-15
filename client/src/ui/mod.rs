@@ -110,12 +110,21 @@ impl Drop for RawGuard {
     }
 }
 
+/// The entry a Ctrl+V was pressed in. The read runs off the loop, so the result names the entry
+/// it was meant for and lands only there — never in whichever entry holds focus when it returns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClipEntry {
+    Compose,
+    Secret,
+    Path,
+}
+
 /// What a key did, for the loop to route.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     None,
     Send(String),
-    Clipboard,
+    Clipboard(ClipEntry),
     Recall { text: String, arrival_id: String },
     Choice(String),
     ChoiceCancelled,
@@ -651,13 +660,19 @@ impl App {
         }
     }
 
-    /// A clipboard image lands in the ask as an `[Image #N]` marker; the send expands it to the
-    /// saved path. Only the composer takes an image — a masked entry or path popup drops it, as
-    /// they drop every paste that is not theirs.
-    pub fn paste_image(&mut self, path: &str) {
-        if self.focus != Focus::Compose {
-            return;
+    /// Whether the entry a Ctrl+V was pressed in still holds input, so its clipboard result may
+    /// land.
+    pub fn entry_still(&self, entry: ClipEntry) -> bool {
+        match entry {
+            ClipEntry::Compose => self.focus == Focus::Compose,
+            ClipEntry::Secret => self.focus == Focus::Secret,
+            ClipEntry::Path => self.focus == Focus::Path,
         }
+    }
+
+    /// A clipboard image lands in the ask as an `[Image #N]` marker; the send expands it to the
+    /// stashed workspace-relative path.
+    pub fn paste_image(&mut self, path: &str) {
         let width = self.entry_width();
         self.ask
             .apply(Key::Image(path.to_string()), &self.history.entries, width);
@@ -702,7 +717,7 @@ impl App {
                 self.copy_last_reply();
                 return Reply::None;
             }
-            KeyCode::Char('v') if ctrl => return Reply::Clipboard,
+            KeyCode::Char('v') if ctrl => return Reply::Clipboard(ClipEntry::Compose),
             KeyCode::Char('?') if self.ask.text.is_empty() => {
                 self.focus = Focus::Keys;
                 return Reply::None;
@@ -790,7 +805,7 @@ impl App {
                 entry.value.clear();
                 Reply::None
             }
-            KeyCode::Char('v') if ctrl => Reply::Clipboard,
+            KeyCode::Char('v') if ctrl => Reply::Clipboard(ClipEntry::Secret),
             KeyCode::Char(ch) if !ctrl => {
                 entry.value.push(ch);
                 Reply::None
@@ -864,7 +879,7 @@ impl App {
                 self.refilter_paths();
             }
             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Reply::Clipboard;
+                return Reply::Clipboard(ClipEntry::Path);
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.ask.apply(Key::Char(ch), &self.history.entries, width);

@@ -275,6 +275,7 @@ fn run_client_on_pty(
     }
     command
         .args(args)
+        .current_dir(home)
         .env("UFO_URL", url)
         .env("UFO_HOME", home)
         .env("UFO_CHANNEL", "e2e-tty")
@@ -331,6 +332,7 @@ fn scratch_home(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("credentials"), "test-token").unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "").unwrap();
     dir
 }
 
@@ -879,15 +881,10 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let stashed = std::fs::read_dir(home.join("tmp"))
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("ufo."))
-        .map(|entry| entry.path().join("image-1.png"))
-        .find(|path| path.exists())
-        .expect("the pasted image is stashed in the session's private workdir");
+    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    let stashed = home.join(&relative);
     assert_eq!(
-        std::fs::read(&stashed).unwrap(),
+        std::fs::read(&stashed).expect("the image is stashed under the workspace"),
         [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 1]
     );
     session.keys.write_all(b"\r").expect("Enter sends");
@@ -896,12 +893,159 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
         requests[1].body,
-        format!("[Image #1: {}]", stashed.display()),
-        "the send names the stashed image"
+        format!("[Image #1: {relative}]"),
+        "the send names the workspace-relative path"
+    );
+    assert!(!stashed.exists(), "the client sweeps its images on exit");
+    assert!(
+        !home.join(".ufo").exists(),
+        "an emptied stash directory leaves nothing behind"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_clipboard_read_lands_only_in_the_entry_that_asked() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["secret\tsealed1\ts1\tPaste the key", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tstored", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("tty-cliprace");
+    let no_image = "#!/bin/sh\nexit 1\n";
+    let slow =
+        "#!/bin/sh\ncase \"$*\" in *image/png*) exit 1;; esac\nsleep 0.6\nprintf 'sk-live-abc123'\n";
+    stub_clipboard(
+        &home,
+        &[
+            ("osascript", no_image),
+            ("pbpaste", slow),
+            ("wl-paste", slow),
+            ("xclip", slow),
+        ],
+    );
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the opening post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+    session
+        .keys
+        .write_all(b"\x16\r")
+        .expect("Ctrl+V then Enter, without waiting for the read");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.screen().contains("press Ctrl+V again") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped paste never named itself: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let screen = session.screen();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    let _ = served.handle.join();
+    assert!(
+        !screen.contains("sk-live-abc123"),
+        "the masked value never reaches the composer: {screen}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_clipboard_deadline_frees_ctrl_v() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &["say\thello", "ask\t>"],
+    }]);
+    let home = scratch_home("tty-clipwedge");
+    stub_clipboard_hang(&home);
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the first post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+    session.keys.write_all(b"\x16").expect("the first Ctrl+V");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !session.screen().contains("did not answer within") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the deadline never fired: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    stub_clipboard_text(&home, "second-paste");
+    session.keys.write_all(b"\x16").expect("the second Ctrl+V");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session.screen().contains("second-paste") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Ctrl+V stayed wedged after the deadline: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    let _ = served.handle.join();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_image_at_the_path_popup_names_the_drop() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &["say\thello", "ask\t>"],
+    }]);
+    let home = scratch_home("tty-clippath");
+    stub_clipboard_image(&home);
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the first post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+    session.press(b"read @");
+    session.keys.write_all(b"\x16").expect("Ctrl+V");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !session
+        .screen()
+        .contains("An image pastes into the message entry only.")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped image never named itself: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let painted = session.painted();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    let _ = served.handle.join();
+    assert!(
+        !painted.contains("[Image #"),
+        "no marker lands outside the composer: {painted}"
     );
     assert!(
-        !stashed.exists(),
-        "the private workdir sweeps the image on exit"
+        !home.join(".ufo").exists(),
+        "a dropped image writes nothing: {painted}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }
