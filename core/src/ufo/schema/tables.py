@@ -324,6 +324,31 @@ spend_cap = sa.Table(
     sa.Index("spend_cap_workspace", "workspace_id"),
 )
 
+balance_purchase = sa.Table(
+    "balance_purchase",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("granted_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("charged_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("reference", sa.Text, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("granted_micro_usd <> 0", name="balance_purchase_granted"),
+    sa.UniqueConstraint("workspace_id", "reference", name="balance_purchase_reference"),
+    sa.Index("balance_purchase_workspace", "workspace_id"),
+)
+
+workspace_balance = sa.Table(
+    "workspace_balance",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("balance_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("reserve_micro_usd", sa.BigInteger, nullable=False, server_default=sa.text("0")),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
 credential = sa.Table(
     "credential",
     metadata,

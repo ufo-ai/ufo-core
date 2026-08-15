@@ -65,6 +65,8 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `pause` (scheduled_tasks extension) | A workflow wait: one per conversation, fired as a scheduled turn unless a member message arrived past its arming watermarks. The extension owns the table via its own migration. |
 | `ledger` | Metered usage: every model and tool call, priced. |
 | `spend_cap` | Caps by scope (`workspace` \| `member` \| `agent`), dimension, window; `reject` or `park` on breach. |
+| `balance_purchase` | One row per credit to a workspace's prepaid balance: what it granted, what it charged, and the `reference` it is idempotent on. Both amounts are signed, so a refund or a corrected credit is a row like any other. A grant charges nothing; a volume tier grants more than it charges, and that difference is the only record of a discount. |
+| `workspace_balance` | The prepaid balance in micro-USD, and `reserve_micro_usd`, the headroom a turn needs before it may begin. A mutable row rather than a sum over `balance_purchase`, because a lifetime balance has no window to bound its sum. |
 | `job` | Recurring/one-time background work (source sync, page-change fan-out, turn dispatch, subagent result delivery, extension jobs). |
 | `scheduled_task` (scheduled_tasks extension) | Agent-namespaced, member-private recurring invocation with names unique per agent and optional UTC expiry, enforced before invocation. The extension owns the table — core migrations created it and it was adopted in place; fires ride the internal `invoke` capability as scheduled turns. Creation binds the executor and its reporting conversation; updates never move either. The main agent may target an existing child-agent task from any conversation: its creator may inspect, edit, or cancel it; an admin may list management metadata, change cadence or expiry, or cancel, but cannot read or change its prompt or responses; another member cannot see it. Each recurring turn carries the exact claimed UTC occurrence; when its following occurrence reaches expiry, runtime adds a continuation check-in to the completed work. |
 
@@ -677,7 +679,14 @@ workspace, its initial admin, and its main agent.
 Every model call and tool call meters into `ledger` in the same commit as the step. Realtime
 visibility: live per-turn cost on the stream, workspace/member/agent rollups in CLI and web. Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
-table per model; BYOK usage still meters (visibility without billing). Seats decide who the agent
+table per model; BYOK usage still meters (visibility without billing).
+
+A workspace may also hold a prepaid balance in micro-USD, credited once per `reference` so a repeated
+delivery of one payment adds nothing. An operator reads and moves it through `ufoctl balance`, which
+names the workspace explicitly on a deploy that serves more than one. The purchases are the record
+the balance is audited against: lifetime `granted_micro_usd` equals `balance_micro_usd`.
+
+Seats decide who the agent
 answers, and nothing bounds how many hold one: the plan is one flat fee per workspace with
 unlimited members, so the daily member count a billing extension ships is for outreach, never
 enforcement. A member holds a seat from creation and an admin revokes it — the `member` kind's

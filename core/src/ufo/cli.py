@@ -8,6 +8,8 @@ import sys
 import threading
 import tomllib
 import webbrowser
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
@@ -20,8 +22,10 @@ import click
 import httpx
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.accounting import SpendReport, SpendRollup
+from ufo.balance import Balance, credit, read_balance, set_reserve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.bundle import Bundle, wheel_name
 from ufo.cancellation import cancel_one_turn
@@ -513,6 +517,129 @@ async def _read_spend_caps(
         ]
     finally:
         await dispose_db()
+
+
+@main.group(name="balance")
+def balance() -> None:
+    """Read and credit the workspace's prepaid balance."""
+
+
+@balance.command(name="show")
+@click.option("--workspace-id", default="", help="omit on a single-workspace deploy")
+def balance_show(workspace_id: str) -> None:
+    """Show what is left, the headroom a turn needs to begin, and the lifetime totals behind it."""
+    config = load_config()
+    current = asyncio.run(_read_balance(config, workspace_id))
+    if current is None:
+        click.echo("no balance")
+        return
+    click.echo(
+        f"balance ${current.balance_micro_usd / MICRO_USD_PER_USD:,.2f}  "
+        f"reserve ${current.reserve_micro_usd / MICRO_USD_PER_USD:,.2f}"
+    )
+    click.echo(
+        f"granted ${current.granted_micro_usd / MICRO_USD_PER_USD:,.2f}  "
+        f"charged ${current.charged_micro_usd / MICRO_USD_PER_USD:,.2f}  "
+        f"last {current.last_purchase_at or 'never'}"
+    )
+
+
+@balance.command(name="credit")
+@click.option("--granted-micro-usd", type=int, required=True)
+@click.option("--charged-micro-usd", type=int, default=0, show_default=True)
+@click.option("--reference", required=True, help="idempotency key; one credit per workspace")
+@click.option("--workspace-id", default="")
+def balance_credit(
+    granted_micro_usd: int, charged_micro_usd: int, reference: str, workspace_id: str
+) -> None:
+    """Add to the balance once per reference. Both amounts may be negative, which is how a refund or
+    a corrected credit is taken back off."""
+    if granted_micro_usd == 0:
+        raise click.ClickException("--granted-micro-usd must not be zero")
+    config = load_config()
+    if asyncio.run(
+        _credit_balance(config, workspace_id, granted_micro_usd, charged_micro_usd, reference)
+    ):
+        click.echo(f"credited ${granted_micro_usd / MICRO_USD_PER_USD:,.2f} ({reference})")
+        return
+    click.echo(f"already credited ({reference})")
+
+
+@balance.command(name="reserve")
+@click.option("--micro-usd", type=int, required=True)
+@click.option("--workspace-id", default="")
+def balance_reserve(micro_usd: int, workspace_id: str) -> None:
+    """Set the headroom a turn needs before it may begin."""
+    if micro_usd < 0:
+        raise click.ClickException("--micro-usd must not be negative")
+    config = load_config()
+    if asyncio.run(_set_reserve(config, workspace_id, micro_usd)):
+        click.echo(f"reserve ${micro_usd / MICRO_USD_PER_USD:,.2f}")
+        return
+    raise click.ClickException("no balance to set a reserve on; credit it first")
+
+
+async def _target_workspace(named: str) -> UUID:
+    """The workspace a command acts on: the one named, else the deploy's only one. A hosted deploy
+    serves many, so a bare command there names the count and the option that fixes it rather than
+    picking one."""
+    async with owner_tx() as connection:
+        if named:
+            wanted = UUID(named)
+            found = (
+                await connection.execute(
+                    sa.select(tables.workspace.c.id).where(tables.workspace.c.id == wanted)
+                )
+            ).one_or_none()
+            if found is None:
+                raise click.ClickException(f"no workspace {wanted}")
+            return wanted
+        rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+    if len(rows) != 1:
+        raise click.ClickException(
+            f"this deploy serves {len(rows)} workspaces; name one with --workspace-id"
+        )
+    return rows[0].id
+
+
+@asynccontextmanager
+async def _balance_scope(config: Config, named: str) -> AsyncIterator[tuple[AsyncConnection, UUID]]:
+    """Open the one workspace a balance verb acts on, bound to it.
+
+    The owner database is initialized first because `_target_workspace` reads across workspaces to
+    find that one. Without it `owner_tx` falls back to the app pool, which on a hosted deploy is the
+    RLS-subject role with no workspace pinned, and the `workspace` read raises before the verb does
+    anything — the same shape `turn cancel` initializes against."""
+    init_db(config.database.url)
+    owner_dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    if owner_dsn:
+        init_owner_db(owner_dsn)
+    try:
+        workspace_id = await _target_workspace(named)
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                yield connection, workspace_id
+    finally:
+        await dispose_db()
+
+
+async def _read_balance(config: Config, named: str) -> Balance | None:
+    async with _balance_scope(config, named) as (connection, workspace_id):
+        return await read_balance(connection, workspace_id)
+
+
+async def _credit_balance(
+    config: Config, named: str, granted_micro_usd: int, charged_micro_usd: int, reference: str
+) -> bool:
+    async with _balance_scope(config, named) as (connection, workspace_id):
+        return await credit(
+            connection, workspace_id, granted_micro_usd, charged_micro_usd, reference
+        )
+
+
+async def _set_reserve(config: Config, named: str, reserve_micro_usd: int) -> bool:
+    async with _balance_scope(config, named) as (connection, workspace_id):
+        return await set_reserve(connection, workspace_id, reserve_micro_usd)
 
 
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400

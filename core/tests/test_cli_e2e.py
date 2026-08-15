@@ -713,3 +713,131 @@ def test_migrate_prefers_owner_dsn_env_as_asyncpg(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("UFO_OWNER_DSN", raising=False)
     assert CliRunner().invoke(cli.main, ["migrate"]).exit_code == 0
     assert captured["url"] == "sqlite+aiosqlite:///tenant.db"
+
+
+def _second_workspace() -> UUID:
+    """A second workspace in the same database, through the same engine lifecycle a one-shot verb
+    uses, so its uuid lands in exactly the storage form the CLI reads back and no engine outlives
+    the call."""
+    workspace_id = uuid4()
+
+    async def _insert() -> None:
+        init_db("sqlite+aiosqlite:///ufo.db")
+        try:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.workspace).values(
+                        id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                    )
+                )
+        finally:
+            await dispose_db()
+
+    asyncio.run(_insert())
+    return workspace_id
+
+
+def test_balance_credit_shows_the_balance_and_repeats_no_credit(cli_home: CliRunner) -> None:
+    """An operator credits a balance by hand and reads it back; a second credit on the same
+    reference is refused as already delivered, which is what a polled fulfilment relies on."""
+    _init(cli_home)
+    empty = cli_home.invoke(cli.main, ["balance", "show"])
+    assert empty.exit_code == 0, empty.output
+    assert "no balance" in empty.output
+
+    credited = cli_home.invoke(
+        cli.main,
+        ["balance", "credit", "--granted-micro-usd", "100000000", "--reference", "probe"],
+    )
+    assert credited.exit_code == 0, credited.output
+    assert "credited $100.00" in credited.output
+
+    again = cli_home.invoke(
+        cli.main,
+        ["balance", "credit", "--granted-micro-usd", "100000000", "--reference", "probe"],
+    )
+    assert again.exit_code == 0, again.output
+    assert "already credited" in again.output
+
+    shown = cli_home.invoke(cli.main, ["balance", "show"])
+    assert shown.exit_code == 0, shown.output
+    assert "balance $100.00" in shown.output
+    assert "granted $100.00" in shown.output
+    assert "charged $0.00" in shown.output
+
+
+def test_a_bare_balance_command_names_the_option_once_a_deploy_serves_two_workspaces(
+    cli_home: CliRunner,
+) -> None:
+    """`scalar_one()` raises an opaque error on the hosted fleet, which serves many workspaces. The
+    balance verbs name the count and the option that resolves it, and credit exactly the workspace
+    named."""
+    _init(cli_home)
+    second = _second_workspace()
+
+    bare = cli_home.invoke(cli.main, ["balance", "show"])
+    assert bare.exit_code != 0
+    assert "serves 2 workspaces" in bare.output
+    assert "--workspace-id" in bare.output
+
+    credited = cli_home.invoke(
+        cli.main,
+        [
+            "balance",
+            "credit",
+            "--granted-micro-usd",
+            "7000000",
+            "--reference",
+            "probe",
+            "--workspace-id",
+            str(second),
+        ],
+    )
+    assert credited.exit_code == 0, credited.output
+
+    named = cli_home.invoke(cli.main, ["balance", "show", "--workspace-id", str(second)])
+    assert named.exit_code == 0, named.output
+    assert "balance $7.00" in named.output
+
+    unknown = cli_home.invoke(cli.main, ["balance", "show", "--workspace-id", str(uuid4())])
+    assert unknown.exit_code != 0
+    assert "no workspace" in unknown.output
+
+
+def test_balance_verbs_initialize_the_owner_database_before_reading_across_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_target_workspace` reads the workspace table through `owner_tx`. On the hosted deploy the
+    config url is the RLS-subject role, so without the owner database that read falls back to the
+    app pool with no workspace pinned and raises before the verb does anything — the same
+    initialization `turn cancel` does."""
+    from ufo.config import BlobConfig
+
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
+    )
+    owner_urls: list[str] = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "init_db", lambda url: None)
+    monkeypatch.setattr(cli, "init_owner_db", owner_urls.append)
+    monkeypatch.setattr(cli, "dispose_db", _noop_dispose)
+    monkeypatch.setattr(cli, "_target_workspace", _unreached_target)
+    monkeypatch.setenv("UFO_OWNER_DSN", "postgresql://ufo_owner@rds/ufo")
+
+    for argv in (
+        ["balance", "show"],
+        ["balance", "credit", "--granted-micro-usd", "1", "--reference", "r"],
+        ["balance", "reserve", "--micro-usd", "1"],
+    ):
+        owner_urls.clear()
+        CliRunner().invoke(cli.main, argv)
+        assert owner_urls == ["postgresql://ufo_owner@rds/ufo"], argv
+
+
+async def _noop_dispose() -> None:
+    return None
+
+
+async def _unreached_target(named: str) -> UUID:
+    raise RuntimeError("stop after the owner database is initialized")
