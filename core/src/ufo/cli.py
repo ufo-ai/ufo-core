@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.accounting import SpendReport, SpendRollup
 from ufo.balance import Balance, credit, read_balance, set_reserve
 from ufo.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.blob import BlobStore, blob_store_for
 from ufo.bundle import Bundle, wheel_name
 from ufo.cancellation import cancel_one_turn
 from ufo.config import Config, config_path, load_config
@@ -43,6 +44,7 @@ from ufo.proxy_serve import run as proxy_run
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 from ufo.seats import email_domain
+from ufo.seed import KitchenSink
 from ufo.serve import home_surface
 from ufo.serve import run as serve_run
 from ufo.workspace import ws
@@ -595,6 +597,8 @@ async def _target_workspace(named: str) -> UUID:
                 raise click.ClickException(f"no workspace {wanted}")
             return wanted
         rows = (await connection.execute(sa.select(tables.workspace.c.id))).all()
+    if not rows:
+        raise click.ClickException("no workspace — run `ufoctl init` first")
     if len(rows) != 1:
         raise click.ClickException(
             f"this deploy serves {len(rows)} workspaces; name one with --workspace-id"
@@ -996,3 +1000,70 @@ async def _cancel_turn(config: Config, turn_id: UUID) -> bool:
             return await cancel_one_turn(client, turn_id)
     finally:
         await dispose_db()
+
+
+@main.group()
+def seed() -> None:
+    """Write demonstration content into the workspace."""
+
+
+@seed.command(name="kitchen-sink")
+@click.option("--workspace-id", "workspace_id", default="", help="The workspace to seed.")
+def seed_kitchen_sink(workspace_id: str) -> None:
+    """Write one conversation holding every shape the portal draws, and print where to read it.
+
+    A design change to the conversation surface is checked against a conversation, not a mock, and
+    the same content has to come back on every run or two reviews are looking at different things.
+    Each run replaces the last one.
+    """
+    config = load_config()
+    conversation_id = asyncio.run(_seed_kitchen_sink(config, workspace_id))
+    click.echo(f"/surface/web#/c/{conversation_id}")
+
+
+async def _seed_kitchen_sink(config: Config, named: str) -> UUID:
+    """The engine lifecycle around one seed: the owner pool first, because `_target_workspace`
+    reads across workspaces to resolve the one named — through the app pool alone a hosted deploy's
+    RLS-subject role has no workspace pinned and the read raises before the verb does anything."""
+    init_db(config.database.url)
+    owner_dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    if owner_dsn:
+        init_owner_db(owner_dsn)
+    try:
+        return await _seed_target(blob_store_for(config.blob), named)
+    finally:
+        await dispose_db()
+
+
+async def _seed_target(blob: BlobStore, named: str) -> UUID:
+    workspace_id = await _target_workspace(named)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            agent_id = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.id).where(
+                            tables.agent.c.workspace_id == workspace_id,
+                            tables.agent.c.is_main,
+                        )
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            member = (
+                await connection.execute(
+                    sa.select(tables.member.c.id, tables.member.c.email)
+                    .where(tables.member.c.workspace_id == workspace_id)
+                    .order_by(tables.member.c.created_at)
+                )
+            ).first()
+        if member is None:
+            raise click.ClickException("no member — run `ufoctl init` first")
+        return await KitchenSink(
+            blob=blob,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            member_id=member.id,
+            email=member.email,
+        ).write()

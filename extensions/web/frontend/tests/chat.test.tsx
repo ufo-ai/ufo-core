@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { ConversationTranscript } from "@/views/Conversations";
 
 import {
   AGENT,
@@ -24,6 +25,13 @@ import {
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
   useStreamFake();
+});
+
+/** `laidLog` measures the log through `Element.prototype`, which every later test in this file
+ *  shares. Undoing it here rather than at the end of the test that asked for it means one failed
+ *  assertion takes down that test alone. */
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 const transcript = (payload: unknown = { messages: [] }) => ({
@@ -170,10 +178,10 @@ test("a bubble another member spoke names them, and the viewer's own carries no 
   );
   open();
 
-  const named = (await screen.findByText("draft the tweets")).closest("[data-role=me]");
+  const named = (await screen.findByText("draft the tweets")).closest("[data-slot=message]");
   expect(named && within(named as HTMLElement).getByText("Sam Frost")).toBeTruthy();
   expect(screen.queryByText(/peer@example\.com/)).toBeNull();
-  const own = screen.getByText("thanks").closest("[data-role=me]");
+  const own = screen.getByText("thanks").closest("[data-slot=message]");
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
 });
 
@@ -215,7 +223,7 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
 
   await userEvent.click(summary);
   expect(screen.getByText("bash gh pr view")).toBeTruthy();
-  expect(document.querySelector(".animate-working")).toBeTruthy();
+  expect(document.querySelector(".shimmer")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -226,7 +234,7 @@ test("a running turn opens onto the calls behind its latest, and keeps working",
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
   expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
-  expect(document.querySelector(".animate-working")).toBeNull();
+  expect(document.querySelector(".shimmer")).toBeNull();
 });
 
 test("a live subagent run nests under the reply it produced", async () => {
@@ -720,16 +728,13 @@ test("a reloaded conversation nests its subagent work under the reply and still 
 });
 
 /** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
-function laid(content: number, fold: number) {
-  const held = [
-    vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content),
-    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(fold),
-  ];
-  return () => held.forEach((spy) => spy.mockRestore());
+function laid(content: number, fold: number): void {
+  vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content);
+  vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(fold);
 }
 
 test("a line longer than the fold opens in place and closes again", async () => {
-  const restore = laid(900, 280);
+  laid(900, 280);
   const long = "The changelog is long. ".repeat(60).trim();
   wire(
     transcript({
@@ -762,11 +767,10 @@ test("a line longer than the fold opens in place and closes again", async () => 
 
   await userEvent.click(less);
   expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
-  restore();
 });
 
 test("a line that fits is offered no control that would do nothing", async () => {
-  const restore = laid(120, 280);
+  laid(120, 280);
   wire(
     transcript({
       messages: [
@@ -787,7 +791,6 @@ test("a line that fits is offered no control that would do nothing", async () =>
   await userEvent.click(await screen.findByText("Reading the tree"));
   expect(screen.getByText("Checked the changelog.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
-  restore();
 });
 
 test("a conversation opens its file changes and returns to chat", async () => {
@@ -816,9 +819,9 @@ test("a conversation opens its file changes and returns to chat", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
-  const log = screen.getByTestId("log");
-  expect(log.parentElement?.children).toHaveLength(3);
-  expect(log.parentElement?.parentElement?.children).toHaveLength(2);
+  const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
+  expect(column.children).toHaveLength(3);
+  expect(column.parentElement?.children).toHaveLength(2);
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");
   expect(screen.getByText("+new").className).toContain("bg-affirm");
@@ -1362,7 +1365,7 @@ const ASKING = (entry: Record<string, unknown>, title = "Pick one") => ({
 
 const ASKED = { question: "Which?", options: [{ label: "left" }, { label: "right" }] };
 
-test("a question submits its choice once, and only once a choice exists", async () => {
+test("a question submits its choice once, and says what is missing until there is one", async () => {
   const posts: RequestInit[] = [];
   wire({
     ...transcript({ messages: [ASKING(ASKED)] }),
@@ -1374,13 +1377,17 @@ test("a question submits its choice once, and only once a choice exists", async 
   open();
 
   const submit = await screen.findByRole("button", { name: "Answer" });
-  expect(submit.hasAttribute("disabled")).toBe(true);
-
-  const left = screen.getByRole("button", { name: "left" });
-  await userEvent.click(left);
-  expect(left.getAttribute("aria-pressed")).toBe("true");
-  expect(submit.hasAttribute("disabled")).toBe(false);
+  await userEvent.click(submit);
   expect(posts.length).toBe(0);
+  const refusal = await screen.findByRole("alert");
+  expect(refusal.textContent).toBe("Choose an answer or skip this question.");
+  expect(refusal.getAttribute("data-slot")).toBe("questionnaire-error");
+
+  const left = screen.getByRole("radio", { name: "left" }) as HTMLInputElement;
+  await userEvent.click(left);
+  expect(left.checked).toBe(true);
+  expect(posts.length).toBe(0);
+  expect(screen.queryByRole("alert")).toBeNull();
 
   await userEvent.click(submit);
 
@@ -1390,7 +1397,7 @@ test("a question submits its choice once, and only once a choice exists", async 
   expect(headers["x-ufo-answer-question"]).toBe("0");
   expect(headers["x-ufo-timezone"]).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   expect(posts[0].body).toBe("left");
-  await waitFor(() => expect(screen.queryByRole("button", { name: "right" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "right" })).toBeNull());
 });
 
 test("a posted message reports the browser's timezone", async () => {
@@ -1435,14 +1442,116 @@ test("a multi-select question sends every label it holds in one answer", async (
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Work" }));
-  await userEvent.click(screen.getByRole("button", { name: "Team" }));
-  await userEvent.click(screen.getByRole("button", { name: "Home" }));
-  await userEvent.click(screen.getByRole("button", { name: "Team" }));
+  await userEvent.click(await screen.findByRole("checkbox", { name: "Work" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Team" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Home" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Team" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
   expect(posts[0].body).toBe("Work, Home");
+});
+
+test("a form holding two answers delivers both, each against its entry", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "asking",
+          question: {
+            turn_id: TURN_ID,
+            title: "Two things",
+            questions: [
+              { question: "First?", options: [{ label: "alpha" }, { label: "beta" }] },
+              { question: "Second?", options: [{ label: "gamma" }, { label: "delta" }] },
+            ],
+          },
+        },
+      ],
+    }),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return posts.length === 1
+        ? json({ turn_id: REFUSED_TURN, opened_run: true, body: "alpha · First?" })
+        : json({
+            turn_id: REFUSED_TURN,
+            opened_run: false,
+            arrival_id: ARRIVAL_ID,
+            body: "gamma · Second?",
+          });
+    },
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+
+  await waitFor(() => expect(posts.length).toBe(2));
+  const first = posts[0].headers as Record<string, string>;
+  expect(first["x-ufo-answer-turn"]).toBe(TURN_ID);
+  expect(first["x-ufo-answer-question"]).toBe("0");
+  expect(posts[0].body).toBe("alpha · First?");
+  const second = posts[1].headers as Record<string, string>;
+  expect(second["x-ufo-answer-turn"]).toBe(TURN_ID);
+  expect(second["x-ufo-answer-question"]).toBe("1");
+  expect(posts[1].body).toBe("gamma · Second?");
+
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "gamma" })).toBeNull());
+  const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
+  expect(within(reply).getByText("alpha · First?")).toBeTruthy();
+  expect(within(reply).getByText("gamma · Second?")).toBeTruthy();
+  expect(StreamFake.opened.length).toBe(1);
+});
+
+test("an entry the form cannot hold stands as prose and gates nothing", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "asking",
+          question: {
+            turn_id: TURN_ID,
+            title: "Two things",
+            questions: [
+              { question: "Which?", options: [{ label: "left" }, { label: "right" }] },
+              { question: "Send the file?", allow_attachments: true },
+            ],
+          },
+        },
+      ],
+    }),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: REFUSED_TURN, opened_run: true, body: "left · Which?" });
+    },
+  });
+  open();
+
+  await screen.findByRole("radio", { name: "left" });
+  expect(screen.getByText("Answer in the message box below.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("radio", { name: "left" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  const headers = posts[0].headers as Record<string, string>;
+  expect(headers["x-ufo-answer-question"]).toBe("0");
+  expect(posts[0].body).toBe("left · Which?");
+});
+
+test("a lone question the form cannot hold says where the answer goes, with no controls", async () => {
+  wire(transcript({ messages: [ASKING({ question: "Send the file?", allow_attachments: true })] }));
+  open();
+
+  await screen.findByText("Send the file?");
+  expect(screen.getByText("Answer in the message box below.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
 });
 
 test("an answered question states the words the surface confirmed it admitted", async () => {
@@ -1452,11 +1561,11 @@ test("an answered question states the words the surface confirmed it admitted", 
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "left" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "left" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
 
-  await waitFor(() => expect(screen.queryByRole("button", { name: "left" })).toBeNull());
-  const reply = screen.getByText("asking").closest("[data-role=agent]") as HTMLElement;
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "left" })).toBeNull());
+  const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
   expect(within(reply).getByText("Which?")).toBeTruthy();
   expect(within(reply).getByText("left · Which?")).toBeTruthy();
 });
@@ -1465,10 +1574,11 @@ test("a question stands under the reply that asked it, not at the foot of the lo
   wire(transcript({ messages: [ASKING(ASKED), { role: "user", text: "one moment" }] }));
   open();
 
-  const left = await screen.findByRole("button", { name: "left" });
-  const reply = screen.getByText("asking").closest("[data-role=agent]") as HTMLElement;
+  const left = await screen.findByRole("radio", { name: "left" });
+  const reply = screen.getByText("asking").closest("[data-slot=message]") as HTMLElement;
   expect(reply.contains(left)).toBe(true);
-  expect(screen.getByTestId("log").lastElementChild?.textContent).toBe("one moment");
+  const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
+  expect(rows[rows.length - 1].textContent).toBe("one moment");
 });
 
 test("a settled turn names each shared file once, with its size", async () => {
@@ -1494,8 +1604,36 @@ test("a settled turn names each shared file once, with its size", async () => {
   const links = screen.getAllByRole("link", { name: "report.csv" });
   expect(links).toHaveLength(1);
   expect(links[0].getAttribute("href")).toBe("/dl/report.csv");
-  expect(screen.getByText("· 2 kB")).toBeTruthy();
+  expect(screen.getByText("2 kB")).toBeTruthy();
+});
 
+/** A file is shared by the turn that is running, not by the turn after it: the frame naming one
+ *  arrives while the reply is still being written, and the row goes up then. What keeps it off the
+ *  next turn is the store dropping the list at the send, which the test below pins. */
+test("a file the running turn shares stands under the log before the turn ends", async () => {
+  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Message the agent"), "hi");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+
+  StreamFake.last().emit("message", { text: "Here it is." });
+  StreamFake.last().emit("files", {
+    files: [{ filename: "report.csv", url: "/dl/report.csv", size_bytes: 2048 }],
+  });
+
+  expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeTruthy());
+  expect(screen.getAllByRole("link", { name: "report.csv" })).toHaveLength(1);
 });
 
 /** The list stands at the foot of the log, so it belongs to the turn the foot of the log is waiting
@@ -1576,12 +1714,71 @@ test("a streamed chunk never steals focus from where the member put it", async (
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  const elsewhere = screen.getByRole("button", { name: "Agents" });
+  const elsewhere = within(screen.getByRole("navigation", { name: "Workspace" })).getByRole(
+    "button",
+    { name: "Agents" },
+  );
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
   await screen.findByText("chunk");
   expect(document.activeElement).toBe(elsewhere);
 });
+
+/** The live chat gives the conversation a height of its own and scrolls it there. A transcript read
+ *  back stands in a page that already scrolls, so it draws no pane, no viewport and no way back to a
+ *  foot it does not own — a second scroll region inside a scrolling page is a second bar beside the
+ *  same words, and one sized to a share of a container with no height to share out collapses to
+ *  nothing and clips the transcript. */
+test("the live chat scrolls its own pane and a transcript read back scrolls with the page", async () => {
+  wire(transcript({ messages: [{ role: "assistant", text: "Done." }] }));
+  open();
+  await screen.findByText("Done.");
+  const pane = screen.getByTestId("log").closest("[data-slot=message-scroller]");
+  expect(pane?.className).toContain("flex-1");
+  expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
+
+  cleanup();
+  render(
+    <ConversationTranscript
+      conversationId={CONVO_ID}
+      title="Review PR 1268"
+      messages={[{ role: "assistant", text: "Done." }]}
+    />,
+  );
+  expect(screen.getByText("Done.")).toBeTruthy();
+  expect(screen.queryByTestId("log")).toBeNull();
+  expect(document.querySelector("[data-slot=message-scroller]")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
+});
+
+/** jsdom lays nothing out, so the pane the transcript is read through is stated here: a thousand
+ *  pixels of messages seen three hundred at a time, with the foot of the content moving as the
+ *  reader scrolls. Every call the scroller makes — whether the reader is at the foot, whether a
+ *  reply follows them — is read off these numbers, and a browser clamps the foot to what is left
+ *  under the fold. */
+const FOLD = 300;
+const CONTENT = 1000;
+const FOOT = CONTENT - FOLD;
+
+function laidLog(log: HTMLElement): void {
+  Object.defineProperty(log, "scrollHeight", { configurable: true, value: CONTENT });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: FOLD });
+  const box = (top: number, height: number) =>
+    ({ top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top }) as DOMRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    if (this === log) return box(0, FOLD);
+    const row = (this.parentElement as HTMLElement | null)?.dataset.slot;
+    return row === "message-scroller-content" ? box(CONTENT - log.scrollTop - 1, 1) : box(0, 0);
+  });
+}
+
+/** A line taking its space in the log. jsdom fires no resize, so the reply growing is stated by
+ *  adding to the content the scroller watches. */
+function lands(log: HTMLElement) {
+  log
+    .querySelector("[data-slot=message-scroller-content]")!
+    .appendChild(document.createElement("p"));
+}
 
 test("streaming keeps the log pinned at the bottom but never yanks a reader back down", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
@@ -1592,25 +1789,24 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
   const log = screen.getByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
-  Object.defineProperty(log, "scrollTo", { configurable: true, value: vi.fn() });
+  laidLog(log);
 
+  log.scrollTop = FOOT;
+  fireEvent.scroll(log);
   log.scrollTop = 100;
   fireEvent.scroll(log);
-  expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
+  const back = screen.getByRole("button", { name: "Jump to bottom" });
+  expect(back.getAttribute("data-active")).toBe("true");
+
   StreamFake.last().emit("message", { text: "while reading" });
   await screen.findByText(saying("while reading"));
+  lands(log);
+  await waitFor(() => expect(back.getAttribute("data-active")).toBe("true"));
   expect(log.scrollTop).toBe(100);
-  expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Jump to bottom" }));
-  expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
 
-  log.scrollTop = 700;
-  fireEvent.scroll(log);
-  StreamFake.last().emit("message", { text: " more" });
-  await screen.findByText(/more/);
-  expect(log.scrollTop).toBe(1000);
+  await userEvent.click(back);
+  expect(log.scrollTop).toBe(FOOT);
+  await waitFor(() => expect(back.getAttribute("data-active")).toBe("false"));
 });
 
 test("a dropped file is named on the composer, comes off it, and rides the message", async () => {
@@ -1708,12 +1904,11 @@ test("the log follows a line that lands after the render that asked for it", asy
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
   const log = screen.getByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  laidLog(log);
   log.scrollTop = 0;
 
-  log.appendChild(document.createElement("p"));
-  await waitFor(() => expect(log.scrollTop).toBe(1000));
+  lands(log);
+  await waitFor(() => expect(log.scrollTop).toBe(FOOT));
 });
 
 test("sending while scrolled up re-pins the log to the bottom", async () => {
@@ -1722,15 +1917,16 @@ test("sending while scrolled up re-pins the log to the bottom", async () => {
   await screen.findByText("No messages in this conversation yet.");
 
   const log = screen.getByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  laidLog(log);
+  log.scrollTop = FOOT;
+  fireEvent.scroll(log);
   log.scrollTop = 100;
   fireEvent.scroll(log);
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "back to now");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("back to now");
-  expect(log.scrollTop).toBe(1000);
+  expect(log.scrollTop).toBe(FOOT);
 });
 
 test("answering a question while scrolled up re-pins the log to the bottom", async () => {
@@ -1742,14 +1938,15 @@ test("answering a question while scrolled up re-pins the log to the bottom", asy
   await screen.findByText("asking");
 
   const log = screen.getByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  laidLog(log);
+  log.scrollTop = FOOT;
+  fireEvent.scroll(log);
   log.scrollTop = 100;
   fireEvent.scroll(log);
 
-  await userEvent.click(screen.getByRole("button", { name: "left" }));
+  await userEvent.click(screen.getByRole("radio", { name: "left" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
-  await waitFor(() => expect(log.scrollTop).toBe(1000));
+  await waitFor(() => expect(log.scrollTop).toBe(FOOT));
 });
 
 test("switching conversations remounts the log so scroll state never leaks across", async () => {
@@ -1769,8 +1966,9 @@ test("switching conversations remounts the log so scroll state never leaks acros
   await screen.findByText("No messages in this conversation yet.");
 
   const first = screen.getByTestId("log");
-  Object.defineProperty(first, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(first, "clientHeight", { configurable: true, value: 300 });
+  laidLog(first);
+  first.scrollTop = FOOT;
+  fireEvent.scroll(first);
   first.scrollTop = 100;
   fireEvent.scroll(first);
 
@@ -1780,12 +1978,11 @@ test("switching conversations remounts the log so scroll state never leaks acros
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
 
-  Object.defineProperty(fresh, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(fresh, "clientHeight", { configurable: true, value: 300 });
+  laidLog(fresh);
   await userEvent.type(screen.getByLabelText("Message the agent"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("hello there");
-  expect(fresh.scrollTop).toBe(1000);
+  expect(fresh.scrollTop).toBe(FOOT);
 });
 
 test("the log opens pinned: loading a transcript lands at the bottom untouched", async () => {
@@ -1798,12 +1995,11 @@ test("the log opens pinned: loading a transcript lands at the bottom untouched",
   open();
 
   const log = await screen.findByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
+  laidLog(log);
 
   release(json({ messages: [{ role: "assistant", text: "history" }] }));
   await screen.findByText("history");
-  expect(log.scrollTop).toBe(1000);
+  expect(log.scrollTop).toBe(FOOT);
 });
 
 test("a reader inside the tolerance band still counts as at the bottom", async () => {
@@ -1815,14 +2011,19 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
   const log = screen.getByTestId("log");
-  Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
-  Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
-  log.scrollTop = 690;
+  laidLog(log);
+  log.scrollTop = FOOT;
   fireEvent.scroll(log);
+  log.scrollTop = FOOT - 10;
+  fireEvent.scroll(log);
+  expect(screen.getByRole("button", { name: "Jump to bottom" }).getAttribute("data-active")).toBe(
+    "false",
+  );
 
   StreamFake.last().emit("message", { text: "nudged" });
   await screen.findByText("nudged");
-  expect(log.scrollTop).toBe(1000);
+  lands(log);
+  await waitFor(() => expect(log.scrollTop).toBe(FOOT));
 });
 
 test("sending returns focus to the composer instead of stranding it on the page", async () => {
@@ -1842,7 +2043,7 @@ test("answering a question returns focus to the composer", async () => {
     "/chat": () => json({ turn_id: REFUSED_TURN, body: "left" }),
   });
   open();
-  await userEvent.click(await screen.findByRole("button", { name: "left" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "left" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   await waitFor(() =>
     expect(document.activeElement).toBe(screen.getByLabelText("Message the agent")),
@@ -1874,8 +2075,10 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
     },
   });
   open();
-  await userEvent.click(await screen.findByRole("button", { name: "alpha" }));
-  await userEvent.click(screen.getAllByRole("button", { name: "Answer" })[0]);
+  await userEvent.click(await screen.findByRole("radio", { name: "alpha" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   await waitFor(() => expect(posts.length).toBe(1));
 
   const log = screen.getByTestId("log");
@@ -1884,7 +2087,7 @@ test("a second answer clicked mid-stream neither posts nor yanks the reader", as
   log.scrollTop = 100;
   fireEvent.scroll(log);
 
-  await userEvent.click(screen.getByRole("button", { name: "gamma" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "gamma" }));
   const submit = screen.getByRole("button", { name: "Answer" });
   expect(submit.hasAttribute("disabled")).toBe(true);
   await userEvent.click(submit);
@@ -1915,9 +2118,9 @@ test("agent markdown renders as elements while the member's text stays literal",
   });
 
   expect((await screen.findByText("bold")).tagName).toBe("STRONG");
-  const agentSide = screen.getByText("bold").closest("[data-role=agent]")!;
+  const agentSide = screen.getByText("bold").closest("[data-slot=bubble-content]")!;
   expect(agentSide.className).not.toContain("whitespace-pre-wrap");
-  const mineSide = screen.getByText("**hi**").closest("[data-role=me]")!;
+  const mineSide = screen.getByText("**hi**").closest("[data-slot=bubble-content]")!;
   expect(mineSide.className).toContain("whitespace-pre-wrap");
   const link = await screen.findByRole("link", { name: "docs" });
   expect(link.getAttribute("href")).toBe("https://example.com/d");

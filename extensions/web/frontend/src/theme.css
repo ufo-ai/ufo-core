@@ -131,6 +131,11 @@
 
   --ease-control: cubic-bezier(0.2, 0, 0, 1);
 
+  /* The pair a control arriving over a scrolling pane moves on: it comes in fast and settles long,
+     and it leaves the other way round, so the eye catches the arrival and never the departure. */
+  --ease-enter: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-leave: cubic-bezier(0.7, 0, 0.84, 0);
+
   --animate-appear: appear 0.3s ease-out;
 
   @keyframes appear {
@@ -208,7 +213,13 @@
   --container-empty: 44ch;
   --container-control: 40ch;
   --container-control-row: 20ch;
+  /* Wide enough to hold "Question 4 of 4" without the line reflowing as the count climbs — a
+     progress line that changes width redraws the row under it on every step. */
+  --container-progress: 14ch;
   --container-search: 168px;
+  /* The floor a file card holds, so a short name and a size still make a card the pointer can
+     land on rather than a pill the width of its own text. */
+  --container-attachment: 160px;
   --container-record: min(440px, 45%);
   --container-menu: 160px;
 
@@ -234,6 +245,11 @@
   --size-act: 88px;
   --size-composer: 15em;
   --size-control: 32px;
+  /* What a thin scrollbar reserves, so anything laid over the pane can stop short of it. */
+  --size-scrollbar: 12px;
+  /* The floor a control the member points at with a finger keeps, which is taller than the
+     control height the pointer needs. An answer in a conversation is tapped as often as clicked. */
+  --size-touch: 44px;
   --size-fact: 16ch;
   --size-glyph: 16px;
   --size-icon: 1em;
@@ -321,6 +337,17 @@
       opacity: 0;
     }
   }
+
+  /* A line the agent is still writing reads as light travelling along the words themselves. The
+     pulse dims a whole line at once and says "something is happening"; this says "this line is
+     the one", which is what a status marker under a reply is for. */
+  --animate-shimmer: shimmer 2s linear infinite;
+
+  @keyframes shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
 }
 
 @layer base {
@@ -402,6 +429,68 @@
   }
 }
 
+/* The utilities the shadcn conversation components draw with that Tailwind does not ship. They are
+   written here because the theme is the only stylesheet, and in the palette's own steps so the
+   scroller and the attachment row resolve their colours the way every other surface does. Each is
+   declared with `@utility` rather than as a rule in a layer: Tailwind compiles a variant form —
+   `data-autoscrolling:scrollbar-quiet` — only for a name it knows is a utility, and a hand-written
+   class under the same name silently compiles nothing at all behind a variant.
+
+   `shimmer` paints the text with a band of ink that travels along it: the second tone is the
+   resting colour, the first is the crest, and the type is cut out of the gradient. */
+@utility shimmer {
+  background: linear-gradient(
+      100deg,
+      var(--color-ink-soft) 40%,
+      var(--color-ink) 50%,
+      var(--color-ink-soft) 60%
+    )
+    0 0 / 200% 100%;
+  background-clip: text;
+  color: transparent;
+  animation: var(--animate-shimmer);
+
+  /* The global reduced-motion rule only shortens a duration, and an infinite animation cut to
+     0.01ms restarts forever rather than stopping. The travel is dropped by name here, and the
+     words are handed back the resting tone — without it they stay the transparent they were cut
+     out of, and the line the member is watching disappears. */
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    background: none;
+    color: var(--color-ink-soft);
+  }
+}
+
+/* A row that scrolls sideways has no scrollbar over it, so a mask is honest here. */
+@utility scroll-fade-x {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--color-ink) var(--spacing-sm),
+    var(--color-ink) calc(100% - var(--spacing-sm)),
+    transparent
+  );
+}
+
+/* The scrollbar is stated globally as its thumb alone; these name the exceptions a scrolling
+   transcript needs — the width it keeps, and the moment it takes itself out of the way while the
+   pane is scrolling itself. */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+}
+
+/* The thumb taken out of sight without taking the gutter with it. `scrollbar-width: none` is a
+   layout change: it reclaims the reserved track, the pane's content box narrows, and anything
+   watching the pane for a resize is woken by what was meant to be a purely visual hush — which,
+   mid-animation, finishes the scroll instantly and cancels it. Colour costs no layout. */
+@utility scrollbar-quiet {
+  scrollbar-color: transparent transparent;
+}
+
 @layer components {
   /* A word fades in once, at the moment it lands. `lib/arrive.ts` wraps each word of a streaming
      reply in a span; a span the browser has just inserted runs this, and one already on the page
@@ -414,6 +503,22 @@
 
   [data-arrive] {
     animation: arrive 0.18s var(--ease-control) min(calc(var(--arrive) * 22ms), 400ms) both;
+  }
+
+  /* The foot of a pane that has more below it, faded into the surface so the last line does not
+     end at a hard edge. It is laid over the pane rather than masked into it: a mask dims the
+     element it is set on — the words the member is reading *and* the scrollbar beside them — and
+     it dims them whether or not there is anything below to hide. This is painted only while the
+     pane says it can still scroll toward its end, so a reply arriving at the foot is read at full
+     strength, and it stops short of the gutter so the bar stays over it rather than under it. */
+  .scroll-fade-b[data-scrollable~="end"]::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0 var(--size-scrollbar);
+    bottom: 0;
+    height: var(--spacing-6xl);
+    background: linear-gradient(to top, var(--color-surface), transparent);
+    pointer-events: none;
   }
 
   .typeset {
@@ -546,4 +651,21 @@
       text-decoration-line: underline;
     }
   }
+}
+
+/* Streamdown builds its code block and its table inside two nested cards of its own, each with a
+   hairline, a radius and the page's own background. Against a reply — drawn with no surface at all
+   — that reads as a box inside a box inside the document, and the innermost of the three is the
+   only one whose colour means anything. The chrome those wrappers hold (the language, the copy
+   control, the table's scroll) is kept; the cards it sits in are not, so `pre` and `table` are the
+   one surface each of them draws.
+
+   This is written outside every layer on purpose. Those wrappers are classed in Tailwind's own
+   utilities, and `@layer utilities` outranks `@layer components` whatever the selectors weigh —
+   the same rule written beside the rest of `typeset` compiles, matches, and loses. */
+.typeset :is(div:has(> pre), div:has(> table), div:has(> div > pre), div:has(> div > table)) {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
 }

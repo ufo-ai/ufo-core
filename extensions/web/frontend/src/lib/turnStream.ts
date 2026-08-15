@@ -583,58 +583,64 @@ export async function sendMessage(
   streamTurn(streamKey, accepted.turn_id, false);
 }
 
-export async function answerQuestion(
+export async function answerQuestions(
   target: ChatTarget,
   turnId: string,
-  questionIndex: number,
-  body: string,
+  answers: readonly { index: number; body: string }[],
 ): Promise<void> {
   const chatKey = target.key;
   const state = chatState(chatKey);
-  if (state.busy || state.messages === null) return;
+  if (!answers.length || state.busy || state.messages === null) return;
   bumpEpoch(chatKey);
   updateChat(chatKey, (current) => ({ ...current, busy: true, live: liveTurn() }));
-  let res: Response;
-  try {
-    res = await fetch(chatUrl(target), {
-      method: "POST",
-      body,
-      credentials: "same-origin",
-      headers: {
-        "x-ufo-answer-turn": turnId,
-        "x-ufo-answer-question": String(questionIndex),
-        ...timezoneHeader(),
-      },
-    });
-  } catch {
-    failTurn(chatKey, "Network error — try again.");
-    return;
+  for (const { index, body } of answers) {
+    let res: Response;
+    try {
+      res = await fetch(chatUrl(target), {
+        method: "POST",
+        body,
+        credentials: "same-origin",
+        headers: {
+          "x-ufo-answer-turn": turnId,
+          "x-ufo-answer-question": String(index),
+          ...timezoneHeader(),
+        },
+      });
+    } catch {
+      failTurn(chatKey, "Network error — try again.");
+      return;
+    }
+    if (!res.ok) {
+      failTurn(chatKey, "Error " + res.status + " — try again.");
+      return;
+    }
+    let payload: { body?: unknown; turn_id?: unknown; arrival_id?: unknown; opened_run?: unknown };
+    try {
+      payload = await res.json();
+    } catch {
+      failTurn(chatKey, "Network error — try again.");
+      return;
+    }
+    if (typeof payload.turn_id !== "string") {
+      failTurn(chatKey, MALFORMED_REPLY);
+      return;
+    }
+    const turn = payload.turn_id;
+    const landed = typeof payload.body === "string" && payload.body ? payload.body : body;
+    const arrivalId = typeof payload.arrival_id === "string" ? payload.arrival_id : null;
+    updateChat(chatKey, (current) => ({
+      ...current,
+      messages: markAnswered(current.messages, turnId, index, landed).concat({
+        role: "user",
+        text: landed,
+        ...(arrivalId !== null && !current.absorbed.includes(arrivalId)
+          ? { arrival_id: arrivalId }
+          : {}),
+      }),
+    }));
+    const joined = arrivalId !== null && payload.opened_run === false;
+    if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, true);
   }
-  if (!res.ok) {
-    failTurn(chatKey, "Error " + res.status + " — try again.");
-    return;
-  }
-  let payload: { body?: unknown; turn_id?: unknown };
-  try {
-    payload = await res.json();
-  } catch {
-    failTurn(chatKey, "Network error — try again.");
-    return;
-  }
-  if (typeof payload.turn_id !== "string") {
-    failTurn(chatKey, MALFORMED_REPLY);
-    return;
-  }
-  const turn = payload.turn_id;
-  const landed = typeof payload.body === "string" && payload.body ? payload.body : body;
-  updateChat(chatKey, (current) => ({
-    ...current,
-    messages: markAnswered(current.messages, turnId, questionIndex, landed).concat({
-      role: "user",
-      text: landed,
-    }),
-  }));
-  streamTurn(chatKey, turn, true);
 }
 
 /** End the turn the page is tailing. Nothing settles here: the stop admits no message, and the

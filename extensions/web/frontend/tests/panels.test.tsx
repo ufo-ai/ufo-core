@@ -815,7 +815,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("parent answer").tagName).toBe("STRONG");
   const summary = screen.getByText("Reading the deploy job.");
-  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("bash ls")).toBeNull();
 
   await userEvent.click(summary);

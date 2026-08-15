@@ -321,7 +321,9 @@ export function App({ agents, subagents, member, newAgent, onAgents }: AppProps)
       <MainAgentProvider agents={agents}>
         <div className={cn("grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]", collapsed ? "grid-cols-[var(--container-rail)_1fr]" : "grid-cols-[var(--container-sidebar)_1fr]")}>
           <TooltipProvider>
-          <nav className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
+          <nav
+            aria-label="Workspace"
+            className="flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl max-narrow:flex-row max-narrow:items-center max-narrow:gap-0 max-narrow:border-r-0 max-narrow:border-b max-narrow:py-0">
             <div className={cn("flex h-(--size-row) items-center justify-between pl-2xl pr-md max-narrow:h-auto max-narrow:px-lg max-narrow:py-md", collapsed && "justify-center px-sm max-narrow:justify-between max-narrow:px-lg")}>
               <span
                 role="img"
@@ -623,7 +625,7 @@ function RoutedPane({
         member={member}
         conversationId={row.conversation_id}
         onActivity={onActivity}
-        onOpenAgent={onOpenAgent}
+        onAgentsIndex={onAgentsIndex}
         slot={route.slot}
         onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
       />
@@ -642,7 +644,7 @@ function RoutedPane({
       conversationId={null}
       onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
       onActivity={onActivity}
-      onOpenAgent={onOpenAgent}
+      onAgentsIndex={onAgentsIndex}
     />
   );
 }
@@ -797,7 +799,7 @@ function RailList({
   return (
     <>
       <div className="flex h-(--size-row) shrink-0 items-center justify-between pl-sm max-narrow:hidden">
-        <h2 className="m-0 text-label font-medium text-ink-soft">Conversations</h2>
+        <h2 className="m-0 font-sans text-label font-medium text-ink-soft">Conversations</h2>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -843,7 +845,7 @@ function RailList({
       ) : null}
       {railGroups(rail.rows, sort, now).map((group) => (
         <section key={group.label} className="max-narrow:contents">
-          <h2 className="m-0 flex h-(--size-row) items-center px-sm text-label font-medium text-ink-soft max-narrow:hidden">
+          <h2 className="m-0 flex h-(--size-row) items-center px-sm font-sans text-label font-medium text-ink-soft max-narrow:hidden">
             {group.label}
           </h2>
           <ul className="m-0 flex list-none flex-col gap-px p-0 max-narrow:flex-row">

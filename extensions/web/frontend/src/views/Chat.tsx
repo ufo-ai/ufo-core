@@ -1,7 +1,24 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
-import { Button } from "@/components/ui/button";
+import {
+  Questionnaire,
+  QuestionnaireActions,
+  QuestionnaireChoice,
+  QuestionnaireChoiceDescription,
+  QuestionnaireChoices,
+  QuestionnaireDescription,
+  QuestionnaireError,
+  QuestionnaireInput,
+  QuestionnaireItem,
+  QuestionnaireNext,
+  QuestionnairePrevious,
+  QuestionnaireProgress,
+  QuestionnaireSkip,
+  QuestionnaireSubmit,
+  QuestionnaireTitle,
+  type QuestionnaireItemDefinition,
+} from "@/components/ui/questionnaire";
 import {
   PromptInput,
   PromptInputAttach,
@@ -10,26 +27,35 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
+import {
+  Attachment,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentGroup,
+  AttachmentTitle,
+} from "@/components/ui/attachment";
 import { SILENT, Toast } from "@/components/ui/toast";
-import { MessageLog, Meta } from "@/kernel/messages";
+import {
+  MessageLog,
+  Meta,
+  TranscriptPane,
+  TranscriptScroll,
+  useTakeMeToTheFoot,
+} from "@/kernel/messages";
 import { COLUMN } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { clearDraft, installDraftFlush, moveDraft, readDraft, writeDraft } from "@/lib/drafts";
-import { formatSize } from "@/lib/size";
 import {
-  answerQuestion,
+  answerQuestions,
   refreshTranscript,
   resyncChat,
   sendMessage,
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
+import { formatSize } from "@/lib/size";
 import type { Agent, ChatFile, ChatQuestion, Member, QuestionEntry } from "@/lib/types";
-
-const MAX_ANSWER_BUTTONS = 10;
-
-const PIN_THRESHOLD_PX = 40;
 
 export type ChatProps = {
   agent: Agent;
@@ -51,13 +77,6 @@ export function Chat({
   const chatKey = conversationId ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
   const state = useChat(chatKey);
-  const log = useRef<HTMLDivElement>(null);
-  const atFoot = useRef(true);
-  const [pinned, setPinned] = useState(true);
-  const pin = (standing: boolean) => {
-    atFoot.current = standing;
-    setPinned(standing);
-  };
   const composer = useRef<HTMLTextAreaElement>(null);
   const wasBusy = useRef(state.busy);
   const target: ChatTarget = {
@@ -104,28 +123,6 @@ export function Chat({
     wasBusy.current = state.busy;
   }, [onSettled, state.busy]);
 
-  useEffect(() => {
-    const pane = log.current;
-    if (pane === null) return;
-    const follow = () => {
-      if (atFoot.current) pane.scrollTop = pane.scrollHeight;
-    };
-    follow();
-    const watch = new MutationObserver(follow);
-    watch.observe(pane, { characterData: true, childList: true, subtree: true });
-    return () => watch.disconnect();
-  }, [state]);
-
-  const jumpToBottom = () => {
-    const pane = log.current;
-    if (!pane) return;
-    pin(true);
-    pane.scrollTo({
-      top: pane.scrollHeight,
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-    });
-  };
-
   const messages = state.messages;
   const showEmpty = messages !== null && !messages.length && !state.busy && !state.live;
   const stalled = messages === null ? state.fault : null;
@@ -134,132 +131,93 @@ export function Chat({
   const held = state.busy || state.messages === null;
 
   return (
-    <>
-      <div
-        ref={log}
-        onScroll={() => {
-          const pane = log.current;
-          if (!pane) return;
-          pin(pane.scrollTop + pane.clientHeight >= pane.scrollHeight - PIN_THRESHOLD_PX);
-        }}
-        className={cn(
-          COLUMN,
-          "flex flex-1 flex-col gap-md overscroll-contain overflow-y-auto scrollbar-gutter-stable p-2xl",
-        )}
-        data-testid="log"
-      >
+    <TranscriptScroll>
+      <TranscriptPane className="flex-1">
         <MessageLog
           messages={messages ?? []}
           live={state.live}
           conversationId={conversationId}
+          className={cn(COLUMN, "p-2xl")}
           question={(question) => (
             <Question
               target={target}
               question={question}
               held={held}
-              onAct={() => {
-                pin(true);
-                composer.current?.focus();
-              }}
+              onAct={() => composer.current?.focus()}
             />
           )}
-        />
-        {trailing && trailing.length ? <Files files={trailing} /> : null}
-        {credentials ? (
-          <Handoff>
-            <div>{credentials.reason}</div>
-            {credentials.prompts.map((prompt) => (
-              <CredentialPromptForm
-                key={prompt.slot}
-                sealed={credentials.sealed}
-                prompt={prompt}
-                onStored={(slot) =>
-                  updateChat(chatKey, (current) => {
-                    const request = current.handoffs.credentials;
-                    if (!request) return current;
-                    return {
-                      ...current,
-                      handoffs: {
-                        ...current.handoffs,
-                        credentials: {
-                          ...request,
-                          prompts: request.prompts.map((entry) =>
-                            entry.slot === slot ? { ...entry, stored: true } : entry,
-                          ),
+        >
+          {trailing && trailing.length ? <Files files={trailing} /> : null}
+          {credentials ? (
+            <Handoff>
+              <div>{credentials.reason}</div>
+              {credentials.prompts.map((prompt) => (
+                <CredentialPromptForm
+                  key={prompt.slot}
+                  sealed={credentials.sealed}
+                  prompt={prompt}
+                  onStored={(slot) =>
+                    updateChat(chatKey, (current) => {
+                      const request = current.handoffs.credentials;
+                      if (!request) return current;
+                      return {
+                        ...current,
+                        handoffs: {
+                          ...current.handoffs,
+                          credentials: {
+                            ...request,
+                            prompts: request.prompts.map((entry) =>
+                              entry.slot === slot ? { ...entry, stored: true } : entry,
+                            ),
+                          },
                         },
-                      },
-                    };
-                  })
-                }
-              />
-            ))}
-          </Handoff>
-        ) : null}
-        {stalled ? (
-          <div className="m-auto max-w-empty text-center text-ink-soft">
-            <p>{stalled.title}</p>
-            {stalled.description ? <p>{stalled.description}</p> : null}
-          </div>
-        ) : null}
-        {showEmpty ? (
-          <div className="m-auto max-w-empty text-center text-ink-soft">
-            {conversationId === null
-              ? "Message " + agent.name + " to start."
-              : "No messages in this conversation yet."}
-          </div>
-        ) : null}
-        {!pinned ? (
-          <Button
-            variant="row"
-            size="icon"
-            aria-label="Jump to bottom"
-            onClick={jumpToBottom}
-            className="sticky bottom-0 self-end"
-          >
-            <svg viewBox="0 0 12 12" aria-hidden className="size-(--size-icon)">
-              <path
-                d="M3 4.5 6 7.5 9 4.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </Button>
-        ) : null}
-      </div>
-      <Composer
-        target={target}
-        draftKey={draftKey}
-        input={composer}
-        onSend={() => pin(true)}
-      />
+                      };
+                    })
+                  }
+                />
+              ))}
+            </Handoff>
+          ) : null}
+          {stalled ? (
+            <div className="m-auto max-w-empty text-center text-ink-soft">
+              <p>{stalled.title}</p>
+              {stalled.description ? <p>{stalled.description}</p> : null}
+            </div>
+          ) : null}
+          {showEmpty ? (
+            <div className="m-auto max-w-empty text-center text-ink-soft">
+              {conversationId === null
+                ? "Message " + agent.name + " to start."
+                : "No messages in this conversation yet."}
+            </div>
+          ) : null}
+        </MessageLog>
+      </TranscriptPane>
+      <Composer target={target} draftKey={draftKey} input={composer} />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
       />
-    </>
+    </TranscriptScroll>
   );
 }
 
+/** What the turn shared, as a row that scrolls sideways rather than a column that pushes the
+ *  composer down the page. */
 function Files({ files }: { files: ChatFile[] }) {
   return (
-    <div className="mt-2xs flex flex-col gap-hair">
+    <AttachmentGroup className="mt-2xs">
       {files.map((file) => (
-        <div key={file.filename}>
-          {file.url ? (
-            <a href={file.url}>{file.filename}</a>
-          ) : (
-            <span>{file.filename}</span>
-          )}
-          <span className="font-mono text-mono">
-            {" "}
-            · {formatSize(file.size_bytes)}
-          </span>
-        </div>
+        <Attachment key={file.filename} size="sm">
+          <AttachmentContent>
+            <AttachmentTitle>
+              {file.url ? <a href={file.url}>{file.filename}</a> : file.filename}
+            </AttachmentTitle>
+            <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+          </AttachmentContent>
+        </Attachment>
       ))}
-    </div>
+    </AttachmentGroup>
   );
 }
 
@@ -271,20 +229,36 @@ function Handoff({ children }: { children: ReactNode }) {
   );
 }
 
-function buttonable(entry: QuestionEntry): boolean {
+/** The most options a turn may offer as choices. Past that the list is taller than the reply it
+ *  stands under, and reading it is worse than typing the answer. */
+const MAX_ANSWER_OPTIONS = 10;
+
+/** Whether an entry's options are drawn as choices at all. A question that will take a file, and a
+ *  list too long to read, are both the message box's job — the form can hold neither, and offering
+ *  a control that cannot carry the answer is worse than saying where the answer goes. */
+function choosable(entry: QuestionEntry): boolean {
   return Boolean(
     entry.options &&
-      entry.options.length <= MAX_ANSWER_BUTTONS &&
+      entry.options.length <= MAX_ANSWER_OPTIONS &&
       !entry.free_text_only &&
       !entry.allow_attachments,
   );
 }
 
-/** What a turn asks, standing under the reply that asked it. Each entry commits on its own act:
- *  the options select and the submit sends, so a multi-select says all of it in one message and a
- *  single choice is still a choice until the member presses. An entry the member has answered
- *  states the words the surface confirmed it admitted — hidden, it would leave the member with no
- *  record of what they chose. */
+/** Answered by typing into the form: words, and no file to go with them. */
+function typed(entry: QuestionEntry): boolean {
+  return !entry.allow_attachments && (Boolean(entry.free_text_only) || !(entry.options ?? []).length);
+}
+
+/** What a turn asks, standing under the reply that asked it and taken one question at a time. A
+ *  turn may ask up to four things; four of them stacked in a transcript is a wall the member has
+ *  to read before answering any of it, and the answers to the later ones often depend on the
+ *  earlier. A step names one decision, says where it sits in the run, and can be gone back to.
+ *
+ *  It is a real form, so each answer is a native control carrying a native name and the member's
+ *  choice arrives as form data rather than as state a component was holding. An entry the member
+ *  has already answered leaves the run and states the words the surface confirmed it admitted —
+ *  hidden, it would leave them with no record of what they chose. */
 function Question({
   target,
   question,
@@ -297,103 +271,42 @@ function Question({
   onAct: () => void;
 }) {
   const asked: QuestionEntry[] = question.questions ?? [];
+  const toTheFoot = useTakeMeToTheFoot();
+  const landed = question.answered ?? {};
+  const open = asked
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ index }) => landed[index] === undefined);
+  // An entry the form cannot carry — a file to attach, a list too long to read — stands as prose
+  // naming where the answer goes. In the form it would be a step demanding a choice it offers no
+  // control for, gating the answers the member did give behind an error nothing on screen resolves.
+  const steppable = open.filter(({ entry }) => choosable(entry) || typed(entry));
+  const prose = open.filter(({ entry }) => !choosable(entry) && !typed(entry));
+  // Declared choices and drawn choices are one list: an entry that names options the form does not
+  // render leaves the primitive holding a choice with nowhere to be, which it says so on the console.
+  const items: QuestionnaireItemDefinition[] = steppable.map(({ entry, index }) => ({
+    name: String(index),
+    ...(choosable(entry)
+      ? { choices: (entry.options ?? []).map((option) => ({ value: option.label })) }
+      : {}),
+  }));
+  // No card around this. Every answer is already a bordered row, and a card holding a stack of
+  // cards states a boundary twice — the question belongs in the reply's own column, exactly where
+  // the words that asked it are.
   return (
-    <div className="mt-sm">
-      <Handoff>
-        <div>{question.title}</div>
-        {asked.map((entry, index) => (
-          <Ask
-            key={index}
-            target={target}
-            question={question}
-            entry={entry}
-            index={index}
-            alone={asked.length === 1}
-            held={held}
-            onAct={onAct}
-          />
-        ))}
-      </Handoff>
-    </div>
-  );
-}
-
-function Ask({
-  target,
-  question,
-  entry,
-  index,
-  alone,
-  held,
-  onAct,
-}: {
-  target: ChatTarget;
-  question: ChatQuestion;
-  entry: QuestionEntry;
-  index: number;
-  alone: boolean;
-  held: boolean;
-  onAct: () => void;
-}) {
-  const [chosen, setChosen] = useState<string[]>([]);
-  const prompt = entry.header ? entry.header + " — " + entry.question : entry.question;
-  const landed = question.answered?.[index];
-  if (landed !== undefined) {
-    return (
-      <div className="flex flex-col gap-xs">
-        <div>{prompt}</div>
-        <Meta>{landed}</Meta>
-      </div>
-    );
-  }
-  const options = entry.options ?? [];
-  return (
-    <div className="flex flex-col gap-xs">
-      <div>{prompt}</div>
-      {buttonable(entry) ? (
-        <>
-          <div className="flex flex-wrap gap-xs">
-            {options.map((option) => (
-              <Button
-                key={option.label}
-                variant="option"
-                aria-pressed={chosen.includes(option.label)}
-                title={option.description}
-                onClick={() =>
-                  setChosen((current) =>
-                    current.includes(option.label)
-                      ? current.filter((label) => label !== option.label)
-                      : entry.multi_select
-                        ? current.concat(option.label)
-                        : [option.label],
-                  )
-                }
-              >
-                {option.label}
-              </Button>
-            ))}
+    <div className="mt-lg flex max-w-bubble flex-col gap-lg">
+      {question.title ? <div>{question.title}</div> : null}
+      {asked.map((entry, index) =>
+        landed[index] === undefined ? null : (
+          <div key={index} className="flex flex-col gap-xs">
+            <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
+            <Meta>{landed[index]}</Meta>
           </div>
-          <Button
-            variant="send"
-            className="self-start"
-            disabled={held || !chosen.length}
-            onClick={() => {
-              const joined = chosen.join(", ");
-              onAct();
-              void answerQuestion(
-                target,
-                question.turn_id,
-                index,
-                alone ? joined : joined + " · " + entry.question,
-              );
-            }}
-          >
-            Answer
-          </Button>
-        </>
-      ) : (
-        <>
-          {options.map((option) => (
+        ),
+      )}
+      {prose.map(({ entry, index }) => (
+        <div key={index} className="flex flex-col gap-xs">
+          <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
+          {(entry.options ?? []).map((option) => (
             <Meta key={option.label}>
               {option.description ? option.label + " — " + option.description : option.label}
             </Meta>
@@ -403,10 +316,85 @@ function Ask({
               ? "Select all that apply — answer in the message box below."
               : "Answer in the message box below."}
           </Meta>
-        </>
-      )}
+        </div>
+      ))}
+      {steppable.length ? (
+        <Questionnaire
+          items={items}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const answers = new FormData(event.currentTarget);
+            onAct();
+            toTheFoot();
+            void deliver(target, question, asked, steppable, answers);
+          }}
+        >
+          {steppable.length > 1 ? <QuestionnaireProgress /> : null}
+          {steppable.map(({ entry, index }) => (
+            <QuestionnaireItem key={index} name={String(index)} multiple={entry.multi_select}>
+              <QuestionnaireTitle>{entry.header ?? entry.question}</QuestionnaireTitle>
+              {entry.header ? (
+                <QuestionnaireDescription>{entry.question}</QuestionnaireDescription>
+              ) : null}
+              <QuestionnaireChoices>
+                {choosable(entry)
+                  ? (entry.options ?? []).map((option) => (
+                      <QuestionnaireChoice key={option.label} value={option.label}>
+                        <span className="font-medium">{option.label}</span>
+                        {option.description ? (
+                          <QuestionnaireChoiceDescription>
+                            {option.description}
+                          </QuestionnaireChoiceDescription>
+                        ) : null}
+                      </QuestionnaireChoice>
+                    ))
+                  : (entry.options ?? []).map((option) => (
+                      <Meta key={option.label}>
+                        {option.description
+                          ? option.label + " — " + option.description
+                          : option.label}
+                      </Meta>
+                    ))}
+                {typed(entry) ? (
+                  <QuestionnaireInput aria-label={entry.question} placeholder="Your answer" />
+                ) : null}
+              </QuestionnaireChoices>
+              <QuestionnaireError />
+            </QuestionnaireItem>
+          ))}
+          <QuestionnaireActions>
+            <QuestionnairePrevious />
+            <QuestionnaireSkip />
+            <QuestionnaireNext />
+            <QuestionnaireSubmit disabled={held} />
+          </QuestionnaireActions>
+        </Questionnaire>
+      ) : null}
     </div>
   );
+}
+
+/** Each answer is admitted against the entry it answers, in the order they were asked, because
+ *  the turn recorded them as separate questions and reads them back the same way. An entry the
+ *  member skipped says nothing rather than saying nothing at length. A single question needs no
+ *  restatement; one of several names itself, so the transcript reads as an answer to something. */
+async function deliver(
+  target: ChatTarget,
+  question: ChatQuestion,
+  asked: QuestionEntry[],
+  open: { entry: QuestionEntry; index: number }[],
+  answers: FormData,
+): Promise<void> {
+  const given = open.flatMap(({ entry, index }) => {
+    const values = answers
+      .getAll(String(index))
+      .map((value) => String(value).trim())
+      .filter((value) => value !== "");
+    if (!values.length) return [];
+    const joined = values.join(", ");
+    return [{ index, body: asked.length === 1 ? joined : joined + " · " + entry.question }];
+  });
+  await answerQuestions(target, question.turn_id, given);
 }
 
 /** The message box holds as many lines as the member writes. Enter sends it and Shift+Enter opens
@@ -417,14 +405,13 @@ function Composer({
   target,
   draftKey,
   input,
-  onSend,
 }: {
   target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
-  onSend: () => void;
 }) {
   const state = useChat(target.key);
+  const toTheFoot = useTakeMeToTheFoot();
   const [text, setText] = useState(() => readDraft(draftKey));
   const [stopping, setStopping] = useState(false);
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
@@ -460,8 +447,8 @@ function Composer({
       for (const file of attached) form.append("file", file);
       body = form;
     }
-    onSend();
     input.current?.focus();
+    toTheFoot();
     void sendMessage(target, body, shown);
     return true;
   }

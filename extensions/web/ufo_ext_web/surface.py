@@ -271,10 +271,16 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     to the same sign-in page an unresolved arrival is redirected to. A deploy that skipped the
     frontend build fails here, naming the command, rather than at import — an unbuilt tree still
     loads the extension, so every route that holds no built asset keeps working and the fault reads
-    as what it is."""
+    as what it is.
+
+    The shell is `no-store`: it is the one document naming which build to load, and every asset it
+    names carries a content hash. Cached, it would go on naming a build that is no longer there —
+    the member reloads, the deploy they were told about is missing, and nothing in the page says
+    why. Its assets revalidate and transfer only on a hash change, so the shell costs one request
+    and no page is ever stale while looking current."""
     if PORTAL_HTML is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
-    return HTMLResponse(PORTAL_HTML)
+    return HTMLResponse(PORTAL_HTML, headers={"cache-control": "no-store"})
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response:

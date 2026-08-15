@@ -8,7 +8,7 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { Table, Td } from "@/components/ui/table";
 import { Notice } from "@/kernel/panel";
-import { MessageLog } from "@/kernel/messages";
+import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 
 import {
   CHAT_ROW,
@@ -183,17 +183,19 @@ test("a table keeps its height inside a scrolling panel instead of collapsing", 
 test("a transcript bubble wraps an unbreakable string instead of widening the pane", () => {
   const blob = '{"pull_number":1269,"head_sha":"e8beb82515566586de252fdc5a411db2526057e1"}';
   render(
-    <MessageLog
-      messages={[
-        { role: "user", text: blob },
-        { role: "assistant", text: blob },
-      ]}
-      conversationId={CONVO_ID}
-    />,
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: blob },
+          { role: "assistant", text: blob },
+        ]}
+        conversationId={CONVO_ID}
+      />
+    </TranscriptScroll>,
   );
 
   for (const bubble of screen.getAllByText(blob)) {
-    expect(bubble.closest("[data-role]")!.className).toContain("wrap-anywhere");
+    expect(bubble.closest("[data-slot=bubble-content]")!.className).toContain("wrap-anywhere");
   }
   // `anywhere` rather than `break-word`: only `anywhere` lowers the intrinsic minimum width, so a
   // shrink-to-fit bubble resolves to the pane instead of to its 70ch maximum and overflowing it.
@@ -297,15 +299,16 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   location.hash = "#/c/" + CONVO_ID;
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  const agentSide = (await screen.findByText("reply")).closest("[data-role=agent]")!;
-  expect(agentSide.className).toContain("leading-reading");
+  const agentSaid = (await screen.findByText("reply")).closest("[data-slot=bubble-content]")!;
+  expect(agentSaid.className).toContain("leading-reading");
+  const agentSide = agentSaid.closest("[data-role=agent]")!;
   expect(agentSide.className).toContain("w-full");
   expect(agentSide.className).not.toContain("bg-fill");
   expect(agentSide.className).not.toContain("animate-appear");
-  const mineSide = screen.getByText("mine").closest("[data-role=me]")!;
-  expect(mineSide.className).toContain("self-end");
-  expect(mineSide.className).toContain("bg-fill");
-  for (const side of [agentSide, mineSide]) expect(side.className).toContain("wrap-anywhere");
+  const mineSaid = screen.getByText("mine").closest("[data-slot=bubble-content]")!;
+  expect(mineSaid.closest("[data-role=me]")!.className).toContain("self-end");
+  expect(mineSaid.closest("[data-role=me]")!.className).toContain("bg-fill");
+  for (const said of [agentSaid, mineSaid]) expect(said.className).toContain("wrap-anywhere");
 
   await userEvent.type(screen.getByLabelText("Message the agent"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));

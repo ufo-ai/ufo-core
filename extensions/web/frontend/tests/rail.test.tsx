@@ -585,7 +585,7 @@ test("the agents index opens the agent's page, and the sidebar starts the conver
   expect(await screen.findByText("Message assistant to start.")).toBeTruthy();
 });
 
-test("the chat header names the agent and opens its page", async () => {
+test("the chat header names the agent and leads back to the agents index", async () => {
   wire({
     "/api/chats": () => json({ chats: [CHAT_ROW] }),
     "/transcript": () => json({ messages: [] }),
@@ -594,12 +594,14 @@ test("the chat header names the agent and opens its page", async () => {
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  await userEvent.click(
-    within(screen.getByRole("main")).getByRole("button", { name: "assistant" }),
-  );
+  const header = within(screen.getByRole("main"));
+  // The agent is what this pane is about, so it is the page rather than a link out of it.
+  expect(header.getByText("assistant")).toBeTruthy();
+  expect(header.queryByRole("button", { name: "assistant" })).toBeNull();
 
-  expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy();
+  await userEvent.click(header.getByRole("button", { name: "Back to Agents" }));
+
+  expect(location.hash).toBe("#/agents");
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {

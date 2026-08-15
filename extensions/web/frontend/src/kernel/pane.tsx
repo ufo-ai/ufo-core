@@ -11,6 +11,14 @@ import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
 import { BesideHost } from "@/kernel/beside";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { cn } from "@/lib/cn";
 
 /** The measure a conversation is read at, centred in whatever width the shell leaves. A transcript
@@ -204,5 +212,54 @@ export function RecordPanel({
         </div>
       </BesideHost>
     </aside>
+  );
+}
+
+/** Where the member is, and what they can do about it — the one header shape every screen that
+ *  sits *inside* something else wears. A root has no crumb, because there is nothing above it to
+ *  name; a record has one, because the list it came from is the way back and a title alone makes
+ *  the member find that list again in the sidebar.
+ *
+ *  Every parent in this portal is reached by a callback rather than an address — an agent's own
+ *  conversation lives in a place on its agent's hash, not at one of its own — so `parent` takes
+ *  the verb that gets there rather than a URL.
+ *
+ *  `note` is what the record says about itself in passing: a model, a slot, the kind of thing it
+ *  is. `actions` are the acts on the record, and they stand at the far end as pills so a row of
+ *  them reads as one band of controls rather than as chrome tucked under a heading. Alignment is
+ *  on the box, not the baseline: a pill and a word share a centre, never a baseline. */
+export function PaneHeader({
+  parent,
+  current,
+  note,
+  actions,
+}: {
+  parent?: { label: string; onGo: () => void };
+  current: ReactNode;
+  note?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-md border-b border-edge px-2xl py-lg">
+      <Breadcrumb className="min-w-0">
+        <BreadcrumbList className="flex-nowrap">
+          {parent ? (
+            <>
+              <BreadcrumbItem>
+                <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
+                  {parent.label}
+                </BreadcrumbLink>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+            </>
+          ) : null}
+          <BreadcrumbItem className="min-w-0">
+            <BreadcrumbPage>{current}</BreadcrumbPage>
+            {note}
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+      {actions ? <div className="ml-auto flex items-center gap-sm">{actions}</div> : null}
+    </div>
   );
 }

@@ -22,6 +22,17 @@ function installWhatJsdomLacks() {
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};
   Element.prototype.scrollIntoView = () => {};
+  // jsdom gives an element `scrollTop` but no `scrollTo` to move it, so a transcript that scrolls
+  // itself throws where a browser would simply scroll. Writing the offset through keeps the two
+  // agreeing, which is what the code under test reads back.
+  Element.prototype.scrollTo = function scrollTo(
+    to?: number | ScrollToOptions,
+    top?: number,
+  ): void {
+    const asked = typeof to === "object" ? to : { left: to, top };
+    if (asked?.top !== undefined) this.scrollTop = asked.top;
+    if (asked?.left !== undefined) this.scrollLeft = asked.left;
+  };
   globalThis.ResizeObserver = class {
     observe() {}
     unobserve() {}

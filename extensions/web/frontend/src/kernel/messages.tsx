@@ -1,114 +1,225 @@
 import { useState, type ReactNode } from "react";
 
+import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import { Marker, MarkerContent } from "@/components/ui/marker";
+import { Message, MessageContent, MessageHeader } from "@/components/ui/message";
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+  useMessageScroller,
+} from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
 import { speakerName } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { Markdown, StreamingBody } from "@/lib/markdown";
 import { subagentConversationHash } from "@/lib/route";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
-import type { ActivityEvent, Bubble, LiveTurn } from "@/lib/chatStore";
+import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
 import type { ChatQuestion, SubagentRun } from "@/lib/types";
 
-const PULSE = "size-xs animate-working rounded-full bg-ink motion-reduce:animate-none";
+/** How far from the foot still counts as being at it. A reader is at the bottom of a conversation
+ *  long before they are at the last pixel of it: a line lands, the composer grows by a row, the
+ *  pane settles a few pixels short. Judged to the pixel, a reply would stop following the moment
+ *  any of that happened, and the member would be left reading a stream that had walked off the
+ *  screen without them. */
+const AT_THE_FOOT_PX = 40;
 
-/** One conversation's messages, drawn the one way this portal draws them — the member's words in
- *  a bubble, the agent's as markdown, and under each reply what it did: the subagents it spawned,
- *  the tools it called, the account it asked to connect, what it cost. The live chat hands it the
- *  turn it is streaming and puts a composer under it; a transcript read back — an agent's
+/** What every screen that draws a conversation stands in. It holds no element of its own, so it
+ *  encloses the log and the acts beside it alike: a send or an answer taken outside the pane can
+ *  still say "take me back to the foot", because a member who scrolled up to re-read something and
+ *  then wrote is not asking to stay where they were — they have just added the newest thing on the
+ *  page. `useTakeMeToTheFoot` is how those acts say it, and it reaches this through context, so a
+ *  caller outside one is a mistake the primitive raises on rather than a silent no-scroll. */
+export function TranscriptScroll({ children }: { children: ReactNode }) {
+  return (
+    <MessageScrollerProvider
+      autoScroll
+      defaultScrollPosition="end"
+      scrollEdgeThreshold={AT_THE_FOOT_PX}
+    >
+      {children}
+    </MessageScrollerProvider>
+  );
+}
+
+/** The pane a conversation is scrolled in, with the way back to its foot standing over it. Only a
+ *  screen that gives the conversation a height of its own draws one — the live chat, where the
+ *  composer holds the bottom and the log takes what is left. A transcript read back stands in a page
+ *  that already scrolls, and a second scroll region inside that page is a second scrollbar beside
+ *  the same words. How the pane takes its height is the caller's to state: one that claimed a share
+ *  of its container would collapse in a container with no height to share out, and clip the
+ *  transcript to nothing.
+ *
+ *  The three things a transcript must not do — jump when a reply grows, jump when older messages
+ *  load in above, scroll in front of a member who has scrolled away — are answered here once for
+ *  every pane that draws one. */
+export function TranscriptPane({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <MessageScroller className={className}>
+      <MessageScrollerViewport data-testid="log">{children}</MessageScrollerViewport>
+      <MessageScrollerButton />
+    </MessageScroller>
+  );
+}
+
+export function useTakeMeToTheFoot(): () => void {
+  const { scrollToEnd } = useMessageScroller();
+  return scrollToEnd;
+}
+
+/** One conversation's messages, as a column of rows. It draws no scroll region: a live chat hangs
+ *  it in a `TranscriptPane`, a transcript read back hangs it straight in the page that scrolls it.
+ *
+ *  No message is a scroll anchor. Anchoring one would put the member's question at the top of the
+ *  pane the moment they asked it and hold open the screenful of blank the pane needs to get it
+ *  there — a reading position for a document, and this is not one. A conversation is read at its
+ *  foot: the newest thing is the thing being said, and the pane follows it.
+ *
+ *  A member's words sit in a bubble at the end of the row; a reply is drawn with no surface at
+ *  all, because it is a document in the reading column and not a card. Under each reply is what it
+ *  did: the subagents it spawned, the tools it called, the account it asked to connect, what it
+ *  cost. The live chat hands it the turn it is streaming; a transcript read back — an agent's
  *  conversations, a subagent's runs — hands it none and shows what landed. A conversation the
  *  member cannot reply to still reads exactly like the one they can.
  *
+ *  The reply being written and the reply that landed are one row in one list, under the index the
+ *  landed one will take. React rebuilds a row that moves between lists or changes key, and the pane
+ *  follows the element rather than the name on it, so a row rebuilt at the end of every turn takes
+ *  the transcript back to the top with it.
+ *
  *  A member message a running turn has not taken up yet states that in its own words — italic and
  *  muted, no line added beneath them: a turn absorbs what arrived at its round boundaries, so the
- *  wait lasts as long as the call it is inside, and the words take their weight back when the
- *  turn says it took them up. Those messages are drawn last, under the reply streaming above them:
- *  the turn answers what it is already inside before it takes up the next thing, so that is the
- *  place the drain will leave them in, and a message drawn anywhere else moves when the fold lands.
+ *  wait lasts as long as the call it is inside, and the words take their weight back when the turn
+ *  says it took them up. Those messages are drawn last, under the reply streaming above them.
  *
  *  A bubble somebody other than the viewer spoke is headed by their name — the read hands it over
- *  only then, so the viewer's own bubbles stay the unlabelled default and the label marks exactly
- *  the words another member said.
+ *  only then, so the viewer's own bubbles stay the unlabelled default.
  *
- *  A question stands under the reply that asked it, because that is the reply it answers. The log
- *  decides the place and the view supplies the form: `question` draws one and a pane that cannot
- *  answer passes none, so a transcript read back states the same reply without offering an act on
- *  a turn it does not own.
+ *  A question stands under the reply that asked it. The log decides the place and the view
+ *  supplies the form: `question` draws one and a pane that cannot answer passes none.
  *
- *  `conversationId` is the conversation these messages belong to, and it roots every subagent link
- *  under it: a run is opened through the conversation that spawned it, which is the route by which
- *  a member reading a transcript reaches the run's own record. */
+ *  `children` is what the screen hangs at the foot of the transcript, in the same column — a
+ *  handoff, an empty state — so nothing floats over the conversation in a pane of its own. */
 export function MessageLog({
   messages,
   live = null,
   conversationId,
   question,
+  className,
+  children,
 }: {
-  messages: Bubble[];
+  messages: Spoken[];
   live?: LiveTurn | null;
   conversationId: string | null;
   question?: (asked: ChatQuestion) => ReactNode;
+  /** The reading column, set on the messages rather than on the pane that scrolls them: a pane
+   *  narrowed to the column carries the scrollbar at the column's edge, which puts a moving bar
+   *  in the middle of the screen beside the words instead of at the side of the window. */
+  className?: string;
+  children?: ReactNode;
 }) {
   const waiting = messages.findIndex(
     (message) => message.arrival_id !== undefined || message.queued === true,
   );
   const settled = waiting === -1 ? messages : messages.slice(0, waiting);
   const queued = waiting === -1 ? [] : messages.slice(waiting);
-  const bubble = (message: Bubble, index: number) =>
+  const rows: Row[] = [
+    ...settled.map((said, at) => ({ at, said })),
+    ...(live ? [{ at: settled.length, live }] : []),
+    ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
+  ];
+  const bubble = (message: Spoken, index: number) =>
     message.role === "error" ? (
-      <Meta key={index}>{message.text}</Meta>
+      <MessageScrollerItem key={index} messageId={"m" + String(index)}>
+        <Meta>{message.text}</Meta>
+      </MessageScrollerItem>
     ) : (
-      <Speech key={index} mine={message.role === "user"}>
-        {message.role === "user" && message.speaker ? (
-          <div className="text-label font-medium text-ink-soft">
-            {speakerName(message.speaker)}
-          </div>
-        ) : null}
-        {message.role === "user" ? null : (
-          <Activity
-            events={message.events ?? []}
-            runs={message.subagents ?? []}
-            root={conversationId}
-          />
-        )}
-        {message.role !== "user" ? (
-          <Markdown text={message.text} />
-        ) : message.arrival_id ? (
-          <span className="italic text-ink-soft">{message.text}</span>
-        ) : (
-          message.text
-        )}
-        {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
-        {message.meta ? <Meta>{message.meta}</Meta> : null}
-        {message.question && question ? question(message.question) : null}
-      </Speech>
+      <MessageScrollerItem key={index} messageId={"m" + String(index)}>
+        <Speech mine={message.role === "user"}>
+          {message.role === "user" && message.speaker ? (
+            <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
+          ) : null}
+          {message.role === "user" ? null : (
+            <Activity
+              events={message.events ?? []}
+              runs={message.subagents ?? []}
+              root={conversationId}
+            />
+          )}
+          <Said mine={message.role === "user"}>
+            {message.role !== "user" ? (
+              <Markdown text={message.text} />
+            ) : message.arrival_id ? (
+              <span className="italic text-ink-soft">{message.text}</span>
+            ) : (
+              message.text
+            )}
+          </Said>
+          {message.connectUrl ? <ConnectLink url={message.connectUrl} /> : null}
+          {message.meta ? <Meta>{message.meta}</Meta> : null}
+          {message.question && question ? question(message.question) : null}
+        </Speech>
+      </MessageScrollerItem>
     );
   return (
-    <>
-      {settled.map(bubble)}
-      {live ? (
-        <Speech mine={false} entering>
-          <Activity
-            events={live.events}
-            runs={live.subagents}
-            root={conversationId}
-            working={
-              live.reconnecting
-                ? "Reconnecting…"
-                : (live.activity ?? (live.text ? undefined : "Thinking…"))
-            }
-          />
-          <StreamingBody text={live.text} />
-          {live.connectUrl ? <ConnectLink url={live.connectUrl} /> : null}
-          {live.meter ? <Meta>{live.meter}</Meta> : null}
-          {live.meta ? <Meta>{live.meta}</Meta> : null}
-        </Speech>
-      ) : null}
-      {queued.map((message, index) => bubble(message, settled.length + index))}
-    </>
+    <MessageScrollerContent className={className} aria-busy={live !== null}>
+      {rows.map((row) =>
+        row.live ? (
+          <MessageScrollerItem key={row.at} messageId={"m" + String(row.at)}>
+            <Speech mine={false}>
+              <Activity
+                events={row.live.events}
+                runs={row.live.subagents}
+                root={conversationId}
+                working={
+                  row.live.reconnecting
+                    ? "Reconnecting…"
+                    : (row.live.activity ?? (row.live.text ? undefined : "Thinking…"))
+                }
+              />
+              <Said mine={false} entering>
+                <StreamingBody text={row.live.text} />
+              </Said>
+              {row.live.connectUrl ? <ConnectLink url={row.live.connectUrl} /> : null}
+              {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
+              {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
+            </Speech>
+          </MessageScrollerItem>
+        ) : (
+          bubble(row.said, row.at)
+        ),
+      )}
+      {children}
+    </MessageScrollerContent>
   );
 }
 
-function Speech({
+type Row =
+  | { at: number; said: Spoken; live?: undefined }
+  | { at: number; said?: undefined; live: LiveTurn };
+
+/** The row one message is said on, turned around for the member's own words. */
+function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
+  return (
+    <Message align={mine ? "end" : "start"}>
+      <MessageContent>{children}</MessageContent>
+    </Message>
+  );
+}
+
+/** The words themselves. The member's take the fill step and the reading width; a reply takes no
+ *  surface and the whole column, which is the one difference between being quoted and being read. */
+function Said({
   mine,
   entering = false,
   children,
@@ -118,35 +229,38 @@ function Speech({
   children: ReactNode;
 }) {
   return (
-    <div
-      className={cn(
-        "wrap-anywhere [&_a]:text-link",
-        mine
-          ? "max-w-bubble self-end whitespace-pre-wrap rounded-bubble bg-fill px-lg py-sm"
-          : "w-full max-w-bubble self-start text-body leading-reading",
-        entering && "animate-appear",
-      )}
+    <Bubble
+      variant={mine ? "default" : "ghost"}
+      align={mine ? "end" : "start"}
       data-role={mine ? "me" : "agent"}
+      className={cn(mine ? "self-end" : "w-full", entering && "animate-appear")}
     >
-      {children}
-    </div>
+      <BubbleContent
+        className={cn("wrap-anywhere leading-reading [&_a]:text-link", mine && "whitespace-pre-wrap")}
+      >
+        {children}
+      </BubbleContent>
+    </Bubble>
   );
 }
 
 export function Meta({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-2xs font-mono text-small tabular-nums text-ink-soft">
-      {children}
-    </div>
+    <Marker className="mt-2xs font-mono text-small tabular-nums">
+      <MarkerContent>{children}</MarkerContent>
+    </Marker>
   );
 }
 
+/** What the agent is doing, said as a status line rather than as a bubble — it is about the
+ *  conversation, not in it. It is not a live region: the log it stands in already announces what is
+ *  added to it, and a marker that replaced its own words on every tool call would read the whole
+ *  run of a turn out over whatever else the page had to say. */
 function Working({ children }: { children: ReactNode }) {
   return (
-    <div className="mt-2xs flex items-center gap-sm font-mono text-small text-ink-soft">
-      <span aria-hidden className={PULSE} />
-      {children}
-    </div>
+    <Marker className="mt-2xs font-mono text-small">
+      <MarkerContent className="shimmer">{children}</MarkerContent>
+    </Marker>
   );
 }
 
@@ -170,15 +284,11 @@ function Activity({
       className="mt-2xs font-mono text-small text-ink-soft"
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary className="cursor-pointer">
-        {working === undefined ? null : (
-          <span
-            aria-hidden
-            className={cn(PULSE, "mr-sm inline-block align-middle")}
-          />
-        )}
-        {working ?? latestActivity(events, runs)}
-      </summary>
+      <Marker render={<summary className="cursor-pointer list-none" />}>
+        <MarkerContent className={cn(working !== undefined && "shimmer")}>
+          {working ?? latestActivity(events, runs)}
+        </MarkerContent>
+      </Marker>
       {open ? <ActivityTree events={events} runs={runs} root={root} /> : null}
     </details>
   );
@@ -242,3 +352,4 @@ function ConnectLink({ url }: { url: string }) {
     </a>
   );
 }
+

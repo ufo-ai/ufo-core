@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { buttonVariants } from "@/components/ui/button";
 import { tokens } from "@/lib/turnStream";
 
 import {
@@ -39,9 +38,7 @@ test("a tool frame reports its description, and its tool and preview when it has
   const stream = await streaming();
   stream.emit("tool", { description: "Reading the calendar", tool: "cal", preview: "list" });
   const dock = await screen.findByText("Reading the calendar");
-  const dot = dock.parentElement?.querySelector("span[aria-hidden]");
-  expect(dot?.className).toContain("animate-working");
-  expect(dot?.className).toContain("motion-reduce:animate-none");
+  expect(dock.className).toContain("shimmer");
   stream.emit("tool", { tool: "bash", preview: "ls -la" });
   expect(await screen.findByText("bash ls -la")).toBeTruthy();
 });
@@ -66,7 +63,7 @@ test("a settled turn states its latest call and opens onto the ones before it", 
   });
 
   const summary = await screen.findByText("Loaded skill · calendar-triage");
-  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("bash ls")).toBeNull();
   expect(screen.queryByText("Loading skill · calendar-triage")).toBeNull();
 
@@ -87,7 +84,7 @@ test("one tool call states itself, with nothing more behind it", async () => {
     cost_micro_usd: 1_000_000,
   });
   const summary = await screen.findByText("bash ls");
-  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("summary")).toBeTruthy();
 
   await userEvent.click(summary);
   expect(screen.getAllByText("bash ls")).toHaveLength(2);
@@ -112,7 +109,7 @@ test("a terminal subagent event nests its work under the reply", async () => {
   });
 
   const summary = await screen.findByText("Reading the changelog.");
-  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByRole("link", { name: /Subagent · general_purpose/ })).toBeNull();
 
   await userEvent.click(summary);
@@ -249,41 +246,50 @@ async function asked(entry: Record<string, unknown>) {
 
 test("a single-choice question holds one option at a time", async () => {
   await asked(ENTRY);
-  const work = await screen.findByRole("button", { name: "Work" });
-  const home = screen.getByRole("button", { name: "Home" });
+  const work = (await screen.findByRole("radio", { name: "Work" })) as HTMLInputElement;
+  const home = screen.getByRole("radio", { name: "Home" }) as HTMLInputElement;
   await userEvent.click(work);
   await userEvent.click(home);
-  expect(work.getAttribute("aria-pressed")).toBe("false");
-  expect(home.getAttribute("aria-pressed")).toBe("true");
+  expect(work.checked).toBe(false);
+  expect(home.checked).toBe(true);
 });
 
 test("a multi-select question offers a toggle per option", async () => {
   await asked({ ...ENTRY, multi_select: true });
-  const work = await screen.findByRole("button", { name: "Work" });
-  expect(work.getAttribute("aria-pressed")).toBe("false");
+  const work = (await screen.findByRole("checkbox", { name: "Work" })) as HTMLInputElement;
+  expect(work.checked).toBe(false);
   await userEvent.click(work);
-  expect(work.getAttribute("aria-pressed")).toBe("true");
-  await userEvent.click(screen.getByRole("button", { name: "Home" }));
-  expect(work.getAttribute("aria-pressed")).toBe("true");
+  expect(work.checked).toBe(true);
+  await userEvent.click(screen.getByRole("checkbox", { name: "Home" }));
+  expect(work.checked).toBe(true);
 });
 
-test("a free-text-only question offers no option buttons", async () => {
+test("a free-text-only question takes words rather than a choice", async () => {
   await asked({ ...ENTRY, free_text_only: true });
   expect(await screen.findByText("Which calendar?")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Work" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "Work" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: "Work" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Which calendar?" })).toBeTruthy();
 });
 
-test("a question allowing attachments offers no option buttons", async () => {
+test("a question allowing attachments is answered in the message box, not the form", async () => {
   await asked({ ...ENTRY, allow_attachments: true });
   expect(await screen.findByText("Which calendar?")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Work" })).toBeNull();
+  // The options are stated so the member knows what is on offer, but none is a control, and there
+  // is no box to type in either: the answer carries a file, and only the composer takes one.
+  expect(screen.queryByRole("radio", { name: "Work" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: "Work" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "Which calendar?" })).toBeNull();
+  expect(screen.getByText(/answer in the message box below/i)).toBeTruthy();
 });
 
 test("a question with more options than fit offers none of them as buttons", async () => {
   const many = Array.from({ length: 11 }, (_, index) => ({ label: "option-" + index }));
   await asked({ question: "Which one?", options: many });
   expect(await screen.findByText("Which one?")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "option-0" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "option-0" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: "option-0" })).toBeNull();
+  expect(screen.getByText(/answer in the message box below/i)).toBeTruthy();
 });
 
 test("the slot strip draws the option every pressed control in the portal is drawn as", async () => {
@@ -304,7 +310,10 @@ test("the slot strip draws the option every pressed control in the portal is dra
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const changes = await screen.findByRole("button", { name: "Changes 2" });
-  expect(changes.className).toContain(buttonVariants({ variant: "option" }));
+  // The rule is that a pressed control is drawn as pressed, which these four classes are. The
+  // variant's whole class string is not asserted: the strip stands in a header bar, so it also
+  // takes `size="bar"`, and the height and the pill shape override the variant's own padding and
+  // radius — a verbatim match would be asserting that no control may ever be sized.
   expect(changes.className).toContain("aria-pressed:bg-ink");
   expect(changes.className).toContain("aria-pressed:text-surface");
   expect(changes.className).toContain("aria-pressed:border-ink");
@@ -348,7 +357,7 @@ test("an answer whose response is not json ends the wait rather than hanging", a
     "/chat": () => new Response("<html>", { status: 200 }),
   });
 
-  await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "Work" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
@@ -360,7 +369,7 @@ test("an answer the server refuses states its status rather than hanging", async
     "/chat": () => new Response("nope", { status: 503 }),
   });
 
-  await userEvent.click(await screen.findByRole("button", { name: "Work" }));
+  await userEvent.click(await screen.findByRole("radio", { name: "Work" }));
   await userEvent.click(screen.getByRole("button", { name: "Answer" }));
   expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
 });

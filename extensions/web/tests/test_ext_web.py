@@ -4648,7 +4648,8 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     sign-in page, serving nothing of the shell. The bearer never rides a URL — the one POST that
     opens a session lands the form token as the host-only session cookie — HttpOnly, Secure, and
     `lax`, because arrival is a cross-site navigation from the gateway's signed-in card — then
-    redirects into the portal."""
+    redirects into the portal. The shell it serves is `no-store`: it names the build to load, and a
+    cached copy would go on naming assets a later deploy no longer holds."""
     client, workspace_id, _agent_id = web
     page = await client.get("/surface/web")
     assert page.status_code == 303
@@ -4664,6 +4665,7 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     shell = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert shell.status_code == 200
     assert shell.text == PORTAL_FILE.read_text()
+    assert shell.headers["cache-control"] == "no-store"
     client.cookies.clear()
     tokenless = await client.post("/surface/web", data={})
     assert tokenless.status_code == 401

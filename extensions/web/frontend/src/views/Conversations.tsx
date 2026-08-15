@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { day } from "@/lib/moments";
-import { MessageLog } from "@/kernel/messages";
+import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -351,10 +351,12 @@ export function unreadable(message: string): ReactNode {
 }
 
 /** One conversation read rather than continued: the same message log the chat draws, headed the
- *  way the row that opened it named it, and no composer under it. The section carries no act — a
- *  transcript has no diff state to read, so a Changes link here would be drawn over conversations
- *  that changed no file, and the one way out of the conversation is the channel its heading names
- *  rather than a control beside that heading. */
+ *  way the row that opened it named it, and no composer under it. It takes no pane of its own — the
+ *  page this section stands in is what scrolls, and a transcript that scrolled itself inside it
+ *  would put a second bar beside the same words. The section carries no act — a transcript has no
+ *  diff state to read, so a Changes link here would be drawn over conversations that changed no
+ *  file, and the one way out of the conversation is the channel its heading names rather than a
+ *  control beside that heading. */
 export function ConversationTranscript({
   conversationId,
   title,
@@ -367,9 +369,9 @@ export function ConversationTranscript({
   return (
     <Section title={title}>
       {messages.length ? (
-        <div className="flex flex-col gap-md">
+        <TranscriptScroll>
           <MessageLog messages={messages} conversationId={conversationId} />
-        </div>
+        </TranscriptScroll>
       ) : (
         <PanelBlank body="No messages in this conversation yet." />
       )}

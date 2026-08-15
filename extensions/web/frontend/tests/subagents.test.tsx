@@ -261,7 +261,7 @@ test("a run's own page nests the work of the runs it spawned, each rooted at it"
   portal({});
 
   const summary = await screen.findByText("Checking the state site.");
-  expect(summary.tagName).toBe("SUMMARY");
+  expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("Reading the filing")).toBeNull();
 
   await userEvent.click(summary);

@@ -134,6 +134,7 @@ test("a refused stop reports as a toast and leaves the turn streaming", async ()
   await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
 
   const toast = await screen.findByRole("status");
+  expect(toast.getAttribute("data-slot")).toBe("toast");
   expect(toast.textContent).toContain("The turn did not stop.");
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 });

@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Chat, type ChatProps } from "@/views/Chat";
-import { COLUMN, Pane } from "@/kernel/pane";
+import { Pane, PaneHeader } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
 import {
@@ -12,7 +12,7 @@ import {
 } from "@/views/ConversationSlotPane";
 
 export type ChatPaneProps = ChatProps & {
-  onOpenAgent: (agentId: string) => void;
+  onAgentsIndex: () => void;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
 };
@@ -23,7 +23,7 @@ export function ChatPane({
   conversationId,
   onCreated,
   onActivity,
-  onOpenAgent,
+  onAgentsIndex,
   slot,
   onSelectSlot,
 }: ChatPaneProps) {
@@ -38,25 +38,18 @@ export function ChatPane({
     slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
   const header = (
-    <div className="border-b border-edge">
-      <div className={cn(COLUMN, "flex items-baseline gap-md px-2xl py-lg")}>
-        <button
-          type="button"
-          onClick={() => onOpenAgent(agent.id)}
-          className="m-0 border-0 bg-transparent p-0 text-title font-strong text-inherit"
-        >
-          {agent.name}
-        </button>
-        <span className="font-mono text-mono text-ink-soft">{agent.model}</span>
-        {slots.phase === "ready" && slots.payload.slots.length ? (
-          <div
-            className="ml-auto flex items-center gap-sm self-center"
-            aria-label="Conversation slots"
-          >
+    <PaneHeader
+      parent={{ label: "Agents", onGo: onAgentsIndex }}
+      current={agent.name}
+      note={<span className="font-mono text-mono text-ink-soft">{agent.model}</span>}
+      actions={
+        slots.phase === "ready" && slots.payload.slots.length ? (
+          <div className="flex items-center gap-sm" aria-label="Conversation slots">
             {slots.payload.slots.map((entry) => (
               <Button
                 key={entry.id}
                 variant="option"
+                size="bar"
                 aria-pressed={slot === entry.id}
                 onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
               >
@@ -68,9 +61,9 @@ export function ChatPane({
               </Button>
             ))}
           </div>
-        ) : null}
-      </div>
-    </div>
+        ) : null
+      }
+    />
   );
   return (
     <Pane>
