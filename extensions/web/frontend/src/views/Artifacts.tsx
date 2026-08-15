@@ -122,15 +122,22 @@ function siteCard(row: ObjectRow, viewer: string | null): Card {
   };
 }
 
-/** A markdown file's band is its fingerprint: the document renders at reading width and scales to
- *  the edge of legibility, so the band holds a dense picture of the page — its shape, headings,
- *  and tables — rather than one full-sized opening line. It reads the same link the viewer reads
- *  whole, the one preview an already-shared file can grow without a re-render; other text stays
- *  pictureless, since its characters render as themselves and the viewer shows them. The
- *  fingerprint is `inert`: the band is decoration, so nothing in it takes a press or the keyboard,
- *  and the band's own overflow crops it. */
+const FINGERPRINT_MEDIA = new Set([
+  "application/json",
+  "text/csv",
+  "text/markdown",
+  "text/x-patch",
+]);
+
+/** A shaped text file's band is its fingerprint: the content renders at reading width — markdown
+ *  as the document it is, a csv as its table, json and a patch as their characters — and scales to
+ *  the edge of legibility, so the band holds a dense picture of the page rather than one
+ *  full-sized opening line. It reads the same link the viewer reads whole, the one preview an
+ *  already-shared file can grow without a re-render; plain text stays pictureless, since it has no
+ *  shape a fingerprint would carry. The fingerprint is `inert`: the band is decoration, so nothing
+ *  in it takes a press or the keyboard, and the band's own overflow crops it. */
 function bandExcerpt(file: Artifact | null): ReactNode {
-  if (!file?.url || file.media_type !== "text/markdown") return null;
+  if (!file?.url || !FINGERPRINT_MEDIA.has(file.media_type)) return null;
   return (
     <div inert className="w-(--size-fingerprint) origin-top-left scale-(--scale-fingerprint)">
       <ArtifactText

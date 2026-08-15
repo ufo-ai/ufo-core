@@ -15,6 +15,7 @@ and `verify_artifact_url` checks the same values, so a round-trip agrees by cons
 import mimetypes
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import cast
 from urllib.parse import quote
 from uuid import UUID
@@ -30,6 +31,13 @@ from ufo.token_signing import sign_detached, verify_detached
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_URL_TTL_SECONDS = 3600
 FALLBACK_MEDIA_TYPE = "application/octet-stream"
+ARTIFACT_MEDIA_TYPES = {
+    ".diff": "text/x-patch",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".patch": "text/x-patch",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
 
 class ArtifactUrlError(ValueError):
@@ -58,9 +66,16 @@ class ArtifactUrlExpired(ArtifactUrlError):
 
 
 def artifact_media_type(filename: str) -> str:
-    """The MIME type an artifact stores and serves, from its one filename. A name whose type
-    carries a compression encoding (`chart.png.gz`) is not the inner type — declaring `image/png`
-    without `content-encoding: gzip` serves broken bytes — so it falls back with the unknowns."""
+    """The MIME type an artifact stores and serves, from its one filename. The suffixes the product
+    keys features on — the media families, previews, and inline text rendering — resolve through
+    `ARTIFACT_MEDIA_TYPES`, never the registry: `mimetypes` answers from the host's own mime files,
+    and the hosted image (`python:3.12-slim`) carries none, so an office type guessed right on a
+    laptop and landed as the fallback in production. A name whose type carries a compression
+    encoding (`chart.png.gz`) is not the inner type — declaring `image/png` without
+    `content-encoding: gzip` serves broken bytes — so it falls back with the unknowns."""
+    declared = ARTIFACT_MEDIA_TYPES.get(PurePosixPath(filename).suffix.lower())
+    if declared is not None:
+        return declared
     guessed, encoding = mimetypes.guess_type(filename)
     return guessed if guessed and encoding is None else FALLBACK_MEDIA_TYPE
 

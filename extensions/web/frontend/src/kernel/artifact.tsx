@@ -8,11 +8,50 @@ const ARTIFACT_TEXT_BYTES = 64 * 1024;
 const ARTIFACT_HTML_BYTES = 256 * 1024;
 const MARKDOWN_MEDIA_TYPE = "text/markdown";
 const HTML_MEDIA_TYPE = "text/html";
+const CSV_MEDIA_TYPE = "text/csv";
 const HTML_CSP =
   "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">";
 
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
+}
+
+/** The fetched slice as RFC 4180 rows: a quoted field holds commas and newlines, a doubled quote
+ *  is a literal one. A row the byte cut ends mid-field still renders — the reader sees the table's
+ *  shape, and the cap notice under it names the truncation. */
+function csvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let quoted = false;
+  let at = 0;
+  const settle = () => {
+    row.push(field);
+    field = "";
+  };
+  const land = () => {
+    settle();
+    rows.push(row);
+    row = [];
+  };
+  while (at < text.length) {
+    const char = text[at];
+    if (quoted) {
+      if (char === '"' && text[at + 1] === '"') {
+        field += '"';
+        at += 2;
+        continue;
+      }
+      if (char === '"') quoted = false;
+      else field += char;
+    } else if (char === '"' && field === "") quoted = true;
+    else if (char === ",") settle();
+    else if (char === "\n") land();
+    else if (char !== "\r") field += char;
+    at += 1;
+  }
+  if (field !== "" || row.length) land();
+  return rows;
 }
 
 /** A shared text file, read to the fold. Markdown renders as the document it is — the same
@@ -85,7 +124,7 @@ export function ArtifactText({
     );
   return (
     <>
-      {mediaType === MARKDOWN_MEDIA_TYPE ? (
+      {mediaType === MARKDOWN_MEDIA_TYPE || mediaType === CSV_MEDIA_TYPE ? (
         <div
           data-artifact-document
           className={cn(
@@ -94,7 +133,7 @@ export function ArtifactText({
             display === "frame" && "max-h-(--media-tall) overflow-y-auto",
           )}
         >
-          <Markdown text={body} />
+          {mediaType === MARKDOWN_MEDIA_TYPE ? <Markdown text={body} /> : <CsvTable text={body} />}
           {display === "excerpt" ? (
             <div
               aria-hidden
@@ -121,5 +160,33 @@ export function ArtifactText({
         </div>
       ) : null}
     </>
+  );
+}
+
+/** A csv as the table it encodes: the first row heads the columns, every later row is a record.
+ *  The `typeset` register draws it as the document tables markdown renders to. */
+function CsvTable({ text }: { text: string }) {
+  const [head, ...records] = csvRows(text);
+  return (
+    <div className="typeset">
+      <table>
+        <thead>
+          <tr>
+            {(head ?? []).map((cell, column) => (
+              <th key={column}>{cell}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((cells, row) => (
+            <tr key={row}>
+              {cells.map((cell, column) => (
+                <td key={column}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

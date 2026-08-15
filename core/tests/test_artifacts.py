@@ -1,3 +1,4 @@
+import mimetypes
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from email.message import Message
@@ -13,8 +14,10 @@ from PIL import Image
 
 from ufo.artifact_url import (
     ARTIFACT_KEY_PREFIX,
+    ARTIFACT_MEDIA_TYPES,
     ArtifactUrlError,
     ArtifactUrlExpired,
+    artifact_media_type,
     mint_artifact_url,
     verify_artifact_url,
 )
@@ -60,6 +63,27 @@ async def artifact_client(
     app.include_router(artifacts_router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://core") as client:
         yield client, blob
+
+
+def test_artifact_media_types_answer_from_the_product_table_on_any_host() -> None:
+    """The suffixes the product keys features on resolve identically everywhere: `mimetypes` reads
+    the host's own registry, which the hosted image lacks, so a registry-guessed type was right on
+    a laptop and the fallback in production. Every table entry covers a suffix the interpreter's
+    built-in map cannot name — a suffix it can name needs no entry."""
+    assert artifact_media_type("Deck.PPTX") == (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    assert artifact_media_type("brief.docx") == (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert artifact_media_type("grid.xlsx") == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert artifact_media_type("fix.patch") == "text/x-patch"
+    assert artifact_media_type("fix.diff") == "text/x-patch"
+    bare_registry = mimetypes.MimeTypes(filenames=())
+    for suffix in ARTIFACT_MEDIA_TYPES:
+        assert bare_registry.guess_type(f"a{suffix}")[0] is None
 
 
 def test_mint_and_verify_agree_on_a_round_trip() -> None:

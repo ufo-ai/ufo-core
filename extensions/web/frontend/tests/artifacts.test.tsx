@@ -486,6 +486,84 @@ test("a markdown artifact's band reads its first lines", async () => {
   expect(band.querySelector("img")).toBeNull();
 });
 
+test("json and patch bands read their characters as fingerprints", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/artifacts"))
+        return json({
+          artifacts: [
+            artifact({
+              media_type: "application/json",
+              filename: "runs.json",
+              url: "/dl/runs.json",
+            }),
+            artifact({
+              id: "a2",
+              media_type: "text/x-patch",
+              filename: "fix.patch",
+              url: "/dl/fix.patch",
+              created_at: "2026-07-30T09:00:00",
+            }),
+          ],
+        });
+      if (url.includes("runs.json")) return new Response('{"runs": 12}');
+      return new Response("--- a/loop.py\n+++ b/loop.py");
+    }),
+  );
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const items = await screen.findAllByRole("listitem");
+  const jsonBand = items
+    .find((entry) => entry.textContent?.includes("runs.json"))
+    ?.querySelector('[data-part="mark"]') as HTMLElement;
+  const patchBand = items
+    .find((entry) => entry.textContent?.includes("fix.patch"))
+    ?.querySelector('[data-part="mark"]') as HTMLElement;
+  await waitFor(() => expect(jsonBand.textContent).toContain('{"runs": 12}'));
+  await waitFor(() => expect(patchBand.textContent).toContain("+++ b/loop.py"));
+  expect(jsonBand.querySelector("pre")).not.toBeNull();
+});
+
+test("a csv artifact draws as its table, in the band and in the viewer", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
+      if (url.includes("/workspace/artifacts"))
+        return json({
+          artifacts: [
+            artifact({ media_type: "text/csv", filename: "spend.csv", url: "/dl/spend.csv" }),
+          ],
+        });
+      return new Response('member,spend\n"Ng, Ada",12\nBo,"3 ""units"""');
+    }),
+  );
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("spend.csv"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  await waitFor(() => expect(band.querySelector("table")).not.toBeNull());
+  expect(band.querySelectorAll("th")[1]?.textContent).toBe("spend");
+  const cells = [...band.querySelectorAll("td")].map((cell) => cell.textContent);
+  expect(cells).toEqual(["Ng, Ada", "12", "Bo", '3 "units"']);
+
+  await userEvent.click(await viewCard("spend.csv"));
+  const sheet = document.querySelector("aside, [role='dialog']") as HTMLElement;
+  await waitFor(() => expect(within(sheet).getAllByRole("table").length).toBeGreaterThan(0));
+});
+
 test("a plain text artifact's band stays the placeholder", async () => {
   only([artifact()]);
   render(
