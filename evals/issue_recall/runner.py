@@ -1,13 +1,15 @@
 """The `issue_recall` leaf: does default memory injection surface the repository's related issues
 and pull requests when the turn's goal is filing a new one?
 
-Each case's graded turn is one issue-filing message and nothing else — no reminder that prior issues
-exist, no instruction to search — and a `mid-thread` case sends that ask as the next turn of a
-conversation already spent on unrelated technical Q&A. The grade reads the recall event the memory
-extension's `user_prompt_submit` hook exported for that exact turn, so it scores what injection
-surfaced before the model ran: the rank of each related fixture page's derived facts, the coverage
-of the related set, and whether the corpus's distractors outnumbered them in the injected context.
-The answer is recorded, and the related issue numbers it cited with it, but the bar is the recall.
+Each case's graded turn is one inbound and nothing else — no reminder that prior issues exist, no
+instruction to search. A topic is asked as a member phrases it, as the next turn of a conversation
+already spent on unrelated technical Q&A (`mid-thread`), and as a source-change alert whose only
+topical signal is one page title inside machine boilerplate (`source-alert`) — the inbound shape
+scheduled admissions put through the hook. The grade reads the recall event the memory extension's
+`user_prompt_submit` hook exported for that exact turn, so it scores what injection surfaced before
+the model ran: the rank of each related fixture page's derived facts, the coverage of the related
+set, and whether the corpus's distractors outnumbered them in the injected context. The answer is
+recorded, and the related issue numbers it cited with it, but the bar is the recall.
 """
 
 from __future__ import annotations
@@ -28,7 +30,9 @@ from evals.harness.registry import EvalTask, capability_task
 from evals.issue_recall.corpus import (
     ABSENT_FILINGS,
     CASES,
+    DUPLICATE_FAMILIES,
     ISSUE_SHAPED,
+    MACHINE_CONTROLS,
     corpus_digest,
     corpus_issue_numbers,
     related_refs,
@@ -36,7 +40,7 @@ from evals.issue_recall.corpus import (
 from evals.issue_recall.state import CorpusReadiness
 
 ISSUE_RECALL_TASK = "issue_recall"
-ISSUE_RECALL_GRADER_REVISION = "derived-fact-owners-1"
+ISSUE_RECALL_GRADER_REVISION = "duplicate-visibility-1"
 ISSUE_NUMBER_PATTERN = re.compile(r"#(\d{2,5})\b")
 MEMORY_SEARCH_TOOL = "memory_search"
 
@@ -68,6 +72,10 @@ def load_issue_recall(readiness_path: Path) -> IssueRecallRun:
         for memory in readiness.ambient
         if memory.ref in {record.ref for record in ISSUE_SHAPED}
     )
+    ambient_ids = {memory.ref: memory.memory_id for memory in readiness.ambient}
+    duplicates = tuple(
+        frozenset(ambient_ids[memory.ref] for memory in family) for family in DUPLICATE_FAMILIES
+    )
     cases: list[CapabilityCase] = []
     for case in CASES:
         related = frozenset(related_refs(case))
@@ -93,7 +101,9 @@ def load_issue_recall(readiness_path: Path) -> IssueRecallRun:
                 name=case.name,
                 message=case.message,
                 prior_messages=case.prior_messages,
-                grader=IssueRecallGrader(expected, distractors, shaped, case.min_coverage),
+                grader=IssueRecallGrader(
+                    expected, distractors, shaped, duplicates, case.min_coverage
+                ),
                 digest_tag=(
                     f"{readiness.corpus_digest}:{ISSUE_RECALL_GRADER_REVISION}:{case.name}:"
                     f"{expected_identity}"
@@ -104,12 +114,23 @@ def load_issue_recall(readiness_path: Path) -> IssueRecallRun:
         CapabilityCase(
             name=f"{absent.slug}:absent-topic",
             message=absent.message,
-            grader=AbsentTopicGrader(corpus_issue_numbers(), shaped),
+            grader=AbsentTopicGrader(corpus_issue_numbers(), shaped, duplicates),
             digest_tag=(
                 f"{readiness.corpus_digest}:{ISSUE_RECALL_GRADER_REVISION}:{absent.slug}:absent"
             ),
         )
         for absent in ABSENT_FILINGS
+    ]
+    cases += [
+        CapabilityCase(
+            name=f"{control.slug}:machine-inbound",
+            message=control.message,
+            grader=AbsentTopicGrader(corpus_issue_numbers(), shaped, duplicates),
+            digest_tag=(
+                f"{readiness.corpus_digest}:{ISSUE_RECALL_GRADER_REVISION}:{control.slug}:machine"
+            ),
+        )
+        for control in MACHINE_CONTROLS
     ]
     return IssueRecallRun(
         (recall_graded(capability_task(ISSUE_RECALL_TASK, tuple(cases))),), readiness
@@ -124,6 +145,7 @@ class AbsentTopicGrader:
 
     corpus_numbers: frozenset[int]
     issue_shaped: frozenset[UUID]
+    duplicate_families: tuple[frozenset[UUID], ...]
 
     @property
     def grading(self) -> str:
@@ -151,6 +173,7 @@ class AbsentTopicGrader:
             "issueShapedInjected": sum(
                 memory_id in self.issue_shaped for memory_id in recall.memory_ids
             ),
+            "duplicateCopiesInjected": duplicate_copies(recall.memory_ids, self.duplicate_families),
             "citedIssues": cited,
             "attributedToCorpusIssues": attributed,
             "memorySearchCalls": [
@@ -175,6 +198,14 @@ class AbsentTopicGrader:
         )
 
 
+def duplicate_copies(selected: tuple[UUID, ...], families: tuple[frozenset[UUID], ...]) -> int:
+    """How many injected memories were a second-or-later live copy of a fact the injection already
+    carried — the slots a duplicated fact burned that another memory could have had."""
+    return sum(
+        max(0, sum(memory_id in family for memory_id in selected) - 1) for family in families
+    )
+
+
 @dataclass(frozen=True)
 class IssueRecallGrader:
     """Score the turn's injected recall against the case's related pages."""
@@ -182,6 +213,7 @@ class IssueRecallGrader:
     expected: tuple[ExpectedPage, ...]
     distractors: frozenset[UUID]
     issue_shaped: frozenset[UUID]
+    duplicate_families: tuple[frozenset[UUID], ...]
     min_coverage: float
 
     @property
@@ -243,6 +275,7 @@ class IssueRecallGrader:
             ],
             "citedIssues": sorted(set(ISSUE_NUMBER_PATTERN.findall(output.response))),
             "issueShapedInjected": sum(memory_id in self.issue_shaped for memory_id in selected),
+            "duplicateCopiesInjected": duplicate_copies(selected, self.duplicate_families),
         }
         if recall.error_class is not None:
             return CapabilityVerdict(False, f"recall degraded ({recall.error_class})", evidence)

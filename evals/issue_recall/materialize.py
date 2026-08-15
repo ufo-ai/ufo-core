@@ -116,7 +116,7 @@ class Materializer:
         because re-materializing the same corpus is a documented no-op — so the bar is that every
         durable row is a declared ambient ref or a fact whose `created_from_page_id` names one of
         this fixture's pages, and every page belongs to this fixture's source. Anything else and the
-        run would commit some 460 ambient rows plus a sync into a workspace it does not own, leaving
+        run would commit some 470 ambient rows plus a sync into a workspace it does not own, leaving
         the attestor to discover it afterwards."""
         declared = {memory.ref for memory in self.ambient}
         page_ids = {page_id_for(source_id, page.source_ref) for page in self.pages}

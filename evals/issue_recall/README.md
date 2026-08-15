@@ -8,17 +8,17 @@ chose to run.
 | Piece | What it is |
 |---|---|
 | Fixture | 23 in-repo GitHub records: 3 clusters of related issues/PRs/comments (9 pages) + 14 distractors, several near-topic (`atlas sync` performance, Okta SSO, webhook-signature docs) |
-| Haystack | 460 declared ambient memories the graded facts compete against — 40 near-topic negatives, 60 issue-shaped records from five sibling repositories, and a generated bank of ordinary workspace facts |
+| Haystack | 473 declared ambient memories the graded facts compete against — 40 near-topic negatives, 13 live copies across five duplicate families, 60 issue-shaped records from five sibling repositories, and a generated bank of ordinary workspace facts |
 | Pages | Rendered by the real `GitHubConnector` (`flatten` then `render`), landed by the core sync driver as a folder source |
 | Recall path | `derive_facts` distills each page into durable facts, stamping each with the `created_from_page_id` link back to its page; those facts are what auto-inject can reach, so readiness maps page → derived fact ids through that link |
 | Grade | Coverage of the case's related pages in the injected memory ids, their ranks, and whether the front of the injected context is related rather than distractors |
 
-One leaf (`issue_recall`), eighteen cases: fifteen graded on coverage and three absent-topic
-controls. The coverage cases are three filing topics — `sync-token-hang`,
+One leaf (`issue_recall`), twenty-two cases: eighteen graded on coverage, three absent-topic
+controls, and one machine control. The coverage cases are three filing topics — `sync-token-hang`,
 `webhook-duplicate-orders`, `csv-export-truncation` — each asked four ways as a conversation's first
-message, and once more mid-conversation. The whole inbound is the query the recall hook embeds, so a
-phrasing is a distinct retrieval query over one topic, and the symptom text is held identical across
-the four so the only thing varying is the ask around it:
+message, once more mid-conversation, and once as a source-change alert. The whole inbound is the
+query the recall hook embeds, so a phrasing is a distinct retrieval query over one topic, and the
+symptom text is held identical across the four so the only thing varying is the ask around it:
 
 | Phrasing | Inbound |
 |---|---|
@@ -40,6 +40,18 @@ because the hook embeds the graded turn's inbound alone: the thread above it is 
 retrieval query, so a dozen words carry the whole search. These cases measure that — they are not
 tuned to pass, and the ask is never padded with symptom words to help it.
 
+The `source-alert` case is the topic reached the way scheduled admissions reach it. On a production
+deploy sampled 2026-08-15, scheduled and internal turns outnumbered member asks roughly six to one,
+and their inbounds are machine text the hook embeds verbatim: a source-change alert or a subagent
+result, not a member's phrasing. The case's message is the alert shape `sources` emits — source and
+connection ids, a stream name, a page uuid — around one related page's title, which is the query's
+only topical signal. The bar is the topic's own, like `mid-thread`: not tuned to pass, measuring
+whether recall still surfaces the cluster when the symptom words are absent and most of the query
+is uniform boilerplate. Measured on this corpus, all three alert cases cover their full related
+set, but the boilerplate costs precision before it costs coverage: the webhook alert's related
+pages rank 1, 4, 5, letting distractors lead the front — the leaf's one failing case as of
+2026-08-15, kept failing because that is the measurement.
+
 Naming the repository does not help recall and can hurt it: `northwind/atlas` and `github` appear in
 every page of the corpus (each body opens `# github issues:`), so those tokens are uniform noise in
 the query while the symptom words carry all the signal. Measured on the corpus below, the three
@@ -59,14 +71,27 @@ evidence therefore hands retrieval a third of itself, and a coverage bar sits cl
 time and covers a four-page set outright 0.8% of the time. Measured coverage of 100% against that
 pool says the ranking is real, but it cannot separate excellent retrieval from adequate retrieval.
 
-The haystack fixes the denominator. 460 ambient memories — durable shared rows no page produced —
-put the pool at 483, so the injected share falls to 1.7% and covering a four-page set by luck falls
+The haystack fixes the denominator. 473 ambient memories — durable shared rows no page produced —
+put the pool at 496, so the injected share falls to 1.6% and covering a four-page set by luck falls
 to about 1e-08. Forty of them are hand-written to be near-topic: session tokens that refresh
 silently, webhook retries capped by the provider, a ten-thousand-row *UI page size*, a stalled-job
 runbook. Those carry the filing topics' vocabulary about other systems entirely, so the leaf tests
 discrimination rather than topic detection; the generated remainder is ordinary workspace noise whose
 job is the pool size. Every ambient row is a distractor for every case, so it competes for the same
 injection slots and shows up in `distractorInjected` and the front-precision check.
+
+Thirteen more mirror what a production memory store actually accretes, measured on a live deploy
+2026-08-15: one workspace held 27 live copies of a single "canonical ledger" memory (bodies to
+16.7KB), ordinary facts written 3–10 times across sessions, and injections that spent three of
+their eight slots restating one fact three ways. The corpus carries that shape as five duplicate
+families — one triplet of restatements per filing topic (a plain statement, a dated
+"re-confirmed" echo, a restatement with its practical consequence), a giant update-in-place
+operations ledger beside its stale earlier copy, and a point-in-time snapshot beside its revision.
+Copies rank independently, so a retrieval that cannot see they are one fact burns injection slots
+the related set needed; `duplicateCopiesInjected` records per turn how many injected memories were
+a second-or-later copy from one family. The ledger is also the junk-drawer distractor: its dated
+entries sweep all three topics' vocabulary, so it partial-matches every graded query and floods
+the context when it wins a slot.
 
 A denominator alone would not have been enough. `derive_facts` writes the graded facts in
 issue-tracker voice — "Atlas issue #388 (closed) reported that `atlas sync` retried token refresh in
@@ -99,6 +124,12 @@ record behind every one of those numbers is about something else — fails the c
 fresh passes. Each case records `issueShapedInjected`, so the exposure the control rules out is
 visible per turn rather than argued.
 
+The machine control extends the same bar to a query with no topic at all: a cancelled subagent
+result — profile, uuid, status, empty body — the inbound internal admissions put through the hook
+verbatim. Sampled live, such turns received six to eight injected memories chosen by nothing but
+form, since the query is pure boilerplate. The reply must not turn that exposure into a corpus
+attribution; what recall injected is recorded, never prescribed.
+
 Coverage is a fraction of the whole related set, never of the subset that derived a fact. A page the
 derivation pass distilled nothing from counts against its case and is named in `unmappedEvidence` and
 `mappedCount` so the cause is separable from a ranking miss — had the denominator re-based onto the
@@ -106,8 +137,8 @@ mapped subset, a `derive_facts` regression leaving one of a topic's four pages d
 a perfect pass while three quarters of the graded evidence left the grading set. The report
 surfaces `meanMappedEvidenceCoverage`, `minMappedEvidenceCoverage`, `degradedRecallCount`, and
 `unmappedEvidenceCount`, and each case's evidence adds `evidenceRanks`, `relatedInjected`,
-`distractorInjected`, `frontSlots`, `relatedInFront`, `memorySearchCalls`, and the issue numbers the
-reply cited. The `memory_search` calls are recorded, never required or forbidden: the graded event
+`distractorInjected`, `duplicateCopiesInjected`, `frontSlots`, `relatedInFront`,
+`memorySearchCalls`, and the issue numbers the reply cited. The `memory_search` calls are recorded, never required or forbidden: the graded event
 is the hook's, exported before the model's first round, so a search the agent chose to run
 afterwards cannot flatter the coverage.
 
@@ -120,9 +151,10 @@ duration of a run — it re-reads the same staged bytes and changes nothing.
 
 The stack orchestrator materializes the corpus before serve boots (`ufoctl init`, then
 `python -m evals.issue_recall.materialize`), then drives the leaf against the running deploy. The
-run needs `ANTHROPIC_API_KEY` (target turns and the fact-derivation pass) and `OPENAI_API_KEY`
-(corpus and query embeddings), and a template `[o11y] otlp_endpoint` — the recall collector binds a
-free loopback port per run.
+run needs `ANTHROPIC_API_KEY` (target turns and the fact-derivation pass), `OPENAI_API_KEY`
+(corpus and query embeddings), and `EXA_API_KEY` (the assistant pack's research extension refuses
+to boot without its search provider), and a template `[o11y] otlp_endpoint` — the recall collector
+binds a free loopback port per run.
 
 The stack imposes no Postgres requirement on this corpus — 23 pages ask nothing of the database that
 SQLite cannot hold, and provisioning accepts a SQLite template. The recipe below still names Postgres
@@ -144,6 +176,12 @@ root = "./blobs"
 
 [pack]
 name = "assistant"
+
+[research]
+search_provider = "exa"
+
+[connect]
+public_base_url = "http://127.0.0.1:8710"
 
 [o11y]
 otlp_endpoint = "http://127.0.0.1:4318"

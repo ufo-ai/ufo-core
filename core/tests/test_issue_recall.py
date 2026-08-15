@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
@@ -19,14 +20,19 @@ from evals.issue_recall.corpus import (
     AMBIENT_CLAIMS,
     AMBIENT_SUBJECTS,
     CASES,
+    DUPLICATE_FAMILIES,
     FILINGS,
     HARD_NEGATIVES,
     ISSUE_SHAPED,
+    MACHINE_CONTROLS,
     MID_THREAD,
+    OPS_LEDGER_COPIES,
     PAGES,
     PHRASINGS,
     REPO,
     SIBLING_REPOS,
+    SOURCE_ALERT,
+    STALE_SNAPSHOTS,
     FilingCase,
     IssueThread,
     ambient_memories,
@@ -146,7 +152,8 @@ def test_the_haystack_makes_the_pool_realistic_and_leans_near_topic() -> None:
     half is measurably nearer the filing topics than the generated bank, so what is tested is
     discrimination rather than topic detection."""
     ambient = ambient_memories()
-    generated = ambient[len(HARD_NEGATIVES) + len(ISSUE_SHAPED) :]
+    duplicated = tuple(memory for family in DUPLICATE_FAMILIES for memory in family)
+    generated = ambient[len(HARD_NEGATIVES) + len(duplicated) + len(ISSUE_SHAPED) :]
     pool = len(ambient) + len(rendered_pages())
     vocabulary = frozenset(
         word.strip("`.,:;()")
@@ -158,7 +165,10 @@ def test_the_haystack_makes_the_pool_realistic_and_leans_near_topic() -> None:
     filler_mean = sum(_overlap(m.body, vocabulary) for m in generated) / len(generated)
 
     assert len(ambient) == (
-        len(HARD_NEGATIVES) + len(ISSUE_SHAPED) + len(AMBIENT_CLAIMS) * len(AMBIENT_SUBJECTS)
+        len(HARD_NEGATIVES)
+        + len(duplicated)
+        + len(ISSUE_SHAPED)
+        + len(AMBIENT_CLAIMS) * len(AMBIENT_SUBJECTS)
     )
     assert pool >= 400
     assert MAX_RECALLED_MEMORY_IDS / pool < 0.05
@@ -190,6 +200,97 @@ async def test_the_issue_shaped_bank_denies_recall_a_shortcut_on_form() -> None:
     assert len(ISSUE_SHAPED) > graded * 6
 
 
+def test_duplicate_families_are_live_copies_of_one_near_topic_fact() -> None:
+    """Each family is one fact written several ways — the shape a production store accretes when
+    the same fact is re-written across sessions — so retrieval that ranks copies independently can
+    spend several of its fixed injection slots restating one thing. The triplets pair with the
+    filing topics in order and each member carries its topic's vocabulary, so every copy competes
+    on the graded queries rather than sitting inert in the pool."""
+    ambient_refs = {memory.ref for memory in ambient_memories()}
+    triplets = DUPLICATE_FAMILIES[: len(FILINGS)]
+
+    assert DUPLICATE_FAMILIES == (*triplets, OPS_LEDGER_COPIES, STALE_SNAPSHOTS)
+    assert all(len(family) >= 2 for family in DUPLICATE_FAMILIES)
+    assert all(len(triplet) == 3 for triplet in triplets)
+    assert all(memory.ref in ambient_refs for family in DUPLICATE_FAMILIES for memory in family)
+    for filing, triplet in zip(FILINGS, triplets, strict=True):
+        vocabulary = frozenset(
+            word.strip("`.,:;()") for word in filing.symptom.lower().split() if len(word) > 3
+        )
+        assert all(_overlap(memory.body, vocabulary) >= 1 for memory in triplet)
+
+
+def test_the_ops_ledger_is_a_giant_update_in_place_memory_with_a_stale_copy() -> None:
+    """The junk-drawer shape: one running ledger held as a single memory, claiming to be the only
+    copy while an older revision sits live beside it. Its dated entries sweep every filing topic's
+    vocabulary about internal reviews, so it partial-matches every graded query, and its size makes
+    it the kind of memory that floods an injection when it wins a slot."""
+    current, stale = OPS_LEDGER_COPIES
+
+    assert len(current.body) > 3000
+    assert len(stale.body) < len(current.body) / 2
+    assert stale.body[:120] == current.body[:120]
+    assert "SINGLE canonical ledger" in current.body
+    assert "RECALL GUIDANCE" in current.body
+    assert "RECALL GUIDANCE" not in stale.body
+    for filing in FILINGS:
+        vocabulary = frozenset(
+            word.strip("`.,:;()") for word in filing.symptom.lower().split() if len(word) > 3
+        )
+        assert _overlap(current.body, vocabulary) >= 1
+
+
+def test_stale_snapshots_are_two_live_revisions_of_one_point_in_time_fact() -> None:
+    july, august = STALE_SNAPSHOTS
+
+    assert july.body.startswith("As of 2026-07")
+    assert august.body.startswith("As of 2026-08")
+    assert july.body != august.body
+
+
+def test_every_filing_also_arrives_as_a_source_alert() -> None:
+    """The alert is the inbound shape scheduled admissions put through the recall hook: machine
+    boilerplate — source and connection ids, a stream name, a page uuid — around one related page's
+    title, which is the query's only topical signal. The member's symptom words never appear, and
+    the case grades against the topic's own related set and bar."""
+    alerts = tuple(case for case in CASES if case.name.endswith(f":{SOURCE_ALERT}"))
+
+    assert tuple(case.name for case in alerts) == tuple(
+        f"{filing.slug}:{SOURCE_ALERT}" for filing in FILINGS
+    )
+    assert tuple((case.related, case.min_coverage) for case in alerts) == tuple(
+        (filing.related, filing.min_coverage) for filing in FILINGS
+    )
+    for filing, case in zip(FILINGS, alerts, strict=True):
+        page = next(page for page in PAGES if page.key == filing.alert_page)
+        assert filing.alert_page in filing.related
+        assert isinstance(page, IssueThread)
+        assert page.title in case.message
+        assert "you watch changed" in case.message
+        assert "object_get" in case.message
+        assert re.search(r"page/[0-9a-f]{8}-[0-9a-f-]{27}", case.message)
+        assert filing.symptom not in case.message
+        assert not case.prior_messages
+
+
+def test_the_machine_control_is_pure_boilerplate() -> None:
+    """The cancelled subagent result carries ids and a status and nothing topical, so whatever
+    recall injects for it is query-independent — the control grades that the reply does not turn
+    that exposure into a corpus attribution."""
+    (control,) = MACHINE_CONTROLS
+
+    assert re.fullmatch(
+        r'<subagent_result profile="\w+" subagent_id="[0-9a-f-]{36}" '
+        r'status="cancelled">\n\n</subagent_result>',
+        control.message,
+    )
+    for filing in FILINGS:
+        vocabulary = frozenset(
+            word.strip("`.,:;()") for word in filing.symptom.lower().split() if len(word) > 3
+        )
+        assert _overlap(control.message, vocabulary) == 0
+
+
 async def test_the_haystack_competes_for_the_injection_slots(tmp_path: Path) -> None:
     """Every ambient row is a distractor for every case, so a turn whose injection is all haystack
     fails on the front-precision check rather than passing for lack of accounting."""
@@ -202,7 +303,9 @@ async def test_the_haystack_competes_for_the_injection_slots(tmp_path: Path) -> 
     report = await run.tasks[0].run(RecallTarget(haystack), asyncio.Semaphore(1))
 
     assert len(readiness.ambient) == len(ambient_memories())
-    coverage_cases = tuple(case for case in report.cases if not case.name.endswith(":absent-topic"))
+    coverage_names = {case.name for case in CASES}
+    coverage_cases = tuple(case for case in report.cases if case.name in coverage_names)
+    assert len(coverage_cases) == len(CASES)
     assert not any(case.passed for case in coverage_cases)
     assert all("covered 0/" in case.reason for case in coverage_cases)
 
@@ -237,11 +340,13 @@ def test_every_filing_is_asked_every_way_and_only_one_way_names_the_repository()
     Each topic is asked once per phrasing as a first message, then once mid-conversation."""
     named = tuple(case for case in CASES if REPO in case.message)
 
-    assert len(CASES) == len(FILINGS) * (len(PHRASINGS) + 1)
+    assert len(CASES) == len(FILINGS) * (len(PHRASINGS) + 2)
     assert len({case.name for case in CASES}) == len(CASES)
-    assert {case.name for case in CASES} == {
-        f"{filing.slug}:{phrasing.slug}" for filing in FILINGS for phrasing in PHRASINGS
-    } | {f"{filing.slug}:{MID_THREAD}" for filing in FILINGS}
+    assert {case.name for case in CASES} == (
+        {f"{filing.slug}:{phrasing.slug}" for filing in FILINGS for phrasing in PHRASINGS}
+        | {f"{filing.slug}:{MID_THREAD}" for filing in FILINGS}
+        | {f"{filing.slug}:{SOURCE_ALERT}" for filing in FILINGS}
+    )
     assert tuple(case.name for case in named) == tuple(
         f"{filing.slug}:named-repo" for filing in FILINGS
     )
@@ -281,7 +386,7 @@ async def test_grader_passes_when_the_related_facts_lead_the_injection() -> None
     related = ExpectedPage("issues/2400412", frozenset({_owner("issues/2400412", 0)}))
     other = ExpectedPage("pull_requests/2400431", frozenset({_owner("pull/431", 0)}))
     distractor = _owner("issues/2400466", 0)
-    grader = IssueRecallGrader((related, other), frozenset({distractor}), frozenset(), 0.5)
+    grader = IssueRecallGrader((related, other), frozenset({distractor}), frozenset(), (), 0.5)
 
     verdict = await grader(_output((_owner("issues/2400412", 0), distractor)))
 
@@ -303,7 +408,7 @@ async def test_grader_fails_below_the_coverage_bar() -> None:
         ExpectedPage(f"issues/{number}", frozenset({_owner(f"issues/{number}", 0)}))
         for number in (2400412, 2400388, 2400355, 2400297)
     )
-    grader = IssueRecallGrader(related, frozenset(), frozenset(), 0.5)
+    grader = IssueRecallGrader(related, frozenset(), frozenset(), (), 0.5)
 
     verdict = await grader(_output((_owner("issues/2400412", 0),)))
 
@@ -317,7 +422,7 @@ async def test_grader_passes_when_the_related_set_trails_a_full_context() -> Non
     overall; what matters is that it leads the context rather than being buried."""
     related = ExpectedPage("issues/2400412", frozenset({_owner("issues/2400412", 0)}))
     distractors = frozenset(_owner(f"issues/{number}", 0) for number in (2400466, 2400372, 2400360))
-    grader = IssueRecallGrader((related,), distractors, frozenset(), 0.5)
+    grader = IssueRecallGrader((related,), distractors, frozenset(), (), 0.5)
 
     verdict = await grader(_output((_owner("issues/2400412", 0), *sorted(distractors))))
 
@@ -335,7 +440,7 @@ async def test_grader_fails_when_distractors_lead_the_context() -> None:
     distractors = tuple(
         _owner(f"issues/{number}", 0) for number in (2400466, 2400372, 2400360, 2400501)
     )
-    grader = IssueRecallGrader(related, frozenset(distractors), frozenset(), 0.75)
+    grader = IssueRecallGrader(related, frozenset(distractors), frozenset(), (), 0.75)
 
     verdict = await grader(
         _output((*distractors[:3], *(_owner(page.source_ref, 0) for page in related)))
@@ -349,7 +454,7 @@ async def test_grader_fails_when_distractors_lead_the_context() -> None:
 
 async def test_grader_fails_when_no_related_page_derived_a_fact() -> None:
     grader = IssueRecallGrader(
-        (ExpectedPage("issues/2400412", frozenset()),), frozenset(), frozenset(), 0.5
+        (ExpectedPage("issues/2400412", frozenset()),), frozenset(), frozenset(), (), 0.5
     )
 
     verdict = await grader(_output((uuid4(),)))
@@ -366,6 +471,7 @@ async def test_grader_fails_when_recall_degraded() -> None:
         (ExpectedPage("issues/2400412", frozenset({_owner("issues/2400412", 0)})),),
         frozenset(),
         frozenset(),
+        (),
         0.5,
     )
 
@@ -404,7 +510,7 @@ async def test_grader_fails_without_a_valid_recall_log(
     output: CapabilityOutput, reason: str
 ) -> None:
     grader = IssueRecallGrader(
-        (ExpectedPage("issues/2400412", frozenset({uuid4()})),), frozenset(), frozenset(), 0.5
+        (ExpectedPage("issues/2400412", frozenset({uuid4()})),), frozenset(), frozenset(), (), 0.5
     )
 
     verdict = await grader(output)
@@ -413,10 +519,32 @@ async def test_grader_fails_without_a_valid_recall_log(
     assert verdict.reason == reason
 
 
+async def test_graders_report_the_slots_duplicate_copies_burned() -> None:
+    """A duplicated fact's copies rank together, so an injection can spend several of its fixed
+    slots restating one thing; the count of second-or-later copies makes that burn visible per turn
+    instead of argued from the corpus."""
+    family = tuple(_owner(f"dupe/{ordinal}", 0) for ordinal in range(3))
+    related = ExpectedPage("issues/2400412", frozenset({_owner("issues/2400412", 0)}))
+    grader = IssueRecallGrader(
+        (related,), frozenset(family), frozenset(), (frozenset(family),), 0.5
+    )
+    absent_grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), (frozenset(family),))
+
+    verdict = await grader(_output((_owner("issues/2400412", 0), *family[:2])))
+    absent_verdict = await absent_grader(
+        replace(_output(family), response="Drafted a fresh report.")
+    )
+
+    assert verdict.passed
+    assert verdict.evidence["duplicateCopiesInjected"] == 1
+    assert absent_verdict.passed
+    assert absent_verdict.evidence["duplicateCopiesInjected"] == 2
+
+
 async def test_grader_records_an_explicit_memory_search() -> None:
     memory_id = _owner("issues/2400412", 0)
     grader = IssueRecallGrader(
-        (ExpectedPage("issues/2400412", frozenset({memory_id})),), frozenset(), frozenset(), 0.5
+        (ExpectedPage("issues/2400412", frozenset({memory_id})),), frozenset(), frozenset(), (), 0.5
     )
     searched = replace(
         _output((memory_id,)),
@@ -440,8 +568,10 @@ def test_load_issue_recall_builds_one_leaf_pinned_to_its_owners(tmp_path: Path) 
     rederived = load_issue_recall(path)
 
     assert tuple(task.name for task in run.tasks) == (ISSUE_RECALL_TASK,)
-    assert run.tasks[0].cases == tuple(case.name for case in CASES) + tuple(
-        f"{absent.slug}:absent-topic" for absent in ABSENT_FILINGS
+    assert run.tasks[0].cases == (
+        tuple(case.name for case in CASES)
+        + tuple(f"{absent.slug}:absent-topic" for absent in ABSENT_FILINGS)
+        + tuple(f"{control.slug}:machine-inbound" for control in MACHINE_CONTROLS)
     )
     assert run.readiness.workspace_id == WORKSPACE_ID
     assert rederived.tasks[0].digest != run.tasks[0].digest
@@ -488,19 +618,22 @@ async def test_issue_recall_report_carries_the_recall_aggregates(tmp_path: Path)
 
     report = await run.tasks[0].run(target, asyncio.Semaphore(1))
 
-    absent = {f"{filing.slug}:absent-topic" for filing in ABSENT_FILINGS}
-    passed = {case.name for case in report.cases if case.passed} - absent
-    per_topic = len(PHRASINGS) + 1
-    assert passed == {f"{FILINGS[0].slug}:{phrasing.slug}" for phrasing in PHRASINGS} | {
-        f"{FILINGS[0].slug}:{MID_THREAD}"
+    controls = {f"{filing.slug}:absent-topic" for filing in ABSENT_FILINGS} | {
+        f"{control.slug}:machine-inbound" for control in MACHINE_CONTROLS
     }
+    passed = {case.name for case in report.cases if case.passed} - controls
+    per_topic = len(PHRASINGS) + 2
+    assert passed == (
+        {f"{FILINGS[0].slug}:{phrasing.slug}" for phrasing in PHRASINGS}
+        | {f"{FILINGS[0].slug}:{MID_THREAD}", f"{FILINGS[0].slug}:{SOURCE_ALERT}"}
+    )
     assert report.mean_mapped_evidence_coverage == pytest.approx(per_topic / len(CASES))
     assert report.min_mapped_evidence_coverage == 0.0
     assert report.degraded_recall_count == 0
     assert report.unmapped_evidence_count == 0
     assert not report.passed
     assert {
-        case.name: case.prior_messages for case in target.driven if case.name not in absent
+        case.name: case.prior_messages for case in target.driven if case.name not in controls
     } == {case.name: case.prior_messages for case in CASES}
 
 
@@ -521,8 +654,9 @@ async def test_a_related_page_that_derived_nothing_counts_against_coverage(
         RecallTarget(tuple(_owner(ref, 0) for ref in derived)), asyncio.Semaphore(1)
     )
 
-    per_topic = len(PHRASINGS) + 1
-    coverage_cases = tuple(case for case in report.cases if not case.name.endswith(":absent-topic"))
+    per_topic = len(PHRASINGS) + 2
+    coverage_names = {case.name for case in CASES}
+    coverage_cases = tuple(case for case in report.cases if case.name in coverage_names)
     partial = tuple(case for case in coverage_cases if case.name.startswith(FILINGS[0].slug))
     assert report.unmapped_evidence_count == sum(len(case.related) for case in CASES) - per_topic
     assert report.mean_mapped_evidence_coverage == pytest.approx(
@@ -539,7 +673,7 @@ async def test_absent_topic_grader_passes_when_nothing_existing_is_claimed() -> 
     issue-shaped memories that reached context is recorded either way, since that exposure is the
     priming the case exists to rule out."""
     shaped = frozenset({_owner("ledger-88", 0), _owner("warehouse-305", 0)})
-    grader = AbsentTopicGrader(corpus_issue_numbers(), shaped)
+    grader = AbsentTopicGrader(corpus_issue_numbers(), shaped, ())
     output = replace(
         _output(tuple(shaped)),
         response="Nothing on file matches this. Here is the issue I would open: cold-start crash …",
@@ -554,7 +688,7 @@ async def test_absent_topic_grader_passes_when_nothing_existing_is_claimed() -> 
 
 
 async def test_absent_topic_grader_fails_a_reply_that_claims_an_existing_issue() -> None:
-    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset())
+    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), ())
     output = replace(
         _output((uuid4(),)),
         response="This is already filed as #412, so I have not opened a duplicate.",
@@ -569,7 +703,7 @@ async def test_absent_topic_grader_fails_a_reply_that_claims_an_existing_issue()
 
 async def test_absent_topic_grader_ignores_a_number_the_corpus_never_used() -> None:
     """A version string or an unrelated number is not an attribution."""
-    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset())
+    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), ())
     output = replace(_output((uuid4(),)), response="Filed as a fresh report; see #9042 upstream.")
 
     verdict = await grader(output)
@@ -580,7 +714,7 @@ async def test_absent_topic_grader_ignores_a_number_the_corpus_never_used() -> N
 
 
 async def test_absent_topic_grader_fails_on_a_missing_log_a_bad_event_and_degraded_recall() -> None:
-    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset())
+    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), ())
     wrong_event = CapabilityOutput(
         "drafted",
         (),
@@ -599,7 +733,7 @@ async def test_absent_topic_grader_catches_a_sibling_repository_citation() -> No
     """The corpus's numbers span the sibling repositories too — #88 exists only in `ISSUE_SHAPED`
     (`ledger-88`), never in `PAGES` — so a reply reaching for one of those is the same false
     attribution as reaching for an Atlas number."""
-    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset())
+    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), ())
     sibling_only = frozenset(int(memory.ref.rpartition("-")[2]) for memory in ISSUE_SHAPED) - {
         page.number for page in PAGES if isinstance(page, IssueThread)
     }
@@ -616,7 +750,7 @@ async def test_absent_topic_grader_catches_a_sibling_repository_citation() -> No
 
 
 async def test_absent_topic_grader_fails_a_malformed_recall_log() -> None:
-    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset())
+    grader = AbsentTopicGrader(corpus_issue_numbers(), frozenset(), ())
     malformed = CapabilityOutput(
         "drafted",
         (),

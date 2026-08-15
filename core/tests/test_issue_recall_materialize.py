@@ -29,6 +29,7 @@ from evals.issue_recall.corpus import (
     ABSENT_FILINGS,
     CASES,
     FILINGS,
+    MACHINE_CONTROLS,
     PAGES,
     ambient_memories,
     corpus_digest,
@@ -41,6 +42,7 @@ from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.ext.context import SourceReader, context_for
+from ufo.indexing import TextChunker
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
 from ufo.models.registry import ModelRegistry
@@ -178,7 +180,12 @@ async def test_materializes_the_fixture_into_a_recallable_attested_corpus(
     assert {owner.ref for owner in readiness.ambient} == {
         memory.ref for memory in ambient_memories()
     }
-    assert readiness.chunk_count == 2 * len(pages) + len(ambient_memories())
+    ambient_chunks = sum(
+        len(TextChunker().chunk(memory.body, "memory_item", memory.ref, "shared"))
+        for memory in ambient_memories()
+    )
+    assert readiness.chunk_count == 2 * len(pages) + ambient_chunks
+    assert ambient_chunks > len(ambient_memories())
     assert client.calls == 3
     assert {owner.source_ref for owner in readiness.pages} == {page.source_ref for page in pages}
     assert {owner.source_ref: owner.page_id for owner in readiness.pages} == {
@@ -322,7 +329,7 @@ async def test_the_readiness_it_writes_loads_as_the_graded_leaf(
 
     assert run.readiness == readiness
     assert len(run.tasks) == 1
-    assert len(run.tasks[0].cases) == len(CASES) + len(ABSENT_FILINGS)
+    assert len(run.tasks[0].cases) == len(CASES) + len(ABSENT_FILINGS) + len(MACHINE_CONTROLS)
 
 
 async def test_attestation_refuses_an_incomplete_ambient_haystack(

@@ -14,6 +14,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from ufo_ext_sources.github import GitHubConnector
 
@@ -967,6 +968,152 @@ ISSUE_SHAPED: tuple[Ambient, ...] = (
 )
 
 
+OPS_LEDGER_HEAD = (
+    "Atlas operations review ledger — reviews already run (canonical ledger). This is the SINGLE "
+    "canonical ledger; update it in place each run (overwrite, never append a second copy). "
+    "Reviews post to the operations channel after each session.\n"
+)
+
+OPS_LEDGER_ENTRIES: tuple[str, ...] = (
+    "(01) 2026-06-16 — 'OAuth refresh path' (walked the sync worker's token refresh under an "
+    "expiring credential: deadline behavior, retry budget, and what an operator sees when a "
+    "refresh stalls; services/sync/auth.py, runbooks/token-refresh.md).",
+    "(02) 2026-06-19 — 'webhook intake' (at-least-once delivery from the payment provider, the "
+    "provider-owned retry schedule, and the idempotency expectations on the order writer; "
+    "services/orders/webhooks.py, runbooks/webhook-replay.md).",
+    "(03) 2026-06-23 — 'export pipeline' (the exporter's hard page size, replica lag while a "
+    "bulk import runs, and when a CSV file counts as partial; services/exports/csv.py, "
+    "runbooks/export-rerun.md).",
+    "(04) 2026-06-26 — 'catalog sync throughput' (per-SKU price lookups, batched reads, and the "
+    "fetch concurrency ceiling; services/sync/catalog.py).",
+    "(05) 2026-06-30 — 'sync cursor storage' (cursors live in the jobs database, replaying a "
+    "window, and who approves a wide backfill; services/sync/cursors.py).",
+    "(06) 2026-07-03 — 'dashboard metrics' (sync lag as the headline metric, paging thresholds, "
+    "and the on-call rotation that owns them; ops/dashboards/sync.json).",
+    "(07) 2026-07-07 — 'partner SFTP intake' (the nightly inventory drop, the reconciliation "
+    "job, and late-file handling; services/intake/sftp.py).",
+    "(08) 2026-07-10 — 'thread-pool saturation' (queue depth as the tell for a hang, and the "
+    "dump-before-restart rule for a stalled job; runbooks/stalled-job.md).",
+    "(09) 2026-07-14 — 'token audit trail' (who requested a refresh, under which grant, and "
+    "where the security log keeps it; services/auth/audit.py).",
+    "(10) 2026-07-17 — 'duplicate suppression' (the message-id dedupe window in the events "
+    "pipeline and what falls outside it; services/events/dedupe.py).",
+    "(11) 2026-07-21 — 'export streaming plan' (a streaming writer for large accounts and "
+    "telling the member when a file is partial; services/exports/stream.py).",
+    "(12) 2026-07-24 — 'webhook replay tooling' (support-side replay of a delivery and what the "
+    "original payload means on a second receipt; tools/admin/replay.py).",
+    "(13) 2026-07-28 — 'token lifetime matrix' (which tenant tiers run fifteen-minute access "
+    "tokens versus hour-long ones, and what each means for a long sync run crossing an expiry; "
+    "services/auth/lifetimes.py, docs/tenancy.md).",
+    "(14) 2026-07-31 — 'order reconciliation' (how the orders table is reconciled against the "
+    "provider's settlement report, and which mismatches page a human versus queue for review; "
+    "services/orders/reconcile.py, runbooks/settlement-mismatch.md).",
+    "(15) 2026-08-04 — 'export surfaces' (every place a member can start an export — the UI, "
+    "the reporting API, the scheduled weekly report — and which of them share the exporter's "
+    "page size; services/exports/api.py, web/reports/export.tsx).",
+    "(16) 2026-08-07 — 'retry backoff policy' (the house rule that retries against an external "
+    "party carry exponential backoff and a ceiling, and the audit of call sites that predate "
+    "it; docs/retry-policy.md).",
+    "(17) 2026-08-11 — 'escalation ladder' (when a stalled nightly job pages the secondary, "
+    "when it wakes the service owner, and the fifteen-minute acknowledgement bar; "
+    "ops/escalation.md).",
+    "(18) 2026-08-14 — 'credential rotation drill' (rotated the warehouse service account and "
+    "the payment provider's signing secret in staging, timing every dependent restart; "
+    "runbooks/rotation-drill.md).",
+)
+
+OPS_LEDGER_GUIDANCE = (
+    "\nRECALL GUIDANCE (learned the hard way): a generic memory search for this ledger returns "
+    "STALE copies stopping at entries 05-07, and even a targeted search may return a stale copy "
+    "first — always scan every returned copy for the HIGHEST entry number before trusting one. "
+    "When the ledger is already present in the turn's recalled-memory block with the highest "
+    "entry number, that copy is current and no search is needed."
+)
+
+OPS_LEDGER_COPIES: tuple[Ambient, ...] = (
+    Ambient(
+        "ops-ledger-current",
+        OPS_LEDGER_HEAD + "\n".join(OPS_LEDGER_ENTRIES) + "\nSTILL UNREVIEWED candidates: "
+        "'auth service mesh identities', 'nightly reconciliation', 'billing gateway move'."
+        + OPS_LEDGER_GUIDANCE,
+    ),
+    Ambient(
+        "ops-ledger-stale",
+        OPS_LEDGER_HEAD + "\n".join(OPS_LEDGER_ENTRIES[:5]) + "\nSTILL UNREVIEWED candidates: "
+        "'dashboard metrics', 'partner SFTP intake'.",
+    ),
+)
+
+STALE_SNAPSHOTS: tuple[Ambient, ...] = (
+    Ambient(
+        "snapshot-triage-july",
+        "As of 2026-07-20 the atlas triage board counted 114 open items: 61 sync, 29 webhooks, "
+        "24 exports; the oldest open item dated to January.",
+    ),
+    Ambient(
+        "snapshot-triage-august",
+        "As of 2026-08-08 the atlas triage board counted 131 open items: 66 sync, 33 webhooks, "
+        "32 exports; the oldest open item dated to January.",
+    ),
+)
+
+DUPLICATE_FAMILIES: tuple[tuple[Ambient, ...], ...] = (
+    (
+        Ambient(
+            "dupe-refresh-owner-1",
+            "The sync worker refreshes its own OAuth token in process; there is no standalone "
+            "token-refresh service to restart when a refresh goes bad.",
+        ),
+        Ambient(
+            "dupe-refresh-owner-2",
+            "Re-confirmed 2026-08-14 against the deploy manifest: still no standalone "
+            "token-refresh service — the sync worker refreshes its OAuth token in process.",
+        ),
+        Ambient(
+            "dupe-refresh-owner-3",
+            "There is no token-refresh sidecar in the atlas deploy (checked the manifest again), "
+            "so a bad token is fixed inside the sync worker, never by restarting a service.",
+        ),
+    ),
+    (
+        Ambient(
+            "dupe-retry-owner-1",
+            "The payment provider owns the webhook retry schedule; deliveries repeat "
+            "at-least-once and nothing on our side can turn a retry off.",
+        ),
+        Ambient(
+            "dupe-retry-owner-2",
+            "Re-confirmed 2026-08-11 with the provider's support: webhook delivery retries are "
+            "the provider's, at-least-once, and not configurable from our side.",
+        ),
+        Ambient(
+            "dupe-retry-owner-3",
+            "Webhook retries come from the payment provider on the provider's own schedule "
+            "(at-least-once), so turning them off is not an option a handler has.",
+        ),
+    ),
+    (
+        Ambient(
+            "dupe-export-replica-1",
+            "The order export reads from the reporting replica, which lags the primary by up to "
+            "ten minutes during a bulk import.",
+        ),
+        Ambient(
+            "dupe-export-replica-2",
+            "Re-confirmed 2026-08-09: the order export still reads the reporting replica, up to "
+            "ten minutes behind the primary while a bulk import runs.",
+        ),
+        Ambient(
+            "dupe-export-replica-3",
+            "The export path reads the reporting replica (lag up to ten minutes under bulk "
+            "import), never the primary.",
+        ),
+    ),
+    OPS_LEDGER_COPIES,
+    STALE_SNAPSHOTS,
+)
+
+
 AMBIENT_SUBJECTS: tuple[str, ...] = (
     "Loomcart",
     "Trellis",
@@ -1018,8 +1165,11 @@ AMBIENT_CLAIMS: tuple[str, ...] = (
 
 
 def ambient_memories() -> tuple[Ambient, ...]:
-    """The haystack in stable order: the near-topic hard negatives, the issue-shaped bank from the
-    sibling repositories, then the generated ambient bank."""
+    """The haystack in stable order: the near-topic hard negatives, the duplicate families — live
+    copies of one evolving fact, the shape a production memory store accretes when the same fact is
+    re-written across sessions (triplicated restatements, a giant update-in-place ledger and its
+    stale earlier copy, a point-in-time snapshot beside its revision) — the issue-shaped bank from
+    the sibling repositories, then the generated ambient bank."""
     generated = tuple(
         Ambient(
             ref=f"ambient/{index:03d}",
@@ -1029,7 +1179,8 @@ def ambient_memories() -> tuple[Ambient, ...]:
             (claim, subject) for claim in AMBIENT_CLAIMS for subject in AMBIENT_SUBJECTS
         )
     )
-    memories = HARD_NEGATIVES + ISSUE_SHAPED + generated
+    duplicated = tuple(memory for family in DUPLICATE_FAMILIES for memory in family)
+    memories = HARD_NEGATIVES + duplicated + ISSUE_SHAPED + generated
     refs = tuple(memory.ref for memory in memories)
     if len(set(refs)) != len(refs):
         raise ValueError("issue_recall ambient memories share a ref")
@@ -1055,13 +1206,15 @@ class Filing:
     """One filing topic: the symptom a member reports in their own words, the corpus pages a default
     recall must surface for it, and the case's bar — the majority of that related set, so a set of
     four may lose at most one page. Every page outside `related` is a distractor for this topic,
-    including the other topics' clusters. The same bar grades the topic's mid-conversation ask."""
+    including the other topics' clusters. The same bar grades the topic's mid-conversation ask and
+    its source-alert ask, where `alert_page` names the related page the alert reports changed."""
 
     slug: str
     symptom: str
     related: tuple[str, ...]
     min_coverage: float
     mid_thread: MidThread
+    alert_page: str
 
 
 FILINGS: tuple[Filing, ...] = (
@@ -1088,6 +1241,7 @@ FILINGS: tuple[Filing, ...] = (
             ),
             ask="ok, file an issue for the nightly job stalling on the auth refresh",
         ),
+        alert_page="pull-431",
     ),
     Filing(
         slug="webhook-duplicate-orders",
@@ -1111,6 +1265,7 @@ FILINGS: tuple[Filing, ...] = (
             ),
             ask="ok, file an issue for the payment retries double-booking an order",
         ),
+        alert_page="pull-402",
     ),
     Filing(
         slug="csv-export-truncation",
@@ -1133,6 +1288,7 @@ FILINGS: tuple[Filing, ...] = (
             ),
             ask="ok, file an issue for the order export cutting off the tail of a big account",
         ),
+        alert_page="issue-297",
     ),
 )
 
@@ -1203,6 +1359,29 @@ ABSENT_FILINGS: tuple[AbsentFiling, ...] = (
 
 
 @dataclass(frozen=True)
+class MachineControl:
+    """An inbound no member wrote: machine boilerplate — ids, a status, no topic — the inbound
+    shape internal admissions put through the recall hook verbatim. There is nothing to find, so
+    the graded bar is the absent-topic one: whatever recall injects for a query of pure
+    boilerplate, the reply must not attribute the turn to a corpus record."""
+
+    slug: str
+    message: str
+
+
+MACHINE_CONTROLS: tuple[MachineControl, ...] = (
+    MachineControl(
+        slug="subagent-cancelled",
+        message=(
+            '<subagent_result profile="coding" '
+            'subagent_id="7c2f5a90-4b1e-4c8a-9d3f-2e6b8a1c5d40" status="cancelled">\n\n'
+            "</subagent_result>"
+        ),
+    ),
+)
+
+
+@dataclass(frozen=True)
 class FilingCase:
     """One filing topic asked one way: the graded turn, and the conversation it lands in."""
 
@@ -1214,6 +1393,30 @@ class FilingCase:
 
 
 MID_THREAD = "mid-thread"
+SOURCE_ALERT = "source-alert"
+ALERT_SOURCE_NAME = "github-9c41d2ae"
+ALERT_CONNECTION_ID = "ca_mVtR-qwkoblf"
+
+
+def source_alert(filing: Filing) -> str:
+    """The topic reached the way scheduled admissions reach it: a source-change alert whose only
+    topical signal is one related page's title, wrapped in the machine boilerplate — source and
+    connection ids, a stream name, a page uuid — that the recall hook embeds verbatim as the
+    query."""
+    page = next(page for page in PAGES if page.key == filing.alert_page)
+    if not isinstance(page, IssueThread):
+        raise ValueError(f"issue_recall alert page {filing.alert_page!r} carries no title")
+    page_uuid = UUID(
+        bytes=hashlib.sha256(f"issue-recall/alert/{filing.alert_page}".encode()).digest()[:16],
+        version=4,
+    )
+    return (
+        f"The source '{ALERT_SOURCE_NAME}' (github ({ALERT_CONNECTION_ID}): {page.stream}) you "
+        f"watch changed — {page.stream}: 1 updated. Changed pages (object_get each to read what "
+        f"changed): page/{page_uuid} ({page.title}). Then tell the member what is new and why it "
+        "matters."
+    )
+
 
 CASES: tuple[FilingCase, ...] = (
     *(
@@ -1233,6 +1436,15 @@ CASES: tuple[FilingCase, ...] = (
             related=filing.related,
             min_coverage=filing.min_coverage,
             prior_messages=filing.mid_thread.prior_messages,
+        )
+        for filing in FILINGS
+    ),
+    *(
+        FilingCase(
+            name=f"{filing.slug}:{SOURCE_ALERT}",
+            message=source_alert(filing),
+            related=filing.related,
+            min_coverage=filing.min_coverage,
         )
         for filing in FILINGS
     ),
