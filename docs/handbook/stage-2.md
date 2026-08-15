@@ -1,179 +1,190 @@
-# Process Bootstrap, CLI Commands, and Pack Selection  `stage-2`
+# Process bootstrap, CLI commands, and application lifespan  `stage-2`
 
-This stage is the system’s front door. It runs when UFO is first started from a terminal, launched as a service, or packaged for deployment. The main command tools are ufoctl in cli.py for local setup, running, inspection, and packaging, and the hosted control command in main.py for starting the managed web gateway, preparing the database, invitations, Slack setup, and security rules. serve.py is the main assembly bench: it reads settings and connects the database, extensions, web routes, background workers, credentials, sandbox, and shutdown hooks. onboarding.py performs first-run setup by creating the first workspace, admin, and assistant, while preventing duplicate or incomplete setup. bundle.py freezes a chosen configuration into a Docker deployment folder. select.py picks the one sandbox, meaning the isolated place where tools run.
-
-The pack files are ready-made menus of capabilities. Assistant, billing, hosted, and eval packs choose different assistant setups. Chief of staff, DSQA, GDPVal, sample, and YC packs declare their own extensions, skills, and setup steps so startup can enable the right bundle by name.
+This stage is the system’s front door and power switch. It covers what happens when an operator starts UFO, runs an admin command, builds a deployable package, or shuts the service down cleanly. The main server path is in core/src/ufo/serve.py. It reads configuration, opens database connections, loads extensions, starts background workers, attaches web routes, and launches the HTTP server that clients talk to. core/src/ufo/cli.py provides ufoctl, the local command-line tool for setup, running, inspection, packaging, repair, and development tasks. control/src/ufo_control/main.py plays a similar role for the hosted control service, including database setup, invitations, Slack retry work, and access-policy setup. core/src/ufo/bundle.py freezes a deployment into a repeatable Docker build folder, like packing a machine with its exact parts list. core/src/ufo/proxy_serve.py starts the shared network proxy used by sandboxes, applying the right workspace rules based on each request’s run token. Together these pieces start services, prepare their dependencies, expose commands and routes, and support orderly shutdown.
 
 ## Files in this stage
 
-### Operator entry points
-These files provide the main command-line fronts for local UFO administration and hosted control-service operations.
+### Operator command lines
+Command-line entrypoints expose local deployment operations and hosted-control administration workflows.
 
 ### `core/src/ufo/cli.py`
 
-`entrypoint` · `startup, administration, interactive chat, packaging`
+`entrypoint` · `operator command execution, from startup through admin maintenance`
 
-This file turns many backend features into commands a person can type. Without it, a user would have to create config files, database rows, secrets, extension pins, spending rules, and chat requests by hand. It is like the control panel for the system.
+This file turns many parts of the UFO system into human-friendly terminal commands. Without it, a new user would have to manually create config files, set secrets, migrate databases, create the first workspace, start servers, and poke database tables by hand. The file is like a control panel: each button is a command, and the code behind the button loads configuration, checks inputs, opens the right database connection, calls the subsystem that does the real work, then prints a short result.
 
-At startup, the CLI loads a nearby `.env` file so local secrets work without manual shell setup. The `init` command creates a default config, prepares the database, creates the first workspace owner and default agent, writes development secrets, and saves a long-lived CLI token on the user’s machine. The serving commands then start the main server, proxy, or ingress gateway.
+The startup path loads a `.env` file beside `ufo.toml`, so local secrets work without the user typing `export` commands. The `init` command creates a default config, generates development secrets, migrates the database, onboards the first owner and workspace, and stores a long-lived CLI token. The `serve`, `proxy`, and `ingress` commands start runtime services. Other command groups let operators set spend caps, credit balances, inspect spend, view transcript-read disclosures, manage encrypted credentials, install extensions, build deployable bundles, cancel stuck turns, and seed demo content.
 
-The `chat` command sends messages to the running server over HTTP and prints the agent’s streaming replies. It understands simple server instructions such as “print text,” “show a status line,” “poll again later,” or “ask privately for a secret.”
-
-The rest of the file is administrative tooling: setting and listing spending caps, reading spending reports, auditing transcript reads, listing OAuth grants, storing encrypted extension credentials, searching or pinning extensions, and building a deployable bundle. Most database work follows the same pattern: load config, open the database, find the current workspace, read or write the needed rows, then close the connection.
+A notable piece is `BrowserHandoff`, which signs the user into the browser portal without putting the token in the URL. It briefly starts a local one-use web page that posts the token as a form, then closes.
 
 #### Function details
 
-##### `_ufoctl_dir`  (lines 65–67)
+##### `_ufoctl_dir`  (lines 78–80)
 
 ```
 def _ufoctl_dir() -> Path
 ```
 
-**Purpose**: Chooses where this CLI stores its own local files, such as the saved login token and current chat session. A user can override the location with an environment variable.
+**Purpose**: Finds the private directory where this machine stores `ufoctl` state, such as the CLI token. It lets tests or advanced users override the location with an environment variable.
 
-**Data flow**: It reads the `UFOCTL_DIR` environment variable. If it is set, that path is used; otherwise it builds a path under the user’s home directory named `.ufoctl`. It returns that path without creating it.
+**Data flow**: It reads the `UFOCTL_DIR` environment variable. If it is set, it turns that value into a path; otherwise it uses a `.ufoctl` folder in the current user’s home directory. It returns that path without creating it.
 
-**Call relations**: The setup flow uses it when writing the CLI token. The chat flow uses it to find the token and remember the ongoing session.
+**Call relations**: `init` calls this before writing the CLI token, and `portal` calls it before reading that token back for browser sign-in.
 
-*Call graph*: called by 3 (_session, chat, init); 2 external calls (Path, home).
+*Call graph*: called by 2 (init, portal); 2 external calls (Path, home).
 
 
-##### `_dotenv_path`  (lines 70–71)
+##### `_dotenv_path`  (lines 83–84)
 
 ```
 def _dotenv_path() -> Path
 ```
 
-**Purpose**: Finds the `.env` file that sits next to the main UFO config file. This is where local secret values can be stored for development.
+**Purpose**: Locates the `.env` file that sits beside the main UFO config file. This gives secrets a predictable local home.
 
-**Data flow**: It asks the config system where the config file lives, takes that file’s folder, and appends `.env`. It returns the resulting path.
+**Data flow**: It asks the config system where `ufo.toml` lives, takes that file’s folder, and returns the path to `.env` inside it.
 
-**Call relations**: Startup uses it to load secrets. Initialization uses it to report and write newly generated development secrets.
+**Call relations**: The environment-loading and secret-writing helpers call this whenever they need to read or update local secret values. `init` also uses it when telling the user where secrets were written.
 
-*Call graph*: called by 3 (_load_dotenv, _write_dev_secrets, init); 1 external calls (config_path).
+*Call graph*: called by 4 (_load_dotenv, _missing_deploy_keys, _write_dev_secrets, init); 1 external calls (config_path).
 
 
-##### `_dotenv_pairs`  (lines 74–90)
+##### `_dotenv_pairs`  (lines 87–121)
 
 ```
 def _dotenv_pairs(text: str) -> list[tuple[str, str]]
 ```
 
-**Purpose**: Reads simple `.env` text and turns it into name-and-value pairs. This lets the CLI understand the small environment-file format it writes itself.
+**Purpose**: Reads simple `.env` text and turns it into key-value pairs. It supports ordinary one-line secrets and quoted multi-line secrets such as private keys.
 
-**Data flow**: It receives raw text, skips blank lines and comments, accepts lines shaped like `KEY=VALUE`, removes an optional `export`, and strips matching surrounding quotes. It returns a list of parsed pairs.
+**Data flow**: It receives raw text, skips blank lines and comments, removes an optional `export`, strips matching quotes, and preserves quoted multi-line values. It returns a list of `(name, value)` pairs, or raises an error if a quoted value never closes.
 
-**Call relations**: The environment loader uses it before commands run. The secret writer uses it to avoid overwriting names already present in the `.env` file.
+**Call relations**: `_load_dotenv` uses it to fill environment variables, `_write_dev_secrets` uses it to avoid overwriting existing secrets, and `_missing_deploy_keys` uses it to see which required keys are already present.
 
-*Call graph*: called by 2 (_load_dotenv, _write_dev_secrets).
+*Call graph*: called by 3 (_load_dotenv, _missing_deploy_keys, _write_dev_secrets).
 
 
-##### `_load_dotenv`  (lines 93–102)
+##### `_load_dotenv`  (lines 124–133)
 
 ```
 def _load_dotenv() -> None
 ```
 
-**Purpose**: Loads local `.env` values into the process environment before any command reads secrets. Already exported shell variables win over file values.
+**Purpose**: Loads local secret values from `.env` into the process environment before any command runs. Existing environment variables win, so explicit shell settings are not overwritten.
 
-**Data flow**: It finds the `.env` path, does nothing if the file is missing, parses the file if present, and sets only environment variables that are not already set.
+**Data flow**: It finds the `.env` file, returns immediately if it does not exist, parses its contents, and copies each missing variable into `os.environ`.
 
-**Call relations**: The top-level CLI group calls it first, so every command sees the same local-secret behavior.
+**Call relations**: The top-level `main` command calls this first. That means later commands such as `init`, `serve`, and credential commands can read secrets in the normal environment-variable way.
 
 *Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (main).
 
 
-##### `main`  (lines 106–108)
+##### `main`  (lines 137–139)
 
 ```
 def main() -> None
 ```
 
-**Purpose**: Defines the root `ufoctl` command. It gives all subcommands a common startup step.
+**Purpose**: Defines the root `ufoctl` command group. It is the entry point that Click, the command-line framework, uses to attach all subcommands.
 
-**Data flow**: When a command starts, it loads `.env` values into the environment. It does not return user data; it prepares the process for the selected subcommand.
+**Data flow**: When any `ufoctl` command starts, this function runs and loads `.env` values into the environment. It does not return user data; it prepares the process for the selected subcommand.
 
-**Call relations**: All command groups and commands hang from this root. Its main handoff is to `_load_dotenv`, which prepares secrets before the chosen command continues.
+**Call relations**: All other commands in this file hang under this command group. Its main handoff is to `_load_dotenv`, which prepares secrets before command-specific work begins.
 
 *Call graph*: calls 1 internal fn (_load_dotenv).
 
 
-##### `_one_address`  (lines 111–116)
+##### `_one_address`  (lines 142–147)
 
 ```
 def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> str
 ```
 
-**Purpose**: Validates that an email option looks like one local email address with a domain. It gives a clear command-line error before database setup begins.
+**Purpose**: Validates that the owner email passed to `init` looks like exactly one local-address-at-domain email. This catches a common setup typo early.
 
-**Data flow**: It receives the option value from Click, checks it with the seat/email helper, and either returns the same value or raises a friendly parameter error.
+**Data flow**: It receives the Click callback inputs and the proposed email string. It asks the seat/email helper whether the value has a domain; if not, it raises a friendly command-line error. Otherwise it returns the email unchanged.
 
-**Call relations**: The `init` command uses it for the owner email option, so onboarding gets a clean address instead of discovering the problem later.
+**Call relations**: Click calls this while parsing the `--email` option for `init`, before the onboarding code tries to write the owner member to the database.
 
 *Call graph*: 2 external calls (BadParameter, email_domain).
 
 
-##### `init`  (lines 122–150)
+##### `init`  (lines 153–185)
 
 ```
 def init(email: str, model: str) -> None
 ```
 
-**Purpose**: Creates a usable UFO workspace from scratch. It writes default local config if needed, prepares storage, creates the first owner and agent, and saves a CLI token.
+**Purpose**: Creates a working UFO installation for a new deploy or local checkout. It writes default config when needed, creates secrets, migrates the database, creates the first workspace and owner, and stores a CLI token.
 
-**Data flow**: It takes an owner email and model name. It writes config and secrets if missing, creates a Postgres system database when needed, runs migrations, onboards the workspace, mints a bearer token, and writes that token to the local CLI directory.
+**Data flow**: It reads or creates config, writes missing development secrets, may create a PostgreSQL system database, applies migrations, onboards the workspace, mints a signed bearer token, saves it under the `ufoctl` directory, and prints next steps.
 
-**Call relations**: This is the first command most local users run. It calls the secret writer, database creator, migration runner, onboarding helper, token helper, and path helper in sequence so later commands such as `serve` and `chat` have everything they need.
+**Call relations**: This is the first command most users run. It orchestrates helpers such as `_write_dev_secrets`, `_create_postgres_system_database`, `_onboard`, `_ufoctl_dir`, and `_missing_deploy_keys` so the rest of the CLI and server have a valid workspace to use.
 
-*Call graph*: calls 5 internal fn (_create_postgres_system_database, _dotenv_path, _onboard, _ufoctl_dir, _write_dev_secrets); 7 external calls (run, ClickException, echo, mint_token, config_path, load_config, apply_migrations).
+*Call graph*: calls 6 internal fn (_create_postgres_system_database, _dotenv_path, _missing_deploy_keys, _onboard, _ufoctl_dir, _write_dev_secrets); 7 external calls (run, ClickException, echo, mint_token, config_path, load_config, apply_migrations).
 
 
-##### `_write_dev_secrets`  (lines 153–175)
+##### `_missing_deploy_keys`  (lines 188–203)
+
+```
+def _missing_deploy_keys(config: Config) -> tuple[str, ...]
+```
+
+**Purpose**: Reports provider API keys that installed extensions say they need but that are not currently available. It warns rather than blocks startup, so optional features can be configured later.
+
+**Data flow**: It loads extension manifests, collects their declared deployment keys, reads names already present in `.env` and the process environment, then returns the sorted missing names.
+
+**Call relations**: `init` calls this after onboarding so it can print useful setup reminders while the user is already looking at configuration output.
+
+*Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (init); 1 external calls (load_manifests).
+
+
+##### `_write_dev_secrets`  (lines 206–228)
 
 ```
 def _write_dev_secrets(config: Config) -> tuple[str, ...]
 ```
 
-**Purpose**: Creates the local secret values needed for a zero-setup development server. It avoids replacing secrets that already exist.
+**Purpose**: Creates local development secrets needed for a zero-service setup. These include encryption and token-signing secrets used by credentials, artifacts, and CLI/member authentication.
 
-**Data flow**: It receives loaded config, generates an encryption key and token-signing secrets, reads existing `.env` content and current environment variables, writes only missing names, also adds them to the current process, and returns the names it added.
+**Data flow**: It generates candidate secrets, reads existing `.env` values and environment variables, writes only the missing ones to `.env`, also adds them to the current process environment, and returns the names it added.
 
-**Call relations**: The `init` command uses it before onboarding. Its output is printed to tell the user what was added, and those values later let the server encrypt credentials and verify CLI tokens.
+**Call relations**: `init` calls this before onboarding and token minting. It uses `_dotenv_path` and `_dotenv_pairs` so it can merge safely instead of replacing a user’s existing secrets.
 
 *Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (init); 2 external calls (generate_key, token_urlsafe).
 
 
-##### `_onboard`  (lines 178–197)
+##### `_onboard`  (lines 231–250)
 
 ```
 async def _onboard(config: Config, email: str, model: str) -> Onboarded
 ```
 
-**Purpose**: Creates the first workspace, owner member, default agent, model setup, and extension onboarding records. It keeps database setup in one clean async operation.
+**Purpose**: Creates the initial workspace, owner member, default agent, model setup, and extension onboarding data. It keeps the database open only for this onboarding window.
 
-**Data flow**: It receives config, email, and model. It opens the database, optionally creates an encrypted credential store from the configured key, loads extension manifests, runs core onboarding, runs extension onboarding steps, returns the created onboarding summary, and always closes the database.
+**Data flow**: It initializes database access, optionally builds an encrypted credential store from the configured key, creates an `Onboarding` object with config, email, model, credentials, and extension manifests, runs core creation and extension steps, then closes database resources.
 
-**Call relations**: `init` calls it after migrations and secrets are ready. It hands back workspace information used to mint the local CLI token.
+**Call relations**: `init` calls this after config, secrets, and migrations are ready. It hands off the detailed creation work to the onboarding subsystem and returns the workspace information needed to mint the CLI token.
 
 *Call graph*: called by 1 (init); 6 external calls (__init__, __init__, Fernet, dispose_db, init_db, load_manifests).
 
 
-##### `_create_postgres_system_database`  (lines 200–211)
+##### `_create_postgres_system_database`  (lines 253–264)
 
 ```
 async def _create_postgres_system_database(config: Config) -> None
 ```
 
-**Purpose**: Creates the extra Postgres database used by the system if it does not already exist. This smooths first-time setup for Postgres deployments.
+**Purpose**: Ensures the separate PostgreSQL system database exists when the app is configured for PostgreSQL. This helps local setup create the database before migrations need it.
 
-**Data flow**: It turns the configured async database URL into a plain Postgres connection string, extracts the system database name, connects to Postgres, checks whether that database exists, creates it if missing, and closes the connection.
+**Data flow**: It derives a plain PostgreSQL connection string, connects, checks whether the configured system database name exists, creates it if missing, and closes the connection.
 
-**Call relations**: `init` calls it only when the configured database is Postgres. After this, migrations can safely run against the expected databases.
+**Call relations**: `init` calls this only for PostgreSQL-style database URLs, before applying migrations.
 
 *Call graph*: called by 1 (init); 1 external calls (connect).
 
 
-##### `migrate`  (lines 215–232)
+##### `migrate`  (lines 268–285)
 
 ```
 def migrate() -> None
@@ -181,663 +192,773 @@ def migrate() -> None
 
 **Purpose**: Brings the database schema up to date. A schema is the set of tables and columns the application expects.
 
-**Data flow**: It loads config, optionally uses an owner database URL from the environment for shared deployments, applies core and extension migrations, and prints confirmation.
+**Data flow**: It loads config, chooses either an owner database URL from the environment or the normal config URL, runs migrations for the active pack, and prints success.
 
-**Call relations**: Operators run this after setup or extension changes. It delegates the actual schema changes to the database migration layer.
+**Call relations**: Operators run this after installing extensions or during deploy jobs. It delegates the real schema work to `apply_migrations`.
 
 *Call graph*: 3 external calls (echo, load_config, apply_migrations).
 
 
-##### `serve`  (lines 236–238)
+##### `serve`  (lines 289–298)
 
 ```
 def serve() -> None
 ```
 
-**Purpose**: Starts the main UFO service process. This is the command that runs surfaces, workers, and background jobs.
+**Purpose**: Starts the main UFO runtime: user surfaces, workers, and jobs. It also tells the user the portal URL when the active pack has a browser surface.
 
-**Data flow**: It takes no command arguments. It hands control to the server runner, which keeps the process alive.
+**Data flow**: It loads config, loads extension manifests, asks which browser surface is the home surface, prints a helpful URL if one exists, then starts the server runtime.
 
-**Call relations**: This command is a thin entry point from the CLI into the main serving subsystem.
+**Call relations**: This is the command that moves a configured deploy into normal operation. It uses `_serve_base` for the local URL and hands execution to the serving subsystem.
 
-*Call graph*: 1 external calls (run).
+*Call graph*: calls 1 internal fn (_serve_base); 5 external calls (echo, load_config, load_manifests, home_surface, run).
 
 
-##### `proxy`  (lines 242–244)
+##### `portal`  (lines 302–320)
+
+```
+def portal() -> None
+```
+
+**Purpose**: Opens the browser portal and signs in using the CLI token stored by `init`. It saves the user from copying and pasting a token manually.
+
+**Data flow**: It loads config, finds the home browser surface, reads the local CLI token, checks that the server answers, creates a `BrowserHandoff`, opens the browser, and prints the portal URL.
+
+**Call relations**: This command depends on `serve` already running and on `init` having written a token. It uses `_serve_base`, `_ufoctl_dir`, and `BrowserHandoff` to bridge from terminal authentication to browser session.
+
+*Call graph*: calls 2 internal fn (_serve_base, _ufoctl_dir); 7 external calls (__init__, ClickException, echo, get, load_config, load_manifests, home_surface).
+
+
+##### `_serve_base`  (lines 323–324)
+
+```
+def _serve_base(config: Config) -> str
+```
+
+**Purpose**: Builds the base local HTTP address for the running UFO server. It keeps URL formatting in one small helper.
+
+**Data flow**: It reads the configured host and port and returns a string like `http://host:port`.
+
+**Call relations**: `serve` uses it when printing the portal address, and `portal` uses it when checking and opening the browser surface.
+
+*Call graph*: called by 2 (portal, serve).
+
+
+##### `BrowserHandoff.open`  (lines 339–347)
+
+```
+def open(self) -> None
+```
+
+**Purpose**: Performs a one-time, local browser sign-in handoff. It serves a temporary web page on localhost that submits the CLI token to the portal.
+
+**Data flow**: It creates an unguessable path, starts a local HTTP server on `127.0.0.1` with a random free port, opens the browser to that path, and handles requests until the page has been delivered.
+
+**Call relations**: `portal` creates a `BrowserHandoff` and calls this. This method uses `_responder` to build the temporary request handler and `_page` indirectly to create the form page.
+
+*Call graph*: calls 1 internal fn (_responder); 5 external calls (echo, HTTPServer, token_urlsafe, Event, open).
+
+
+##### `BrowserHandoff._responder`  (lines 349–366)
+
+```
+def _responder(self, path: str, delivered: threading.Event) -> type[BaseHTTPRequestHandler]
+```
+
+**Purpose**: Builds the tiny HTTP request handler used during browser handoff. The handler only serves the secret handoff path.
+
+**Data flow**: It receives the expected path and an event flag, generates the HTML page once, and returns a request-handler class that can serve it.
+
+**Call relations**: `BrowserHandoff.open` calls this when setting up the local HTTP server. The returned handler’s `do_GET` method is what the browser actually reaches.
+
+*Call graph*: calls 1 internal fn (_page); called by 1 (open).
+
+
+##### `BrowserHandoff._responder.do_GET`  (lines 353–362)
+
+```
+def do_GET(self) -> None
+```
+
+**Purpose**: Serves the one handoff page to the browser, but only at the exact random path. Any other path gets a not-found response.
+
+**Data flow**: It reads the incoming request path. If the path is wrong, it sends a 404 error; if it matches, it sends the HTML page, writes the bytes to the browser, and marks the handoff as delivered.
+
+**Call relations**: The local HTTP server created by `BrowserHandoff.open` calls this when the browser connects. Setting the delivered flag lets `open` stop listening after the token handoff page is served.
+
+
+##### `BrowserHandoff._responder.log_message`  (lines 364–364)
+
+```
+def log_message(self, *args: object) -> None
+```
+
+**Purpose**: Silences the default HTTP server logging for the temporary handoff server. This avoids printing noisy request lines during a normal portal open.
+
+**Data flow**: It receives log arguments from the HTTP server and intentionally does nothing.
+
+**Call relations**: The standard library HTTP server calls this during handoff requests. It exists only inside the responder class returned by `_responder`.
+
+
+##### `BrowserHandoff._page`  (lines 368–375)
+
+```
+def _page(self) -> str
+```
+
+**Purpose**: Creates the HTML form page that posts the CLI token to the portal. The token is placed in the form body, not in the URL.
+
+**Data flow**: It reads the portal URL and token from the `BrowserHandoff`, safely escapes them for HTML, and returns a small page with an auto-submitting form and a fallback button.
+
+**Call relations**: `_responder` calls this before serving the local handoff page. The browser then submits the form to the normal portal sign-in endpoint.
+
+*Call graph*: called by 1 (_responder); 1 external calls (escape).
+
+
+##### `proxy`  (lines 379–381)
 
 ```
 def proxy() -> None
 ```
 
-**Purpose**: Starts the shared egress proxy, which is the outbound network gateway for workspace sandboxes. A proxy is a service that forwards traffic under controlled rules.
+**Purpose**: Starts the shared egress proxy, which is the network service used by workspace sandboxes to reach outward through one controlled front door.
 
-**Data flow**: It takes no command arguments and calls the proxy runner. The runner owns the long-running network process.
+**Data flow**: It takes no command arguments and hands execution to the proxy serving subsystem.
 
-**Call relations**: This command is used when the proxy is deployed separately from the main server.
+**Call relations**: Operators run this as its own service command. The actual network loop lives in `ufo.proxy_serve.run`.
 
 *Call graph*: 1 external calls (run).
 
 
-##### `ingress`  (lines 248–250)
+##### `ingress`  (lines 385–387)
 
 ```
 def ingress() -> None
 ```
 
-**Purpose**: Starts the sandbox ingress gateway, which lets approved requests reach sandbox ports. It protects those routes with tokens.
+**Purpose**: Starts the sandbox ingress service, a token-protected reverse proxy into conversation sandbox ports. A reverse proxy accepts a request and forwards it to another local service.
 
-**Data flow**: It takes no command arguments and calls the ingress runner. That runner starts the reverse-proxy service.
+**Data flow**: It takes no command arguments and starts the ingress serving subsystem.
 
-**Call relations**: This command is another thin CLI door into a long-running server component.
+**Call relations**: Operators run this when sandbox access from outside needs to be available. The actual serving behavior lives in `ufo.ingress_serve.run`.
 
 *Call graph*: 1 external calls (run).
 
 
-##### `chat`  (lines 256–274)
-
-```
-def chat(message: str | None, new: bool) -> None
-```
-
-**Purpose**: Lets a user talk to the agent from the terminal. It either sends one message or opens a simple prompt loop.
-
-**Data flow**: It loads config, reads the saved CLI token, chooses or creates a conversation channel, and sends each non-empty message through `_run_turn`. If no token exists, it tells the user to run initialization first.
-
-**Call relations**: This is the human-facing start of the chat flow. It relies on `_session` for continuity and `_run_turn` for each server interaction.
-
-*Call graph*: calls 3 internal fn (_run_turn, _session, _ufoctl_dir); 3 external calls (ClickException, echo, load_config).
-
-
-##### `_session`  (lines 277–283)
-
-```
-def _session(new: bool) -> str
-```
-
-**Purpose**: Keeps chat conversations continuing across separate CLI runs. It stores a small session id on disk.
-
-**Data flow**: It reads or writes a `session` file in the CLI directory. If the caller asks for a new session, or no session exists, it creates a fresh random id. It returns the session id text.
-
-**Call relations**: `chat` calls it before sending messages so the server can connect each message to the right conversation channel.
-
-*Call graph*: calls 1 internal fn (_ufoctl_dir); called by 1 (chat); 1 external calls (uuid4).
-
-
-##### `_run_turn`  (lines 286–300)
-
-```
-def _run_turn(config: Config, token: str, channel: str, message: str) -> None
-```
-
-**Purpose**: Runs one chat turn and turns connection problems into helpful CLI messages. A turn is one user message plus the agent’s response.
-
-**Data flow**: It builds the server base URL from config, then runs the async streaming chat call. If the user presses Ctrl-C, it explains that the server may keep working; if the connection fails, it suggests retrying to catch up.
-
-**Call relations**: `chat` calls it for each entered message. It hands the real network streaming work to `_stream_turn`.
-
-*Call graph*: calls 1 internal fn (_stream_turn); called by 1 (chat); 3 external calls (run, ClickException, echo).
-
-
-##### `_stream_turn`  (lines 312–320)
-
-```
-async def _stream_turn(base: str, token: str, channel: str, message: str) -> None
-```
-
-**Purpose**: Opens the HTTP client and drives one streamed chat turn. It connects the network layer to the terminal display.
-
-**Data flow**: It receives the server URL, token, channel, and message. It builds authorization headers and the channel path, creates a display object and async HTTP client, then asks `_ChatStream` to run the turn.
-
-**Call relations**: `_run_turn` calls it inside an async runner. It constructs `_TurnDisplay` for output and `_ChatStream` for the server protocol.
-
-*Call graph*: called by 1 (_run_turn); 3 external calls (__init__, __init__, AsyncClient).
-
-
-##### `_ChatStream.run`  (lines 334–345)
-
-```
-async def run(self, message: str) -> None
-```
-
-**Purpose**: Runs the full chat-stream loop until the server says the turn is finished. It also deals with private credential prompts after the normal stream closes.
-
-**Data flow**: It starts with the user’s message as the request body. Each drain may ask it to wait and reconnect with an empty body, or may return secrets to fill. When no more polling is needed, it closes the display, prompts for any requested secrets, sends them, and returns.
-
-**Call relations**: `_stream_turn` creates the `_ChatStream` and calls this method. This method coordinates `_drain` for server output and `_fulfill_secret` for out-of-band secret entry.
-
-*Call graph*: calls 2 internal fn (_drain, _fulfill_secret); 1 external calls (sleep).
-
-
-##### `_ChatStream._drain`  (lines 347–387)
-
-```
-async def _drain(self, body: str) -> _Pending
-```
-
-**Purpose**: Reads one server response stream and turns server directives into terminal output. A directive is a small instruction such as “print this text” or “show this status.”
-
-**Data flow**: It posts the request body to the chat path, checks for a successful response, reads each line, unescapes fields, updates the display for text, lines, notes, and status, records secret prompts, records polling instructions, and returns a pending summary.
-
-**Call relations**: `_ChatStream.run` calls it once or many times. It uses `_unescape` to decode the server’s tab-separated protocol and `_TurnDisplay` methods to show the result.
-
-*Call graph*: calls 1 internal fn (_unescape); called by 1 (run); 2 external calls (__init__, ClickException).
-
-
-##### `_ChatStream._fulfill_secret`  (lines 389–406)
-
-```
-async def _fulfill_secret(self, sealed: str, slot: str, prompt: str) -> None
-```
-
-**Purpose**: Privately asks the user for a secret value and sends it to the server without adding it to the chat transcript. This protects credentials from being treated like normal chat text.
-
-**Data flow**: It receives the sealed prompt marker, slot name, and prompt text. It asks the user for hidden input, posts the value with special headers, checks the response, and prints any acknowledgement line from the server.
-
-**Call relations**: `_ChatStream.run` calls it after a turn has ended and `_drain` collected secret prompts. It again uses `_unescape` to read server acknowledgement lines.
-
-*Call graph*: calls 1 internal fn (_unescape); called by 1 (run); 2 external calls (ClickException, prompt).
-
-
-##### `_unescape`  (lines 412–424)
-
-```
-def _unescape(text: str) -> str
-```
-
-**Purpose**: Decodes escaped text from the chat directive protocol. This lets tabs, newlines, and backslashes travel safely inside one line.
-
-**Data flow**: It receives encoded text, walks through it character by character, replaces known backslash escape sequences with their real characters, and returns the decoded string.
-
-**Call relations**: The chat stream reader and secret fulfiller use it whenever they split a server directive into fields.
-
-*Call graph*: called by 2 (_drain, _fulfill_secret).
-
-
-##### `_TurnDisplay.text`  (lines 441–445)
-
-```
-def text(self, delta: str) -> None
-```
-
-**Purpose**: Prints streamed pieces of agent text exactly as they arrive. This is what makes the answer appear gradually in the terminal.
-
-**Data flow**: It removes any temporary status meter, writes the text fragment to standard output without forcing a newline, and records whether the current output line is still open.
-
-**Call relations**: `_ChatStream._drain` calls it when the server sends a text directive. It uses `_erase_meter` so status text never overwrites the response.
-
-*Call graph*: calls 1 internal fn (_erase_meter); 1 external calls (echo).
-
-
-##### `_TurnDisplay.line`  (lines 447–451)
-
-```
-def line(self, text: str) -> None
-```
-
-**Purpose**: Prints a complete finished line from the server. This is used for non-streamed answers, notices, failures, links, or credential acknowledgements.
-
-**Data flow**: It first closes any unfinished streamed line cleanly, then writes the full line to standard output.
-
-**Call relations**: `_ChatStream._drain` and `_ChatStream._fulfill_secret` cause this path when the server says something complete. It relies on `_close_line` for tidy terminal layout.
-
-*Call graph*: calls 1 internal fn (_close_line); 1 external calls (echo).
-
-
-##### `_TurnDisplay.activity`  (lines 453–457)
-
-```
-def activity(self, note: str) -> None
-```
-
-**Purpose**: Shows a dim, separate activity note during a turn, such as a tool call or skill load. It keeps these notes from mixing into the answer text.
-
-**Data flow**: It closes any open streamed line, styles the note dimly, and writes it to standard output on its own line.
-
-**Call relations**: `_ChatStream._drain` calls it for note directives. It uses `_close_line` to preserve readable output.
-
-*Call graph*: calls 1 internal fn (_close_line); 2 external calls (echo, style).
-
-
-##### `_TurnDisplay.meter`  (lines 459–468)
-
-```
-def meter(self, text: str) -> None
-```
-
-**Purpose**: Shows a temporary status meter on terminals that support it. It is meant for short progress text that can later disappear.
-
-**Data flow**: It ignores non-interactive output. On a real terminal, it first separates from any open streamed line, writes an erasable dim status line to standard error, and remembers that the meter is visible.
-
-**Call relations**: `_ChatStream._drain` calls it for status directives. Later text, lines, or close operations erase it before printing permanent output.
-
-*Call graph*: 2 external calls (echo, style).
-
-
-##### `_TurnDisplay.close`  (lines 470–471)
-
-```
-def close(self) -> None
-```
-
-**Purpose**: Finishes terminal output for a turn. It prevents the prompt or next message from appearing on the same half-written line.
-
-**Data flow**: It closes any open output line and clears any temporary meter. It returns no data.
-
-**Call relations**: `_ChatStream.run` calls it when streaming is done, before prompting for any requested secrets.
-
-*Call graph*: calls 1 internal fn (_close_line).
-
-
-##### `_TurnDisplay._erase_meter`  (lines 473–477)
-
-```
-def _erase_meter(self) -> None
-```
-
-**Purpose**: Removes the temporary status meter if one is currently shown. This protects permanent text from being visually corrupted.
-
-**Data flow**: It checks the display’s meter flag. If a meter is visible, it writes the terminal erase sequence to standard error and marks the meter as gone.
-
-**Call relations**: The display uses it before printing streamed text and while closing lines. It is an internal cleanup helper for terminal layout.
-
-*Call graph*: called by 2 (_close_line, text); 1 external calls (echo).
-
-
-##### `_TurnDisplay._close_line`  (lines 479–483)
-
-```
-def _close_line(self) -> None
-```
-
-**Purpose**: Makes sure output is at a clean line boundary. This is a small terminal housekeeping step.
-
-**Data flow**: It erases any meter, then, if streamed text left a line open, writes a newline and marks the line closed.
-
-**Call relations**: Line output, activity output, and final close all call it before writing or ending, so the display stays readable.
-
-*Call graph*: calls 1 internal fn (_erase_meter); called by 3 (activity, close, line); 1 external calls (echo).
-
-
-##### `spend_cap`  (lines 487–488)
+##### `spend_cap`  (lines 391–392)
 
 ```
 def spend_cap() -> None
 ```
 
-**Purpose**: Defines the `spend-cap` command group. This groups commands for reading and changing cost limits.
+**Purpose**: Defines the `spend-cap` command group for reading and changing limits on how much a workspace, member, or agent may spend in a time window.
 
-**Data flow**: It does not process data itself. It acts as a parent command under which set and list subcommands are registered.
+**Data flow**: It does not process data itself; it gives Click a parent command under which `set` and `list` are registered.
 
-**Call relations**: The CLI framework enters this group before dispatching to `spend_cap_set` or `spend_cap_list`.
+**Call relations**: Click uses this group to route `ufoctl spend-cap set` and `ufoctl spend-cap list` to their specific functions.
 
 
-##### `spend_cap_set`  (lines 499–517)
+##### `spend_cap_set`  (lines 403–421)
 
 ```
 def spend_cap_set(scope: str, subject_id: str, window_seconds: int, limit_micro_usd: int, on_breach: str) -> None
 ```
 
-**Purpose**: Creates or updates a spending cap for the workspace, a member, or an agent. Spending caps limit how much model usage is allowed in a time window.
+**Purpose**: Creates or updates a spending limit. This lets an operator cap cost over a period and choose whether excess work is parked or rejected.
 
-**Data flow**: It receives scope, optional subject id, time window, money limit in micro-dollars, and breach behavior. It validates the subject rules, loads config, writes the cap in the database, converts the amount for display, and prints the result.
+**Data flow**: It validates the scope and subject ID, converts a subject ID to a UUID when present, loads config, writes the cap through `_write_spend_cap`, converts micro-dollars to dollars for display, and prints the result.
 
-**Call relations**: Operators call this command directly. It delegates database changes to `_write_spend_cap`.
+**Call relations**: Click calls this for `ufoctl spend-cap set`. It uses `_write_spend_cap` for the database change and reports the cap in human-readable money.
 
 *Call graph*: calls 1 internal fn (_write_spend_cap); 5 external calls (run, ClickException, echo, load_config, UUID).
 
 
-##### `spend_cap_list`  (lines 521–531)
+##### `spend_cap_list`  (lines 425–435)
 
 ```
 def spend_cap_list() -> None
 ```
 
-**Purpose**: Shows the spending caps currently set for the workspace. This helps operators see what cost rules are active.
+**Purpose**: Shows all spend caps configured for the workspace. This gives operators a quick view of current cost guardrails.
 
-**Data flow**: It loads config, reads caps from the database, prints a no-caps message if empty, otherwise formats each cap with its scope, target, amount, time window, and breach behavior.
+**Data flow**: It loads config, reads cap rows through `_read_spend_caps`, prints `no spend caps set` if empty, otherwise formats each cap with its scope, target, time window, amount, and breach behavior.
 
-**Call relations**: This command calls `_read_spend_caps` to fetch the stored rules, then only formats them for the terminal.
+**Call relations**: Click calls this for `ufoctl spend-cap list`. It delegates database reading to `_read_spend_caps`.
 
 *Call graph*: calls 1 internal fn (_read_spend_caps); 3 external calls (run, echo, load_config).
 
 
-##### `_write_spend_cap`  (lines 534–588)
+##### `_write_spend_cap`  (lines 438–492)
 
 ```
 async def _write_spend_cap(config: Config, scope: str, subject: UUID | None, window_seconds: int, limit_micro_usd: int, on_breach: str) -> UUID
 ```
 
-**Purpose**: Writes one spending cap row, updating an existing matching cap instead of creating a duplicate. This keeps each scope and window rule tidy.
+**Purpose**: Writes the database row for a spend cap, updating an existing matching cap when one already exists. Matching is based on workspace, scope, subject, and time window.
 
-**Data flow**: It opens the database, finds the workspace id, searches for a cap with the same workspace, scope, subject, and window. If found, it updates the limit and breach behavior; otherwise it inserts a new cap id. It returns the cap id and closes the database.
+**Data flow**: It opens the workspace database, finds the workspace ID, searches for an existing cap with the same target and window, updates the amount and breach behavior if found, or inserts a new cap with a fresh UUID. It returns the cap ID and closes the database.
 
-**Call relations**: `spend_cap_set` calls it after command-line validation. The database layer supplies the transaction boundary.
+**Call relations**: `spend_cap_set` calls this after validating command-line inputs. It performs the actual insert or update through the workspace transaction.
 
 *Call graph*: called by 1 (spend_cap_set); 7 external calls (insert, select, update, dispose_db, init_db, workspace_tx, uuid4).
 
 
-##### `_read_spend_caps`  (lines 591–617)
+##### `_read_spend_caps`  (lines 495–521)
 
 ```
 async def _read_spend_caps(config: Config) -> list[tuple[UUID, str, UUID | None, int, int, str]]
 ```
 
-**Purpose**: Reads all spending caps for the current workspace. It returns data in a simple shape the CLI can print.
+**Purpose**: Reads spend cap records for the current workspace. It provides the raw data that the CLI formats for humans.
 
-**Data flow**: It opens the database, finds the workspace id, selects cap fields for that workspace, orders them by scope, converts rows into tuples, and closes the database.
+**Data flow**: It opens the database, finds the workspace ID, selects cap fields for that workspace ordered by scope, converts rows into tuples, and closes the database.
 
-**Call relations**: `spend_cap_list` calls it, then handles all user-facing formatting.
+**Call relations**: `spend_cap_list` calls this and then decides how to display the returned list.
 
 *Call graph*: called by 1 (spend_cap_list); 4 external calls (select, dispose_db, init_db, workspace_tx).
 
 
-##### `spend`  (lines 625–645)
+##### `balance`  (lines 525–526)
+
+```
+def balance() -> None
+```
+
+**Purpose**: Defines the `balance` command group for prepaid workspace funds. Operators use its subcommands to show, credit, or reserve balance.
+
+**Data flow**: It does not read or write balance data itself; it registers a parent command for the balance subcommands.
+
+**Call relations**: Click uses this group to route `balance show`, `balance credit`, and `balance reserve`.
+
+
+##### `balance_show`  (lines 531–546)
+
+```
+def balance_show(workspace_id: str) -> None
+```
+
+**Purpose**: Displays the current prepaid balance, required reserve, and lifetime granted and charged totals. This helps an operator understand whether turns can start.
+
+**Data flow**: It loads config, reads a balance for the named or only workspace through `_read_balance`, prints `no balance` if missing, otherwise formats micro-dollars as dollars and prints totals.
+
+**Call relations**: Click calls this for `ufoctl balance show`. It relies on `_read_balance`, which sets up the correct workspace scope before reading.
+
+*Call graph*: calls 1 internal fn (_read_balance); 3 external calls (run, echo, load_config).
+
+
+##### `balance_credit`  (lines 554–567)
+
+```
+def balance_credit(granted_micro_usd: int, charged_micro_usd: int, reference: str, workspace_id: str) -> None
+```
+
+**Purpose**: Adds money to a workspace balance once per reference key. The reference makes the operation safe to retry without double-crediting.
+
+**Data flow**: It rejects a zero grant, loads config, calls `_credit_balance` with granted amount, charged amount, reference, and optional workspace ID, then prints whether a new credit was applied or had already been recorded.
+
+**Call relations**: Click calls this for `ufoctl balance credit`. It delegates idempotent accounting to the balance subsystem through `_credit_balance`.
+
+*Call graph*: calls 1 internal fn (_credit_balance); 4 external calls (run, ClickException, echo, load_config).
+
+
+##### `balance_reserve`  (lines 573–581)
+
+```
+def balance_reserve(micro_usd: int, workspace_id: str) -> None
+```
+
+**Purpose**: Sets the minimum balance headroom required before a turn may begin. This prevents starting work when there is too little prepaid balance.
+
+**Data flow**: It rejects negative reserve values, loads config, calls `_set_reserve`, prints the new reserve if successful, or raises an error if no balance row exists yet.
+
+**Call relations**: Click calls this for `ufoctl balance reserve`. It uses `_set_reserve`, which opens the right workspace and calls the balance subsystem.
+
+*Call graph*: calls 1 internal fn (_set_reserve); 4 external calls (run, ClickException, echo, load_config).
+
+
+##### `_target_workspace`  (lines 584–606)
+
+```
+async def _target_workspace(named: str) -> UUID
+```
+
+**Purpose**: Chooses which workspace an administrative command should affect. If a workspace ID is supplied it verifies it; if not, it only chooses automatically when there is exactly one workspace.
+
+**Data flow**: It reads across workspaces through an owner-level transaction. With a supplied ID, it checks that ID exists and returns it; without one, it returns the sole workspace ID or raises a clear error if there are none or many.
+
+**Call relations**: `_balance_scope` and `_seed_target` call this before doing workspace-specific work. It prevents hosted multi-workspace deploys from accidentally changing the wrong workspace.
+
+*Call graph*: called by 2 (_balance_scope, _seed_target); 4 external calls (ClickException, select, owner_tx, UUID).
+
+
+##### `_balance_scope`  (lines 610–627)
+
+```
+async def _balance_scope(config: Config, named: str) -> AsyncIterator[tuple[AsyncConnection, UUID]]
+```
+
+**Purpose**: Creates a safe database scope for balance operations on one workspace. A scope here means the code is temporarily bound to the selected workspace for row-level security.
+
+**Data flow**: It initializes app and owner database pools, resolves the target workspace, enters the workspace context, opens a workspace transaction, yields the connection and workspace ID, then disposes database resources afterward.
+
+**Call relations**: `_read_balance`, `_credit_balance`, and `_set_reserve` all use this shared setup so they act on the same kind of correctly selected workspace.
+
+*Call graph*: calls 1 internal fn (_target_workspace); called by 3 (_credit_balance, _read_balance, _set_reserve); 5 external calls (dispose_db, init_db, init_owner_db, workspace_tx, ws).
+
+
+##### `_read_balance`  (lines 630–632)
+
+```
+async def _read_balance(config: Config, named: str) -> Balance | None
+```
+
+**Purpose**: Reads the balance object for a chosen workspace. It is the async helper behind the human-facing `balance show` command.
+
+**Data flow**: It opens `_balance_scope`, passes the scoped connection and workspace ID to `read_balance`, and returns either a `Balance` object or `None`.
+
+**Call relations**: `balance_show` calls this. It hands the actual accounting read to `ufo.balance.read_balance` after the workspace has been selected.
+
+*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_show); 1 external calls (read_balance).
+
+
+##### `_credit_balance`  (lines 635–641)
+
+```
+async def _credit_balance(config: Config, named: str, granted_micro_usd: int, charged_micro_usd: int, reference: str) -> bool
+```
+
+**Purpose**: Applies an idempotent balance credit to a chosen workspace. Idempotent means repeating the same reference does not apply the credit twice.
+
+**Data flow**: It opens `_balance_scope`, passes the connection, workspace ID, amounts, and reference to the balance credit function, and returns a boolean saying whether a new credit was recorded.
+
+**Call relations**: `balance_credit` calls this after validating command-line input. It hands the money-accounting rules to `ufo.balance.credit`.
+
+*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_credit); 1 external calls (credit).
+
+
+##### `_set_reserve`  (lines 644–646)
+
+```
+async def _set_reserve(config: Config, named: str, reserve_micro_usd: int) -> bool
+```
+
+**Purpose**: Updates the reserve amount for a chosen workspace’s balance. The reserve is the minimum headroom needed before work can start.
+
+**Data flow**: It opens `_balance_scope`, passes the connection, workspace ID, and reserve amount to the balance subsystem, and returns whether the update succeeded.
+
+**Call relations**: `balance_reserve` calls this. It delegates the actual database update to `ufo.balance.set_reserve`.
+
+*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_reserve); 1 external calls (set_reserve).
+
+
+##### `spend`  (lines 654–677)
 
 ```
 def spend(window_seconds: int) -> None
 ```
 
-**Purpose**: Prints a cost report for a recent time window. It shows total spend and breakdowns by dimension, member, agent, and price version.
+**Purpose**: Prints a spending report over a recent time window. It breaks total cost down by dimensions such as member, agent, origin, and price version.
 
-**Data flow**: It receives a window length in seconds, loads config, reads the spend report, converts micro-dollars to dollars for display, and prints each rollup section.
+**Data flow**: It loads config, reads a `SpendReport` through `_read_spend`, converts micro-dollars to dollars, and prints totals and breakdown lines.
 
-**Call relations**: Operators call this command to inspect cost. It delegates the accounting read to `_read_spend`.
+**Call relations**: Click calls this for `ufoctl spend`. It relies on `_read_spend` to do the database rollup and focuses on readable terminal output.
 
 *Call graph*: calls 1 internal fn (_read_spend); 3 external calls (run, echo, load_config).
 
 
-##### `_read_spend`  (lines 648–655)
+##### `_read_spend`  (lines 680–687)
 
 ```
 async def _read_spend(config: Config, window_seconds: int) -> SpendReport
 ```
 
-**Purpose**: Builds the spending report for the current workspace. It uses the accounting rollup code rather than doing the math in the CLI.
+**Purpose**: Builds the spending report for the current workspace and requested time window. This is the database-reading half of the `spend` command.
 
-**Data flow**: It opens the database, finds the workspace id, asks `SpendRollup` to read totals for the requested window, returns the report, and closes the database.
+**Data flow**: It initializes the database, finds the workspace ID, creates a spend rollup reader for that workspace, asks it to read the window, returns the report, and disposes database resources.
 
-**Call relations**: `spend` calls it and then prints the returned report in a human-readable layout.
+**Call relations**: `spend` calls this and then formats the returned report for display. The detailed accounting logic lives in `SpendRollup`.
 
 *Call graph*: called by 1 (spend); 5 external calls (__init__, select, dispose_db, init_db, workspace_tx).
 
 
-##### `transcript_reads`  (lines 663–676)
+##### `transcript_reads`  (lines 695–708)
 
 ```
 def transcript_reads(limit: int) -> None
 ```
 
-**Purpose**: Lists recorded admin disclosures for reading another member’s private transcript. This supports auditability.
+**Purpose**: Lists administrator disclosures for reading another member’s private transcript. This gives operators an audit trail of sensitive transcript access.
 
-**Data flow**: It checks that the requested limit is positive, loads config, reads recent transcript-access records, and prints either a no-records message or each reader, subject, conversation, and time.
+**Data flow**: It validates that the limit is at least one, loads config, reads recent access records through `_read_transcript_accesses`, and prints either an empty message or rows with time, reader, subject, and conversation ID.
 
-**Call relations**: Operators call this command for audit review. It gets the rows from `_read_transcript_accesses`.
+**Call relations**: Click calls this for `ufoctl transcript-reads`. It delegates the database query to `_read_transcript_accesses`.
 
 *Call graph*: calls 1 internal fn (_read_transcript_accesses); 4 external calls (run, ClickException, echo, load_config).
 
 
-##### `_read_transcript_accesses`  (lines 679–713)
+##### `_read_transcript_accesses`  (lines 711–745)
 
 ```
 async def _read_transcript_accesses(config: Config, limit: int) -> list[tuple[str, str, UUID, datetime]]
 ```
 
-**Purpose**: Reads recent transcript-access audit records for the current workspace. It joins member records so emails can be shown instead of only ids.
+**Purpose**: Reads recent transcript-access disclosure records for the current workspace. It joins member records so the CLI can show emails instead of only IDs.
 
-**Data flow**: It opens the database, aliases the member table as reader and subject, finds the workspace id, selects recent access records with emails and timestamps, limits the result, returns tuples, and closes the database.
+**Data flow**: It initializes the database, aliases the member table for reader and subject, finds the workspace ID, selects recent transcript access rows with joined emails, limits the result, returns tuples, and closes the database.
 
-**Call relations**: `transcript_reads` calls it after validating the limit. The command then formats the audit records for the terminal.
+**Call relations**: `transcript_reads` calls this and formats the returned records for the terminal.
 
 *Call graph*: called by 1 (transcript_reads); 4 external calls (select, dispose_db, init_db, workspace_tx).
 
 
-##### `grants`  (lines 717–729)
+##### `grants`  (lines 749–761)
 
 ```
 def grants() -> None
 ```
 
-**Purpose**: Lists OAuth account grants available to agents. OAuth is a standard way to give an app limited access to an outside account.
+**Purpose**: Lists OAuth account grants available to agents. OAuth is a standard way for users to give an app limited access to an outside account.
 
-**Data flow**: It loads config, reads grant summaries, prints `no grants` if empty, otherwise prints agent, provider, account id, shared/private status, and grant date.
+**Data flow**: It loads config, reads grant summaries through `_read_grants`, prints `no grants` if none exist, otherwise prints agent, provider, account ID, sharing status, and grant date.
 
-**Call relations**: Operators call this to inspect connected accounts. It relies on `_read_grants` to gather the summaries.
+**Call relations**: Click calls this for `ufoctl grants`. It uses `_read_grants` to ask the grants subsystem for workspace-level summaries.
 
 *Call graph*: calls 1 internal fn (_read_grants); 3 external calls (run, echo, load_config).
 
 
-##### `_read_grants`  (lines 732–739)
+##### `_read_grants`  (lines 764–771)
 
 ```
 async def _read_grants(config: Config) -> tuple[GrantSummary, ...]
 ```
 
-**Purpose**: Reads OAuth grant summaries for the workspace. It keeps the CLI separate from the details of how grants are summarized.
+**Purpose**: Finds the current workspace and asks the grants subsystem for its OAuth grant summaries.
 
-**Data flow**: It opens the database, finds the workspace id, asks the grants subsystem for summaries, returns them, and closes the database.
+**Data flow**: It initializes the database, reads the workspace ID inside a workspace transaction, calls `workspace_grant_summaries`, returns the summaries, and disposes database resources.
 
-**Call relations**: `grants` calls it and then prints the summary rows.
+**Call relations**: `grants` calls this before printing. The more detailed grant lookup is handled outside this CLI file.
 
 *Call graph*: called by 1 (grants); 5 external calls (select, dispose_db, init_db, workspace_tx, workspace_grant_summaries).
 
 
-##### `credential`  (lines 743–745)
+##### `credential`  (lines 775–777)
 
 ```
 def credential() -> None
 ```
 
-**Purpose**: Defines the `credential` command group. These commands let operators inspect and fill secret slots declared by extensions.
+**Purpose**: Defines the `credential` command group for encrypted bring-your-own-key credential slots. These are secrets required by extensions.
 
-**Data flow**: It does not read or write credentials itself. It provides the parent command for credential subcommands.
+**Data flow**: It does not inspect credentials itself; it registers a parent command for setting and listing slots.
 
-**Call relations**: The CLI framework enters this group before dispatching to `credential_set` or `credential_list`.
+**Call relations**: Click routes `credential set` and `credential list` through this group.
 
 
-##### `credential_set`  (lines 750–773)
+##### `credential_set`  (lines 782–805)
 
 ```
 def credential_set(slot: str) -> None
 ```
 
-**Purpose**: Stores one extension credential securely. It avoids putting the secret in command-line arguments, where shells and process lists might expose it.
+**Purpose**: Stores a secret value for a declared extension credential slot. It avoids accepting secrets as command arguments so they do not appear in shell history.
 
-**Data flow**: It loads config, checks that the slot is declared and allowed to be manually filled, reads the encryption key from the environment, reads the secret from a hidden prompt or standard input, rejects empty values, writes the encrypted credential, and prints confirmation.
+**Data flow**: It loads config, checks that the slot is declared and user-fillable, checks that the encryption key environment variable exists, reads the secret from a hidden prompt or standard input, rejects empty values, writes it through `_write_credential`, and prints confirmation.
 
-**Call relations**: This command uses `_declared_slots` and `_fillable_slots` for safety checks, then delegates storage to `_write_credential`.
+**Call relations**: Click calls this for `ufoctl credential set`. It uses `_declared_slots`, `_fillable_slots`, and `_write_credential` to validate and store the secret safely.
 
 *Call graph*: calls 3 internal fn (_declared_slots, _fillable_slots, _write_credential); 5 external calls (run, ClickException, echo, prompt, load_config).
 
 
-##### `credential_list`  (lines 777–787)
+##### `credential_list`  (lines 809–819)
 
 ```
 def credential_list() -> None
 ```
 
-**Purpose**: Lists extension credential slots and whether each has a stored value. It never prints the secret values themselves.
+**Purpose**: Shows which declared credential slots are set or unset without revealing their values. This helps operators see what still needs configuration.
 
-**Data flow**: It loads config, reads declared slots from extension manifests, reads stored slot names from the database, and prints each slot with its owning extension and set/unset status.
+**Data flow**: It loads config, reads declared slots, reads stored slot names, and prints each slot with its owning extension and set/unset status.
 
-**Call relations**: This command combines `_declared_slots` with `_read_stored_slots` to give an operator a safe inventory.
+**Call relations**: Click calls this for `ufoctl credential list`. It combines extension declarations from `_declared_slots` with database state from `_read_stored_slots`.
 
 *Call graph*: calls 2 internal fn (_declared_slots, _read_stored_slots); 3 external calls (run, echo, load_config).
 
 
-##### `_declared_slots`  (lines 790–795)
+##### `_declared_slots`  (lines 822–827)
 
 ```
 def _declared_slots(config: Config) -> dict[str, str]
 ```
 
-**Purpose**: Finds all credential slots declared by installed extension manifests. A manifest is an extension’s description of what it needs.
+**Purpose**: Collects all credential slots declared by the active extension manifests. It maps each slot name to the extension that owns it.
 
-**Data flow**: It loads manifests for the configured pack, converts each credential slot into a mapping from slot name to extension name, and turns manifest-loading failures into CLI errors.
+**Data flow**: It loads manifests for the configured pack, converts manifest credential declarations into a dictionary, and turns manifest-loading errors into user-friendly CLI errors.
 
-**Call relations**: Credential listing and setting both call it so the CLI only accepts slots extensions actually declare.
+**Call relations**: `credential_set` uses this to reject unknown slots, and `credential_list` uses it to know what slots should be shown.
 
 *Call graph*: called by 2 (credential_list, credential_set); 2 external calls (ClickException, load_manifests).
 
 
-##### `_fillable_slots`  (lines 798–807)
+##### `_fillable_slots`  (lines 830–839)
 
 ```
 def _fillable_slots(config: Config) -> frozenset[str]
 ```
 
-**Purpose**: Finds the subset of credential slots a person is allowed to type manually. Some slots are written by the deployment itself and should not be filled this way.
+**Purpose**: Finds the credential slots an operator or member is allowed to type manually. Some slots are written by the deployment itself and should not accept typed values.
 
-**Data flow**: It loads extension manifests, filters credentials to those marked as member-fillable, returns their names as a frozen set, and reports manifest errors as CLI errors.
+**Data flow**: It loads extension manifests, filters credential declarations to those marked as member-fillable, returns their names as a frozen set, and reports loading errors as CLI errors.
 
-**Call relations**: `credential_set` calls it after checking the slot exists, preventing an operator from entering a value for a deploy-written seal.
+**Call relations**: `credential_set` calls this after checking that a slot exists, so it can reject slots that are not meant for manual entry.
 
 *Call graph*: called by 1 (credential_set); 2 external calls (ClickException, load_manifests).
 
 
-##### `_write_credential`  (lines 810–817)
+##### `_write_credential`  (lines 842–849)
 
 ```
 async def _write_credential(config: Config, key: str, slot: str, value: str) -> None
 ```
 
-**Purpose**: Encrypts and stores one credential value for the workspace. Encryption at rest means the database does not hold the plain secret.
+**Purpose**: Encrypts and stores one credential value for the current workspace. Encryption at rest means the database stores sealed text rather than the raw secret.
 
-**Data flow**: It opens the database, finds the workspace id, creates a credential store using the provided Fernet key, stores the slot value for that workspace, and closes the database.
+**Data flow**: It initializes the database, finds the workspace ID, creates a `CredentialStore` using the supplied Fernet encryption key, stores the slot value, and disposes database resources.
 
-**Call relations**: `credential_set` calls it only after validating the slot and collecting the secret safely.
+**Call relations**: `credential_set` calls this after reading and validating the secret. The actual storage is delegated to `CredentialStore.put`.
 
 *Call graph*: called by 1 (credential_set); 6 external calls (__init__, Fernet, select, dispose_db, init_db, workspace_tx).
 
 
-##### `_read_stored_slots`  (lines 820–834)
+##### `_read_stored_slots`  (lines 852–866)
 
 ```
 async def _read_stored_slots(config: Config) -> frozenset[str]
 ```
 
-**Purpose**: Reads which credential slots currently have stored values. It returns names only, not secrets.
+**Purpose**: Reads which credential slots currently have stored values for the workspace. It does not read or return the secret values themselves.
 
-**Data flow**: It opens the database, finds the workspace id, selects credential slot names for that workspace, returns them as a frozen set, and closes the database.
+**Data flow**: It initializes the database, finds the workspace ID, selects credential slot names for that workspace, returns them as a frozen set, and closes database resources.
 
-**Call relations**: `credential_list` calls it so it can mark declared slots as set or unset.
+**Call relations**: `credential_list` calls this to decide whether each declared slot should be printed as set or unset.
 
 *Call graph*: called by 1 (credential_list); 4 external calls (select, dispose_db, init_db, workspace_tx).
 
 
-##### `ext`  (lines 838–839)
+##### `ext`  (lines 870–871)
 
 ```
 def ext() -> None
 ```
 
-**Purpose**: Defines the `ext` command group for extension-store operations. Extensions add optional abilities to the deploy.
+**Purpose**: Defines the `ext` command group for searching, installing, and removing extensions. Extensions add features to a UFO pack.
 
-**Data flow**: It does not perform store work itself. It serves as the parent command for searching, installing, and removing extensions.
+**Data flow**: It does no extension work directly; it registers the parent command for extension subcommands.
 
-**Call relations**: The CLI framework enters this group before dispatching to extension subcommands.
+**Call relations**: Click routes `ext search`, `ext install`, and `ext remove` through this group.
 
 
-##### `_store`  (lines 842–845)
+##### `_store`  (lines 874–877)
 
 ```
 def _store(config: Config) -> ExtensionStore
 ```
 
-**Purpose**: Creates an extension-store object from config. It fails clearly if the extension store is not enabled.
+**Purpose**: Creates an extension-store object from configuration. The store knows the available catalog and the local lockfile of installed extensions.
 
-**Data flow**: It receives config, checks for a configured store catalog, reads that catalog, finds the lockfile path, and returns an `ExtensionStore` connected to both.
+**Data flow**: It checks that extension store configuration exists, reads the catalog, finds the lockfile path, builds an `ExtensionStore`, and returns it. If the store is disabled, it raises a CLI error.
 
-**Call relations**: The extension search, install, and remove commands all call it before doing store-specific work.
+**Call relations**: `ext_search`, `ext_install`, and `ext_remove` call this before doing store operations.
 
 *Call graph*: called by 3 (ext_install, ext_remove, ext_search); 4 external calls (__init__, ClickException, lockfile_path, read_catalog).
 
 
-##### `ext_search`  (lines 850–863)
+##### `ext_search`  (lines 882–895)
 
 ```
 def ext_search(query: str) -> None
 ```
 
-**Purpose**: Searches the configured extension store and shows what can be installed. It also marks extensions that are already installed or bundle-only.
+**Purpose**: Searches the configured extension catalog and shows matching extensions. It also marks whether each one is installed, available, or bundle-only.
 
-**Data flow**: It loads config, creates the store, searches with the query text, prints a no-match message if empty, otherwise prints each listing with name, version, and state.
+**Data flow**: It loads config, creates the store with `_store`, searches using the query string, prints an empty message if there are no matches, otherwise prints name, version, and state.
 
-**Call relations**: This is the read-only extension command. It hands catalog and lockfile details to `_store`.
+**Call relations**: Click calls this for `ufoctl ext search`. The catalog lookup is handled by the `ExtensionStore` returned by `_store`.
 
 *Call graph*: calls 1 internal fn (_store); 2 external calls (echo, load_config).
 
 
-##### `ext_install`  (lines 868–874)
+##### `ext_install`  (lines 900–906)
 
 ```
 def ext_install(name: str) -> None
 ```
 
-**Purpose**: Pins an extension into the deploy’s lockfile. Pinning records the exact version and digest to load later.
+**Purpose**: Pins an extension into the deployment lockfile so the next server run loads it. Pinning records the exact version and digest.
 
-**Data flow**: It loads config, creates the store, asks it to install the named extension, catches user-facing store errors, and prints the installed pin details.
+**Data flow**: It loads config, creates the store, asks it to install the named extension, catches store errors as CLI errors, and prints the installed pin details.
 
-**Call relations**: Operators call this before migrating and serving with a new extension. `_store` supplies the store object that performs the lockfile change.
+**Call relations**: Click calls this for `ufoctl ext install`. After this command, operators usually run migrations if the extension owns tables, then restart `serve`.
 
 *Call graph*: calls 1 internal fn (_store); 3 external calls (ClickException, echo, load_config).
 
 
-##### `ext_remove`  (lines 879–885)
+##### `ext_remove`  (lines 911–917)
 
 ```
 def ext_remove(name: str) -> None
 ```
 
-**Purpose**: Removes an extension pin from the lockfile so the next server run stops loading it.
+**Purpose**: Removes an extension pin from the lockfile so future runs stop loading it.
 
-**Data flow**: It loads config, creates the store, asks it to remove the named extension, turns store errors into CLI errors, and prints confirmation.
+**Data flow**: It loads config, creates the store, asks it to remove the named extension, reports any store error as a CLI error, and prints confirmation.
 
-**Call relations**: This is the uninstall path for extensions. It delegates catalog and lockfile handling through `_store`.
+**Call relations**: Click calls this for `ufoctl ext remove`. It delegates lockfile editing to `ExtensionStore.remove`.
 
 *Call graph*: calls 1 internal fn (_store); 3 external calls (ClickException, echo, load_config).
 
 
-##### `_ufo_project_dir`  (lines 891–902)
+##### `_ufo_project_dir`  (lines 923–934)
 
 ```
 def _ufo_project_dir() -> Path
 ```
 
-**Purpose**: Finds the source project directory needed to build the UFO wheel for a bundle. A wheel is a packaged Python distribution file.
+**Purpose**: Finds the source project directory needed to build the UFO Python wheel for a bundle. A wheel is a packaged Python distribution file.
 
-**Data flow**: It walks upward from this file, looks for a `pyproject.toml` whose project name is `ufo`, returns that directory when found, and raises a clear error if running from a wheel-only install without source.
+**Data flow**: It walks upward from this file, looks for `pyproject.toml`, parses it, and returns the first ancestor whose project name is `ufo`. If none is found, it raises a clear CLI error.
 
-**Call relations**: `bundle` calls it before running the external wheel build command, so bundling works from any current working directory.
+**Call relations**: `bundle` calls this before running `uv build`, so the wheel is built from the actual UFO source project rather than the user’s current directory.
 
 *Call graph*: called by 1 (bundle); 3 external calls (ClickException, Path, loads).
 
 
-##### `bundle`  (lines 909–925)
+##### `bundle`  (lines 941–957)
 
 ```
 def bundle(out: Path) -> None
 ```
 
-**Purpose**: Builds a deployable bundle containing pinned config, extension information, an image recipe, and the UFO wheel. This freezes the current deploy into an artifact others can run.
+**Purpose**: Builds a deployable bundle containing pinned config, extension locks, image recipe material, and a UFO wheel. This freezes a deploy into a repeatable artifact.
 
-**Data flow**: It loads config, reads the extension catalog if configured, asks `Bundle` to build files under the output directory, runs `uv build` to create a wheel from the source project, verifies the wheel exists, and prints the bundle path and pinned extensions.
+**Data flow**: It loads config, optionally reads the extension catalog, asks `Bundle` to build files into the output directory, runs `uv build` to create a wheel, verifies the wheel exists, and prints bundle contents and pinned extensions.
 
-**Call relations**: Operators call this when preparing a deployable package. It coordinates config loading, bundle construction, project discovery through `_ufo_project_dir`, and the external build tool.
+**Call relations**: Click calls this for `ufoctl bundle`. It uses `_ufo_project_dir` to locate source code and the bundle subsystem to assemble deployment files.
 
 *Call graph*: calls 1 internal fn (_ufo_project_dir); 8 external calls (__init__, ClickException, echo, run, wheel_name, config_path, load_config, read_catalog).
 
 
+##### `turn`  (lines 961–962)
+
+```
+def turn() -> None
+```
+
+**Purpose**: Defines the `turn` command group for actions on a single conversation turn. A turn is one unit of agent work in a conversation.
+
+**Data flow**: It does not act on a turn itself; it registers the parent command for turn subcommands.
+
+**Call relations**: Click routes `turn cancel` through this group.
+
+
+##### `turn_cancel`  (lines 967–977)
+
+```
+def turn_cancel(turn_id: str) -> None
+```
+
+**Purpose**: Cancels one stuck or unwanted turn by ID. This is an operator repair tool for work that cannot be ended normally through the user surface.
+
+**Data flow**: It loads config, converts the supplied turn ID into a UUID, calls `_cancel_turn`, and prints whether it was cancelled or already terminal.
+
+**Call relations**: Click calls this for `ufoctl turn cancel`. It hands the actual durable-workflow cancellation to `_cancel_turn`.
+
+*Call graph*: calls 1 internal fn (_cancel_turn); 4 external calls (run, echo, load_config, UUID).
+
+
+##### `_cancel_turn`  (lines 980–1002)
+
+```
+async def _cancel_turn(config: Config, turn_id: UUID) -> bool
+```
+
+**Purpose**: Finds the workspace that owns a turn, then cancels that turn while bound to the correct workspace. This keeps tenant boundaries intact during an operator repair.
+
+**Data flow**: It initializes app and possibly owner database access, reads the turn’s workspace ID through an owner transaction, raises if the turn does not exist, creates a replay-safe durable client, enters the workspace context, calls `cancel_one_turn`, returns whether cancellation happened, and closes database resources.
+
+**Call relations**: `turn_cancel` calls this. It first uses owner-level access only to locate the tenant, then hands the cancellation to the normal cancellation subsystem under that workspace.
+
+*Call graph*: called by 1 (turn_cancel); 9 external calls (ClickException, select, cancel_one_turn, dispose_db, init_db, init_owner_db, owner_tx, replay_safe_client, ws).
+
+
+##### `seed`  (lines 1006–1007)
+
+```
+def seed() -> None
+```
+
+**Purpose**: Defines the `seed` command group for writing demonstration content into a workspace.
+
+**Data flow**: It performs no seeding itself; it registers a parent command for seed subcommands.
+
+**Call relations**: Click routes `seed kitchen-sink` through this group.
+
+
+##### `seed_kitchen_sink`  (lines 1012–1021)
+
+```
+def seed_kitchen_sink(workspace_id: str) -> None
+```
+
+**Purpose**: Writes a comprehensive demo conversation that exercises the portal’s display shapes. Designers and reviewers can use it as stable sample content.
+
+**Data flow**: It loads config, calls `_seed_kitchen_sink` with an optional workspace ID, receives the created conversation ID, and prints the browser route for opening it.
+
+**Call relations**: Click calls this for `ufoctl seed kitchen-sink`. It delegates database setup and content writing to `_seed_kitchen_sink`.
+
+*Call graph*: calls 1 internal fn (_seed_kitchen_sink); 3 external calls (run, echo, load_config).
+
+
+##### `_seed_kitchen_sink`  (lines 1024–1035)
+
+```
+async def _seed_kitchen_sink(config: Config, named: str) -> UUID
+```
+
+**Purpose**: Sets up the database and blob store needed to write the kitchen-sink demo conversation. A blob store is where larger file-like content is saved.
+
+**Data flow**: It initializes app and possibly owner database access, creates a blob store from config, calls `_seed_target`, returns the conversation ID, and disposes database resources.
+
+**Call relations**: `seed_kitchen_sink` calls this. It prepares shared resources, while `_seed_target` chooses the workspace and writes the actual sample content.
+
+*Call graph*: calls 1 internal fn (_seed_target); called by 1 (seed_kitchen_sink); 4 external calls (blob_store_for, dispose_db, init_db, init_owner_db).
+
+
+##### `_seed_target`  (lines 1038–1069)
+
+```
+async def _seed_target(blob: BlobStore, named: str) -> UUID
+```
+
+**Purpose**: Writes the kitchen-sink demo conversation into one selected workspace. It finds the main agent and an existing member to author the sample.
+
+**Data flow**: It resolves the workspace with `_target_workspace`, enters that workspace context, reads the main agent ID and earliest member, raises if no member exists, creates a `KitchenSink` writer with blob, workspace, agent, member, and email, and returns the conversation ID it writes.
+
+**Call relations**: `_seed_kitchen_sink` calls this after setting up database and blob access. It hands the actual demo-content creation to the `KitchenSink` seed helper.
+
+*Call graph*: calls 1 internal fn (_target_workspace); called by 1 (_seed_kitchen_sink); 5 external calls (__init__, ClickException, select, workspace_tx, ws).
+
+
 ### `control/src/ufo_control/main.py`
 
-`entrypoint` · `startup and operator maintenance commands`
+`entrypoint` · `startup and administrator command execution`
 
-This file is the control panel for operating the hosted shared-workspace service. It uses Click, a command-line tool library, so operators can run clear commands such as starting the gateway, migrating the database, or minting an invite. Without this file, the service would still have many of its internal parts, but there would be no simple, official way to start them or run the key maintenance tasks.
+This file is the place an operator goes when they need to run the hosted shared-workspace service or prepare its database. It uses Click, a Python command-line tool library, to define several commands under one main program. Think of it like a control panel with buttons: one button starts the gateway web server, another reshapes the database schema, another grants and emails an invitation, and others repair or bootstrap specific platform state.
 
-At startup, the top-level command sets up ordinary logging and, if configured, forwards logs to an OTLP collector. OTLP is a standard way to send observability data, such as logs, to a monitoring platform. The gateway command then runs the web application with Uvicorn, the web server used for Python async apps.
+At startup, the main command sets up normal logging. If the environment provides an OpenTelemetry log endpoint, it also sends logs to a central collector. OpenTelemetry is a standard way to collect service logs and telemetry from running systems.
 
-The other commands are operator tools. One shapes the control database schema. One grants an invitation to a waitlist object and sends the invite email. One retries a failed Slack Connect delivery after its underlying problem has been fixed. One creates the shared database role and row-level security policies, which are database rules that limit which rows each role may see or change.
+The gateway command starts the FastAPI-style application through Uvicorn, the web server. The migration and bootstrap commands connect as the database owner and make sure the control database has the expected tables, roles, and row-level security policies. Row-level security means the database itself helps prevent one workspace from seeing another workspace’s data.
 
-A recurring pattern is that the visible command is short and user-friendly, while a helper function does the asynchronous database or email work. This keeps the command-line experience simple while still allowing the service to use async database connections safely.
+The invitation command is careful: it checks the schema, builds the email sender, creates a one-use grant in the database, and then sends the email. If the email send fails after the grant is created, it tells the operator that the grant still exists instead of silently undoing it.
 
 #### Function details
 
@@ -847,11 +968,11 @@ A recurring pattern is that the visible command is short and user-friendly, whil
 def main() -> None
 ```
 
-**Purpose**: Defines the main command group for operating the hosted service. It also sets up basic process logging so every command produces consistent, readable log messages.
+**Purpose**: This is the top-level command group for operating the hosted service. It prepares logging before any specific subcommand runs, so operators get useful output no matter which command they choose.
 
-**Data flow**: It reads the OTLP logging endpoint from the environment. It configures standard logging, then passes the optional endpoint to `_export_logs`; after that, Click uses this command group as the parent for the subcommands in this file.
+**Data flow**: It reads the log-export endpoint from the process environment and configures basic console logging. If a remote log endpoint is present, it passes that value onward so logs can also be shipped to the platform collector. It does not return data; it prepares the process for the selected command.
 
-**Call relations**: This is the first function Click enters when the command-line program starts. It calls `_export_logs` during setup so any later command, such as `gateway` or `invite`, can have its logs sent to the configured monitoring system.
+**Call relations**: Click calls this group when the command-line program starts. During that setup, it calls `_export_logs` after configuring standard logging, so every later command benefits from the same logging setup.
 
 *Call graph*: calls 1 internal fn (_export_logs); 1 external calls (basicConfig).
 
@@ -862,11 +983,11 @@ def main() -> None
 def _export_logs(otlp_endpoint: str | None) -> None
 ```
 
-**Purpose**: Turns on remote log shipping when an OTLP endpoint is configured. If no endpoint is provided, it leaves logging as normal console output only.
+**Purpose**: This function optionally sends the program’s logs to an OpenTelemetry collector, which is a central place for gathering service logs. If no endpoint is configured, it deliberately does nothing and leaves logs on standard output only.
 
-**Data flow**: It receives either a logging collector URL or `None`. If the value is `None`, it stops immediately; otherwise it builds an OpenTelemetry logger provider, attaches a batch exporter that sends logs to the collector’s `/v1/logs` path, and asks `_install_root_handler` to connect Python logging to that provider.
+**Data flow**: It receives either a log collector URL or `None`. With `None`, it exits immediately. With a URL, it creates an OpenTelemetry logger provider, points an exporter at the collector’s log path, wraps that exporter in a batch processor so logs are sent efficiently, and then asks `_install_root_handler` to connect Python logging to that provider.
 
-**Call relations**: `main` calls this once at command startup. When remote logging is enabled, this function prepares the OpenTelemetry pieces and then hands the final wiring step to `_install_root_handler`.
+**Call relations**: `main` calls this during command startup. When log exporting is enabled, `_export_logs` builds the OpenTelemetry pieces and hands them to `_install_root_handler`, which attaches them to the normal Python logging system.
 
 *Call graph*: calls 1 internal fn (_install_root_handler); called by 1 (main); 4 external calls (OTLPLogExporter, LoggerProvider, BatchLogRecordProcessor, create).
 
@@ -877,11 +998,11 @@ def _export_logs(otlp_endpoint: str | None) -> None
 def _install_root_handler(logger_provider: LoggerProvider) -> None
 ```
 
-**Purpose**: Connects Python’s normal logging system to OpenTelemetry log export. It deliberately skips logs from OpenTelemetry itself so a logging export failure cannot create a feedback loop of more logging errors.
+**Purpose**: This connects ordinary Python log messages to the OpenTelemetry logging pipeline. It also avoids feeding OpenTelemetry’s own internal errors back into itself, which could otherwise create a noisy loop.
 
-**Data flow**: It receives an OpenTelemetry logger provider. It creates a logging handler that forwards records to that provider, adds a filter that rejects logger names starting with `opentelemetry`, and attaches the handler to the root logger, which is the shared parent logger for the process.
+**Data flow**: It receives a configured OpenTelemetry logger provider. It creates a logging handler that forwards records to that provider, adds a filter that rejects records from loggers whose names start with `opentelemetry`, and attaches the handler to the root logger. The result is a changed global logging setup rather than a returned value.
 
-**Call relations**: `_export_logs` calls this after building the remote log exporter. From then on, later commands write logs as usual, and this handler quietly forwards eligible records to the observability pipeline.
+**Call relations**: `_export_logs` calls this after it has built the remote logging pipeline. From then on, later commands and server code can log normally, and those messages will also flow to the collector when configured.
 
 *Call graph*: called by 1 (_export_logs); 2 external calls (getLogger, LoggingHandler).
 
@@ -892,11 +1013,11 @@ def _install_root_handler(logger_provider: LoggerProvider) -> None
 def gateway() -> None
 ```
 
-**Purpose**: Starts the hosted web gateway. This is the command an operator uses to serve onboarding, fleet counts, and the terminal client over HTTP.
+**Purpose**: This command starts the hosted gateway web service. That gateway serves onboarding, fleet count information, and the terminal client.
 
-**Data flow**: It reads the desired port from the `UFO_GATEWAY_PORT` environment variable, or falls back to port 8080. It then starts Uvicorn on host `0.0.0.0`, which means the server listens on all network interfaces, and points it at the `ufo_control.gateway:app` web application.
+**Data flow**: It reads the gateway port from the environment, falling back to the default port if none is set. It then starts Uvicorn with the application named `ufo_control.gateway:app`, listening on all network interfaces. The function does not return while the server is running; the web server takes over the process.
 
-**Call relations**: This is a Click subcommand under `main`. Unlike the maintenance commands, it does not call an internal helper; it directly hands control to Uvicorn, which runs the web service until the process is stopped.
+**Call relations**: Click runs this when an operator chooses the `gateway` command. It hands control to `uvicorn.run`, which imports the gateway application and runs the web server.
 
 *Call graph*: 1 external calls (run).
 
@@ -907,11 +1028,11 @@ def gateway() -> None
 def migrate() -> None
 ```
 
-**Purpose**: Updates the control database schema to the expected shape. Operators use this when deploying or upgrading so the database has the tables and structures the gateway expects.
+**Purpose**: This command brings the control database schema up to the expected shape. Operators use it when deploying or upgrading the hosted service so the database has the ledgers and structures the gateway expects.
 
-**Data flow**: It asks for the database owner connection string, runs the asynchronous schema-shaping routine to completion, and then prints `control schema at head` to confirm success.
+**Data flow**: It asks for the database owner connection string, then runs the asynchronous schema-shaping work inside `asyncio.run`, which is the bridge from normal command-line code into async database code. When the schema update finishes, it prints a short confirmation message.
 
-**Call relations**: This is a Click subcommand under `main`. It bridges the synchronous command-line world to async database work by using `asyncio.run`, then delegates the actual schema work to `shape_control_schema`.
+**Call relations**: Click runs this for the `migrate` command. It calls `owner_dsn` to get privileged database access, hands that to `shape_control_schema`, and uses `click.echo` to report success to the operator.
 
 *Call graph*: 4 external calls (run, echo, owner_dsn, shape_control_schema).
 
@@ -922,11 +1043,11 @@ def migrate() -> None
 def invite(object_number: int, email: str) -> None
 ```
 
-**Purpose**: Creates one workspace invitation for a waitlist object and emails it to the requested address. It also turns invitation and work-email validation failures into friendly command-line errors.
+**Purpose**: This command grants a waitlist object’s email domain one new workspace and emails the invitation to the given address. It gives the operator a safe, clear way to issue onboarding invites.
 
-**Data flow**: It receives an object number and an email address from the command line. It runs `_mint_invite`, catches expected invite or email errors, then prints the granted object number, recipient email, and expiration time in UTC if everything succeeds.
+**Data flow**: It receives an object number and an email address from the command line. It calls `_mint_invite` through `asyncio.run` to do the database and email work. If known invitation or work-email errors occur, it turns them into a Click-friendly command error; otherwise it prints who was granted access and when the invite expires.
 
-**Call relations**: This is the operator-facing command for issuing invites. It keeps the user interaction and error display near the command line, while `_mint_invite` performs the database, validation, and email-sending steps.
+**Call relations**: Click calls this when an operator runs the invite command. The real work is delegated to `_mint_invite`; this wrapper translates results and errors into command-line messages.
 
 *Call graph*: calls 1 internal fn (_mint_invite); 3 external calls (run, ClickException, echo).
 
@@ -937,11 +1058,11 @@ def invite(object_number: int, email: str) -> None
 async def _mint_invite(object_number: int, email: str) -> MintedInvite
 ```
 
-**Purpose**: Does the real work of granting an invite and sending the invitation email. It is careful to check email configuration before spending the one live grant tied to a waitlist object.
+**Purpose**: This performs the actual invitation workflow: verify the system is ready, create the grant in the database, and send the invitation email. It is careful to avoid spending a grant if email configuration is missing before the grant is created.
 
-**Data flow**: It receives an object number and email address. It reads the public host name and database owner connection string, verifies the control schema exists, builds the email sender, opens a small database connection pool, mints the invite in the database, closes the pool, builds the email subject and body, and sends the message. It returns the minted invite; if email sending fails after the grant is created, it raises a command-line error explaining that the grant still stands.
+**Data flow**: It receives the waitlist object number and target email address. It reads the public host name and owner database connection string, confirms the control schema exists, builds the configured email sender, opens a small database connection pool, and mints the invite through `InviteCodes`. After closing the pool, it builds the invitation email and sends it. On success it returns the minted invitation details; if sending fails after the grant exists, it raises a command error that explains the grant still stands.
 
-**Call relations**: `invite` calls this helper when an operator runs the invite command. This function coordinates several subsystems: schema checking, invite-code creation through `InviteCodes`, email body creation, and actual sending through the configured mail sender.
+**Call relations**: `invite` calls this as the asynchronous worker behind the command. It relies on gateway email helpers for sender setup and message text, schema helpers for database safety checks, and `InviteCodes` for the database grant itself.
 
 *Call graph*: called by 1 (invite); 8 external calls (__init__, create_pool, ClickException, email_sender_from_env, invite_email, public_apex_host, owner_dsn, require_control_schema).
 
@@ -952,11 +1073,11 @@ async def _mint_invite(object_number: int, email: str) -> MintedInvite
 def slack_connect_retry(onboard_claim_id: uuid.UUID) -> None
 ```
 
-**Purpose**: Lets an operator retry a failed Slack Connect delivery for a specific onboarding claim. This is useful after fixing the reason the first delivery failed.
+**Purpose**: This command re-arms a failed Slack Connect delivery for one onboarding claim after an operator has fixed the underlying problem. Slack Connect is Slack’s way to connect separate workspaces through a shared channel.
 
-**Data flow**: It receives an onboarding claim UUID from the command line. It runs `_rearm_slack_connect`; if no failed delivery is found, it raises a friendly command-line error. If one is found, it prints the claim ID and the time since the delivery had been failed.
+**Data flow**: It receives an onboarding claim ID from the command line. It calls `_rearm_slack_connect` through `asyncio.run`. If no failed delivery is found, it raises a clear command error; if one is found, it prints when the delivery had been failing since.
 
-**Call relations**: This is the visible Click command for Slack Connect retry work. It delegates the database change to `_rearm_slack_connect`, then turns that result into either a clear success message or a clear failure message.
+**Call relations**: Click calls this for the `slack-connect-retry` command. It delegates the database change to `_rearm_slack_connect`, then turns the result into either an operator-facing error or a success message.
 
 *Call graph*: calls 1 internal fn (_rearm_slack_connect); 3 external calls (run, ClickException, echo).
 
@@ -967,11 +1088,11 @@ def slack_connect_retry(onboard_claim_id: uuid.UUID) -> None
 async def _rearm_slack_connect(onboard_claim_id: uuid.UUID) -> datetime | None
 ```
 
-**Purpose**: Finds and re-arms one failed Slack Connect delivery in the database. Re-arming means marking it so the system can try sending it again.
+**Purpose**: This does the database work needed to mark one failed Slack Connect delivery as ready to try again. It returns the time the delivery originally failed, or nothing if there was no matching failed delivery.
 
-**Data flow**: It receives an onboarding claim UUID. It reads the owner database connection string, verifies the control schema is present, opens a one-connection async database pool, asks `rearm_failed_delivery` to perform the retry preparation, closes the pool, and returns the original failure time or `None` if no matching failed delivery exists.
+**Data flow**: It receives an onboarding claim UUID. It gets the owner database connection string, checks that the control schema exists, opens a small database connection pool, and calls `rearm_failed_delivery` with that pool and claim ID. It closes the pool before returning the failure timestamp or `None`.
 
-**Call relations**: `slack_connect_retry` calls this helper from the command line. This function provides the database setup and cleanup around the more focused Slack Connect operation performed by `rearm_failed_delivery`.
+**Call relations**: `slack_connect_retry` calls this as its asynchronous helper. This function handles setup and cleanup around the lower-level `rearm_failed_delivery` operation, which performs the actual retry-state change.
 
 *Call graph*: called by 1 (slack_connect_retry); 4 external calls (create_pool, rearm_failed_delivery, owner_dsn, require_control_schema).
 
@@ -982,11 +1103,11 @@ async def _rearm_slack_connect(onboard_claim_id: uuid.UUID) -> datetime | None
 def rls_bootstrap() -> None
 ```
 
-**Purpose**: Runs the setup needed for database row-level security. Row-level security means the database itself enforces which rows a role can access.
+**Purpose**: This command creates or refreshes the database role and row-level security policies needed by the shared service. Operators use it so the database enforces workspace boundaries correctly.
 
-**Data flow**: It starts the asynchronous `_bootstrap` helper and waits for it to finish. When the database role and policies are in place, it prints `rls policies at head`.
+**Data flow**: It takes no command-line data. It runs `_bootstrap` through `asyncio.run`, then prints a confirmation once the role and policies are in place.
 
-**Call relations**: This is the operator-facing Click command for security bootstrap. It uses `_bootstrap` to do the actual database work, keeping the command itself simple and focused on reporting success.
+**Call relations**: Click calls this for the `rls-bootstrap` command. It keeps the command-line layer small and hands the actual database setup to `_bootstrap`.
 
 *Call graph*: calls 1 internal fn (_bootstrap); 2 external calls (run, echo).
 
@@ -997,27 +1118,27 @@ def rls_bootstrap() -> None
 async def _bootstrap() -> None
 ```
 
-**Purpose**: Creates or updates the database pieces needed for serving workspaces safely: shared policies and the serve role. These are foundational security settings for the hosted service.
+**Purpose**: This applies the database access-policy setup needed by the service. It creates or updates the shared serve role and the workspace isolation policies.
 
-**Data flow**: It reads the owner database connection string. It applies the row-level security policies, then ensures the serve role exists and is ready to use. It does not return a value; the important result is the changed database state.
+**Data flow**: It gets the owner database connection string, then passes it to `bootstrap_policies` and `ensure_serve_role`. Those calls change database state; this function returns no value after they complete.
 
-**Call relations**: `rls_bootstrap` calls this helper when an operator runs the bootstrap command. It delegates the two concrete database tasks to `bootstrap_policies` and `ensure_serve_role` in sequence.
+**Call relations**: `rls_bootstrap` calls this as the asynchronous worker behind the command. It coordinates the two lower-level security setup steps: policies first, then the serve role.
 
 *Call graph*: called by 1 (rls_bootstrap); 3 external calls (bootstrap_policies, ensure_serve_role, owner_dsn).
 
 
-### Bootstrap workflows
-These files handle deployable bundle creation and safe first-run workspace initialization.
+### Deployment bundling
+Bundle creation freezes the configured deployment into a reproducible Docker-based artifact.
 
 ### `core/src/ufo/bundle.py`
 
-`orchestration` · `bundle creation`
+`domain_logic` · `bundle creation / packaging time`
 
-This file supports the `ufoctl bundle` command. Its job is to turn the current UFO setup into a portable artifact, much like packing a lunchbox with the exact food and utensils needed instead of hoping they exist at the destination.
+This file is the packaging step behind `ufoctl bundle`. Its job is to turn a working UFO setup into a repeatable container build context. Think of it like packing a suitcase for a trip: it copies the needed configuration, writes a list of exactly which extensions are allowed, and adds instructions for Docker to build an image that can run the app later.
 
-The bundle contains three main things. First, it copies the current `ufo.toml` configuration into the output folder. Second, it writes a `ufo.lock` file that pins the exact extensions to use. A lockfile is a record of chosen package or extension versions and checksums, so later runs can verify they are using the same pieces. Third, it writes a Dockerfile, which is a recipe for building a container image.
+The important safety idea is “pinning.” A pin records an extension by name and verifies the installed version or digest, so the bundle does not accidentally depend on whatever happens to be installed at runtime. If there is already a lockfile, the bundle starts from the extensions named there. If not, it starts from the extensions currently discovered in the environment. It can also add catalog entries marked as “bundle-only,” meaning they are installed into the bundle but not enabled through the normal runtime store path.
 
-The important safety step is extension pinning. If there is already a lockfile, the bundle keeps those pinned extensions. If there is no lockfile, it pins every extension currently discovered as installed. If an extension catalog is available, it also includes entries marked as disabled, because these are “bundle-only”: they are installed into the artifact at bundle time rather than fetched later at runtime. Each extension is pinned through the store, which checks that the needed extension is actually installed and has the expected digest. Without this file, deployments would be easier to drift: one machine might start with a different extension set than another.
+The `Bundle.build` method creates the output directory, copies the config as `ufo.toml`, writes a fresh `ufo.lock`, and writes a Dockerfile. That Dockerfile installs the UFO wheel from the build context, points UFO at the bundled config and lockfile through environment variables, and defaults to running `ufoctl serve`.
 
 #### Function details
 
@@ -1027,11 +1148,11 @@ The important safety step is extension pinning. If there is already a lockfile, 
 def wheel_name() -> str
 ```
 
-**Purpose**: This function builds the filename of the UFO Python wheel that the Dockerfile will install. A wheel is Python’s packaged install file, and here it represents the local UFO distribution rather than something downloaded from a public package index.
+**Purpose**: Builds the expected filename for the UFO Python wheel that will be copied into the Docker image. A wheel is Python’s installable package format, and this project expects the wheel to sit beside the generated Docker build files.
 
-**Data flow**: It reads the current UFO version from the extension store helper. It then places that version into the expected wheel filename format, producing a string such as a package file name that the Docker build can copy and install.
+**Data flow**: It reads the current UFO version from the extension store helper, places that version into the standard wheel filename pattern, and returns the resulting string, such as a versioned `ufo-...-py3-none-any.whl` name. It does not change any files or state.
 
-**Call relations**: It is used by `Bundle._dockerfile` when writing the Docker build recipe. That recipe needs the exact filename twice: once to copy the wheel into the image and once to install it with `pip`.
+**Call relations**: When `Bundle._dockerfile` writes Docker instructions, it calls this function so the Dockerfile copies and installs the exact wheel name that matches the current UFO version.
 
 *Call graph*: called by 1 (_dockerfile); 1 external calls (ufo_version).
 
@@ -1042,11 +1163,11 @@ def wheel_name() -> str
 def build(self) -> BundleResult
 ```
 
-**Purpose**: This is the main action for creating the bundle folder. It gathers the pinned extensions, copies the config, writes a lockfile, writes a Dockerfile, and returns a summary of what it created.
+**Purpose**: Creates the actual bundle folder. It gathers the extension pins, copies the configuration, writes the lockfile, writes the Dockerfile, and returns a summary of what it created.
 
-**Data flow**: It starts with the bundle’s input paths: the source config file, the output directory, and the optional extension catalog stored on the `Bundle` object. It asks `_pins` for the exact extension pins, creates the output directory if needed, copies the config text into `ufo.toml`, writes a new JSON lockfile containing the UFO version and extension pins, and writes the Dockerfile text from `_dockerfile`. It returns a `BundleResult` containing the output folder, the created file paths, and the pins used.
+**Data flow**: It starts with a `Bundle` object containing the source config path, optional extension catalog, and output folder. It asks `_pins` for the frozen extension list, creates the output directory if needed, copies the config text into `ufo.toml`, writes a JSON lockfile using the current UFO version and pins, writes the Dockerfile text from `_dockerfile`, and returns a `BundleResult` containing the paths and pins.
 
-**Call relations**: This is the coordinating method that a higher-level bundle command would call. It delegates extension selection to `Bundle._pins`, Dockerfile text generation to `Bundle._dockerfile`, and uses `Lockfile` plus `ufo_version` to record a reproducible locked setup.
+**Call relations**: This is the main action for the file. A higher-level command such as `ufoctl bundle` would call it when the user wants a bundle. Inside, it delegates the two main pieces of thinking: `_pins` decides what extensions belong in the frozen bundle, and `_dockerfile` produces the container build instructions.
 
 *Call graph*: calls 2 internal fn (_dockerfile, _pins); 3 external calls (__init__, __init__, ufo_version).
 
@@ -1057,11 +1178,11 @@ def build(self) -> BundleResult
 def _pins(self) -> tuple[ExtensionPin, ...]
 ```
 
-**Purpose**: This private helper decides which extensions must be frozen into the bundle. It combines what the current deployment already uses with any catalog entries that are meant to be included only when bundling.
+**Purpose**: Decides which extensions must be pinned into the bundle. This is what makes the bundle repeatable instead of depending on whatever extensions happen to be available later.
 
-**Data flow**: It first discovers installed extensions and checks the usual lockfile path. If a lockfile already exists, it uses the extension names recorded there as the base list. If no lockfile exists, it uses all discovered installed extensions. If a catalog was provided, it adds any catalog extension marked as disabled, because those are treated as bundle-only additions. It removes duplicate names while keeping order, then turns each name into a verified extension pin using `pin_for`. The result is a tuple of exact extension pins.
+**Data flow**: It first asks the extension loader what extensions are installed or discoverable now. Then it checks for an existing lockfile. If a lockfile exists, it uses the extension names already listed there; if not, it uses every discovered extension. If a catalog is available, it also adds extensions marked disabled in the catalog, because those are bundle-only additions. It removes duplicate names while keeping order, then turns each name into a verified pin and returns all pins as an immutable tuple.
 
-**Call relations**: It is called by `Bundle.build` before any files are written. It relies on loader helpers to inspect the current installed and locked state, and on the store helper `pin_for` to turn extension names into checked, reproducible pins.
+**Call relations**: It is called by `Bundle.build` before any files are written. It relies on loader helpers to inspect the current environment and lockfile, then hands each chosen extension name to `pin_for`, which performs the pinning check. The resulting pins are later written into the generated lockfile.
 
 *Call graph*: called by 1 (build); 4 external calls (discovered, lockfile_path, read_lockfile, pin_for).
 
@@ -1072,1034 +1193,700 @@ def _pins(self) -> tuple[ExtensionPin, ...]
 def _dockerfile(self) -> str
 ```
 
-**Purpose**: This private helper writes the Dockerfile recipe for running the bundled UFO deployment. The Dockerfile installs the local UFO wheel, copies in the frozen config and lockfile, and sets the container to run `ufoctl serve` by default.
+**Purpose**: Creates the text of the Dockerfile used to build the runnable container image. The Dockerfile tells Docker which base Python image to use, how to install UFO, where to find the bundled config and lockfile, and what command to run by default.
 
-**Data flow**: It uses fixed bundle filenames and asks `wheel_name` for the expected wheel package filename. It then assembles a multi-line Dockerfile string: start from a Python base image, work in `/app`, set environment variables pointing UFO at the bundled config and lockfile, copy and install the wheel, copy the config and lockfile, and define the startup command. The output is plain text ready to be written to `Dockerfile`.
+**Data flow**: It uses fixed bundle filenames and asks `wheel_name` for the versioned UFO wheel filename. It then joins a set of Dockerfile lines into one string. The result is only text; writing it to disk is done later by `Bundle.build`.
 
-**Call relations**: It is called by `Bundle.build` during bundle creation. It hands back the container build recipe, while `Bundle.build` is responsible for writing that recipe into the output directory.
+**Call relations**: It is called by `Bundle.build` when the bundle folder is being written. It calls `wheel_name` so the Dockerfile’s `COPY`, `pip install`, and cleanup steps all refer to the same expected wheel file.
 
 *Call graph*: calls 1 internal fn (wheel_name); called by 1 (build).
 
 
-### `core/src/ufo/onboarding.py`
+### Service runtimes
+Runtime entrypoints start the shared proxy and assemble the main UFO web service with its databases, routes, and background workers.
 
-`orchestration` · `startup / first-run initialization`
+### `core/src/ufo/proxy_serve.py`
 
-This file is the “new office setup” checklist for a fresh UFO installation. Before anyone can use the system, UFO needs a durable workspace, an initial administrator, and a main agent to talk to. It also needs to know that required API keys or credential storage are available, so the first real use does not fail immediately.
+`entrypoint` · `startup and main loop`
 
-The flow is deliberately split into two parts. First, the core system is created: it checks that the chosen model has its required environment variable set, checks that extension setup will have credential support if needed, then opens a database transaction and creates the workspace, admin member, and main agent together. A database transaction means “all of this succeeds as one unit, or none of it is kept,” like signing all pages of a contract before filing it. If there is already any member in the database, it raises `AlreadyInitialized` instead of making a second first workspace.
+A sandbox needs controlled access to the outside world: model providers, artifact storage, connector services, and any approved internet destinations. This file is the startup point for the standalone shared proxy that provides that access. Without it, sandbox traffic would either be blocked, leak secrets, or bypass the project’s workspace boundaries.
 
-After the core exists, extension onboarding steps run. Each extension gets its own scoped context, meaning it only sees the credential slots it declared. If an extension setup step fails, the error is logged and UFO continues with the next step, so one add-on cannot ruin the core installation.
+The proxy is shared across workspaces, so it cannot rely on one fixed workspace setting. Instead, each request carries a run token, and that token tells the proxy which workspace it belongs to. The proxy then looks up only the grants, credentials, and rules for that workspace.
+
+At startup, the file loads configuration, extension manifests, database access, certificate material, model pricing, and any credential-decryption key. It deliberately fails early if required secrets are missing. That is safer than starting a proxy that appears to work but cannot reach model providers, cannot decrypt connector credentials, or signs certificates that sandboxes will not trust.
+
+The main `ProxyServe` class then opens the owner database connection, builds the shared base rules, adds per-workspace rule resolution, creates the actual `EgressProxy`, and waits until the process is asked to shut down. In simple terms, this file is the front desk for sandbox network access: it checks who is asking, finds what they are allowed to reach, swaps in the right secrets, and keeps the proxy running.
 
 #### Function details
 
-##### `run_onboarding_steps`  (lines 46–74)
+##### `model_rule_base`  (lines 43–62)
 
 ```
-async def run_onboarding_steps(manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None) -> None
+def model_rule_base(config: Config) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Runs the setup steps supplied by installed extensions after the main workspace has already been created. It gives each extension its own limited setup context and makes sure one failing extension does not stop the rest.
+**Purpose**: This builds the basic network rules that allow sandboxes to contact configured model providers, such as Anthropic or OpenAI. It only allows providers whose API keys are present in the process environment, and it refuses to continue if no model provider is usable.
 
-**Data flow**: It receives the installed extension manifests, the new workspace ID, and an optional credential store. It enters that workspace’s context, skips extensions with no setup steps, and skips step execution if credentials are required but unavailable. For each step it builds the extension-specific context, calls the step, and logs failures instead of returning an error. It does not return data; its effect is any setup work the extension performs.
+**Data flow**: It takes the loaded configuration, reads the environment variable names where model API keys should live, and checks the real process environment for those keys. For each key it finds, it asks the model-rule builder to produce safe proxy rules, combines the allowed host names into one host rule, and returns the full set of rules. If no model hosts can be allowed, it raises an error instead of returning an empty rule set.
 
-**Call relations**: After `Onboarding.run` has created the core workspace, `Onboarding.run_steps` calls this function to perform optional add-on setup. Inside, it uses the workspace context so extension code runs as if it belongs to the new workspace, asks `context_for` for the extension’s scoped handle, and uses logging when a step must be skipped or fails.
+**Call relations**: During proxy startup, `ProxyServe.serve` calls this to create the model-provider part of the proxy’s base rule set. The helper delegates the provider-specific rule details to `derive_model_rules`, then hands the resulting rules back so they can be combined with artifact-store and workspace-specific rules.
 
-*Call graph*: called by 1 (run_steps); 3 external calls (context_for, log, ws).
-
-
-##### `Onboarding.run`  (lines 89–92)
-
-```
-async def run(self) -> Onboarded
-```
-
-**Purpose**: Runs the complete first-run setup from start to finish. It creates the core workspace first, then runs extension setup, and finally reports which workspace and member were created.
-
-**Data flow**: It starts with the information stored on the `Onboarding` object: configuration, admin email, chosen model, credential store, and extension manifests. It calls `create` to produce an `Onboarded` record, passes that record to `run_steps`, and returns the same `Onboarded` record to the caller.
-
-**Call relations**: This is the high-level path used by the initialization command or surface. It delegates the durable core creation to `Onboarding.create`, then delegates extension setup to `Onboarding.run_steps`, keeping the overall order clear and safe.
-
-*Call graph*: calls 2 internal fn (create, run_steps).
+*Call graph*: called by 1 (serve); 2 external calls (__init__, derive_model_rules).
 
 
-##### `Onboarding.create`  (lines 94–100)
+##### `run`  (lines 65–86)
 
 ```
-async def create(self) -> Onboarded
+def run() -> None
 ```
 
-**Purpose**: Creates only the core UFO installation pieces: model readiness, credential readiness, workspace, initial admin, and main agent. It intentionally avoids depending on extension setup so the basic workspace can be established before optional add-ons run.
+**Purpose**: This is the top-level boot function for the standalone proxy service. It gathers all required settings and secrets, creates a `ProxyServe` instance, and runs it forever until shutdown.
 
-**Data flow**: It reads the selected model, configuration, credentials, manifests, and admin email from the `Onboarding` object. It first checks for the model key, then checks whether extension steps need credential support, then writes the workspace records to the database. It returns an `Onboarded` value containing the new workspace ID and admin member ID.
+**Data flow**: It starts by loading configuration and initializing observability, which is the system that sends logs and telemetry. It loads extension manifests, reads the shared certificate authority, chooses the owner database connection string, opens the credential store if needed, builds model pricing, and creates a shutdown event. Those pieces are packaged into `ProxyServe`, then `asyncio.run` starts the asynchronous serving loop.
 
-**Call relations**: `Onboarding.run` calls this before any extension setup happens. This method coordinates three smaller checks/actions: `_require_model_key`, `_require_credentials_for_steps`, and `_create_workspace`.
+**Call relations**: This function is the outer story for the whole file. It calls `_egress_ca`, `owner_dsn`, and `_credential_store` to validate important secrets before the server starts, then hands control to `ProxyServe.serve`, which performs the actual database setup and proxy listening.
 
-*Call graph*: calls 3 internal fn (_create_workspace, _require_credentials_for_steps, _require_model_key); called by 1 (run).
-
-
-##### `Onboarding.run_steps`  (lines 102–103)
-
-```
-async def run_steps(self, onboarded: Onboarded) -> None
-```
-
-**Purpose**: Runs extension onboarding for a workspace that has already been created. It is a small bridge between the `Onboarding` object and the standalone extension-step runner.
-
-**Data flow**: It takes the `Onboarded` result, reads the workspace ID from it, and combines that with the object’s manifests and credential store. It passes those values to `run_onboarding_steps`. It returns nothing directly; any useful work happens inside the extension steps.
-
-**Call relations**: `Onboarding.run` calls this after `Onboarding.create` succeeds. It hands off to `run_onboarding_steps`, which contains the actual loop over installed extensions.
-
-*Call graph*: calls 1 internal fn (run_onboarding_steps); called by 1 (run).
+*Call graph*: calls 3 internal fn (_credential_store, _egress_ca, owner_dsn); 9 external calls (__init__, Event, run, load_config, injecting_slots, load_manifests, model_registry, init_o11y, log).
 
 
-##### `Onboarding._require_credentials_for_steps`  (lines 105–116)
+##### `_egress_ca`  (lines 89–100)
 
 ```
-def _require_credentials_for_steps(self) -> None
+def _egress_ca() -> tuple[str, str]
 ```
 
-**Purpose**: Checks, before touching the database, that extension setup can store secrets if any installed extension has onboarding steps. This avoids creating a workspace and only then discovering that required credential support is missing.
+**Purpose**: This reads the shared certificate authority used by the proxy to sign temporary certificates for sandbox traffic. The shared certificate authority matters because sandboxes must trust the same signing chain across proxy restarts.
 
-**Data flow**: It reads the credential store and extension manifests from the `Onboarding` object. If a credential store exists, it allows setup to continue. If no credential store exists but at least one extension has onboarding steps, it raises an error telling the operator which environment variable must be set. It returns nothing when the check passes.
+**Data flow**: It reads the certificate and private key from two environment variables. If both are present, it returns them as text. If either is missing, it raises an error explaining that the proxy cannot safely sign certificates that sandboxes will trust.
 
-**Call relations**: `Onboarding.create` calls this before `_create_workspace`. It sits alongside the model-key check as an early safety gate, so failed prerequisites leave no half-initialized database behind.
+**Call relations**: `run` calls this during startup before creating `ProxyServe`. The returned certificate and key are later passed into `EgressProxy`, which uses them when it intercepts and protects outbound sandbox connections.
 
-*Call graph*: called by 1 (create).
-
-
-##### `Onboarding._require_model_key`  (lines 118–125)
-
-```
-def _require_model_key(self) -> None
-```
-
-**Purpose**: Checks whether the selected model needs an environment variable, such as an API key, and stops initialization if that variable is missing. This prevents creating a workspace that cannot take its first assistant turn.
-
-**Data flow**: It asks `_model_key_env` for the name of the required environment variable, if one is known. If there is no required variable, it allows setup to continue. If there is a required variable but the operating system environment does not contain a value for it, it raises an error. It returns nothing when the check passes.
-
-**Call relations**: `Onboarding.create` calls this as the first readiness check. It relies on `_model_key_env` to understand the configured model provider, then uses the process environment as the source of truth for whether the key is present.
-
-*Call graph*: calls 1 internal fn (_model_key_env); called by 1 (create).
+*Call graph*: called by 1 (run).
 
 
-##### `Onboarding._model_key_env`  (lines 127–130)
+##### `owner_dsn`  (lines 103–116)
 
 ```
-def _model_key_env(self) -> str | None
+def owner_dsn(config: Config) -> str
 ```
 
-**Purpose**: Finds the environment variable name that should contain the key for the selected model, when UFO can know that name ahead of time. Some extension-provided models resolve their own keys later, so this can also return no name.
+**Purpose**: This chooses the database connection string for the shared proxy. It uses an owner-level database connection because one proxy serves all workspaces, while the proxy’s own queries still filter by the workspace ID from each run token.
 
-**Data flow**: It reads the configuration, installed manifests, and chosen model from the `Onboarding` object. It builds or consults the model registry and asks it which environment variable belongs to that model. It returns the variable name as text, or `None` if there is no eager check to perform.
+**Data flow**: It first looks for the owner database URL in the `UFO_OWNER_DSN` environment variable, then falls back to the configured owner URL. If neither exists, it raises an error. If it finds a URL starting with `postgresql://`, it rewrites it to use the async PostgreSQL driver expected by this service, then returns the rewritten string.
 
-**Call relations**: `Onboarding._require_model_key` calls this to decide what to check in the operating system environment. The model registry is the outside helper that knows about built-in and extension-contributed model providers.
+**Call relations**: `run` calls this at startup and passes the result into `ProxyServe`. Later, `ProxyServe.serve` uses that string to initialize database access before the proxy begins listening.
 
-*Call graph*: called by 1 (_require_model_key); 1 external calls (model_registry).
-
-
-##### `Onboarding._create_workspace`  (lines 132–156)
-
-```
-async def _create_workspace(self) -> Onboarded
-```
-
-**Purpose**: Writes the first durable UFO records into the database: the workspace, the initial admin member, and the main agent. It also enforces that this can only happen once for an empty installation.
-
-**Data flow**: It opens a workspace database transaction, then looks for any existing member. If a member already exists, it raises `AlreadyInitialized`. Otherwise it creates new unique IDs, inserts a workspace row, calls `create_member` to add the admin user, inserts the main agent with the chosen model and default prompt, and returns an `Onboarded` record containing the new workspace and member IDs.
-
-**Call relations**: `Onboarding.create` calls this only after prerequisite checks pass. It relies on the database transaction helper to keep the writes together, on `create_member` to create the first administrator correctly, and on SQLAlchemy database commands to insert the workspace and agent records.
-
-*Call graph*: called by 1 (create); 7 external calls (__init__, __init__, insert, select, workspace_tx, create_member, uuid4).
+*Call graph*: called by 1 (run).
 
 
-### Runtime assembly
-These files choose the sandbox backend and assemble the configured UFO service into a running process.
-
-### `core/src/ufo/sandbox/select.py`
-
-`orchestration` · `startup/config load`
-
-A sandbox is an isolated place where work can run without freely touching the host system. This file is the small but important gatekeeper that decides which sandbox backend is active for this process. Without it, the system could accidentally pick the wrong backend, silently ignore an unknown backend name, or run a remote sandbox without the safe network proxy it needs.
-
-The built-in choice is called `local`, which uses `LocalCarrier`. Extensions can add more choices, such as a Docker-based runner or a remote runner. The file collects all these choices into one name-to-factory map. A factory is just a callable that builds the carrier when needed. If two carriers try to claim the same backend name, the code stops immediately, because that would make the configuration ambiguous.
-
-After building the list of available carriers, it looks up the backend named in `[sandbox] backend`. If no carrier registered that name, it raises a clear error. It also tracks which carriers run “off-cluster,” meaning outside the local process or local environment. Those remote carriers need an externally reachable HTTPS proxy URL so sandbox network traffic can be routed safely, with credentials injected and access controlled. If that URL is missing or not HTTPS, the file refuses to continue. In the end, it returns the chosen carrier and a true-or-false flag saying whether it is off-cluster.
-
-#### Function details
-
-##### `select_carrier`  (lines 13–54)
+##### `_credential_store`  (lines 119–133)
 
 ```
-def select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, bool]
+def _credential_store(config: Config, slots: tuple[CredentialSlot, ...]) -> CredentialStore | None
 ```
 
-**Purpose**: This function chooses exactly one sandbox backend from the built-in backend and any extension-provided backends. It also checks that remote sandbox backends have a safe public HTTPS proxy URL before they are allowed to run.
+**Purpose**: This decides whether the proxy needs a credential store for connector secrets, and opens it if possible. The credential store decrypts per-workspace secrets that the proxy may need to inject into outbound requests.
 
-**Data flow**: It receives the loaded configuration and a tuple of extension manifests. It starts with the built-in `local` carrier, adds each carrier advertised by the manifests, and records which ones are remote or off-cluster. It then reads `config.sandbox.backend`, finds the matching carrier factory, validates any needed remote proxy URL, builds the carrier, and returns it together with a boolean saying whether the selected backend is off-cluster. If the backend name is unknown, duplicated, missing required remote settings, or configured with a non-HTTPS proxy URL, it raises an error instead of returning.
+**Data flow**: It receives the configuration and the list of credential slots that require injection. It reads the configured encryption key environment variable. If the key exists, it creates a Fernet encryptor/decryptor and wraps it in a `CredentialStore`. If no key exists but the active pack declares credential slots, it raises an error. If no key is needed, it returns `None`.
 
-**Call relations**: This function is used when the runtime needs to turn configuration into the actual sandbox carrier it will hold and use. If the configured backend name is not registered, it creates a `NotRegisteredError` to explain the available choices. If the chosen backend is remote, it calls `urllib.parse.urlparse` to inspect the public proxy URL and make sure it is a real HTTPS URL before handing the carrier back to the caller.
+**Call relations**: `run` calls this after loading manifests and discovering which credential slots need injection. The returned store, or `None`, is passed into `ProxyServe`, and later into `PerAgentRules`, so workspace-specific secrets can be decrypted when a sandbox request needs them.
 
-*Call graph*: 2 external calls (__init__, urlparse).
+*Call graph*: called by 1 (run); 2 external calls (__init__, Fernet).
+
+
+##### `ProxyServe.serve`  (lines 151–182)
+
+```
+async def serve(self) -> None
+```
+
+**Purpose**: This starts the actual shared proxy and keeps it alive until the process receives a shutdown signal. It prepares database access, builds rule resolution, starts listening on the configured port, and shuts down gracefully.
+
+**Data flow**: It registers signal handlers so Ctrl-C or a termination signal sets the shutdown event. It initializes the database connection, verifies the database is reachable, builds artifact-store rules, builds model-provider rules, and creates a `PerAgentRules` resolver that can decide what each sandbox run may access. It then creates an `EgressProxy` with certificate material, run-token decoding, authorization checks, and pricing information. The proxy starts on the configured port, waits for shutdown, and finally stops with the configured grace period.
+
+**Call relations**: `run` creates the `ProxyServe` object and then calls this method through the asynchronous event loop. Inside, it calls `model_rule_base` for shared model access, uses manifest-derived helpers for connector and internet rules, creates `PerAgentRules` to resolve per-run permissions, and hands that resolver into `EgressProxy`, which performs the live network proxy work.
+
+*Call graph*: calls 2 internal fn (model_rule_base, from_env); 13 external calls (__init__, __init__, __init__, get_running_loop, blob_store_for, init_db, verify_db_reachable, connector_clis, injecting_slots, log (+3 more)).
 
 
 ### `core/src/ufo/serve.py`
 
 `entrypoint` · `startup, request handling, background work, shutdown`
 
-Think of this file as the control room for a multi-tenant service: one server process serves many workspaces, but each request and background job must be carefully tied to the right workspace so data does not leak across boundaries. Without this file, the pieces might exist, but nothing would reliably start in the right order or share the same runtime objects.
+This file is the place where many separate parts of the system are plugged together into one running service. Think of it like the control room that turns on power, checks safety switches, connects the phone lines, starts the workers, and then opens the front door to users.
 
-At startup, `run` loads configuration, opens database access, verifies credentials, loads extensions, starts a heartbeat for this service instance, builds storage, model, search, connector, browser, sandbox, and memory services, and then registers background jobs. It also creates the FastAPI web app, mounts built-in routes, extension routes, and shared surface routes, and finally starts Uvicorn, the web server.
+At startup, it loads configuration, sets up logging, initializes the main and owner databases, verifies encryption keys for stored credentials, loads extension manifests, creates the blob store for large files, chooses providers such as the live-message hub, model registry, search, memory, browser control, connector authentication, and sandbox egress proxy, then registers durable jobs. It also starts a heartbeat so other service instances know this one is alive.
 
-A major theme is “fail early.” If two extensions claim the same backend name, if a required provider is missing, if a public OAuth callback URL is not really public, or if credential encryption is unavailable, startup stops with a clear error instead of failing later during a user action.
+The file mounts two kinds of web routes. Extension routes live under `/ext/...` and are only allowed to run after the request is tied to a workspace. Shared surface routes live under `/surface/...` and are the member-facing API or UI entry points. A workspace is the tenant boundary: every database read and credential lookup must happen with the right workspace selected. The `WorkspaceScopeBoundary` middleware makes sure that no stale workspace leaks between requests.
 
-Another major theme is workspace safety. The `WorkspaceScopeBoundary` middleware clears any leftover workspace setting at the start and end of each HTTP request. Surface endpoints identify the caller’s workspace before touching data, like checking a badge before opening a filing cabinet. Background pollers and jobs also re-bind each operation to the workspace they are acting for.
+Finally, it runs Uvicorn, the web server. On shutdown it carefully drains or preserves durable work so another process does not accidentally run the same workflow at the same time.
 
 #### Function details
 
-##### `_assert_no_reserved_routes`  (lines 135–151)
+##### `_assert_no_reserved_routes`  (lines 154–170)
 
 ```
 def _assert_no_reserved_routes(app: FastAPI) -> None
 ```
 
-**Purpose**: Checks that this service has not mounted web routes under URL prefixes reserved for the onboarding gateway. This prevents a quiet routing conflict where a route appears to exist here but is actually hidden by the front-door proxy.
+**Purpose**: This is a startup safety check. It makes sure this service has not mounted routes under URL prefixes that belong to the onboarding or login gateway.
 
-**Data flow**: It reads the FastAPI app’s registered routes → looks for paths starting with reserved prefixes like `/login`, `/v1/onboard`, or `/ufo` → either returns normally or raises an error listing the conflicting routes.
+**Data flow**: It reads the FastAPI app's registered routes, looks for paths starting with reserved prefixes such as login and onboarding paths, and raises an error if any conflict is found. If there are no conflicts, it changes nothing and returns normally.
 
-**Call relations**: Near the end of `run`, after all built-in, extension, and surface routes have been mounted, this function is called as a final safety check before the web server starts.
+**Call relations**: The main `run` function calls this after all routes have been mounted. It is the final guard before the server starts accepting traffic.
 
 *Call graph*: called by 1 (run).
 
 
-##### `run`  (lines 154–299)
+##### `run`  (lines 173–340)
 
 ```
 def run() -> None
 ```
 
-**Purpose**: Starts the shared UFO fleet process. It is the top-level boot sequence that turns configuration and extension manifests into a live web service with workers, routes, sandboxes, credentials, and background jobs.
+**Purpose**: This is the main entry point for the shared service process. It builds every major runtime dependency, starts durable workers, mounts web endpoints, and launches the HTTP server.
 
-**Data flow**: It reads configuration and environment variables → initializes observability, databases, credentials, extensions, blob storage, runtime services, DBOS workers, web routes, and background tasks → starts Uvicorn to serve HTTP traffic → on exit, shuts down workers and the heartbeat safely.
+**Data flow**: It begins with configuration and environment variables, then turns those into live objects: database connections, credential encryption, extension registries, blob storage, sandboxes, hubs, model and memory backends, connector registries, job runners, and a FastAPI app. The result is a running web server plus background workers; on exit it shuts down the DBOS executor and heartbeat carefully.
 
-**Call relations**: This is the main conductor. It calls most helper functions in this file to select providers, mount routes, launch jobs, build connector and connect-flow support, start the sandbox proxy, and validate the final web app before handing control to Uvicorn.
+**Call relations**: This function is the top-level conductor. It calls the helper functions in this file to choose backends, mount routes, register jobs, configure proxy access, and clean up during shutdown.
 
-*Call graph*: calls 17 internal fn (from_env, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _one_shot, _proxy_endpoint, _select_cdp_provider (+7 more)); 43 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
-
-
-##### `_one_shot`  (lines 302–314)
-
-```
-def _one_shot(coro: Coroutine[Any, Any, T]) -> T
-```
-
-**Purpose**: Runs one asynchronous setup or teardown action on a temporary event loop, then cleans up database engines tied to that loop. This avoids leaving database connections attached to a loop that is about to disappear.
-
-**Data flow**: It receives a coroutine, meaning an async operation waiting to be run → wraps it in a cleanup step → runs it to completion with `asyncio.run` → returns the operation’s result after disposing loop-owned database resources.
-
-**Call relations**: `run` uses this for startup database checks and instance-seat recording. `_stop_executor` uses it during shutdown to retire the heartbeat seat safely.
-
-*Call graph*: called by 2 (_stop_executor, run); 1 external calls (run).
+*Call graph*: calls 18 internal fn (from_env, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _one_shot, _proxy_endpoint, _select_cdp_provider (+8 more)); 49 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
 
 
-##### `_one_shot.step`  (lines 308–312)
-
-```
-async def step() -> T
-```
-
-**Purpose**: Performs the actual wrapped async operation and guarantees cleanup afterward. It exists so `_one_shot` can always dispose event-loop database engines, whether the operation succeeds or fails.
-
-**Data flow**: It awaits the original coroutine → captures and returns its result if successful → always calls database engine disposal before the temporary loop closes.
-
-**Call relations**: This inner helper is created and run only by `_one_shot`. It hands cleanup to `dispose_loop_engines` so short-lived startup loops do not strand pooled database connections.
-
-*Call graph*: 1 external calls (dispose_loop_engines).
-
-
-##### `_stop_executor`  (lines 317–331)
-
-```
-def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None
-```
-
-**Purpose**: Shuts down DBOS workflow execution without accidentally letting another process run the same still-active work. It only retires this service instance’s seat if no workflows are still active locally.
-
-**Data flow**: It receives the DBOS executor, heartbeat, and drain timeout → asks DBOS to stop and wait for work to finish → checks whether workflows are still active → either keeps the seat alive and logs that fact, or retires the heartbeat seat.
-
-**Call relations**: `run` calls this in its `finally` block after Uvicorn stops. It uses `_one_shot` to run the async heartbeat retirement step and logs when active workflows prevent retirement.
-
-*Call graph*: calls 2 internal fn (retire, _one_shot); called by 1 (run); 2 external calls (destroy, log).
-
-
-##### `_shared_owner_dsn`  (lines 334–348)
-
-```
-def _shared_owner_dsn(config: Config) -> str
-```
-
-**Purpose**: Finds the database connection string used for owner-level cross-workspace reads. This is needed for jobs that must first list work across all workspaces before doing each piece under the correct workspace.
-
-**Data flow**: It reads the owner database URL from an environment variable or config → fails if neither is set → normalizes a plain PostgreSQL URL to the async driver form → returns the usable connection string.
-
-**Call relations**: `run` calls this before initializing the owner database connection. Its result allows shared background sweeps to enumerate workspaces safely before rebinding each operation.
-
-*Call graph*: called by 1 (run).
-
-
-##### `_launch_jobs`  (lines 351–395)
-
-```
-def _launch_jobs(runtime: Runtime, sync_driver: SyncDriver, page_feed: CorePageFeed) -> None
-```
-
-**Purpose**: Registers and starts the background jobs for syncing sources, dispatching turns, and reacting to page changes. These jobs keep the system moving even when no HTTP request is currently active.
-
-**Data flow**: It receives the runtime, sync driver, and page feed → builds admission helpers, page-change runners, core job bindings, and extension job bindings → creates a `JobRunner` → launches the jobs with access to shared runtime services.
-
-**Call relations**: `run` calls this after the runtime and DBOS client are ready. It hands work to job classes such as `TurnDispatcher`, `PageChangeRunner`, and `JobRunner`, which take over scheduled and queued background execution.
-
-*Call graph*: called by 1 (run); 7 external calls (__init__, __init__, __init__, __init__, durable_surfaces, bindings_from, core_jobs).
-
-
-##### `_launch_jobs.invoker_for`  (lines 365–366)
+##### `run.invoker_for`  (lines 215–216)
 
 ```
 def invoker_for(workspace_id: UUID) -> AdmissionInvoker
 ```
 
-**Purpose**: Creates a workspace-specific admission invoker for background jobs. An admission invoker is the object that lets a job submit or re-admit work for one chosen workspace.
+**Purpose**: This small helper creates an admission invoker for one workspace. An admission invoker is the object that lets work be admitted into the durable workflow system for that workspace.
 
-**Data flow**: It receives a workspace ID → combines it with the shared admission object → returns an `AdmissionInvoker` tied to that workspace.
+**Data flow**: It receives a workspace ID, combines it with the already-created shared `Admission` object, and returns an `AdmissionInvoker` tied to that workspace.
 
-**Call relations**: This small factory is passed into job runners from `_launch_jobs`. When a job needs to act for a particular workspace, the runner calls this factory to get the correctly scoped invoker.
+**Call relations**: It is defined inside `run` so it can reuse the shared admission setup. `run` passes it into the runtime and job-launch code so later work can be admitted under the correct workspace.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `_source_backends`  (lines 398–412)
+##### `_one_shot`  (lines 343–355)
+
+```
+def _one_shot(coro: Coroutine[Any, Any, T]) -> T
+```
+
+**Purpose**: This helper runs one asynchronous database-touching operation on a temporary event loop, then cleans up database engines attached to that loop. It prevents database connection pools from being stranded on a loop that has already closed.
+
+**Data flow**: It receives a coroutine, runs it to completion with `asyncio.run`, and returns the coroutine's result. Before the temporary loop closes, it disposes the loop's database engines.
+
+**Call relations**: `run` uses it for one-time startup database checks and records. `_stop_executor` uses it during shutdown to retire the heartbeat seat safely.
+
+*Call graph*: called by 2 (_stop_executor, run); 1 external calls (run).
+
+
+##### `_one_shot.step`  (lines 349–353)
+
+```
+async def step() -> T
+```
+
+**Purpose**: This inner async function wraps the actual one-shot operation with cleanup. Its purpose is to guarantee database engine cleanup even if the operation fails.
+
+**Data flow**: It awaits the supplied coroutine, returns its result if successful, and always calls database engine disposal afterward. If the coroutine raises an error, cleanup still runs before the error continues outward.
+
+**Call relations**: It is only used by `_one_shot`. It is the part that actually performs the before-and-after cleanup promise.
+
+*Call graph*: 1 external calls (dispose_loop_engines).
+
+
+##### `_stop_executor`  (lines 358–372)
+
+```
+def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None
+```
+
+**Purpose**: This shuts down the durable workflow executor without allowing duplicate workflow execution. It retires this process's worker seat only if no workflows are still active.
+
+**Data flow**: It receives the DBOS executor, heartbeat object, and allowed graceful shutdown time. It asks DBOS to drain work, checks whether any workflow tasks are still active, logs and keeps the seat if work remains, or retires the heartbeat seat if the executor is empty.
+
+**Call relations**: `run` calls this in its final shutdown block. It uses `_one_shot` to run the asynchronous heartbeat retirement in a safe temporary loop.
+
+*Call graph*: calls 2 internal fn (retire, _one_shot); called by 1 (run); 2 external calls (destroy, log).
+
+
+##### `_shared_owner_dsn`  (lines 375–389)
+
+```
+def _shared_owner_dsn(config: Config) -> str
+```
+
+**Purpose**: This finds the special database connection string used for owner-level cross-workspace reads. That owner connection is needed for sweep jobs that first list workspaces before rebinding each item to its own workspace.
+
+**Data flow**: It reads either the owner database URL environment variable or the configured owner URL. If neither exists, it raises a clear startup error; otherwise it returns the chosen connection string.
+
+**Call relations**: `run` calls this before initializing the owner database. Without this value, shared-fleet background sweeps could not safely enumerate work across all workspaces.
+
+*Call graph*: called by 1 (run).
+
+
+##### `_launch_jobs`  (lines 392–446)
+
+```
+def _launch_jobs(runtime: Runtime, invoker_for: InvokerFactory, sync_driver: SyncDriver, page_feed: CorePageFeed) -> None
+```
+
+**Purpose**: This registers and starts the durable background jobs for core and installed extensions. These jobs synchronize sources, dispatch queued turns, process page changes, and deliver delegated work.
+
+**Data flow**: It receives the already-built runtime, an invoker factory, a sync driver, and a page feed. It builds probe helpers, page-change runners, core job bindings, and finally launches a `JobRunner` that registers the jobs with DBOS.
+
+**Call relations**: `run` calls this after the runtime and DBOS client are ready. It hands off to the job system so background work can continue independently of individual web requests.
+
+*Call graph*: called by 1 (run); 12 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, connector_clis, injecting_slots (+2 more)).
+
+
+##### `_source_backends`  (lines 449–463)
 
 ```
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]
 ```
 
-**Purpose**: Builds the list of source-sync backends available to the sync driver. A source backend is the code that knows how to read from a specific kind of source, such as the built-in folder source or an extension-provided source.
+**Purpose**: This builds the list of source-sync backends available to the sync driver. A source backend is the code that knows how to read one kind of external content source.
 
-**Data flow**: It starts with the built-in folder backend → walks all extension manifests → gives each extension a credential reader limited to its declared credential slots → adds each declared source backend → raises an error if two backends use the same name.
+**Data flow**: It starts with the built-in folder source backend, then reads every extension manifest for additional source providers. It gives each provider credential access limited to that extension's declared credential slots and returns a name-to-backend map, raising an error if two providers claim the same name.
 
-**Call relations**: `run` calls this while building the `SyncDriver`. The returned map lets the sync system resolve a stored source row to exactly one implementation.
+**Call relations**: `run` uses this when creating the `SyncDriver`. The returned map tells source synchronization which implementation to use for each stored source row.
 
 *Call graph*: called by 1 (run); 2 external calls (__init__, __init__).
 
 
-##### `_source_identity_resolvers`  (lines 415–455)
+##### `_source_identity_resolvers`  (lines 466–506)
 
 ```
 def _source_identity_resolvers(manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: BlobStore) -> dict[str, SourceIdentityResolver]
 ```
 
-**Purpose**: Builds helper functions that can ask a surface, such as an extension UI endpoint, who the current user is in that external source. This is used to connect synced source data with the right external identity.
+**Purpose**: This prepares optional functions that can identify the current user for a source-connected surface. It lets surfaces say, for example, which external account belongs to a workspace.
 
-**Data flow**: It scans extension surfaces that declare a `self_user_id` function → creates one resolver per surface name → each resolver later receives a workspace ID and may read allowed credentials and blob storage → returns a map from surface name to resolver.
+**Data flow**: It scans extension surfaces for a `self_user_id` hook. For each one, it creates a resolver that can read only the credentials declared by that surface's extension and returns a map from surface name to resolver.
 
-**Call relations**: `run` passes these resolvers into the `SyncDriver`. The nested `resolve` function is what the sync system later calls when it needs a source identity for a workspace.
+**Call relations**: `run` gives these resolvers to the sync driver. The nested resolver functions are later called when source synchronization needs to connect workspace identity to a surface.
 
 *Call graph*: called by 1 (run).
 
 
-##### `_source_identity_resolvers.resolve`  (lines 429–452)
+##### `_source_identity_resolvers.resolve`  (lines 480–503)
 
 ```
 async def resolve(workspace_id: UUID, handler=surface.self_user_id, slots=declared, store=credentials) -> str | None
 ```
 
-**Purpose**: Runs one surface’s identity lookup for one workspace. It wraps the surface-provided handler with a safe context containing only the blob store and a guarded credential reader.
+**Purpose**: This per-surface resolver calls an extension's identity hook for one workspace. It packages the workspace, blob store, and safe credential reader into a context the extension can use.
 
-**Data flow**: It receives a workspace ID → prepares a `SurfaceIdentityContext` with a credential callback → calls the surface’s identity handler → returns that handler’s user ID string or `None`.
+**Data flow**: It receives a workspace ID, builds a `SurfaceIdentityContext`, and calls the surface's identity handler. The result is either an external user ID string or no value if the surface cannot identify one.
 
-**Call relations**: This function is produced by `_source_identity_resolvers` and stored in the resolver map used by the sync driver. It hands credential reads to its nested `credential` helper.
+**Call relations**: It is created by `_source_identity_resolvers` and later used by source synchronization. It delegates credential reads to its nested `credential` function so extensions cannot read undeclared secrets.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `_source_identity_resolvers.resolve.credential`  (lines 435–444)
+##### `_source_identity_resolvers.resolve.credential`  (lines 486–495)
 
 ```
 async def credential(credential_slot: str) -> str
 ```
 
-**Purpose**: Safely reads one credential for a surface identity lookup. It enforces that the surface can only read credential slots its extension declared.
+**Purpose**: This nested helper safely reads one credential slot for a source identity lookup. It enforces that the extension only asks for credentials it declared.
 
-**Data flow**: It receives a credential slot name → checks that the slot is declared by the extension → checks that a credential store exists → reads the credential for the current workspace → returns the secret value.
+**Data flow**: It receives a credential slot name, checks that the slot is allowed, checks that a credential store exists, then fetches the secret for the current workspace. It returns the credential value or raises a clear error if access is invalid.
 
-**Call relations**: This nested helper is used inside `_source_identity_resolvers.resolve` when an extension’s identity handler needs a credential. It prevents accidental or unauthorized reads of unrelated credential slots.
+**Call relations**: It is used inside `_source_identity_resolvers.resolve`. It is the guardrail between extension identity code and stored workspace credentials.
 
 
-##### `_select_hub`  (lines 458–476)
+##### `_select_hub`  (lines 509–527)
 
 ```
 def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub
 ```
 
-**Purpose**: Chooses the live-message hub backend for this deployment. The hub is the process-wide channel used to publish and tail live updates, with an in-process default unless an extension provides another backend.
+**Purpose**: This chooses the live-message hub backend for the process. The hub is the channel used to move live updates between workflows and connected clients.
 
-**Data flow**: It starts with the built-in in-process hub builder → adds hub builders declared by extensions → rejects duplicate backend names → looks up the backend selected in config → returns the built hub or raises an error if missing.
+**Data flow**: It starts with the built-in in-process hub option, adds hub builders registered by extensions, checks for duplicate names, and selects the configured backend. It returns the built hub or raises an error if the configured name is unknown.
 
-**Call relations**: `run` calls this during startup and stores the hub in both the runtime and FastAPI app state. Later, shared surfaces use it through `HubTailer` to stream live updates.
+**Call relations**: `run` calls this while assembling the runtime. The chosen hub is later used by surfaces, tailers, and stopping logic to communicate live state.
 
 *Call graph*: called by 1 (run); 1 external calls (__init__).
 
 
-##### `_select_cdp_provider`  (lines 479–507)
+##### `_select_terminal_transport`  (lines 530–572)
+
+```
+def _select_terminal_transport(config: Config, manifests: tuple[Manifest, ...], blob: BlobStore) -> TerminalTransport
+```
+
+**Purpose**: This chooses how terminal sessions are connected between users and running work. It also prevents an unsafe setup where multiple service instances use a process-local terminal transport.
+
+**Data flow**: It reads terminal and hub configuration, rejects an in-process terminal transport when the hub is cross-process, gathers terminal transport builders from extensions, and returns the selected transport. Duplicate or unknown backend names cause startup errors.
+
+**Call relations**: `run` uses this when constructing sandbox support. The selected transport lets a user's held terminal connection find the workflow that owns the terminal.
+
+*Call graph*: called by 1 (run); 1 external calls (__init__).
+
+
+##### `_select_cdp_provider`  (lines 575–603)
 
 ```
 def _select_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> CdpProvider | None
 ```
 
-**Purpose**: Chooses the browser-control provider, if one is configured and registered. CDP means Chrome DevTools Protocol, a way for software to drive a browser; this provider lets sandboxes or tools browse when an extension supplies support.
+**Purpose**: This chooses the browser automation provider, if one is installed and selected. CDP means Chrome DevTools Protocol, a way for software to control a browser.
 
-**Data flow**: It scans extension manifests for CDP provider specs → rejects duplicate backend names → looks up the configured backend → returns `None` if none is registered for that name → otherwise builds the provider with a credential reader limited to that extension’s declared slots.
+**Data flow**: It scans extension manifests for CDP provider registrations, checks for duplicate backend names, looks up the configured provider, verifies credentials are available if needed, and returns a built provider or `None` if no active extension supplies it.
 
-**Call relations**: `run` calls this to put the selected provider into the runtime. `_require_cdp_provider` also calls it during required-feature validation so browser extensions fail at startup if no provider is available.
+**Call relations**: `run` calls this while building the runtime. `_require_cdp_provider` also calls it during extension requirement checks to fail early when a browser extension needs it.
 
 *Call graph*: called by 2 (_require_cdp_provider, run); 1 external calls (__init__).
 
 
-##### `_validate_requires`  (lines 510–534)
+##### `_validate_requires`  (lines 606–630)
 
 ```
 def _validate_requires(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Checks every extension’s declared required seams before the service starts. A seam is a plug-in point, such as search or browser control, that an extension depends on.
+**Purpose**: This checks every extension's declared runtime requirements at startup. It turns missing providers into clear boot errors instead of surprising failures during the first user action.
 
-**Data flow**: It reads each manifest’s `requires` list → looks up the matching checker in `_REQUIRED_SEAM_CHECKS` → runs that checker → wraps any failure with a message naming the extension and unavailable seam.
+**Data flow**: It reads each manifest's `requires` list, looks up the matching checker, and runs it against the current config, manifests, and credential store. If a seam is unknown or unavailable, it raises an error naming the extension and missing requirement.
 
-**Call relations**: `run` calls this after extension tools are validated and before building the rest of the runtime. It delegates actual checks to functions such as `_require_cdp_provider`, `_require_search_provider`, and `_require_memory_search`.
+**Call relations**: `run` calls this after loading manifests and credentials. It dispatches to requirement helpers such as `_require_cdp_provider`, `_require_search_provider`, and `_require_memory_search`.
 
 *Call graph*: called by 1 (run).
 
 
-##### `_require_cdp_provider`  (lines 537–551)
+##### `_require_cdp_provider`  (lines 633–647)
 
 ```
 def _require_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Enforces that a browser-control provider is available when an active extension requires one. It turns a missing optional browser backend into a clear startup error.
+**Purpose**: This enforces that a browser-control provider is available when an extension requires one. It makes browser features fail at startup if the provider is missing.
 
-**Data flow**: It receives config, manifests, and credentials → calls `_select_cdp_provider` → raises an error if the result is `None` → otherwise returns successfully.
+**Data flow**: It asks `_select_cdp_provider` to resolve the configured provider. If that returns `None`, it raises an error explaining that the required provider is not registered.
 
-**Call relations**: _validate_requires calls this when an extension declares the `cdp_providers` seam. It relies on `_select_cdp_provider` to do the actual provider lookup and credential checks.
+**Call relations**: `_validate_requires` calls this when an extension declares the `cdp_providers` requirement. It reuses the same selection logic that `run` uses for the actual runtime.
 
 *Call graph*: calls 1 internal fn (_select_cdp_provider).
 
 
-##### `_select_search_provider`  (lines 554–589)
+##### `_select_search_provider`  (lines 650–685)
 
 ```
 def _select_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> SearchProvider | None
 ```
 
-**Purpose**: Chooses the research search provider for this deployment. A search provider is the backend that external research tools use to search the web or another index.
+**Purpose**: This chooses the research search backend, if configured. A search provider is the service used by research tools to query the web or another search system.
 
-**Data flow**: It scans extension manifests for search provider specs → rejects duplicate backend names → returns `None` if config leaves search unset → otherwise verifies the configured provider exists and credentials are available → builds and returns the provider.
+**Data flow**: It scans extension manifests for search providers, checks for duplicate names, returns `None` if search is not configured, or builds the selected provider with scoped credential access. Unknown names or missing credential support raise startup errors.
 
-**Call relations**: `run` calls this to put the provider into the runtime. `_require_search_provider` calls it when an extension requires search, so missing or misconfigured search fails during startup.
+**Call relations**: `run` calls this to put search capability into the runtime. `_require_search_provider` calls it when an extension says search is mandatory.
 
 *Call graph*: called by 2 (_require_search_provider, run); 2 external calls (__init__, __init__).
 
 
-##### `_require_search_provider`  (lines 592–605)
+##### `_require_search_provider`  (lines 688–701)
 
 ```
 def _require_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Enforces that research search is configured and usable when an extension requires it. This avoids a user discovering the missing provider only after starting a research task.
+**Purpose**: This enforces that research tools have a configured and working search provider. It prevents a research extension from loading without the backend it needs.
 
-**Data flow**: It checks whether the search provider config value is set → raises a clear error if not → calls `_select_search_provider` to validate and build the selected backend.
+**Data flow**: It checks that the search provider setting is present, then calls `_select_search_provider` to verify and build it. If anything is missing or invalid, it raises a startup error.
 
-**Call relations**: _validate_requires calls this for extensions that declare the `search_providers` seam. It hands the detailed backend lookup to `_select_search_provider`.
+**Call relations**: `_validate_requires` calls this for extensions that require `search_providers`. It uses the normal search selection helper so validation and runtime behavior match.
 
 *Call graph*: calls 1 internal fn (_select_search_provider).
 
 
-##### `_require_memory_search`  (lines 608–634)
+##### `_require_memory_search`  (lines 704–730)
 
 ```
 def _require_memory_search(_config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Enforces that exactly one usable default memory-search provider is installed when an extension requires memory search. Memory search lets the system retrieve stored contextual information.
+**Purpose**: This enforces that exactly one default memory-search provider is available when required. Memory search is the feature that lets the system retrieve stored memories or indexed content.
 
-**Data flow**: It scans manifests for the default memory-search provider name → fails if none or more than one exists → checks whether declared credentials need a credential store → returns successfully only when the provider is unambiguous and usable.
+**Data flow**: It scans manifests for the default memory-search provider name, rejects none or multiple matches, and checks that credentials exist if the provider's extension declares credential slots. It returns nothing if the requirement is satisfied.
 
-**Call relations**: _validate_requires calls this for extensions that declare the `memory_search` seam. It does not build the provider itself; it checks that the later memory-search selection can work.
+**Call relations**: `_validate_requires` calls this when an extension declares the `memory_search` requirement. It is a startup-only readiness check.
 
 
-##### `_select_auth_proxy`  (lines 646–683)
+##### `_select_auth_proxy`  (lines 742–779)
 
 ```
 def _select_auth_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> AuthProxy | None
 ```
 
-**Purpose**: Chooses the fallback authentication proxy used by connector feed-sync credentials when a connector does not provide its own broker. An auth proxy is a host-side helper that can supply or exchange credentials without exposing them directly to sandboxes.
+**Purpose**: This chooses the fallback authentication proxy for connectors. That proxy helps connector sync read credentials in a controlled host-side way when a connector does not have its own broker.
 
-**Data flow**: It scans manifests for auth proxy specs → rejects duplicate names → chooses the configured backend, or the only installed backend if config is unset → fails if selection is ambiguous or unknown → builds the proxy with a restricted credential reader.
+**Data flow**: It gathers auth proxy registrations from manifests, checks duplicates, chooses the configured backend or the only available backend, verifies a credential store exists, and builds the proxy with scoped credential access. Ambiguous, unknown, or unkeyed choices raise errors.
 
-**Call relations**: _connector_registry calls this while building the connector registry. The selected proxy becomes the fallback path for connector credential resolution.
+**Call relations**: `_connector_registry` calls this while building the connector registry. The returned proxy becomes the fallback path for connector credential resolution.
 
 *Call graph*: called by 1 (_connector_registry); 2 external calls (__init__, __init__).
 
 
-##### `_mount_ext_routes`  (lines 686–724)
+##### `_mount_ext_routes`  (lines 782–820)
 
 ```
 def _mount_ext_routes(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, index: IndexBackend, embed: EmbedClient) -> None
 ```
 
-**Purpose**: Adds extension-defined HTTP routes to the FastAPI app under `/ext/<extension-name>/...`. Each route must identify a workspace before the handler can run.
+**Purpose**: This mounts extension-provided HTTP routes under `/ext/<extension>/...`. It makes sure each request is identified and bound to a workspace before extension code can run.
 
-**Data flow**: It walks every manifest’s route specs → builds an extension context with declared credential limits and index/embed access → creates an endpoint wrapper for each route → registers the route on the app.
+**Data flow**: It reads extension route declarations, creates an extension context for each manifest, and adds FastAPI routes. If an extension serves routes but credentials are not configured, it raises an error.
 
-**Call relations**: `run` calls this after jobs are launched and before shared surfaces are mounted. The nested endpoint function becomes the actual FastAPI handler for each extension route.
+**Call relations**: `run` calls this after core setup and before the server starts. The nested `endpoint` function is the actual request wrapper for each mounted extension route.
 
 *Call graph*: called by 1 (run); 2 external calls (add_route, context_for).
 
 
-##### `_mount_ext_routes.endpoint`  (lines 708–718)
+##### `_mount_ext_routes.endpoint`  (lines 804–814)
 
 ```
 async def endpoint(request: Request, handler=spec.handler, identify=spec.identify, extension_context=context) -> Response
 ```
 
-**Purpose**: Authorizes and runs one extension route request. It refuses the request if the extension cannot identify a workspace, and otherwise runs the handler inside that workspace’s scope.
+**Purpose**: This is the per-request wrapper for one extension route. It verifies which workspace the request belongs to before calling the extension's handler.
 
-**Data flow**: It receives an HTTP request → calls the route’s identify function → returns a 401 response if no workspace is found → otherwise enters the workspace context and calls the extension’s handler → returns the handler’s response.
+**Data flow**: It receives a web request, asks the route's identify function for a workspace, returns a 401 response if identification fails, otherwise binds that workspace and calls the extension handler with its context and request. The handler's response is returned to the client.
 
-**Call relations**: This wrapper is registered by `_mount_ext_routes` as the route handler. It hands successful requests to extension code only after binding the workspace with `ws(...)`.
+**Call relations**: FastAPI calls this when a matching `/ext/...` route receives a request. It is created by `_mount_ext_routes` and uses the workspace binding helper so downstream code reads the right tenant data.
 
 *Call graph*: 2 external calls (Response, ws).
 
 
-##### `WorkspaceScopeBoundary.__call__`  (lines 745–753)
+##### `WorkspaceScopeBoundary.__call__`  (lines 841–849)
 
 ```
 async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None
 ```
 
-**Purpose**: Clears workspace context at the beginning and end of each HTTP request. This protects a shared process from accidentally reusing a workspace value left over from another request task.
+**Purpose**: This middleware clears workspace state at the start and end of every HTTP request. It protects one workspace's data from leaking into another request through leftover context.
 
-**Data flow**: It receives the low-level ASGI request scope, receive function, and send function → passes non-HTTP traffic through untouched → for HTTP, clears the current workspace, runs the downstream app, and clears the workspace again in a final cleanup step.
+**Data flow**: It receives the ASGI request scope and send/receive functions. For non-HTTP traffic it passes through unchanged; for HTTP it clears the current workspace, lets the app handle the full response, and clears the workspace again in a final cleanup step.
 
-**Call relations**: _mount_shared_surfaces installs this as middleware. Surface endpoints set `current_workspace` for valid requests, and this boundary guarantees that setting does not leak beyond the full streamed response.
+**Call relations**: `_mount_shared_surfaces` installs this middleware on the FastAPI app. Shared surface endpoints set the workspace during a request, and this boundary guarantees cleanup after streaming or errors.
 
 *Call graph*: 1 external calls (set).
 
 
-##### `_mount_shared_surfaces`  (lines 756–873)
+##### `_mount_shared_surfaces`  (lines 852–1008)
 
 ```
 def _mount_shared_surfaces(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: BlobStore, sandboxes: ConversationSandbox, hub: Hub, dbos_client: DBOSClient, artif
 ```
 
-**Purpose**: Adds shared surface routes to the FastAPI app and ensures every request is tied to the workspace proven by that surface’s authentication. A surface is a user-facing integration point, such as a chat or product UI endpoint.
+**Purpose**: This mounts the shared member-facing surface routes under `/surface/...`. A surface is a user-facing integration point, such as a web UI or chat-like entry point, and each request must resolve to a workspace.
 
-**Data flow**: It installs the workspace-scope middleware → builds shared admission, hub-tailing, extension, credential, model, skill, memory, and object-schema context pieces → walks every surface route in every manifest → wraps each route with workspace identification → registers routes and optionally starts a writeback poller for durable surfaces.
+**Data flow**: It receives the app plus runtime services such as credentials, blob storage, sandboxes, hub, DBOS client, models, skills, memory, and objects. It prepares shared context builders, registers routes for every surface, installs workspace cleanup middleware, mounts the home redirect, and creates a writeback poller when durable surfaces need one.
 
-**Call relations**: `run` calls this after extension routes are mounted. It creates the nested `context_for` helper used by route handlers and writeback polling, and the nested endpoint wrapper used for each surface route.
+**Call relations**: `run` calls this after the runtime is ready. It creates nested `context_for` and `endpoint` helpers; those are used later whenever a surface request arrives.
 
-*Call graph*: called by 1 (run); 13 external calls (__init__, __init__, __init__, __init__, __init__, add_middleware, add_route, core_object_kinds, durable_surfaces, declared_slots (+3 more)).
+*Call graph*: calls 2 internal fn (_mount_home, index); called by 1 (run); 19 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, add_middleware, add_route (+9 more)).
 
 
-##### `_mount_shared_surfaces.context_for`  (lines 808–829)
+##### `_mount_shared_surfaces.context_for`  (lines 936–963)
 
 ```
 def context_for(workspace_id: UUID, surface: str) -> SurfaceContext
 ```
 
-**Purpose**: Builds the per-request context object that a surface handler uses. This context is like a backpack containing the tools and limits for one surface acting in one workspace.
+**Purpose**: This builds the `SurfaceContext` handed to a surface handler for one workspace. The context is the surface's toolbox: admission, tailing, stopping, credentials, blob storage, sandboxes, models, skills, memory, and object schemas.
 
-**Data flow**: It receives a workspace ID and surface name → combines them with blob storage, sandbox access, admission, hub tailing, credentials, public URLs, models, skills, memory, and object schemas → returns a `SurfaceContext`.
+**Data flow**: It receives a workspace ID and surface name, combines them with the services captured by `_mount_shared_surfaces`, and returns a fully populated `SurfaceContext`. It also includes deployment details such as home surface, available models, sandbox sizes, and extension metadata.
 
-**Call relations**: This helper is created inside `_mount_shared_surfaces`. The surface endpoint wrapper calls it for each authorized request, and the writeback poller uses it when delivering durable surface updates.
+**Call relations**: The nested surface `endpoint` calls this after identifying a workspace. The writeback poller also uses it to perform durable writeback work under the correct workspace.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (home_surface); 2 external calls (__init__, __init__).
 
 
-##### `_mount_shared_surfaces.endpoint`  (lines 845–859)
+##### `_mount_shared_surfaces.endpoint`  (lines 979–993)
 
 ```
 async def endpoint(request: Request, handler=route.handler, identify=resolver, surface=spec.name, surface_auth=auth) -> Response
 ```
 
-**Purpose**: Authorizes and runs one shared surface route request. It lets the surface decide which workspace the request belongs to, then binds that workspace for the full handler execution.
+**Purpose**: This is the per-request wrapper for a shared surface route. It authenticates or identifies the request, binds the workspace, and then calls the surface's real handler.
 
-**Data flow**: It receives an HTTP request → asks the surface identify function to authenticate it using `SurfaceAuth` → returns a custom response or 401 if identification fails → sets the current workspace → builds a `SurfaceContext` → calls the surface route handler and returns its response.
+**Data flow**: It receives a request, calls the surface's identify function with surface authentication helpers, and handles three outcomes: a ready-made response, unauthorized/no workspace, or a workspace ID. For a workspace ID, it stores that workspace in the current request context and returns the handler's response.
 
-**Call relations**: _mount_shared_surfaces registers this wrapper for each surface route. It relies on `context_for` to supply the handler with workspace-specific tools and on `WorkspaceScopeBoundary` to clear the workspace afterward.
+**Call relations**: FastAPI calls this for matching `/surface/...` routes. It is created by `_mount_shared_surfaces` and relies on `WorkspaceScopeBoundary` to clear the workspace after the response is done.
 
-*Call graph*: 3 external calls (Response, set, context_for).
+*Call graph*: 2 external calls (Response, set).
 
 
-##### `_serve_lifespan`  (lines 877–901)
+##### `home_surface`  (lines 1011–1018)
+
+```
+def home_surface(manifests: tuple[Manifest, ...]) -> str | None
+```
+
+**Purpose**: This finds the one surface that should act as the browser home page. It prevents a deployment from claiming two different default front doors.
+
+**Data flow**: It scans all surface declarations for those marked as home. If more than one is found, it raises an error; if exactly one is found, it returns that surface name; otherwise it returns `None`.
+
+**Call relations**: `_mount_home` uses this to decide whether `/` should redirect anywhere. `_mount_shared_surfaces.context_for` also includes the home surface name in the context it gives to handlers.
+
+*Call graph*: called by 2 (_mount_home, context_for).
+
+
+##### `_mount_home`  (lines 1021–1033)
+
+```
+def _mount_home(app: FastAPI, manifests: tuple[Manifest, ...]) -> None
+```
+
+**Purpose**: This makes the bare root URL `/` redirect to the configured home surface. Without it, visiting the service host directly would show a missing page when a home surface exists.
+
+**Data flow**: It asks `home_surface` for the home surface name. If there is none, it does nothing; otherwise it creates a small route that redirects browsers to `/surface/<home>`.
+
+**Call relations**: `_mount_shared_surfaces` calls this after mounting surface routes. Its nested `home` function handles the actual `GET /` request.
+
+*Call graph*: calls 1 internal fn (home_surface); called by 1 (_mount_shared_surfaces); 1 external calls (add_route).
+
+
+##### `_mount_home.home`  (lines 1030–1031)
+
+```
+async def home(_request: Request) -> Response
+```
+
+**Purpose**: This route handler redirects a browser from `/` to the selected home surface. It is a simple doorway into the real surface UI.
+
+**Data flow**: It receives the incoming request, ignores its details, and returns a 303 redirect response pointing to the home surface path.
+
+**Call relations**: FastAPI calls it for `GET /` after `_mount_home` registers it. The destination surface then decides whether to show content or sign-in.
+
+*Call graph*: 1 external calls (RedirectResponse).
+
+
+##### `_serve_lifespan`  (lines 1037–1060)
 
 ```
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]
 ```
 
-**Purpose**: Runs app-loop background tasks for the lifetime of the FastAPI app. These tasks recover stranded workflows, reconcile cancellations, and, when needed, deliver durable surface writebacks.
+**Purpose**: This runs app-loop background tasks while the FastAPI server is alive. These tasks recover stranded workflows, reconcile cancellation, and optionally poll durable surface writebacks.
 
-**Data flow**: When the app starts, it creates an async task group → starts executor recovery and cancel reconciliation tasks, plus a writeback poller if one exists → yields control while the app runs → on shutdown, cancels those tasks.
+**Data flow**: When the app starts, it creates a task group and starts recovery, cancel reconciliation, and possibly writeback polling. When the app shuts down, it cancels those tasks before leaving the lifespan block.
 
-**Call relations**: `run` passes this function as the FastAPI lifespan handler. It uses objects placed in `app.state` during startup, such as recovery, DBOS client, and optional writeback poller.
+**Call relations**: `run` passes this as the FastAPI lifespan handler. It does not run the heartbeat; the heartbeat is started earlier in `run` on a separate thread so worker liveness is independent of the web app loop.
 
-*Call graph*: 2 external calls (__init__, TaskGroup).
+*Call graph*: 3 external calls (__init__, __init__, TaskGroup).
 
 
-##### `_proxy_endpoint`  (lines 904–932)
+##### `_proxy_endpoint`  (lines 1063–1091)
 
 ```
 def _proxy_endpoint(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, blob: BlobStore) -> ProxyEndpoint
 ```
 
-**Purpose**: Chooses how sandboxes reach the egress proxy, which is the controlled gateway for network access from sandboxed runs. It supports either an in-process local proxy or a separately deployed shared proxy.
+**Purpose**: This decides how sandboxes reach the outside world through an egress proxy. The proxy is the controlled exit gate that enforces network and credential rules for sandboxed code.
 
-**Data flow**: It reads sandbox proxy configuration → if no public proxy URL is configured, starts a local proxy via `_local_egress_proxy` → otherwise reads the shared proxy CA certificate from the environment → returns a `ProxyEndpoint` describing the proxy port, trust certificate, and public URL.
+**Data flow**: It reads sandbox proxy configuration. If no public proxy URL is configured, it starts a local in-process proxy and returns its endpoint; otherwise it reads the shared proxy certificate from the environment and returns an endpoint pointing at the external proxy.
 
-**Call relations**: `run` calls this while building the `ConversationSandbox`. It delegates local single-node setup to `_local_egress_proxy` and directly builds the endpoint for hosted multi-node deployments.
+**Call relations**: `run` calls this while constructing the conversation sandbox system. If local mode is needed, it delegates to `_local_egress_proxy`.
 
 *Call graph*: calls 1 internal fn (_local_egress_proxy); called by 1 (run); 1 external calls (__init__).
 
 
-##### `_local_egress_proxy`  (lines 935–973)
+##### `_local_egress_proxy`  (lines 1094–1132)
 
 ```
 def _local_egress_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, blob: BlobStore) -> ProxyEndpoint
 ```
 
-**Purpose**: Starts an in-process egress proxy for local or single-node deployments. It runs on its own event loop in a background thread so sandbox network control is separate from normal request and turn handling.
+**Purpose**: This starts a local egress proxy inside the service process for single-node deployments. It gives sandboxes one controlled route to models, artifacts, connectors, and allowed internet hosts.
 
-**Data flow**: It creates a new async event loop → starts that loop in a daemon thread → schedules the nested `_boot` coroutine on it → waits up to the startup timeout → returns the proxy endpoint produced by `_boot`.
+**Data flow**: It creates a new event loop on a daemon thread, boots the proxy asynchronously there, waits up to the startup timeout, and returns the resulting proxy endpoint. The proxy uses generated certificate authority material because it is local and temporary.
 
-**Call relations**: _proxy_endpoint calls this when there is no configured external proxy URL. Its nested `_boot` function builds the proxy rules, certificate authority, and server.
+**Call relations**: `_proxy_endpoint` calls this when there is no external proxy URL. Its nested `_boot` coroutine builds the actual proxy rules and starts the proxy server.
 
 *Call graph*: called by 1 (_proxy_endpoint); 3 external calls (new_event_loop, run_coroutine_threadsafe, Thread).
 
 
-##### `_local_egress_proxy._boot`  (lines 953–971)
+##### `_local_egress_proxy._boot`  (lines 1112–1130)
 
 ```
 async def _boot() -> ProxyEndpoint
 ```
 
-**Purpose**: Builds and starts the actual local egress proxy service. It creates the rule resolver that decides what each sandboxed agent may access, then starts the proxy with fresh local trust material.
+**Purpose**: This asynchronous boot step builds the local proxy's rules and starts the proxy server. It defines what sandbox traffic is allowed and how per-agent authorization is checked.
 
-**Data flow**: It derives model, artifact, manifest, connector, credential-injection, and transfer-host rules → creates grant and credential-aware per-agent rules → generates a temporary certificate authority → starts `EgressProxy` on the configured port → returns its `ProxyEndpoint`.
+**Data flow**: It builds rule resolvers from model rules, artifact-store rules, manifest network rules, connector transfer hosts, credentials, grants, and connector command-line tools. It generates a certificate authority, starts an `EgressProxy` on the configured port, and returns the endpoint the sandbox should use.
 
-**Call relations**: This coroutine is scheduled by `_local_egress_proxy` on the proxy’s separate event loop. It hands rule resolution and live-turn authorization into `EgressProxy` so network requests can be checked as they happen.
+**Call relations**: It is scheduled by `_local_egress_proxy` onto the proxy's dedicated event loop. It hands the finished endpoint back to `_local_egress_proxy`, which returns it to `_proxy_endpoint` and ultimately to the sandbox runtime.
 
 *Call graph*: 10 external calls (__init__, __init__, __init__, connector_clis, injecting_slots, model_rule_base, connector_transfer_hosts, derive_artifact_store_rules, derive_manifest_rules, generate_ca).
 
 
-##### `_connector_registry`  (lines 979–1002)
+##### `_connector_registry`  (lines 1138–1161)
 
 ```
 def _connector_registry(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> ConnectorRegistry
 ```
 
-**Purpose**: Builds the central registry of installed connector providers. Connectors are integrations that can authenticate to outside services and provide tools or synced feeds.
+**Purpose**: This builds the registry of installed connector providers. Connectors are integrations that can authorize with outside services and sync or transfer data.
 
-**Data flow**: It scans all manifests for connector declarations → rejects duplicate provider names → creates one registry entry per provider with its label and broker information → selects a fallback auth proxy → returns a `ConnectorRegistry` with namespace resolution.
+**Data flow**: It scans manifests for connector declarations, rejects duplicate provider names, creates registry entries, opens the connector namespace resolver, selects the fallback auth proxy, and returns a `ConnectorRegistry`.
 
-**Call relations**: `run` calls this before building the runtime. It calls `_select_auth_proxy` for the fallback credential path and supplies the resulting registry to runtime tools and source syncing.
+**Call relations**: `run` calls this during runtime setup. The runtime and sync system later use the registry to route connector tools and resolve feed-sync credentials.
 
 *Call graph*: calls 1 internal fn (_select_auth_proxy); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
 
 
-##### `_connect_flow`  (lines 1005–1030)
+##### `_connect_flow`  (lines 1164–1189)
 
 ```
 def _connect_flow(credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...]) -> ConnectFlow | None
 ```
 
-**Purpose**: Builds the OAuth connect flow for installed connectors. OAuth is the common browser-based permission handoff where a user authorizes access to an external service.
+**Purpose**: This builds the OAuth connect flow for connector authorization. OAuth is the common browser-based process where a user grants this app access to another service.
 
-**Data flow**: It receives credentials, config, and manifests → returns `None` if no credential store exists → collects OAuth provider descriptors from connectors while rejecting duplicates → computes the public callback URI → creates a `ConnectFlow` with encryption, grant storage, and namespace resolution.
+**Data flow**: If no credential store exists, it returns `None` because grants cannot be safely stored. Otherwise it gathers connector OAuth providers, checks for duplicate provider names, derives the redirect URI, and returns a `ConnectFlow` with encryption and grant storage.
 
-**Call relations**: `run` calls this and installs the result globally with `install_connect_flow`. It calls `_connect_redirect_uri` to make sure the callback URL is valid before OAuth can be used.
+**Call relations**: `run` installs the result so tools, surfaces, and the OAuth callback route can all use the same connect flow. It calls `_connect_redirect_uri` to validate the externally visible callback address.
 
 *Call graph*: calls 1 internal fn (_connect_redirect_uri); called by 1 (run); 3 external calls (__init__, __init__, open_connector_namespace).
 
 
-##### `_connect_redirect_uri`  (lines 1033–1057)
+##### `_connect_redirect_uri`  (lines 1192–1218)
 
 ```
 def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str
 ```
 
-**Purpose**: Builds and validates the public OAuth callback URL for connector authentication. This URL must be reachable by external providers after the user approves access.
+**Purpose**: This computes and validates the public OAuth callback URL. The callback URL must be something the user's browser and the external provider can actually open.
 
-**Data flow**: It reads `connect.public_base_url` from config and the provider map → if no providers exist, returns an inert callback path or empty string → otherwise requires a URL with `http` or `https`, a host, and a non-local bind address → returns the base URL plus the callback path.
+**Data flow**: It reads `connect.public_base_url` from configuration and the set of registered providers. If no providers exist, it may return an empty or simple callback value; if providers exist, it requires a real HTTP or HTTPS URL with a host and rejects wildcard bind addresses like `0.0.0.0`.
 
-**Call relations**: _connect_flow calls this while creating the OAuth connect flow. Its validation prevents connector setup from using addresses like `127.0.0.1` or `0.0.0.0` that an external provider cannot redirect to.
+**Call relations**: `_connect_flow` calls this before constructing the connect flow. Its return value is the redirect URI that both the outbound OAuth request and inbound callback must agree on.
 
 *Call graph*: called by 1 (_connect_flow); 1 external calls (urlparse).
 
-
-### Assistant pack variants
-These manifests define the main assistant-oriented bundles for development, billing, evaluation, and hosted deployments.
-
-### `packs/assistant_billing/ufo_pack_assistant_billing.py`
-
-`config` · `config load / startup`
-
-This file is a small configuration bridge between the local assistant setup and the hosted billing system. In this project, a “pack” is a named bundle of extensions that tells the system which capabilities to turn on. The regular local assistant pack does not include Metronome, the billing provider, because most development setups should not send usage data to a real billing service. The hosted assistant pack does include billing, but it also includes hosted-only services that are not useful on a laptop.
-
-This file creates the missing middle option: `assistant_billing`. It starts with all extensions from the normal assistant pack, then adds `metronome`. Choosing this pack enables billing-related behavior such as billing setup, billing activation, and shipping usage or seat information to Metronome. Because that requires real external credentials, it is deliberately not the default. A developer must opt in and should use sandbox or test-mode keys.
-
-Without this file, the “Set up billing” action offered during hosted onboarding would have no simple local equivalent to exercise end to end. It is like adding one special adapter to a test bench: the rest of the assistant stays local, but the billing wire is connected so the full circuit can be checked.
-
-#### Function details
-
-##### `pack`  (lines 25–26)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: This function builds and returns the pack definition for the `assistant_billing` bundle. The system uses it to learn the pack’s name, version, and which extensions should be enabled.
-
-**Data flow**: It reads the fixed pack name and version from this file, and reads the assistant extension list imported from the normal assistant pack. It adds the `metronome` extension to that list, then creates a `Pack` object containing the combined information and returns it.
-
-**Call relations**: When the pack system loads this file, it calls `pack` to get the concrete pack description. Inside, `pack` hands the name, version, and extension list to `Pack.__init__`, which turns those plain values into the structured object the rest of the system can use during startup.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `packs/assistant_dev/ufo_pack_assistant.py`
-
-`config` · `config load`
-
-A pack is like a pre-packed toolbox. Instead of asking an operator to turn on memory, web research, browser tools, document creation, connectors, coding help, and other features one by one, this file names one bundle called “assistant” that brings them up together.
-
-The file is intentionally small. It sets a pack name, a version, and a fixed list of extensions. Each extension is a separate capability area, such as durable memory, search-backed research, browser automation, scheduled tasks, website building, document generation, connector integrations, coding support, and debugging tools. The long comment at the top explains the important design choice: this pack runs on the project’s own local carrier and index, rather than relying on managed hosted infrastructure. That is what separates it from a hosted assistant pack.
-
-This file does not add its own tools, skills, or onboarding text. It only chooses which extension manifests are included. In everyday terms, it is not building the tools; it is deciding which tools are placed in the assistant’s kit. Without this file, users could not activate this exact assistant setup by simply choosing the “assistant” pack name.
-
-#### Function details
-
-##### `pack`  (lines 48–49)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: This function creates the pack description that the larger system can load. Someone would use it when they want the system to know the pack’s name, version, and exact list of extensions to activate.
-
-**Data flow**: It reads the file’s constants: the pack name, version, and extension list. It passes those values into a `Pack` object, which is the structured form the rest of the system understands. The result is a ready-to-use pack manifest; it does not change anything else by itself.
-
-**Call relations**: When the pack system loads this file, it calls `pack` to obtain the manifest. Inside, `pack` hands the name, version, and extension list to `Pack.__init__`, which packages that information into the standard object used by the rest of the configuration flow.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `packs/assistant_eval/ufo_pack_assistant_eval.py`
-
-`config` · `startup/config load`
-
-This file is a small manifest for an evaluation-only tool pack. A “pack” is a named bundle of extensions that the system can load from configuration. Here, the goal is to create a safe and predictable environment for testing assistant conversations.
-
-It starts from the regular assistant pack, then filters out real broker providers such as Composio and Pipedream. Those services normally need real API keys and live accounts. In an evaluation run, they would only create confusing dead ends, because the assistant could see them but could not successfully use them. Instead, this pack adds “eval_env”, which provides deterministic fake services like email, calendar, and code search, and “docker”, which lets each evaluated conversation use a real bind-mounted workspace directory.
-
-The important idea is separation. The fake evaluation providers should not be included in the normal product assistant pack, because tool registry entries may be visible even when the user has not granted access. This eval pack keeps test-only tools in the test-only environment, like putting practice equipment in a training room rather than in the real workplace.
-
-#### Function details
-
-##### `pack`  (lines 26–27)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: This function builds and returns the pack description for the evaluation assistant environment. The system can call it to learn the pack’s name, version, and the exact extension list it should load.
-
-**Data flow**: It reads the file-level constants for the pack name, version, and chosen extensions. It passes those values into the Pack object, which becomes the final structured description returned to the caller.
-
-**Call relations**: When the pack-loading system discovers this module, it calls `pack` to get the manifest. `pack` then hands the prepared values to `Pack.__init__`, so the rest of the system receives a standard Pack object rather than having to understand this file’s filtering rules itself.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `packs/assistant_hosted/ufo_pack_assistant_hosted.py`
-
-`config` · `config load / startup`
-
-Think of this file like the packing list for a hosted product edition. It does not implement memory, Slack, browser use, billing, coding tools, or document generation itself. Instead, it names the pieces that should be turned on together so the rest of the system can assemble them consistently.
-
-The hosted assistant pack includes many assistant capabilities: memory and recall, research tools, connectors to outside services, browser and computer-use tools, website and document creation, scheduled tasks, Slack support, a web portal, model providers, usage metering, and more. The important difference is that several heavy parts are backed by managed infrastructure. For example, search indexing uses Turbopuffer, live coordination uses Redis, browser sessions use Browserbase-hosted Chrome, and sandboxed code execution uses E2B.
-
-The file also points to one packaged skill, `customer-onboarding-help`. A skill here is a bundled set of assistant knowledge or behavior. This one gives the hosted workspace a curated, read-only source of onboarding facts, so the assistant can answer product setup and billing questions from shipped content rather than relying on a customer’s own workspace memory.
-
-Without this file, choosing `assistant_hosted` would not give the system a clear recipe for which hosted services, tools, and bundled knowledge to activate.
-
-#### Function details
-
-##### `pack`  (lines 64–70)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: Builds and returns the pack description that the system uses to activate the hosted assistant. Someone would use it when loading this pack so the platform knows its name, version, enabled extensions, and included skill folders.
-
-**Data flow**: It starts with constants in this file: the pack name, version, the list of extension names, the folder where skills live, and the skill names. It turns each skill name into a `SkillSpec`, which is a small description pointing at that skill’s directory. It then puts everything into a `Pack` object and returns that object to the caller.
-
-**Call relations**: When the pack-loading part of the system asks this module for its pack definition, `pack` creates the manifest. During that work it hands each skill path to `SkillSpec.__init__` so the skill can be described, then hands the full name, version, extensions, and skill specs to `Pack.__init__` so the final pack object can be used by the wider system.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### Specialized pack manifests
-These manifests define domain-specific, evaluation, sample, and YC founder bundles that can be selected as named packs.
-
-### `packs/chief_of_staff/ufo_pack_chief_of_staff.py`
-
-`config` · `startup`
-
-This file is the pack’s manifest, which is like a label on a toolbox saying what is inside and what it needs to work. The pack is meant to act as a chief-of-staff assistant for one person. It brings together meeting notes, Slack channels, people files, org charts, daily logs, todos, scheduled syncs, and self-improvement workflows so the user can review and approve suggested updates from Slack.
-
-The file does not implement the actual workflows itself. Instead, it names the pack, gives it a version, lists the system extensions it depends on, and points to four skill folders: setup, sync, prep, and triage. Those skills are where the user-facing behavior lives. For example, setup is done through conversation, sync reviews new information and proposes updates, prep creates a one-on-one meeting brief, and triage captures the user’s judgment so future runs get better.
-
-Without this file, the system would not know that these skills and extensions belong together as one deployable pack. It is the entry in the catalog that lets the broader UFO runtime load the chief-of-staff assistant as a coherent unit.
-
-#### Function details
-
-##### `pack`  (lines 40–46)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: This function builds and returns the pack description that the UFO system can load. Someone would use it when registering or starting this pack so the runtime knows its name, version, required extensions, and available skills.
-
-**Data flow**: It starts with the constants in this file: the pack name, version, extension names, the skills directory, and the skill names. It turns each skill name into a SkillSpec pointing at that skill’s folder, then wraps everything in a Pack object. The result is a complete pack manifest; it does not write files or change outside state.
-
-**Call relations**: When the UFO pack loader asks this module what it provides, this function is the answer. It creates SkillSpec objects for the four skill folders, then hands those along to Pack so the larger system can load the extensions and expose the skills together.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `packs/dsqa_eval/ufo_pack_dsqa_eval.py`
-
-`config` · `startup`
-
-This file is like a menu of tool bundles. Instead of making every part of the system choose extensions one by one, it gives names to three useful combinations: a core DSQA pack, a search-enabled pack, and a browser-enabled pack.
-
-The shared version number keeps all three packs labeled consistently. The base extension list includes the default index, OpenAI embedding support, and OpenRouter model access. The core pack uses just those basics. The search pack builds on that by adding Exa and research tools, so it can look things up. The browser pack builds on the search pack again by adding browser and Chrome sandbox support, so it can interact with web pages more directly.
-
-Each function returns a `Pack`, which is a manifest object from `ufo.sdk.manifest`. In plain terms, that object is the system’s written record of “this pack is called X, it is version Y, and it includes these extensions.” Without this file, users or automation would have to recreate these exact extension combinations elsewhere, making setup more error-prone and less consistent.
-
-#### Function details
-
-##### `core_pack`  (lines 13–14)
-
-```
-def core_pack() -> Pack
-```
-
-**Purpose**: Creates the basic DSQA pack. Someone would use this when they need the core DSQA evaluation setup without search or browser extras.
-
-**Data flow**: It reads the fixed core pack name, version, and core extension list from this file. It passes those values into `Pack.__init__`, which builds a `Pack` manifest object. The result is returned to the caller as the ready-to-use core pack definition.
-
-**Call relations**: This function is a simple pack factory. When called, it hands the name, version, and extension list to `Pack.__init__` so the shared manifest type can create the actual pack object.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `search_pack`  (lines 17–18)
-
-```
-def search_pack() -> Pack
-```
-
-**Purpose**: Creates the DSQA pack that includes search and research capabilities. Someone would use this when evaluation work needs access to external information lookup tools.
-
-**Data flow**: It reads the fixed search pack name, version, and search extension list. That list includes the base extensions plus search-related additions. It sends those values to `Pack.__init__` and returns the resulting `Pack` manifest object.
-
-**Call relations**: This function builds on the same pattern as the core pack, but with a larger extension set. Its only handoff is to `Pack.__init__`, which turns the chosen settings into a manifest object.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `browser_pack`  (lines 21–22)
-
-```
-def browser_pack() -> Pack
-```
-
-**Purpose**: Creates the most capable DSQA pack in this file, including browser automation support. Someone would use this when the evaluation needs both search tools and the ability to work through a browser environment.
-
-**Data flow**: It reads the fixed browser pack name, version, and browser extension list. That list includes the search extensions plus browser and sandboxed Chrome support. It passes everything to `Pack.__init__` and returns the completed `Pack` manifest.
-
-**Call relations**: This function is the final, largest bundle in the file. When called, it delegates object creation to `Pack.__init__`, giving it the browser pack’s name and full extension list.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `packs/gdpval_eval/ufo_pack_gdpval_eval.py`
-
-`config` · `startup / pack discovery`
-
-This file is like a menu for assembling the GDPVal evaluation environment. A “pack” is a bundle of capabilities that the UFO system can load together. Instead of making every user remember a long list of extension names, this file gives those lists clear names.
-
-It starts by naming the shared version and the extension groups. The base group includes the default index, OpenAI embeddings, and OpenRouter access. Then there are optional groups: one for working with documents and code-like tasks, and another for web research and browser-based work.
-
-The four functions each return a Pack object, which is the manifest object the wider system understands. The core pack gives only the common base tools. The documents pack adds document, REPL, and coding support. The research pack adds search, research, browser, and sandboxed Chrome support. The full pack combines everything.
-
-Without this file, callers would need to manually recreate these exact extension combinations. That would make setup more error-prone, especially if different parts of the project accidentally used slightly different bundles.
-
-#### Function details
-
-##### `core_pack`  (lines 13–14)
-
-```
-def core_pack() -> Pack
-```
-
-**Purpose**: Creates the smallest GDPVal pack. Someone would use this when they only need the common base extensions and do not need document tools or research tools.
-
-**Data flow**: It takes no input from the caller. It reads the fixed core name, version, and base extension list from this file, then builds a Pack object with those values. The result is a ready-to-load pack named for the core GDPVal setup.
-
-**Call relations**: When the system or a user asks for the core GDPVal pack, this function constructs it by calling Pack.__init__. It hands Pack the name, version, and extension list so the wider UFO system can later load those extensions together.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `documents_pack`  (lines 17–22)
-
-```
-def documents_pack() -> Pack
-```
-
-**Purpose**: Creates a GDPVal pack for document-heavy work. It includes the base capabilities plus tools for documents, interactive execution, and coding support.
-
-**Data flow**: It takes no caller input. It combines the shared base extensions with the document-related extensions, then passes that combined list along with the document pack name and version into a new Pack object. The output is a configured pack for document and coding workflows.
-
-**Call relations**: When something needs the document-focused GDPVal setup, this function is the factory that builds it. It calls Pack.__init__ with the combined extension set, leaving the actual pack object creation to the Pack class.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `research_pack`  (lines 25–30)
-
-```
-def research_pack() -> Pack
-```
-
-**Purpose**: Creates a GDPVal pack for research-style work. It includes the base capabilities plus extensions for search, research, browsing, and sandboxed browser use.
-
-**Data flow**: It receives no input. It joins the base extension list with the research extension list, then uses those values, the research pack name, and the shared version to create a Pack object. The output is a research-oriented pack ready for the system to load.
-
-**Call relations**: When the research version of the GDPVal environment is requested, this function prepares the manifest. It delegates the actual object construction to Pack.__init__, supplying the exact extension bundle needed for research tasks.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `full_pack`  (lines 33–38)
-
-```
-def full_pack() -> Pack
-```
-
-**Purpose**: Creates the most complete GDPVal pack. It includes the base tools, the document tools, and the research tools all together.
-
-**Data flow**: It takes no input from the caller. It combines all three extension groups defined in the file, then creates a Pack object using the full pack name and shared version. The result is an all-in-one pack for users who want every listed capability available.
-
-**Call relations**: When the full GDPVal setup is needed, this function assembles the complete extension bundle. It calls Pack.__init__ to turn the name, version, and combined extension list into the Pack object that the rest of the system can consume.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `packs/sample_pack/ufo_pack_sample.py`
-
-`config` · `pack discovery and onboarding`
-
-This is a conformance sample pack: a deliberately simple pack that acts like a real installed add-on. Its job is to exercise the boundary between the core system and external packs. That boundary matters because outside pack authors should only need the public `ufo.sdk` interface, not private project internals.
-
-The file declares basic pack facts such as its name, version, bundled extension, skill name, skill folder, and onboarding marker. The `pack()` function is the public entry point. When the system loads this pack, `pack()` returns a `Pack` object saying: include the `sample` extension, add a skill from the pack’s `skills/sample_pack_skill` folder, and run one onboarding step named `sample_pack_setup`.
-
-The onboarding step calls `_setup()`. That function writes `{"pack_onboarded": True}` into the pack’s scoped store under a fixed key. The store is durable project storage, not just a test log, so tests can later read the value back through the same public path the real system would use. In everyday terms, this file is like a smoke-test plug: if the plug fits and the light turns on, the pack seam is still working.
-
-#### Function details
-
-##### `_setup`  (lines 25–26)
-
-```
-async def _setup(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This asynchronous onboarding function records that the sample pack has been set up. It exists so the conformance test can prove that pack onboarding can write to the real scoped store.
-
-**Data flow**: It receives an `ExtensionContext`, which is the pack’s view of shared services such as storage. It writes the fixed key `pack:onboarded` with the value `{"pack_onboarded": True}` into `ctx.store`. Nothing is returned, but the store is changed so later code can read back proof that onboarding ran.
-
-**Call relations**: This function is not called directly in this file. Instead, `pack()` wraps it inside an `OnboardingStep`, and the wider pack-loading flow calls it when that onboarding step is executed.
-
-
-##### `pack`  (lines 29–36)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: This is the pack entry point the UFO pack loader asks for. It builds and returns a `Pack` description that tells the system what extension, skill, and onboarding step this sample pack contributes.
-
-**Data flow**: It reads the constants defined in this file, such as the pack name, version, bundled extension name, skill path, onboarding name, and setup function. It uses those values to create a `SkillSpec`, an `OnboardingStep`, and finally a `Pack`. The returned `Pack` is the complete public description of what this installed pack adds.
-
-**Call relations**: When the system discovers this pack, it calls `pack()` to learn what to activate. Inside that build step, `pack()` creates a `SkillSpec` for the skill folder, creates an `OnboardingStep` that points at `_setup`, and passes all of that into `Pack` so the loader can register the extension, skill, and onboarding work together.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### `packs/yc/ufo_pack_yc/manifest.py`
-
-`config` · `startup`
-
-This is a small “label on the box” file for a pack of YC-focused tools. A pack is a bundle of capabilities that the UFO system can install or load together. Without this manifest, the system would not know the pack’s identity, what supporting extensions it depends on, or where to find its skill folders.
-
-The file sets a few simple facts: the pack is called “yc”, its version is “0.1.0”, and it needs several extensions such as command-line support, memory, document handling, scheduled tasks, and todos. It also points to a local skills directory and lists two skills: “founder-operations” and “company-diligence”.
-
-The main function, `pack`, turns those plain constants into a `Pack` object the UFO framework can understand. For each skill name, it creates a `SkillSpec`, which is a small description saying where that skill lives on disk. In everyday terms, this file is like the table of contents and packing slip for this YC bundle: it does not perform the skills itself, but it tells the system what is inside and what must be available for the contents to work.
-
-#### Function details
-
-##### `pack`  (lines 23–29)
-
-```
-def pack() -> Pack
-```
-
-**Purpose**: Builds and returns the pack description that the UFO system uses to load the YC founder pack. It gathers the pack’s name, version, required extensions, and skill folder locations into one structured object.
-
-**Data flow**: It starts with the constants defined in this file: the pack name, version, extension names, the skills root folder, and the skill names. It converts each skill name into a path under the skills folder, wraps each path in a `SkillSpec`, and then places everything into a `Pack`. The result is a ready-to-use pack object; it does not change files or global state.
-
-**Call relations**: When the larger UFO framework asks this module what pack it provides, this function is the answer. It creates `SkillSpec` objects for the listed skills, then hands those along to `Pack.__init__` so the framework receives one complete manifest for loading the pack.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
 ## 📊 State Registers Touched
 
-- `reg-effective-configuration` — The final startup settings that decide how the service, security, sandbox, proxy, and enabled packs should behave.
-- `reg-extension-catalog` — The loaded list of extensions and packs that tells the system which extra tools, routes, jobs, skills, and backends exist.
-- `reg-durable-store-schema` — The shared database layout and migration version that all services rely on when saving or reading system records.
-- `reg-workspace-tenant-state` — The saved customer workspace boundary, including its owners, admins, limits, main agent, and tenant separation rules.
-- `reg-onboarding-claims-invites` — The temporary signup claims, email verification codes, invite records, and hosted gateway tokens used to admit new users.
-- `reg-agent-profile` — The saved assistant setup for each workspace, including model choice, audience, internet access, skills, and control settings.
-- `reg-credential-secret-store` — The encrypted store of workspace and connector secrets, plus the requests that say which secrets a tool or proxy may reveal.
-- `reg-sandbox-workspace-state` — The remembered sandbox workspace for a conversation, including its backend handle, files, runtime folder, and cleanup ownership.
-- `reg-egress-network-state` — The controlled network exit state, including proxy configuration, certificates, allowed destinations, metering, and last-moment credential injection.
-- `reg-skill-inventory` — The declared and user-created skill inventory, including skill ownership, dependencies, files, and the load order copied into a sandbox.
-- `reg-database-connection-pool` — The live database engine/session pool and transaction doorway shared by migrations, request handlers, workers, and shutdown cleanup.
-- `reg-sandbox-image-cache` — The built or validated sandbox runtime image/backend artifact that later sandbox launches reuse.
-- `reg-service-lifecycle-state` — The process-wide lifecycle state containing startup task handles, shutdown signals, and service cleanup hooks drained during teardown.
+- `reg-effective-config` — The deployment’s active settings, such as enabled services, limits, paths, providers, and safety options.
+- `reg-database-schema` — The agreed database layout and migration version that all stored records must follow.
+- `reg-onboarding-claims` — Temporary signup, email-verification, invitation, and workspace-claim records used while a user joins.
+- `reg-extension-pack-registry` — The selected packs and loaded extensions that decide which features, tools, routes, jobs, and backends exist.
+- `reg-extension-store` — Per-workspace extension pins and extension-owned settings saved so enabled add-ons survive restarts.
+- `reg-credential-vault` — Encrypted workspace secrets and short-lived brokered credentials used without exposing raw secrets to tools.
+- `reg-runtime-fleet` — The sign-in sheet of running server and worker instances used to detect active work, crashes, and abandoned turns.
+- `reg-background-job-schedule` — The durable list of background jobs and dispatch rules used to retry and run work outside user requests.
+- `reg-sandbox-workspace` — The per-conversation isolated workbench, including its handle, files, execution backend, and recorded file changes.
+- `reg-sandbox-network-policy` — The per-run rules and proxy state that decide what sandboxed code may reach on the internet and when secrets may be injected.
+- `reg-accounting-ledger` — Usage, cost, spend limits, prepaid balances, billing exports, and price versions for workspace spending.
+- `reg-observability-context` — Trace IDs, metrics, logs, and sanitized operational events used to understand work across services and turns.
+- `reg-database-connection-pool` — Per-process database engine/session pools and workspace-scoped connection context used by servers, workers, migrations, and persistence code.
+- `reg-outbound-delivery-queue` — Pending outbound surface writebacks and retry state for messages or notifications sent back to external channels such as Slack.
+- `reg-durable-workflow-state` — DBOS/workflow-runtime execution metadata for durable job and turn workflows, including workflow IDs, retries, scheduled starts, cancellation, and resume bookkeeping.

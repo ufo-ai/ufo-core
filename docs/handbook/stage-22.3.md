@@ -1,118 +1,118 @@
-# SDK Provider, Source, Model, and Sandbox Facades  `stage-22.3`
+# Public SDK connector, credential, and transport facades  `stage-22.3`
 
-This stage is shared behind-the-scenes support for extension authors. It does not do the main work itself. Instead, it provides stable “front doors” into parts of the system that may move around internally. That way, outside code can keep importing from the SDK without depending on private file locations.
+This stage is shared behind-the-scenes support for people writing extensions. It does not run the main work itself. Instead, it provides stable “front doors” into the SDK, so outside code can import approved tools without depending on deeper internal paths that may change.
 
-The browser module exposes safe browser connection interfaces. Connectors gathers the pieces needed to talk to external services, including login support such as OAuth, a standard web sign-in flow. Sources is for adding new content sources, with sync tools, REST helpers, pagination, and errors. Index opens the door to search indexes and embedding backends, which turn text into searchable numeric representations. Memory and search expose the public types used for memory lookup and general search. Models gathers model clients, message formats, tool-call blocks, and pricing helpers. Operator exposes web-session helpers meant only for operator use. Sandbox re-exports the public API for controlled execution environments. Together, these files act like a reception desk for plugins: they route authors to the right tools while shielding them from internal rearrangements.
+The connector and source doors work together for adding new data inputs. connectors.py exposes the pieces needed to register connector providers and OAuth-style sign-in flows, while sources.py exposes the types and errors used to sync content sources such as REST APIs. authproxy.py and credentials.py cover the handoff of login details and stored credentials, giving extensions only the credential tools they are meant to use. grants.py exposes grant and connection audit types, so extensions can refer to permission records in a stable way. bearer.py exposes token verification only, meaning code can check bearer tokens without gaining access to token creation secrets.
+
+The transport doors cover how extensions talk to users or outside environments. browser.py exposes browser connection interfaces, terminal.py exposes terminal transport and storage pieces, and operator.py exposes helpers for operator-only web sessions.
 
 ## Files in this stage
 
-### External Connectivity Facades
-Stable SDK import surfaces for browser transport, connector infrastructure, and source synchronization integrations.
+### Credential and authorization facades
+Stable SDK import paths for credential handoff, bearer-token verification, and grant or connection audit types.
+
+### `core/src/ufo/sdk/authproxy.py`
+
+`other` · `cross-cutting`
+
+This file exists to make the authentication extension point easier and safer to use. In this project, a connector may need a credential, such as a token or account secret, before it can talk to an outside provider. An extension can contribute an authentication backend by implementing `AuthProxy`, and can describe that backend with `AuthProxySpec` in its manifest. This file gathers those public pieces in one place.
+
+Think of it like a clearly marked service window. The real objects live elsewhere, mostly in `ufo.connectors` and `ufo.ext.manifest`, but extension authors are meant to come through this SDK-facing module instead of reaching into the building’s back rooms.
+
+It also documents the intended behavior. If there is only one authentication backend, the system can use it automatically. If there are several, configuration chooses one through `config.connectors.auth_backend`. That chosen backend resolves credentials for sources marked with `DIRECT_ACCOUNT`, meaning the member provided the provider credential directly. Sources connected through a broker get their credential through that broker instead.
+
+There is no executable logic here. Its value is as a stable public seam: other code can import these names from `ufo.sdk.authproxy` even if the internal module layout changes later.
+
+
+### `core/src/ufo/sdk/bearer.py`
+
+`util` · `request handling`
+
+This file is a small public doorway into the project’s bearer-token checking code. A bearer token is a short piece of text a client presents as proof that it has already been trusted, much like showing a stamped wristband at an event entrance. Surface extensions need to check these tokens, but they should not know or hold the signing secret used to create them.
+
+To keep that boundary clear, this file simply re-exports selected names from `ufo.bearer`: the login path, the session cookie name, and helper functions that verify a token and read trusted claims from it. The important design choice is that callers do not pass in the secret key. The underlying verification functions look up `UFO_TOKEN_SECRET` themselves. That means extensions can ask, “Is this token valid, and what workspace does it belong to?” without ever being able to mint their own trusted tokens.
+
+Without this file, extensions might import deeper internal modules directly, making the security boundary less obvious and harder to preserve. This file acts like a clearly labeled service window: extensions can check credentials here, but the key stays behind the counter.
+
+
+### `core/src/ufo/sdk/credentials.py`
+
+`data_model` · `cross-cutting`
+
+This file is like a clearly marked service counter in front of a storage room. The real credential code lives elsewhere, in `ufo.credentials`, but outside extensions should not have to reach directly into that internal area. Instead, this SDK file imports only the approved credential-related objects, errors, and helper functions, then makes them available from a stable public path.
+
+Credentials are sensitive pieces of information or proof, so it matters that the project exposes them carefully. By gathering the allowed names here, the codebase can say, “these are the credential tools extensions may touch.” That includes the credential store, error types for failed or invalid credential work, and helper functions for opening an installation, naming credential objects, and checking which workspace is authorized for a slot.
+
+There is no new behavior in this file. It does not create, check, store, or validate credentials by itself. Its job is boundary-setting: it keeps the public SDK surface tidy and shields outside code from internal layout changes. Without this file, extension code might import from internal modules directly, making it more fragile and harder for the project to reorganize later.
+
+
+### `core/src/ufo/sdk/grants.py`
+
+`other` · `import time / SDK use`
+
+This module is like a clearly labeled front desk for a few grant-related tools. The real work lives in `ufo.grants`, but outside code should not have to know the internal layout of the project. Instead, extension authors can import from `ufo.sdk.grants`, which is part of the public SDK surface.
+
+The file exposes types and helper functions used to inspect connection permissions and connector grants. In plain terms, these are audit views: they help answer questions like “what connections exist?”, “what grants were given?”, and “was access denied because a permission was missing?”
+
+The comment at the top explains an important project rule: `ufo.sdk` keeps its `__init__.py` empty, so public SDK features live in named modules such as this one. That makes imports explicit and avoids hidden code running just because a package was imported.
+
+If this file were missing, outside users would need to import directly from `ufo.grants`. That would blur the line between internal project structure and the supported SDK API, making future refactors harder and more likely to break extensions.
+
+
+### Connector and source facades
+Public extension entry points for registering connector providers and content sources without depending on internal modules.
+
+### `core/src/ufo/sdk/connectors.py`
+
+`other` · `cross-cutting import-time SDK surface`
+
+This file does not implement connector behavior itself. Instead, it acts like a front desk: outside extensions can import the official connector-related types from here without needing to know where those types live inside the project. That matters because connectors are a seam between the core system and outside brokered services. An extension supplies an OAuth provider, which knows how to start and finish account authorization, and a connector broker, which knows what tools or catalog entries that service offers and how to run them. The core system can then drive the user through connection setup, attach the resulting connector registry to a tool context, and route feed-sync credentials through the same path, without knowing each broker’s private details. By re-exporting names such as ConnectorBroker, ConnectorRegistry, BrokerTool, OAuthProvider, and OAuthAccount, this file gives extension code a single, stable import path: ufo.sdk.connectors. If the internal package layout changes later, this file can preserve the public contract so extensions do not break.
+
+
+### `core/src/ufo/sdk/sources.py`
+
+`other` · `cross-cutting import-time SDK access`
+
+This file does not implement syncing itself. Instead, it acts like a clearly labeled toolbox at the edge of the project. An extension author can import from this one module instead of learning where every internal class lives.
+
+The concepts it exposes are the pieces needed to build a source: a `SourceBackend`, which is the extension-side object that fetches records and turns them into searchable `Page` documents; `SyncResult`, which tells core what was fetched, deleted, skipped, or fully refreshed; and error types like `CursorExpired`, `StreamSkipped`, and `StreamFault`, which let a connector explain common sync problems in a predictable way.
+
+It also exposes a reusable REST connector framework. A provider that reads from an HTTP API can build on `RestConnector`, describe streams with `StreamSpec`, choose a `Pagination` strategy for moving through pages of API results, and use helper functions such as `get_path` and `records_at` to safely pull records out of nested response data. For sources split into many independent parts, such as repositories or chat channels, it exposes `PartitionWalk`, which centralizes the tricky work of keeping separate cursors.
+
+Without this file, extension code would need to import from internal modules directly, making the public SDK harder to understand and easier to break when internals move.
+
+
+### Transport and session facades
+Stable SDK doorways for browser transports, operator-only web session helpers, and terminal transport APIs.
 
 ### `core/src/ufo/sdk/browser.py`
 
 `io_transport` · `cross-cutting`
 
-This file does not define new behavior itself. Instead, it re-exports a small set of browser-related types from the internal `ufo.browser` module so outside extensions can import them from `ufo.sdk.browser`. That matters because extensions need a clear, supported place to connect their browser provider code to the engine without depending on internal project paths that may change.
+This file does not create new behavior of its own. Its job is to draw a clean boundary between extension authors and the engine’s browser machinery. In this project, the engine talks to Chrome through CDP, the Chrome DevTools Protocol, which is a way for software to inspect and control a browser. Extensions may need to provide or reconnect to a browser session, but they should not have to import private engine modules directly.
 
-The main idea is a “browser transport seam”: a boundary where an extension can supply or reconnect to a Chrome DevTools Protocol session. Chrome DevTools Protocol, often called CDP, is the control channel that lets software drive a Chrome browser. A `CdpProvider` creates a `CdpLease`, which is like borrowing a browser session for one turn of work. The lease gives a `CdpEndpoint`, meaning the URL and headers needed to connect. When the turn ends, the lease can be released. If work is recovered later, the saved lease token can be used to reattach, unless the session is gone.
+Think of this file like a labeled service window. The real tools live behind the wall in `ufo.browser`, but outsiders are told to come to this window. It exposes names such as `CdpProvider`, which can create a temporary browser connection for a turn; `CdpLease`, which represents that temporary right to use the browser; `CdpEndpoint`, which contains the connection details; and `SessionGone`, which signals that a saved session can no longer be resumed. It also exposes helpers for remote file access and browser element ranking.
 
-The file also exposes helper concepts such as `FileBytes`, used when a remote browser needs file contents, and `FindCompleter`, a hook for ranking page elements. In short, this file is an API signpost: it keeps extension-facing imports clean while hiding where the concrete implementation lives.
-
-
-### `core/src/ufo/sdk/connectors.py`
-
-`io_transport` · `extension loading and connector integration`
-
-Connectors are the way outside services plug into this system. A connector extension can provide login flow support, a catalog of available tools or files, and server-side actions that the core application can call without needing to know the details of that outside service. This file exists to make that boundary clean.
-
-Rather than asking extension authors to import pieces from several internal modules, this file re-exports the important names from `ufo.connectors` and `ufo.grants`. A re-export means: “this thing is defined somewhere else, but you can safely import it from here.” It is similar to a reception desk in a building. Visitors do not need to know which office contains each person; they go to the desk and are directed through a stable, public interface.
-
-The file includes connector concepts such as broker tools, catalog entries, uploaded files, request forwarding, and connector registries. It also includes OAuth-related pieces, where OAuth is the common web login-and-permission flow used by services like Google or Slack. The important point is that this file contains no new behavior. Its job is compatibility and clarity: extensions can depend on `ufo.sdk.connectors` as the public contract, while the core project remains free to organize its internal modules behind the scenes.
-
-
-### `core/src/ufo/sdk/sources.py`
-
-`other` · `cross-cutting: used when extensions are imported and when source sync code refers to the public SDK surface`
-
-This file does not implement syncing itself. Instead, it acts like a well-labeled toolbox at the edge of the project. An extension that wants to bring outside records into UFO can import the pieces it needs from here, rather than reaching into many internal modules.
-
-The main idea is the “source backend”: a small adapter an extension writes so UFO can ask an outside service for pages of content. The backend returns `Page` objects, plus a `SyncResult` that tells core whether this run was a full snapshot or only a partial update. That distinction matters. In a full snapshot, missing pages can be treated as deleted. In an incremental update, only explicitly named deletions are removed, so older pages are not accidentally wiped out.
-
-The file also exposes helper classes for REST-based sources. A REST source talks to a web API, usually page by page, and may need cursors, partitions, or pagination rules. The exported connector tools provide common ways to walk through those records without every extension reinventing the same machinery.
-
-Important exceptions are also re-exported. `CursorExpired` tells core to discard an unusable saved cursor and retry fresh. `StreamSkipped` means a provider refused a stream for this account, so the run should be recorded as skipped rather than failed. Without this file, extension code would be tied to internal module paths and the public SDK would be harder to use safely.
-
-
-### Retrieval and Knowledge Facades
-Public re-export modules for indexing, memory search, and search interfaces used by extensions and backend plugins.
-
-### `core/src/ufo/sdk/index.py`
-
-`other` · `cross-cutting`
-
-This file does not implement indexing itself. Instead, it acts like a clearly marked service counter for extension authors. The real search and embedding shapes live deeper in `ufo.indexing`, but extensions should not have to depend on that internal location directly.
-
-The file exposes the main pieces an extension needs to join the indexing system. An `IndexBackend` is the plug-in point for a search backend that can store chunks of text, search them using keywords and vectors, and delete entries within an `IndexScope`. A `Chunk` is a piece of text prepared for indexing, and a `Hit` is a search result. The owner-kind constants distinguish what kind of thing a chunk came from, such as a page or a memory item. `EmbedClient` is the plug-in point for turning batches of text into embeddings, which are numeric representations used for similarity search. `TextChunker` and `chunk_embed_upsert` support the common flow of splitting text, embedding it, and storing it.
-
-Why this matters: it gives extensions a stable import path, `ufo.sdk.index`, even if the internal indexing package changes later. Without this file, extension code would have to reach into internal modules, making it more fragile and harder to keep compatible.
-
-
-### `core/src/ufo/sdk/memory.py`
-
-`data_model` · `cross-cutting`
-
-This file is a small public-facing bridge. The project has memory-search concepts defined elsewhere, in `ufo.memory`, but people writing provider extensions should not need to know the internal layout of the codebase. Instead, they can import the supported memory-search pieces from `ufo.sdk.memory`.
-
-It re-exports three names: `DEFAULT_MEMORY_SEARCH_PROVIDER`, `MemoryMatch`, and `MemorySearchProvider`. In plain terms, these give extension code a shared way to talk about searching stored memory, describing a found result, and referring to the default search provider. Re-exporting means this file does not create new behavior. It simply makes existing definitions available under a cleaner, more stable SDK path.
-
-Why does this matter? If outside extensions imported directly from internal modules, future code rearrangements could break them. This file helps protect those users by acting like a public signpost. Internals can move later, while the SDK import path can stay the same.
-
-
-### `core/src/ufo/sdk/search.py`
-
-`data_model` · `cross-cutting`
-
-This file exists to make the project’s search system easier and safer to plug into. A search extension needs to know the shapes of the requests and responses it must work with: a search question, a list of results, a request to fetch a page, and the fetched page itself. It also needs the provider interface, which is the contract saying, in effect, “if you want to be a search backend, these are the things you must be able to do.”
-
-Rather than defining those pieces here, this file re-exports them from `ufo.search`. Re-exporting means it imports names from one place and makes them available from another. The everyday analogy is a reception desk: the real offices are elsewhere, but outsiders are told to come through this desk because it is the official, stable entrance.
-
-That matters because SDK users should not have to depend on the project’s internal layout. If internal files move later, this file can keep the public import path the same. Without it, extensions might import private modules directly, making them easier to break during refactors. The file also makes the intended boundary clear: extensions implement `SearchProvider`, answer `SearchQuery` with `SearchResults`, fetch pages through `FetchRequest`, return `FetchedPage`, and can raise `SearchUnsupported` when a fetch cannot be done.
-
-
-### Model and Execution Environment Facades
-SDK doorways for model clients and messages, operator web-session helpers, and sandbox execution APIs.
-
-### `core/src/ufo/sdk/models.py`
-
-`other` · `cross-cutting`
-
-This file solves a simple but important problem: it gives outside code one reliable shelf to pick up all model-facing building blocks. Without it, extensions would need to import directly from deeper internal files such as OpenAI, Anthropic, interface, pricing, and schema modules. That would make extensions fragile, because an internal file move could break them even if the public behavior stayed the same.
-
-The file does not create new behavior. Instead, it re-exports selected names. A re-export means “bring this thing in from its real home, then make it available here too.” It is like a shop window: the goods are made elsewhere, but this is the place customers are meant to browse.
-
-The exported pieces include client classes for Anthropic and OpenAI models, shared request and response shapes, message and content block types, tool-call types, reasoning/thinking blocks, usage records, pricing information, model specifications, and helpers such as image trimming and OpenAI message conversion. Together, these form the “model seam”: the boundary where extensions can talk to language models without reaching into the project’s private machinery.
-
-The important behavior is social rather than computational: this file marks what the project promises as a compatible public API for model integrations.
+Without this file, extension code would either duplicate these definitions or import from internal places that may change. By re-exporting the seam here, the project keeps a stable public contract while leaving the concrete implementation free to evolve elsewhere.
 
 
 ### `core/src/ufo/sdk/operator.py`
 
-`util` · `cross-cutting`
+`io_transport` · `request handling`
 
-This file is a small bridge between the public SDK area and the internal operator web tools. The operator surface is the part of the system meant only for operators or debug tools, not ordinary users. Those tools need two shared pieces of sign-in behavior: one piece figures out which workspace an operator is trying to access, and another binds the operator session to the shared session cookie after a POST request.
+This file is a small public doorway. Other code can import operator web-session tools from `ufo.sdk.operator` without needing to know where the real implementation lives inside the project. The tools it exposes are for an operator-only surface, meaning pages or debug tools meant for trusted operators rather than normal users.
 
-Rather than making every caller know the internal path `ufo.ext.operator`, this file exposes the two helpers from `ufo.sdk.operator`. That matters because public import paths are like street addresses: once other code starts using them, moving the real implementation should not break everyone. This file keeps that address stable while the actual logic lives elsewhere.
+It re-exports two helpers. One resolves which workspace an operator is trying to use, including reading a `?ws=` value from the web request and checking that access is coming through the operator domain. The other binds a shared session cookie after a POST request, so the operator’s browser can keep using the same authenticated session across tools.
 
-There are no functions or classes defined here. It simply imports `bind_operator_session` and `resolve_operator_workspace` and makes them available under the SDK namespace. If this file disappeared, operator debug tools that import from the SDK path could fail even though the underlying logic still exists.
+The important reason this file exists is stability. Internal code can move around, but external users of the SDK can keep importing from this simple path. Without this file, every debug or operator tool would either need to know the internal module path or would break if that path changed. It is like a signposted front desk: the actual work happens elsewhere, but everyone knows where to ask.
 
 
-### `core/src/ufo/sdk/sandbox.py`
+### `core/src/ufo/sdk/terminal.py`
 
-`other` · `cross-cutting import-time public API`
+`other` · `import time / SDK use`
 
-This module is like a clearly labeled service counter for sandbox features. The real sandbox code lives elsewhere, mostly in `ufo.sandbox.session`, but outside extensions should not have to know that internal layout. Instead, they can import from `ufo.sdk.sandbox` and get the pieces they need: sandbox descriptions, session handles, execution results, proxy settings, and the `Carrier` protocol, which is the contract a backend must follow to provide sandbox support.
+This module does not create new behavior. Instead, it gathers important terminal-related names from deeper inside the project and re-exports them under `ufo.sdk.terminal`. In plain terms, it is like a front desk: callers do not need to know which internal hallway contains `TerminalTransport`, `Terminals`, or `BlobStore`; they can come to this one public module.
 
-The file also re-exports `CarrierSpec` from the extension manifest area. A `CarrierSpec` describes how an extension registers a sandbox carrier, while the `Carrier` protocol describes what that carrier must be able to do. In plain terms, this is the seam where one deployment can swap in a different sandbox backend without changing the code that uses sandboxes.
+The file matters because SDK users and extension authors need a stable import path. A terminal-transport extension can implement `TerminalTransport`, reuse the in-process `Terminals` backend, and talk to the system's blob store through `BlobStore`. It also exposes the main terminal operation types and error types, such as `TerminalGone` when a terminal disappears and `TerminalOpFailed` when an operation does not succeed.
 
-The comment explains an important project rule: `ufo.sdk` keeps its package initializer empty, so named modules like this one define the public surface. Without this file, extension authors would need to import from deeper internal modules, making their code more fragile if the project reorganizes its internals.
+The comment explains an important project rule: `ufo.sdk` keeps its package `__init__.py` empty, so public SDK names live in explicit modules like this one. That avoids hidden startup code in package imports while still giving users a clean public surface.

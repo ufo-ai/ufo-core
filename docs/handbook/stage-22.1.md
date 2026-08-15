@@ -1,1184 +1,1308 @@
-# Core Public Protocol and Provider Contracts  `stage-22.1`
+# Core extension, model, object, and turn contracts  `stage-22.1`
 
-This stage is shared behind-the-scenes support. It defines the “contracts” that other parts of the system rely on: agreed shapes for data and agreed promises about what a component can do. These files do not run the main work by themselves. They make it possible to swap pieces in and out safely.
+This stage is shared behind-the-scenes support. It defines the basic “forms” and rules that many other parts of UFO rely on, so the core system, extensions, background workers, and user screens all agree on what things mean.
 
-The extension context file defines the limited toolbox an extension gets inside a workspace, so add-ons cannot freely reach databases, secrets, files, or other workspaces. The browser file defines how the system asks for a Chrome connection without caring where Chrome is running. The manifest file defines how an extension describes the tools, jobs, credentials, and other features it brings.
+The extension context is the safe toolbox given to an extension or background job. It limits that code to the current workspace’s approved data, credentials, conversations, models, sources, and transcripts. The manifest file is the extension’s menu of promises: it describes what the extension adds, such as tools, jobs, routes, hooks, credentials, or onboarding steps. Conversation slots define the side panels an extension can show next to a chat, like files, tasks, sources, or workspace changes.
 
-The memory file sets the common form for recall results and memory providers. The model interface defines the shared language for AI messages, tool calls, images, reasoning, and response events. The search file gives one contract for web search and page fetching. The source connector file defines how outside data arrives in streams and pages, and how progress is tracked. The subjects file keeps audience labels consistent.
+The model interface gives UFO one common way to talk to different AI providers. It standardizes requests, streamed replies, images, reasoning text, and tool calls. The object name helper enforces one rule for safe names before they are stored or linked. The records schema defines conversation “turns,” meaning one unit of work, so queues, workers, and user views all track the same states and results.
 
 ## Files in this stage
 
-### Runtime and Extension Contracts
-Defines the bounded workspace runtime, browser-access abstraction, and extension manifest format that frame how add-ons and jobs participate in the system.
+### Scoped extension runtime
+Defines the safe workspace-bound context object that extensions and background jobs use to access core UFO services.
 
 ### `core/src/ufo/ext/context.py`
 
-`orchestration` · `cross-cutting during extension handlers, background jobs, and turn-related work`
+`orchestration` · `cross-cutting: active whenever an extension, job, hook, or background handler runs`
 
-Extensions need useful powers: saving state, reading declared credentials, calling a model, registering synced content, writing files into a conversation, or asking for a prompt change. But giving an extension the whole database or all secrets would be like handing a hotel guest the master key. This file instead builds a room key: an ExtensionContext that only opens the doors that extension is allowed to use, and only inside the currently bound workspace.
+This file is the border guard between extension code and the core system. An extension should not get a raw database connection, every secret, or access to every workspace. Instead, it gets an ExtensionContext: a carefully shaped object full of smaller capabilities. Think of it like giving a contractor a keycard that opens only the rooms needed for the job, not the master key to the building.
 
-The main idea is “ambient workspace scope.” Most methods do not accept a workspace id from the caller. They ask ws_current() which workspace is active for this turn or job. That makes the same context object safe to reuse while still keeping each operation tied to the workspace that the scheduler or turn runner selected.
+The file provides a durable key-value store for one extension, a credential reader that refuses undeclared secret slots, read-only access to conversation transcripts, controlled writing into conversation sandboxes, short-lived off-turn command probes, metered model calls, usage export helpers, source registration and page listing, and safe ways to open or invoke conversations.
 
-The file includes small access objects. ScopedStore gives an extension its own durable key-value storage. CredentialAccess only resolves credential slots named in the extension manifest. TrajectoryCorpus reads recent conversation transcripts but cannot write blobs. ConversationFiles can write or prune files in a conversation sandbox, but cannot run arbitrary sandbox commands. ModelAccess calls the configured language model and records billing usage. ExtensionContext ties these pieces together and adds source registration, page reads, usage export acknowledgements, internal turn invocation, scheduling hooks, and governed agent prompt proposals.
+Most methods derive the workspace from the ambient run scope, rather than accepting a workspace id from the caller. That matters because it prevents accidental or malicious cross-tenant access. Many reads are also batched, so listings can ask for many facts at once without one database round trip per row.
+
+The file is also a wiring point. The context can include optional services such as indexing, embeddings, blob storage, sandboxes, model access, turn invocation, and live turn tailing. If a service is not wired, methods fail loudly instead of pretending there is no data.
 
 #### Function details
 
-##### `ScopedStore.workspace_id`  (lines 81–82)
+##### `ScopedStore.workspace_id`  (lines 93–94)
 
 ```
 def workspace_id(self) -> UUID
 ```
 
-**Purpose**: Returns the workspace id that is currently active for this operation. This keeps the store tied to the workspace already chosen by the turn or job runner.
+**Purpose**: Returns the workspace id currently bound to the running job or turn. This keeps the store tied to the current workspace without letting callers choose another one.
 
-**Data flow**: It takes no direct input. It reads the current workspace from the workspace context and returns that workspace's id.
+**Data flow**: It reads the ambient workspace scope and returns that workspace's id. It does not take input and does not change stored data.
 
-**Call relations**: Store methods use this property before reading or writing extension state, so callers never supply their own workspace id.
+**Call relations**: Other ScopedStore methods use this value when building database queries, so every read or write lands in the current workspace's part of the extension store.
 
 *Call graph*: 1 external calls (ws_current).
 
 
-##### `ScopedStore.get`  (lines 84–95)
+##### `ScopedStore.get`  (lines 96–107)
 
 ```
 async def get(self, key: str) -> JsonValue | None
 ```
 
-**Purpose**: Reads one saved JSON-like value from this extension's private storage area. Extensions use it to remember small durable facts, such as a run id or saved configuration.
+**Purpose**: Reads one JSON value from this extension's private key-value store. It is used when an extension needs durable state, such as saved browser or web-surface information.
 
-**Data flow**: The caller gives a key. The method opens a workspace-scoped database transaction, looks for a row matching the current workspace, this extension name, and that key, then returns the stored value or None if nothing is saved.
+**Data flow**: It takes a key, opens a workspace-scoped database transaction, looks for a row matching the current workspace, this extension, and that key, then returns the stored value or null if none exists.
 
-**Call relations**: Browser and web extensions call this when they need previously saved state. It relies on the workspace transaction helper so the read is scoped to the active workspace.
+**Call relations**: Browser, Browserbase, Slack, and web surface code call this when they need previously saved extension state. It relies on the workspace transaction helper and SQL selection to keep the read scoped.
 
-*Call graph*: called by 3 (_start, _context, _own_chat); 2 external calls (select, workspace_tx).
+*Call graph*: called by 4 (_start, _context, _slack_reply_progress, _own_chat); 2 external calls (select, workspace_tx).
 
 
-##### `ScopedStore.get_many`  (lines 97–112)
+##### `ScopedStore.get_many`  (lines 109–124)
 
 ```
 async def get_many(self, keys: Sequence[str]) -> dict[str, JsonValue]
 ```
 
-**Purpose**: Reads several saved values from the extension's private storage in one database query. This is useful when a caller already knows the keys it wants and does not need to list everything.
+**Purpose**: Reads several named keys from the extension store in one database query. This is useful for listings that know the exact keys they need and should not scan the whole store.
 
-**Data flow**: The caller gives a sequence of keys. If the list is empty, it returns an empty dictionary. Otherwise it queries rows for the current workspace and extension, then returns a dictionary from found keys to values; missing keys are simply left out.
+**Data flow**: It receives a list of keys. If the list is empty, it returns an empty dictionary. Otherwise it fetches matching rows for the current workspace and extension, then returns a key-to-value dictionary for the keys that exist.
 
-**Call relations**: It is a batch version of ScopedStore.get and uses the same workspace-scoped database path.
+**Call relations**: It is a batched companion to ScopedStore.get. Callers use it through the store capability when they want fewer database trips and no broad store listing.
 
 *Call graph*: 2 external calls (select, workspace_tx).
 
 
-##### `ScopedStore.put`  (lines 114–135)
+##### `ScopedStore.put`  (lines 126–147)
 
 ```
 async def put(self, key: str, value: JsonValue) -> None
 ```
 
-**Purpose**: Saves or replaces one JSON-like value in this extension's private storage. Extensions use it to persist state between turns or jobs.
+**Purpose**: Stores or replaces one JSON value in this extension's private store. It gives extensions a simple durable memory tied to the current workspace.
 
-**Data flow**: The caller gives a key and value. The method first tries to update an existing row for the current workspace and extension. If no row exists, it inserts a new one with creation and update timestamps. It returns nothing.
+**Data flow**: It takes a key and value. It first tries to update an existing row for this workspace and extension. If no row was updated, it inserts a new row with timestamps.
 
-**Call relations**: Browser and web extensions call this after creating or updating state. It performs all writes through workspace_tx so the write lands in the active workspace only.
+**Call relations**: Browser, Browserbase, and web surface code call this to remember state. It uses the same workspace transaction path as reads, so writes follow the same scoping rules.
 
 *Call graph*: called by 3 (_start, _context, _open_conversation); 3 external calls (insert, update, workspace_tx).
 
 
-##### `ScopedStore.put_if`  (lines 137–187)
+##### `ScopedStore.put_if`  (lines 149–199)
 
 ```
 async def put_if(self, key: str, value: JsonValue, expected: JsonValue | None) -> bool
 ```
 
-**Purpose**: Writes a value only if the stored value still matches what the caller expected. This prevents a stale worker from overwriting a newer update made by another worker.
+**Purpose**: Writes a value only if the currently stored value is still what the caller expected. This prevents one worker from overwriting newer data with an old copy.
 
-**Data flow**: The caller gives a key, a new value, and the value it believes is currently stored. If the expected value is None, the method tries to insert only if the key is absent. Otherwise it locks the row, compares the current value with the expected one, updates only on a match, and returns True or False to say whether the write happened.
+**Data flow**: It takes a key, a new value, and an expected old value. If expected is null, it attempts an insert only if no row exists. Otherwise it locks the row, compares the stored value, updates only on a match, and returns true or false to say whether the write happened.
 
-**Call relations**: This is the safer, compare-before-write version of ScopedStore.put. It uses database conflict handling and row locking through workspace_tx.
+**Call relations**: Slack reply checkpoint and progress code use this when several updates could race. It builds on database locking and conflict-safe insert behavior.
 
-*Call graph*: 3 external calls (select, update, workspace_tx).
+*Call graph*: called by 2 (_checkpoint_slack_reply, _slack_reply_progress); 3 external calls (select, update, workspace_tx).
 
 
-##### `ScopedStore.delete`  (lines 189–197)
+##### `ScopedStore.delete`  (lines 201–209)
 
 ```
 async def delete(self, key: str) -> None
 ```
 
-**Purpose**: Removes one key from this extension's private storage. Extensions use it when saved state should no longer exist.
+**Purpose**: Deletes one key from this extension's private store. It is used when remembered state is no longer valid.
 
-**Data flow**: The caller gives a key. The method opens a workspace-scoped transaction and deletes the row for the current workspace, this extension, and that key. It returns nothing even if the key was already absent.
+**Data flow**: It takes a key, opens a workspace-scoped transaction, and removes the row matching the current workspace, this extension, and that key. It returns nothing.
 
-**Call relations**: The web extension calls this while changing conversation-related state. It uses the same scoped store table as get and put.
+**Call relations**: The web surface calls this while opening conversations when stale state must be cleared. It follows the same scoped database path as get and put.
 
 *Call graph*: called by 1 (_open_conversation); 2 external calls (delete, workspace_tx).
 
 
-##### `ScopedStore.list`  (lines 199–212)
+##### `ScopedStore.list`  (lines 211–224)
 
 ```
 async def list(self, prefix: str='') -> tuple[tuple[str, JsonValue], ...]
 ```
 
-**Purpose**: Lists saved key-value pairs for this extension, optionally limited to keys that start with a prefix. This lets an extension keep a small namespace of related values.
+**Purpose**: Lists this extension's stored keys and values, optionally limited to keys starting with a prefix. This supports extension-owned listings without exposing other extensions' state.
 
-**Data flow**: The caller may provide a prefix. The method queries the current workspace and extension for matching keys, orders them by key, and returns a tuple of key-value pairs.
+**Data flow**: It takes an optional prefix, queries rows for the current workspace and extension whose keys begin with that prefix, sorts them by key, and returns pairs of key and value.
 
-**Call relations**: Audience-related web extension code calls this to discover stored grants. It still only sees this extension's key space inside the active workspace.
+**Call relations**: Web audience code uses this to discover saved grants. The prefix filter keeps callers from reading more of their own key space than needed.
 
 *Call graph*: called by 2 (_granted_agent_ids, granted_emails); 2 external calls (select, workspace_tx).
 
 
-##### `CredentialAccess.workspace_id`  (lines 226–227)
+##### `CredentialAccess.workspace_id`  (lines 240–241)
 
 ```
 def workspace_id(self) -> UUID
 ```
 
-**Purpose**: Returns the id of the workspace whose credentials are currently available through this access object.
+**Purpose**: Returns the currently bound workspace id for credential operations. Credential lookups are always tied to the workspace running the handler.
 
-**Data flow**: It reads the current workspace context and returns that workspace's id. It does not accept a workspace id from the caller.
+**Data flow**: It reads the ambient workspace scope and returns its id. It does not accept caller-supplied workspace information.
 
-**Call relations**: Credential methods use this workspace identity when resolving or sealing credential values.
+**Call relations**: Credential resolution and installation binding use this to make sure secrets are looked up or sealed for the current workspace only.
 
 *Call graph*: 1 external calls (ws_current).
 
 
-##### `CredentialAccess.get`  (lines 229–235)
+##### `CredentialAccess.get`  (lines 243–249)
 
 ```
 async def get(self, slot: str) -> str
 ```
 
-**Purpose**: Fetches the live secret value for a declared credential slot. It blocks access to any slot the extension did not declare in its manifest.
+**Purpose**: Reads a declared credential slot from the current workspace. It refuses access if the extension did not declare that slot in its manifest.
 
-**Data flow**: The caller gives a slot name. The method first checks that the slot is in the declared set. If not, it raises UndeclaredCredentialSlot before any secret lookup. If allowed, it asks the current workspace to resolve the credential, which may come from a workspace-owned secret or a platform default.
+**Data flow**: It takes a slot name. If the slot is not declared, it raises an error before any secret lookup. If declared, it asks the current workspace for the credential value and returns it.
 
-**Call relations**: Extension code uses this instead of reading secrets directly. It hands the actual lookup to ws_current().credential after enforcing the manifest gate.
+**Call relations**: Extension handlers use this through the credentials capability. The undeclared-slot check is the important gate before reaching workspace secrets.
 
 *Call graph*: 2 external calls (__init__, ws_current).
 
 
-##### `CredentialAccess.rotate`  (lines 237–242)
+##### `CredentialAccess.stored`  (lines 251–258)
+
+```
+async def stored(self, slot: str) -> bool
+```
+
+**Purpose**: Reports whether a declared credential comes from the workspace's own stored secret rather than a platform default. This helps billing and provider-cost decisions.
+
+**Data flow**: It takes a slot name, checks that the slot was declared, then asks the current workspace whether that slot has a stored value. It returns a boolean.
+
+**Call relations**: Handlers use this when they need to know whose provider key paid for an action. It shares the same declaration gate as CredentialAccess.get.
+
+*Call graph*: 2 external calls (__init__, ws_current).
+
+
+##### `CredentialAccess.resolve`  (lines 260–273)
+
+```
+async def resolve(self, slot: str) -> str
+```
+
+**Purpose**: Resolves a declared credential slot using any manifest-defined credential source, falling back to the normal workspace credential. It supports credentials that may come from connected installations or other configured sources.
+
+**Data flow**: It takes a slot name, rejects undeclared slots, looks for a matching declared source, and if one exists asks the credential store for a source-specific secret. If none is found, it returns the workspace credential value.
+
+**Call relations**: This is the more flexible version of get. It calls the credential source helper when a source is configured, otherwise it follows the normal workspace credential path.
+
+*Call graph*: 3 external calls (__init__, slot_secret, ws_current).
+
+
+##### `CredentialAccess.rotate`  (lines 275–280)
 
 ```
 async def rotate(self, slot: str, expected: str, plaintext: str) -> bool
 ```
 
-**Purpose**: Updates a declared credential slot after an external service rotates the secret, but only if the current stored value matches the expected old value. This avoids replacing someone else's newer secret.
+**Purpose**: Replaces an existing declared credential only if its current value matches the expected old value. This is for safe credential rotation after an external provider changes a key.
 
-**Data flow**: The caller gives a slot, the expected current plaintext, and the new plaintext. The method rejects undeclared slots. For declared slots, it asks the current workspace to perform the compare-and-swap update and returns whether it succeeded.
+**Data flow**: It takes a slot, expected old plaintext, and new plaintext. It rejects undeclared slots, then asks the current workspace to perform the compare-and-swap update and returns whether it succeeded.
 
-**Call relations**: It follows the same declared-slot rule as CredentialAccess.get, then delegates the actual secret rotation to the workspace object.
+**Call relations**: Handlers call this when rotating a credential without creating a new initial secret. The workspace object performs the actual protected update.
 
 *Call graph*: 2 external calls (__init__, ws_current).
 
 
-##### `CredentialAccess.bind_installation`  (lines 244–257)
+##### `CredentialAccess.bind_installation`  (lines 282–295)
 
 ```
 async def bind_installation(self, slot: str, installation_id: str) -> None
 ```
 
-**Purpose**: Stores proof that a workspace member has connected a provider installation for a declared credential slot. It saves a sealed token rather than the raw installation id.
+**Purpose**: Stores proof that a workspace credential slot is bound to a provider installation. It seals the installation id so only this workspace and slot can later use it.
 
-**Data flow**: The caller gives a slot and installation id. The method rejects undeclared slots, creates a sealed value tied to the workspace, slot, and installation, then stores that sealed value as the workspace credential.
+**Data flow**: It takes a slot and installation id. After checking the slot is declared, it seals the workspace id, slot, and installation id into a protected value, then writes that value as the workspace credential.
 
-**Call relations**: It uses the installed credential request machinery to get the sealing key, then writes through the current workspace. This keeps provider installation credentials from being forged by just knowing an installation id.
+**Call relations**: This is used after a caller has already proved the member can reach the provider installation. It uses the installed-credential sealing helpers before writing through the workspace credential path.
 
 *Call graph*: 4 external calls (__init__, installed_credential_requests, seal_installation, ws_current).
 
 
-##### `TrajectoryCorpus.workspace_id`  (lines 290–291)
+##### `TrajectoryCorpus.workspace_id`  (lines 328–329)
 
 ```
 def workspace_id(self) -> UUID
 ```
 
-**Purpose**: Returns the workspace whose conversation transcripts this corpus may read.
+**Purpose**: Returns the workspace id whose transcripts this corpus may read. The corpus is read-only and workspace-bound.
 
-**Data flow**: It reads the active workspace context and returns its id.
+**Data flow**: It reads the ambient workspace scope and returns that workspace's id. No input is accepted and no data is changed.
 
-**Call relations**: TrajectoryCorpus.trajectories uses this property to make sure transcript discovery is limited to the currently bound workspace.
+**Call relations**: TrajectoryCorpus.trajectories uses this value to find only conversations in the current workspace.
 
 *Call graph*: 1 external calls (ws_current).
 
 
-##### `TrajectoryCorpus.trajectories`  (lines 293–344)
+##### `TrajectoryCorpus.trajectories`  (lines 331–382)
 
 ```
 async def trajectories(self) -> tuple[Trajectory, ...]
 ```
 
-**Purpose**: Builds a read-only set of recent conversation transcripts for evaluation or learning jobs. Missing or corrupt transcripts are skipped instead of stopping the whole job.
+**Purpose**: Reads a bounded set of recent conversation transcripts for evaluation or learning jobs. Missing or corrupt transcripts are skipped instead of stopping the whole job.
 
-**Data flow**: It finds recent conversations in the current workspace that have turns, reads their transcript blobs, decodes them into messages, computes the current agent prompt digest, and returns Trajectory objects. If a blob is missing it moves on; if decoding fails it logs the problem and moves on.
+**Data flow**: It finds recent conversations in the current workspace that have turns, loads each transcript blob, decodes it, computes the current agent prompt digest, and returns Trajectory objects containing the conversation id, agent id, prompt, digest, and messages.
 
-**Call relations**: ExtensionContext.trajectories delegates to this when a corpus is wired. It combines database metadata, blob storage, transcript decoding, and governance prompt hashing into one safe read path.
+**Call relations**: ExtensionContext.trajectories delegates to this when a corpus is wired. It uses database reads for conversation metadata, blob storage for transcript bodies, and logging when a transcript cannot be decoded.
 
 *Call graph*: 7 external calls (__init__, select, workspace_tx, prompt_digest, log, decode, transcript_key).
 
 
-##### `ConversationFiles.write`  (lines 362–365)
+##### `ConversationFiles.write`  (lines 401–404)
 
 ```
 async def write(self, conversation_id: UUID, rel: str, content: bytes) -> str
 ```
 
-**Purpose**: Writes bytes into a conversation's agent-visible workspace. This lets an off-turn handler prepare files that the agent can see on its next turn.
+**Purpose**: Writes bytes into a conversation's sandbox workspace so the agent can see the file later under /workspace. It is an off-turn file drop, not a command execution feature.
 
-**Data flow**: The caller gives a conversation id, a relative path, and file content. The method passes them to the conversation sandbox writer and returns the /workspace path visible to the agent.
+**Data flow**: It takes a conversation id, relative path, and file contents. It passes them to the sandbox service, which writes the file and returns the path visible to the agent.
 
-**Call relations**: ConversationFiles is added to ExtensionContext only when sandbox support is wired. This method exposes file writing without exposing arbitrary sandbox execution.
+**Call relations**: Handlers use this through the optional files capability. The actual sandbox work stays behind ConversationSandbox rather than being exposed directly.
 
 
-##### `ConversationFiles.prune`  (lines 367–373)
+##### `ConversationFiles.prune`  (lines 406–412)
 
 ```
 async def prune(self, conversation_id: UUID, rel_prefix: str, keep: int=CONVERSATION_FILES_KEEP) -> None
 ```
 
-**Purpose**: Deletes older files under a path prefix, keeping only the newest named files. This prevents unattended background writers from filling a conversation workspace forever.
+**Purpose**: Deletes older files under a conversation sandbox prefix, keeping only the newest configured number. This prevents unattended writers from filling the workspace forever.
 
-**Data flow**: The caller gives a conversation id, a relative prefix, and optionally how many files to keep. The method asks the sandbox layer to prune files under that prefix and returns nothing.
+**Data flow**: It takes a conversation id, a relative prefix, and a keep count. It asks the sandbox service to remove all but the newest matching files and returns nothing.
 
-**Call relations**: It pairs with ConversationFiles.write. Both hand off to ConversationSandbox while keeping the sandbox object itself private.
+**Call relations**: This pairs with ConversationFiles.write. A handler that repeatedly appends files can prune through this narrow capability without receiving general sandbox control.
 
 
-##### `trajectory_workspaces`  (lines 376–398)
+##### `conversation_agent_id`  (lines 415–428)
+
+```
+async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UUID | None
+```
+
+**Purpose**: Finds which agent a conversation belongs to, or reports that no such conversation exists in the workspace. This is a small shared lookup used before agent-scoped operations.
+
+**Data flow**: It receives a workspace id and conversation id, queries the conversation table for that exact pair, and returns the agent id or null.
+
+**Call relations**: ConversationProbes.run uses it before opening a sandbox, and ExtensionContext.conversation_agent exposes it to handlers. It centralizes the workspace-safe conversation-to-agent lookup.
+
+*Call graph*: called by 2 (run, conversation_agent); 2 external calls (select, workspace_tx).
+
+
+##### `ConversationProbes.run`  (lines 467–516)
+
+```
+async def run(self, conversation_id: UUID, command: str, timeout_s: int=PROBE_TIMEOUT_SECONDS, acting_member_id: UUID | None=None) -> ExecResult
+```
+
+**Purpose**: Runs one short shell command inside a conversation's sandbox, outside of a normal turn. It is meant for bounded checks, not long-running work.
+
+**Data flow**: It takes a conversation id, command, timeout, and optional acting member id. It validates the timeout, confirms the conversation belongs to the current workspace, creates a short-lived probe token, binds the conversation's agent scope, opens the sandbox with environment variables, runs the command, and returns stdout, stderr, and exit code.
+
+**Call relations**: It calls conversation_agent_id to enforce workspace ownership and uses the sandbox plus probe-token services to run safely. The agent scope binding makes any nested agent-scoped reads agree with the conversation's agent.
+
+*Call graph*: calls 1 internal fn (conversation_agent_id); 5 external calls (__init__, now, agent, ws_current, uuid4).
+
+
+##### `trajectory_workspaces`  (lines 519–541)
 
 ```
 def trajectory_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: Creates a workspace candidate selector for jobs that need conversation trajectories. It finds workspaces that actually have at least one conversation with at least one turn.
+**Purpose**: Builds a workspace-candidate selector for jobs that need conversation transcripts. It identifies workspaces that actually have at least one conversation with a turn.
 
-**Data flow**: It defines a database query builder and wraps it with owner_candidates, producing a WorkspaceCandidates object that a dispatcher can use to decide which workspaces to run against.
+**Data flow**: It creates a query-producing helper and hands it to the owner-candidate mechanism. The result can later enumerate eligible workspaces without the extension touching cross-workspace database access directly.
 
-**Call relations**: Extensions that read trajectories can declare this as their candidate source. The nested query function builds the actual SQL condition.
+**Call relations**: Trajectory-reading jobs declare this as their candidate source. The nested query builder supplies the actual database condition.
 
 *Call graph*: 1 external calls (owner_candidates).
 
 
-##### `trajectory_workspaces.with_a_turn`  (lines 384–396)
+##### `trajectory_workspaces.with_a_turn`  (lines 527–539)
 
 ```
 def with_a_turn() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Builds the database query used to find workspaces containing at least one turn-bearing conversation.
+**Purpose**: Creates the database query that finds workspaces with at least one turn-bearing conversation. It is the concrete test used by trajectory_workspaces.
 
-**Data flow**: It takes no arguments. It returns a SQL select statement that chooses workspace ids where a conversation exists and that conversation has a turn.
+**Data flow**: It produces a select query over workspaces using existence checks for conversations and turns. The query itself is returned for the candidate system to run later.
 
-**Call relations**: trajectory_workspaces passes this query builder into owner_candidates so scheduling code can enumerate eligible workspaces.
+**Call relations**: It is defined inside trajectory_workspaces and handed indirectly to owner_candidates. It keeps the cross-workspace discovery rule in core code.
 
 *Call graph*: 2 external calls (exists, select).
 
 
-##### `TurnInvoker.invoke`  (lines 405–407)
+##### `store_key_workspaces`  (lines 544–560)
 
 ```
-async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str) -> UUID
+def store_key_workspaces(extension: str, prefix: str) -> WorkspaceCandidates
 ```
 
-**Purpose**: Defines the interface for starting an internal agent turn from background code. It is a protocol method, meaning this file states the shape required but another component supplies the implementation.
+**Purpose**: Builds a workspace-candidate selector for jobs driven by extension store keys. It lets a job run only in workspaces where this extension has pending state under a prefix.
 
-**Data flow**: An implementation receives a conversation id, agent id, message, and idempotency key. It should admit or reuse a turn and return the resulting turn id.
+**Data flow**: It takes an extension name and key prefix, creates a query-producing helper, and returns a candidate source that finds distinct workspaces with matching store rows.
 
-**Call relations**: ExtensionContext.invoke calls this when an invoker is wired. The protocol keeps this file from importing the concrete turn runner.
+**Call relations**: Store-backed jobs use this to avoid scanning all workspaces. The nested query builder holds the database condition.
+
+*Call graph*: 1 external calls (owner_candidates).
 
 
-##### `ModelResolver.auto_model`  (lines 417–417)
+##### `store_key_workspaces.with_a_key`  (lines 550–558)
+
+```
+def with_a_key() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Creates the database query that finds workspaces containing this extension's store keys under a prefix. It is the concrete selector behind store_key_workspaces.
+
+**Data flow**: It builds a select query over the extension store table, filters by extension and key prefix, and returns distinct workspace ids.
+
+**Call relations**: It is defined inside store_key_workspaces and supplied to owner_candidates so dispatch can bind each matching workspace before running the job.
+
+*Call graph*: 1 external calls (select).
+
+
+##### `TurnInvoker.invoke`  (lines 567–579)
+
+```
+async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str, *, on_behalf_of_member_id: UUID | None=None, holds_work_already_done: bool=False, as_scheduled: bool=F
+```
+
+**Purpose**: Describes the interface for starting an internal turn from a background handler. It is a protocol method, meaning this file states the shape expected but does not implement it.
+
+**Data flow**: An implementation receives conversation and agent ids, a message, an idempotency key, and optional scheduling or member-watermark controls. It should return the admitted turn id, or null when a guarded invocation is skipped.
+
+**Call relations**: ExtensionContext.invoke calls whatever object implements this protocol. This keeps the context file from importing the full turn-running system.
+
+
+##### `ModelResolver.auto_model`  (lines 589–589)
 
 ```
 def auto_model(self) -> str
 ```
 
-**Purpose**: Defines how ModelAccess learns the deployment's default model name. This is a protocol property supplied by the model registry.
+**Purpose**: Describes how to read the deployment's default model id. This is part of the model resolver protocol rather than concrete logic here.
 
-**Data flow**: An implementation returns a model identifier string. No mutation happens.
+**Data flow**: An implementation exposes a string naming the model to use. No input is needed.
 
-**Call relations**: ModelAccess.model and ModelAccess.turn read this property so background model calls use the same default model as the rest of the system.
+**Call relations**: ModelAccess.model and ModelAccess.turn read this property so background model calls use the same default model as the deployment.
 
 
-##### `ModelResolver.pricing`  (lines 420–420)
+##### `ModelResolver.pricing`  (lines 592–592)
 
 ```
 def pricing(self) -> Pricing
 ```
 
-**Purpose**: Defines how ModelAccess obtains the pricing table used to bill model usage.
+**Purpose**: Describes how to read the price table used for model billing. The context needs this to meter model calls correctly.
 
-**Data flow**: An implementation returns pricing information. ModelAccess later combines that with token usage from the model stream.
+**Data flow**: An implementation exposes pricing information. ModelAccess later combines it with token usage from the provider.
 
-**Call relations**: ModelAccess.turn reads this property when recording a billable event.
+**Call relations**: ModelAccess.turn uses this property when recording billable usage after a model stream completes.
 
 
-##### `ModelResolver.client_for`  (lines 422–422)
+##### `ModelResolver.client_for`  (lines 594–594)
 
 ```
 async def client_for(self, model: str) -> ModelClient
 ```
 
-**Purpose**: Defines how to get a model client for a named model. The client is the object that actually talks to the language model provider.
+**Purpose**: Describes how to get a model client for a named model. The actual resolver can choose the right provider key for the current workspace.
 
-**Data flow**: An implementation receives a model name and returns a ModelClient, usually using the active workspace's credential rules.
+**Data flow**: An implementation receives a model id and returns a client object capable of streaming a completion.
 
-**Call relations**: ModelAccess.turn calls this before streaming a completion. Keeping it as a protocol avoids an import cycle with the model registry.
+**Call relations**: ModelAccess.turn calls this before sending the request. Keeping it as a protocol avoids an import cycle with the full model registry.
 
 
-##### `ModelResolver.key_slot_for`  (lines 424–424)
+##### `ModelResolver.key_slot_for`  (lines 596–596)
 
 ```
 def key_slot_for(self, model: str) -> str | None
 ```
 
-**Purpose**: Defines how to identify which credential slot, if any, supplies the key for a model. This is used for usage export labels such as bring-your-own-key.
+**Purpose**: Describes how to map a model id to the credential slot used for that model, if any. This supports labeling usage exports as bring-your-own-key or platform-key usage.
 
-**Data flow**: An implementation receives a model name and returns a credential slot name or None.
+**Data flow**: An implementation receives a model id and returns a credential slot name or null.
 
-**Call relations**: context_for stores this callable on ExtensionContext, and pending_usage_exports uses it when minting export records.
+**Call relations**: context_for stores this function on ExtensionContext when a model resolver is wired, and pending_usage_exports uses it to label exported usage.
 
 
-##### `ModelAccess.model`  (lines 440–442)
+##### `ModelAccess.model`  (lines 612–614)
 
 ```
 def model(self) -> str
 ```
 
-**Purpose**: Reports the model that this access object will use for every completion. It is fixed to the deployment default.
+**Purpose**: Returns the deployment's default model id used by this model access object. It makes clear which model every request will be forced to use.
 
-**Data flow**: It reads auto_model from the resolver and returns that model name.
+**Data flow**: It reads auto_model from the resolver and returns it as a string. No request data is changed.
 
-**Call relations**: Callers can inspect this before using ModelAccess.complete or ModelAccess.turn. The actual model call also uses the same resolver value.
+**Call relations**: Handlers can inspect this property before calling complete or turn. The actual calls also read the same resolver value.
 
 
-##### `ModelAccess.complete`  (lines 444–451)
+##### `ModelAccess.complete`  (lines 616–623)
 
 ```
 async def complete(self, request: ModelRequest) -> str
 ```
 
-**Purpose**: Runs one language-model completion and returns only the final text. It is the simple path for extension code that does not need tool calls or structured assistant blocks.
+**Purpose**: Runs one model completion and returns only the assistant's text. It is a simple helper for handlers that do not need tool calls or reasoning blocks.
 
-**Data flow**: The caller gives a ModelRequest. The method calls ModelAccess.turn, receives an assistant Message, and extracts text from either a plain string response or text blocks. It returns the assembled text.
+**Data flow**: It takes a ModelRequest, delegates to ModelAccess.turn, then extracts text from the returned assistant message. If the message content is already a string, it returns it directly; otherwise it joins text blocks.
 
-**Call relations**: The memory extension uses this for summarization. It delegates the real model streaming and billing work to ModelAccess.turn.
+**Call relations**: The memory condenser calls this to summarize content. It depends on ModelAccess.turn for streaming, model selection, and billing.
 
 *Call graph*: calls 1 internal fn (turn); called by 1 (_summarize).
 
 
-##### `ModelAccess.turn`  (lines 453–507)
+##### `ModelAccess.turn`  (lines 625–680)
 
 ```
 async def turn(self, request: ModelRequest) -> Message
 ```
 
-**Purpose**: Runs one full language-model turn, including streamed text, reasoning blocks, tool calls, and usage billing. It returns the assistant message in the shape needed for follow-up tool use.
+**Purpose**: Runs a full model turn, including streamed text, reasoning blocks, tool calls, and usage billing. It returns an assistant message in the same shape used by the rest of the conversation system.
 
-**Data flow**: The caller gives a ModelRequest. The method replaces the request's model with the deployment default, gets the correct client, streams events, collects text fragments, tool call JSON fragments, reasoning blocks, and usage records, then records total token usage as a billable event. It returns a Message containing plain text if there were no tool calls, or structured blocks if there were.
+**Data flow**: It takes a ModelRequest, replaces its model with the deployment default, streams events from the model client, collects text and tool-call JSON, totals usage records, records the billable event for the current workspace, then returns a Message containing text or structured blocks.
 
-**Call relations**: ModelAccess.complete calls this for the simple text case. It calls the resolver for a client and pricing, uses ws_current for billing, and constructs Message, TextBlock, ToolUseBlock, and Usage objects from the model stream.
+**Call relations**: ModelAccess.complete calls this when it only needs text. This method calls the model client through the resolver and records usage through the current workspace billing context.
 
 *Call graph*: called by 1 (complete); 7 external calls (__init__, __init__, __init__, __init__, model_copy, loads, ws_current).
 
 
-##### `_source_readable`  (lines 565–592)
+##### `_source_readable`  (lines 738–765)
 
 ```
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Builds the permission rule for deciding whether an agent may read a synced content source. It checks workspace, removal status, allowed subjects, explicit grants, and a special owner/main-agent case.
+**Purpose**: Builds the database condition for whether a source is readable by a given agent and member context. It is the shared access rule for source and page reads.
 
-**Data flow**: It receives a workspace id and SourceReader description. It returns a SQL condition, not actual rows. That condition says the source must belong to the workspace, be live, match the reader's subjects, and be either granted to the agent or owned by the requesting member for the main agent.
+**Data flow**: It receives a workspace id and SourceReader, then creates a SQL condition requiring the source to be live, in the workspace, in an allowed subject, and either granted to the agent or owned by the requesting member for the main agent.
 
-**Call relations**: Readable page and source methods reuse this helper so they all apply the same access rule.
+**Call relations**: Readable page-state, source-id, and source-page methods all use this helper. Centralizing the rule prevents each read path from inventing a slightly different access check.
 
 *Call graph*: called by 3 (readable_page_states, readable_source_ids, source_pages); 5 external calls (and_, exists, false, or_, select).
 
 
-##### `ExtensionContext.pending_usage_exports`  (lines 613–635)
+##### `ExtensionContext.workspace_id`  (lines 811–812)
+
+```
+def workspace_id(self) -> UUID
+```
+
+**Purpose**: Returns the workspace id for the current context. It is a convenience wrapper around the context's scoped store.
+
+**Data flow**: It reads workspace_id from the store and returns it. It does not query the database itself.
+
+**Call relations**: Many context methods use the store's workspace id directly; this property exposes the same value to handlers.
+
+
+##### `ExtensionContext.retitle_conversation`  (lines 814–817)
+
+```
+async def retitle_conversation(self, conversation_id: UUID, title: str) -> None
+```
+
+**Purpose**: Changes the title of a conversation in the current workspace. It is used when a job can produce a better conversation name than the original opening text.
+
+**Data flow**: It takes a conversation id and title, adds the current workspace id, and delegates the actual title update to the surface layer.
+
+**Call relations**: The web surface's chat-title summarizer calls this after generating titles. The surface helper performs the actual database update.
+
+*Call graph*: called by 1 (summarize_chat_titles); 1 external calls (retitle_conversation).
+
+
+##### `ExtensionContext.pending_usage_exports`  (lines 819–841)
 
 ```
 async def pending_usage_exports(self, floor: datetime, limit: int) -> tuple[UsageExport, ...]
 ```
 
-**Purpose**: Returns settled usage records that this extension should export to an external billing or accounting receiver. It first freezes any newly eligible usage into export records.
+**Purpose**: Returns this extension's settled but not-yet-acknowledged usage export records. It first mints export intents so the reader sees a stable batch.
 
-**Data flow**: The caller gives a time floor and maximum count. The method requires a model registry key-slot lookup to be wired, opens a workspace transaction, mints export records for usage at or after the floor, then reads pending unacknowledged exports up to the limit.
+**Data flow**: It takes a time floor and limit. It requires a model key-slot resolver, opens a workspace transaction, freezes eligible usage deltas into exports, then reads up to the limit of pending exports for this workspace and extension.
 
-**Call relations**: This is the read side of the usage export flow. After the external receiver accepts records, callers should use ExtensionContext.ack_usage_exports.
+**Call relations**: External billing exporters use this read side before delivering records. It calls accounting helpers owned by core because extensions should not know the private ledger schema.
 
 *Call graph*: 3 external calls (mint_usage_exports, read_pending_usage_exports, workspace_tx).
 
 
-##### `ExtensionContext.ack_usage_exports`  (lines 637–646)
+##### `ExtensionContext.ack_usage_exports`  (lines 843–852)
 
 ```
 async def ack_usage_exports(self, exports: tuple[UsageExport, ...]) -> None
 ```
 
-**Purpose**: Marks usage exports as delivered so they stop appearing in future pending reads. It should be called only after the outside system has accepted them.
+**Purpose**: Marks usage exports as delivered after an external receiver accepts them. Unacknowledged exports remain pending for retry.
 
-**Data flow**: The caller gives a tuple of UsageExport objects. If it is empty, the method does nothing. Otherwise it opens a workspace transaction and records acknowledgements for this workspace and extension.
+**Data flow**: It receives a tuple of export records. If empty, it does nothing. Otherwise it opens a workspace transaction and asks accounting to acknowledge those exports for this workspace and extension.
 
-**Call relations**: It completes the flow started by pending_usage_exports. Unacknowledged exports remain pending and can be retried with the same deduplication identity.
+**Call relations**: This is the write-back companion to pending_usage_exports. Export consumers call it only after successful delivery.
 
 *Call graph*: 2 external calls (ack_usage_exports, workspace_tx).
 
 
-##### `ExtensionContext.transaction`  (lines 649–661)
+##### `ExtensionContext.transaction`  (lines 855–867)
 
 ```
 async def transaction(self) -> AsyncIterator[AsyncConnection]
 ```
 
-**Purpose**: Gives an extension a database transaction for its own extension-created tables and certain SDK-supported core operations. This is powerful and less guarded than the other access objects.
+**Purpose**: Gives an extension a database transaction for its own tables and approved SDK helpers. It commits on success and rolls back on error.
 
-**Data flow**: The caller enters the async context manager. It yields a raw async database connection inside the active workspace transaction. On normal exit the transaction commits; on error it rolls back through workspace_tx behavior.
+**Data flow**: It opens the current workspace transaction and yields the raw async database connection to the caller's block. When the block exits, the transaction machinery handles commit or rollback.
 
-**Call relations**: Web audience extension code uses this when it needs custom SQL. The docstring warns that the connection itself does not enforce extension-table-only access, so the extension must scope its own queries correctly.
+**Call relations**: Memory, research, and web audience code use this when they need custom extension-table queries. The method is powerful: the connection itself is not automatically limited to the extension's tables, so callers must scope their own SQL correctly.
 
-*Call graph*: called by 2 (_gate, web_audience); 1 external calls (workspace_tx).
+*Call graph*: called by 5 (_item, _page, record_sources, _gate, web_audience); 1 external calls (workspace_tx).
 
 
-##### `ExtensionContext.invoke`  (lines 663–672)
+##### `ExtensionContext.invoke`  (lines 869–905)
 
 ```
-async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str) -> UUID
+async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str, *, on_behalf_of_member_id: UUID | None=None, holds_work_already_done: bool=False, as_scheduled: bool=F
 ```
 
-**Purpose**: Starts an internal turn in a conversation for a specific agent. It fails clearly if no turn invoker has been wired.
+**Purpose**: Starts an internal turn in a conversation, if a turn invoker has been wired. It is how background work asks the core turn system to speak or act.
 
-**Data flow**: The caller provides conversation id, agent id, message, and idempotency key. The method checks that an invoker exists, then passes those values to it and returns the resulting turn id.
+**Data flow**: It takes conversation, agent, message, idempotency key, and optional member or scheduling guards. It refuses to run if no invoker exists, otherwise passes all inputs to the invoker and returns the created turn id or null if guarded conditions skip it.
 
-**Call relations**: This is the safe public method extensions use instead of directly calling the turn runner. The actual admission checks live in the invoker implementation.
+**Call relations**: Handlers call this through ExtensionContext instead of importing the turn system. The actual admission and idempotency behavior belongs to the wired TurnInvoker implementation.
 
 
-##### `ExtensionContext.page_states`  (lines 674–699)
+##### `ExtensionContext.tail`  (lines 907–916)
+
+```
+def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
+```
+
+**Purpose**: Subscribes to live frames from a turn until that turn ends. This lets side-channel work watch the turn it triggered or follows.
+
+**Data flow**: It takes a turn id and optional cursor string. It requires a tailer to be wired, then returns an async context manager that yields live frame updates.
+
+**Call relations**: The context delegates to the injected TurnTailer. Exiting the returned context closes the subscription, so callers do not leave background listeners running.
+
+
+##### `ExtensionContext.turn_is_terminal`  (lines 918–932)
+
+```
+async def turn_is_terminal(self, turn_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a turn has reached a final state. It reads the database rather than relying on live hub events, because a caller may arrive after the final event.
+
+**Data flow**: It takes a turn id, queries the turn row in the current workspace, and returns true if the row is missing or its status is terminal. Otherwise it returns false.
+
+**Call relations**: Side-channel work can use this before speaking for a turn. It uses the same terminal-status constants as the surface layer.
+
+*Call graph*: 2 external calls (select, workspace_tx).
+
+
+##### `ExtensionContext.conversation_agent`  (lines 934–938)
+
+```
+async def conversation_agent(self, conversation_id: UUID) -> UUID | None
+```
+
+**Purpose**: Returns the agent bound to a conversation in the current workspace, or null if the conversation id is not local. It helps handlers resolve opaque conversation ids safely.
+
+**Data flow**: It takes a conversation id and passes the current workspace id plus that id to conversation_agent_id. The result is an agent id or null.
+
+**Call relations**: This is the public context wrapper over the shared conversation_agent_id helper.
+
+*Call graph*: calls 1 internal fn (conversation_agent_id).
+
+
+##### `ExtensionContext.conversation_facts`  (lines 940–975)
+
+```
+async def conversation_facts(self, conversation_ids: tuple[UUID, ...]) -> dict[UUID, ConversationFacts]
+```
+
+**Purpose**: Reads visibility and origin facts for several conversations in the current workspace. This supports member-facing listings that need to know who may see each row and where it came from.
+
+**Data flow**: It takes conversation ids. If none are given, it returns an empty dictionary. Otherwise it fetches matching rows in one workspace-scoped query, parses each audience value, and returns a mapping from id to ConversationFacts.
+
+**Call relations**: Listing code can call this once for a page of rows instead of one query per row. Missing ids are omitted, which preserves tenant isolation.
+
+*Call graph*: 4 external calls (__init__, select, parse_audience, workspace_tx).
+
+
+##### `ExtensionContext.conversation_arrival_seq`  (lines 977–1004)
+
+```
+async def conversation_arrival_seq(self, conversation_id: UUID) -> int
+```
+
+**Purpose**: Returns the latest member-message arrival sequence for a conversation. This is a watermark used to tell whether a member spoke after some work was armed.
+
+**Data flow**: It takes a conversation id, queries inbound member messages in the current workspace, finds the maximum sequence number, and returns it or 0 if none exist.
+
+**Call relations**: Invocation guards can compare this value with a previously recorded watermark. Only member arrivals count, so system-generated messages do not wake watchers by accident.
+
+*Call graph*: 2 external calls (select, workspace_tx).
+
+
+##### `ExtensionContext.turn_outcomes`  (lines 1006–1032)
+
+```
+async def turn_outcomes(self, turn_ids: tuple[UUID, ...]) -> dict[UUID, TurnOutcome]
+```
+
+**Purpose**: Reads final status information for several turns. It helps a listing or status line show what happened on previous runs.
+
+**Data flow**: It takes turn ids. If the input is empty, it returns an empty dictionary. Otherwise it fetches matching turn rows for the current workspace and returns each status plus terminal text, when present.
+
+**Call relations**: Like conversation_facts, this is batched and workspace-scoped. Missing turn ids are simply absent from the result.
+
+*Call graph*: 3 external calls (__init__, select, workspace_tx).
+
+
+##### `ExtensionContext.is_operator_workspace`  (lines 1034–1040)
+
+```
+async def is_operator_workspace(self) -> bool
+```
+
+**Purpose**: Checks whether the current workspace belongs to the fleet operator. It is used to hide operator-only details in customer workspaces.
+
+**Data flow**: It opens a workspace transaction, reads the workspace's email domain, compares it with the operator domain, and returns a boolean.
+
+**Call relations**: Rendering code can call this before showing internal spend or debugging links. It delegates the domain lookup to the seats helper.
+
+*Call graph*: 2 external calls (workspace_tx, workspace_domain).
+
+
+##### `ExtensionContext.open_conversation`  (lines 1042–1098)
+
+```
+async def open_conversation(self, agent_id: UUID, key: str) -> UUID
+```
+
+**Purpose**: Gets or creates an extension-owned conversation for a workflow key and agent. This lets recurring external events for the same subject continue in the same conversation history.
+
+**Data flow**: It takes an agent id and key. It confirms the agent belongs to the current workspace, inserts a conversation for this extension and key if one does not already exist, then returns the matching conversation id.
+
+**Call relations**: Handlers use this before invoking turns for trigger-driven work. Extension name and key form the conversation identity, so different extensions do not collide.
+
+*Call graph*: 3 external calls (select, workspace_tx, uuid4).
+
+
+##### `ExtensionContext.agent_name`  (lines 1100–1113)
+
+```
+async def agent_name(self) -> str
+```
+
+**Purpose**: Returns the name of the agent currently bound in agent scope. It is useful for agent-scoped object listings that need to link back to the agent.
+
+**Data flow**: It reads the current agent scope, queries the agent table for that workspace and agent id, and returns the agent name.
+
+**Call relations**: The skill-create extension calls this while reading skill objects. It depends on an agent scope already being active.
+
+*Call graph*: called by 1 (_skill); 3 external calls (select, agent_current, workspace_tx).
+
+
+##### `ExtensionContext.page_states`  (lines 1115–1140)
 
 ```
 async def page_states(self, page_ids: tuple[UUID, ...]) -> dict[UUID, PageState]
 ```
 
-**Purpose**: Reads current state for named live pages in the active workspace. It returns only lightweight metadata, not page bodies.
+**Purpose**: Reads the current subject, revision, digest, and body reference for live pages in this workspace. It does not apply source-readability rules.
 
-**Data flow**: The caller gives page ids. If none are given, it returns an empty dictionary. Otherwise it queries live, non-tombstoned pages in this workspace and returns a mapping from page id to PageState containing subject, revision, digest, and body reference.
+**Data flow**: It takes page ids, returns an empty dictionary for no input, otherwise queries non-tombstoned pages in the current workspace and maps each id to PageState.
 
-**Call relations**: This is the basic workspace-scoped page state read. For reads that also enforce source visibility for a specific agent, ExtensionContext.readable_page_states adds the source permission rule.
+**Call relations**: This is a direct workspace-scoped page-state read. Call readable_page_states when access must also be checked against a SourceReader.
 
 *Call graph*: 3 external calls (__init__, select, workspace_tx).
 
 
-##### `ExtensionContext.readable_page_states`  (lines 701–735)
+##### `ExtensionContext.readable_page_states`  (lines 1142–1176)
 
 ```
 async def readable_page_states(self, page_ids: tuple[UUID, ...], reader: SourceReader) -> dict[UUID, PageState]
 ```
 
-**Purpose**: Reads page state only for pages a particular agent/member reader is allowed to see. It combines page ids with source access checks.
+**Purpose**: Reads page state only for pages the given reader is allowed to see. It combines page ids with source grants and subject visibility.
 
-**Data flow**: The caller gives page ids and a SourceReader. The method returns an empty dictionary for no ids. Otherwise it joins pages to sources, filters to live pages in the current workspace, checks subject and source readability, and returns PageState objects by page id.
+**Data flow**: It takes page ids and a SourceReader. It returns empty for no ids, otherwise joins pages to sources, applies tombstone, subject, workspace, and _source_readable rules, then returns PageState objects by page id.
 
-**Call relations**: It calls _source_readable so it uses the same source permission rule as source_pages and readable_source_ids.
+**Call relations**: Memory object code calls this when resolving readable page-backed objects. It uses _source_readable so page-state checks match source-page listings.
 
-*Call graph*: calls 1 internal fn (_source_readable); 3 external calls (__init__, select, workspace_tx).
+*Call graph*: calls 1 internal fn (_source_readable); called by 2 (_item, _page); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `ExtensionContext.readable_source_ids`  (lines 737–742)
+##### `ExtensionContext.readable_source_ids`  (lines 1178–1183)
 
 ```
 async def readable_source_ids(self, reader: SourceReader) -> frozenset[UUID]
 ```
 
-**Purpose**: Returns the ids of live sources that a reader may access in the current workspace.
+**Purpose**: Returns the set of live source ids readable by a given agent/member context. It is a compact way to apply source access rules.
 
-**Data flow**: The caller provides a SourceReader. The method builds a source query using _source_readable, runs it in a workspace transaction, and returns a frozenset of source ids.
+**Data flow**: It takes a SourceReader, queries source ids that satisfy _source_readable in the current workspace, and returns them as a frozen set.
 
-**Call relations**: It shares the same permission helper used by readable_page_states and source_pages, so source and page visibility stay consistent.
+**Call relations**: This shares the same helper as source_pages and readable_page_states, so all source readability decisions follow one rule.
 
 *Call graph*: calls 1 internal fn (_source_readable); 2 external calls (select, workspace_tx).
 
 
-##### `ExtensionContext.register_source`  (lines 744–903)
+##### `ExtensionContext.register_source`  (lines 1185–1378)
 
 ```
 async def register_source(self, backend: str, config: BaseModel, *, subject: str, owner_member_id: UUID | None, connection_id: UUID | None=None, agent_id: UUID | None=None) -> UUID
 ```
 
-**Purpose**: Registers a content-sync source, such as an external feed or connected account folder, for this workspace. It also grants an agent permission to read that source.
+**Purpose**: Registers a content-sync source for the current workspace and grants an agent access to it. It either creates, reuses, or revives the source row while protecting its authority and identity.
 
-**Data flow**: The caller provides a backend name, typed config, subject label, owner member, optional connection id, and optional target agent. The method turns the config into JSON, computes a stable source id, validates the target agent and any connection-bound authority, inserts or revives the source row, rejects conflicting owner/disclosure changes, grants the target agent, and returns the source id.
+**Data flow**: It takes a backend name, typed config model, subject, owner, optional connection id, and optional agent id. It computes a stable source id, validates the target agent and connection when needed, inserts or locks the source row, rejects conflicting owner or requested-field changes, revives removed rows when appropriate, grants the agent, and returns the source id.
 
-**Call relations**: Sample and YC extensions call this during setup. Later, the core sync driver polls registered source rows and syncs pages from them.
+**Call relations**: The sample extension calls this during setup. Later source sync drivers poll these rows, while source listing and page reading methods expose the registered results.
 
-*Call graph*: called by 2 (_setup, setup_sources); 6 external calls (now, model_dump, select, update, workspace_tx, source_row_id).
+*Call graph*: called by 1 (_setup); 6 external calls (now, model_dump, select, update, workspace_tx, source_row_id).
 
 
-##### `ExtensionContext.sources`  (lines 905–945)
+##### `ExtensionContext.removed_source_ids`  (lines 1380–1403)
+
+```
+async def removed_source_ids(self, source_ids: tuple[UUID, ...]) -> frozenset[UUID]
+```
+
+**Purpose**: Reports which requested source ids are known to be removed in the current workspace. It treats absence as unknown, not as removed.
+
+**Data flow**: It takes source ids, returns an empty frozen set for no input, otherwise queries rows in this workspace with removed_at set and returns their ids.
+
+**Call relations**: Extensions can use this to decide what cleanup is safe. The method gives positive evidence only, avoiding destructive behavior when a row simply was not visible.
+
+*Call graph*: 2 external calls (select, workspace_tx).
+
+
+##### `ExtensionContext.sources`  (lines 1405–1445)
 
 ```
 async def sources(self, backend: str | None=None) -> tuple[SourceRecord, ...]
 ```
 
-**Purpose**: Lists this workspace's live registered sources, optionally filtered to one backend. Removed sources are hidden.
+**Purpose**: Lists live registered sources in the current workspace, optionally for one backend. Removed sources are hidden.
 
-**Data flow**: The caller may provide a backend name. The method builds a workspace-scoped query for live sources, applies the backend filter if present, and returns SourceRecord value objects with identity, config, ownership, timing, and error status.
+**Data flow**: It builds a workspace-scoped query over live source rows, optionally filters by backend, orders the result, and converts each row into a SourceRecord.
 
-**Call relations**: The sources extension uses this to build tool-facing source bindings. It is the read counterpart to register_source.
+**Call relations**: The sources extension uses this to build bindings from extension-visible source state. It is the read side of register_source.
 
 *Call graph*: called by 1 (_bindings_from_ext); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `ExtensionContext.source_pages`  (lines 947–995)
+##### `ExtensionContext.source_pages`  (lines 1447–1495)
 
 ```
 async def source_pages(self, reader: SourceReader) -> tuple[PageRecord, ...]
 ```
 
-**Purpose**: Lists live synced pages that a given reader is allowed to see. It returns metadata and blob references, not full page bodies.
+**Purpose**: Lists live synced pages readable by a specific reader. It applies workspace, tombstone, subject, and source-authority rules.
 
-**Data flow**: The caller gives a SourceReader. The method joins pages to sources, filters to current workspace, non-tombstoned pages, allowed subjects, and readable sources, then returns PageRecord objects.
+**Data flow**: It takes a SourceReader, joins pages to sources, filters by allowed subjects and _source_readable, fetches page metadata, and returns PageRecord objects. Page bodies remain referenced by body_ref rather than loaded inline.
 
-**Call relations**: It calls _source_readable for the permission rule. Consumers can then use page metadata and body references without bypassing audience checks.
+**Call relations**: This is the page-listing counterpart to readable_page_states. It uses the shared readability helper to stay consistent with source access checks.
 
 *Call graph*: calls 1 internal fn (_source_readable); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `ExtensionContext.forget_page`  (lines 997–1013)
+##### `ExtensionContext.forget_page`  (lines 1497–1513)
 
 ```
 async def forget_page(self, page_id: UUID) -> None
 ```
 
-**Purpose**: Marks one live page as forgotten by tombstoning it. This triggers downstream cleanup of derived index data through the normal page-change pipeline.
+**Purpose**: Marks one live page as forgotten by tombstoning it. Downstream page-change processing can then remove derived index data.
 
-**Data flow**: The caller gives a page id. The method updates that page only if it belongs to the current workspace and is not already tombstoned. If no row is changed, it raises an error.
+**Data flow**: It takes a page id, updates that live non-tombstoned page in the current workspace to tombstone=true with a fresh timestamp, and raises an error if no row was changed.
 
-**Call relations**: It is the delete-like counterpart to source_pages for individual pages. It uses a tombstone rather than removing the row outright.
+**Call relations**: This is the write side for callers that read pages and decide one should be removed. It uses the normal page tombstone path rather than deleting the row outright.
 
 *Call graph*: 3 external calls (now, update, workspace_tx).
 
 
-##### `ExtensionContext.remove_source`  (lines 1015–1052)
+##### `ExtensionContext.remove_source`  (lines 1515–1552)
 
 ```
 async def remove_source(self, source_id: UUID) -> None
 ```
 
-**Purpose**: Removes a registered source and tombstones all of its live pages in one transaction. This stops future syncing while preserving row identity for existing page references.
+**Purpose**: Removes a source from syncing and tombstones its live pages in the same transaction. The source row remains so existing references still point somewhere.
 
-**Data flow**: The caller gives a source id. The method marks the live source removed, clears any sync claim, deletes its grants, and tombstones live pages for that source. If no live source matches in this workspace, it raises an error.
+**Data flow**: It takes a source id, marks the live source removed, clears any claim, deletes its grants, tombstones its non-tombstoned pages, and raises an error if the source was not live in this workspace.
 
-**Call relations**: This is the source-level removal path. Re-registering the same source configuration can later revive the row fresh.
+**Call relations**: This is the removal counterpart to register_source. Page-change processing later cleans up derived index state from the tombstoned pages.
 
 *Call graph*: 4 external calls (now, delete, update, workspace_tx).
 
 
-##### `ExtensionContext.set_source_subject`  (lines 1054–1080)
+##### `ExtensionContext.set_source_subject`  (lines 1554–1580)
 
 ```
 async def set_source_subject(self, source_ids: tuple[UUID, ...], subject: str) -> None
 ```
 
-**Purpose**: Changes the disclosure subject for one or more live sources and restamps their live pages with the same subject. This makes re-indexing happen under the new visibility label.
+**Purpose**: Changes the disclosure subject for one or more live sources and their live pages. This is how a source's visibility is moved atomically.
 
-**Data flow**: The caller gives source ids and a subject. The method updates matching live sources in the current workspace, raises if none matched, then updates live pages for those sources with the new subject and timestamp.
+**Data flow**: It takes source ids and a new subject, updates matching live source rows in the current workspace, raises if none matched, then updates live pages from those sources with the same subject and a fresh timestamp.
 
-**Call relations**: It keeps source metadata and page metadata in sync. Downstream page-change processing notices the updated timestamps.
+**Call relations**: Because source rows and pages change in one transaction, listings and re-indexing do not see a half-changed source binding.
 
 *Call graph*: 3 external calls (now, update, workspace_tx).
 
 
-##### `ExtensionContext.schedule_source_sync`  (lines 1082–1099)
+##### `ExtensionContext.rewindow_sources`  (lines 1582–1655)
+
+```
+async def rewindow_sources(self, configs: Mapping[UUID, BaseModel], *, refetch: frozenset[UUID]=frozenset()) -> None
+```
+
+**Purpose**: Updates non-identity configuration fields for live sources, optionally forcing selected sources to refetch from scratch. It prevents changes that would make the row's id no longer match its identity.
+
+**Data flow**: It takes a mapping of source ids to new configs and a set to refetch. It validates that refetched ids are included, locks all live rows, recomputes each source id from the new config, rejects configs that would change identity, updates config fields, and for refetch rows clears cursor and claim state.
+
+**Call relations**: This supports changing sync windows or similar parameters without deleting and recreating sources. It uses the same source_row_id logic as register_source to enforce identity safety.
+
+*Call graph*: 5 external calls (now, select, update, workspace_tx, source_row_id).
+
+
+##### `ExtensionContext.schedule_source_sync`  (lines 1657–1674)
 
 ```
 async def schedule_source_sync(self, source_ids: tuple[UUID, ...]) -> None
 ```
 
-**Purpose**: Requests an on-demand resync for live sources by moving their next sync time to now. The sync driver will pick them up on its next pass.
+**Purpose**: Requests that live sources sync as soon as possible. It is the sanctioned way to trigger an on-demand resync.
 
-**Data flow**: The caller gives source ids. The method updates next_sync_at for matching live sources in the current workspace and raises if none matched.
+**Data flow**: It takes source ids, updates next_sync_at to now for matching live sources in the current workspace, refreshes updated_at, and raises an error if no live source matched.
 
-**Call relations**: This is the sanctioned way for extension code to ask the core sync system to run soon, without directly claiming or running sync work itself.
+**Call relations**: The sync driver later notices these rows and claims them. Claim handling in the sync system prevents overlapping syncs of the same source.
 
 *Call graph*: 3 external calls (now, update, workspace_tx).
 
 
-##### `ExtensionContext.propose_change`  (lines 1101–1107)
+##### `ExtensionContext.propose_change`  (lines 1676–1682)
 
 ```
 async def propose_change(self, change: AgentChange) -> ProposalRef
 ```
 
-**Purpose**: Creates a governed proposal to change an agent, rather than directly editing the agent configuration. This gives review and digest checks a chance to protect against stale or unwanted changes.
+**Purpose**: Creates a governed proposal to change an agent, rather than directly editing the agent. This supports review and safe compare-and-swap application.
 
-**Data flow**: The caller gives an AgentChange. The method creates a Governance object for the current workspace and extension, submits the proposal, and returns a ProposalRef.
+**Data flow**: It takes an AgentChange, constructs a Governance object for the current workspace and extension, asks it to create the proposal, and returns a ProposalRef.
 
-**Call relations**: The sample extension calls this during its tick flow. Governance owns the later approval and compare-and-swap application.
+**Call relations**: The sample extension calls this from its tick handler. Governance owns the approval and final application flow.
 
 *Call graph*: called by 1 (_tick); 1 external calls (__init__).
 
 
-##### `ExtensionContext.trajectories`  (lines 1109–1114)
+##### `ExtensionContext.trajectories`  (lines 1684–1689)
 
 ```
 async def trajectories(self) -> tuple[Trajectory, ...]
 ```
 
-**Purpose**: Returns this workspace's trajectory corpus through the context. It fails clearly if trajectory reading was not wired for this context.
+**Purpose**: Returns this workspace's trajectory corpus through the context. It fails clearly if transcript reading was not wired for this handler.
 
-**Data flow**: It takes no input. If no TrajectoryCorpus exists, it raises a RuntimeError. Otherwise it delegates to the corpus and returns the tuple of Trajectory objects.
+**Data flow**: It checks whether a TrajectoryCorpus exists on the context. If not, it raises an error; otherwise it delegates to the corpus and returns its tuple of trajectories.
 
-**Call relations**: The sample extension calls this when evaluating or proposing changes. It is a guarded wrapper around TrajectoryCorpus.trajectories.
+**Call relations**: The sample extension calls this from its tick handler. The actual transcript loading is done by TrajectoryCorpus.trajectories.
 
 *Call graph*: called by 1 (_tick).
 
 
-##### `context_for`  (lines 1117–1151)
+##### `context_for`  (lines 1692–1740)
 
 ```
 def context_for(extension: str, declared: frozenset[str], index: IndexBackend | None=None, embed: EmbedClient | None=None, pages: PageFeed | None=None, blob: BlobStore | None=None, sandboxes: Conversa
 ```
 
-**Purpose**: Builds the ExtensionContext object handed to an extension or core job. It wires only the capabilities supplied by the caller and scopes credentials and storage to the extension name.
+**Purpose**: Builds the ExtensionContext object handed to an extension or core job. It assembles only the capabilities that were declared or wired for that run.
 
-**Data flow**: The caller provides the extension name, declared credential slots, optional backends such as index, pages, blob store, sandboxes, invoker, model resolver, scheduler, declared surfaces, and audience. The function constructs ScopedStore, CredentialAccess, optional TrajectoryCorpus, ConversationFiles, ModelAccess, ScheduleStore, and SurfaceInstallationAccess, then returns a single ExtensionContext.
+**Data flow**: It receives the extension name, declared credential slots, optional services such as index, embeddings, pages, blobs, sandboxes, invoker, model resolver, surfaces, credential sources, tailer, probes, audience, and public base URL. It constructs the scoped store, credential access, optional corpus, file access, model access, installation access, and returns the complete context.
 
-**Call relations**: This is the factory that makes core jobs and extensions receive the same shape of safe context. Optional arguments decide which powers are present; absent powers become None or fail loudly when used.
+**Call relations**: This is the factory that makes core jobs and extensions receive the same shaped context. Optional inputs determine which features work and which methods fail loudly because they were not wired.
 
-*Call graph*: 8 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__).
+*Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__).
 
 
-### `core/src/ufo/browser.py`
+### Extension contribution contracts
+Describes the structured extension-facing declarations for conversation side panels and pack or extension capabilities.
 
-`data_model` · `cross-cutting; used when a turn leases, reattaches to, uses, and releases browser access`
+### `core/src/ufo/ext/conversation_slots.py`
 
-This file is a boundary line between the core system and browser providers. The core needs a Chrome DevTools Protocol endpoint, or CDP endpoint, which is the address a browser-driving engine uses to control Chrome. But core does not want to own Chrome itself. Instead, extensions provide a CdpProvider, and the provider gives out a CdpLease for each turn.
+`data_model` · `request handling`
 
-A lease is like borrowing a keycard for one visit. It gives the browser engine the connection address, offers a token that can be saved for reconnecting later, and knows how to clean up when the turn ends. It also answers practical file questions. If Chrome runs in the same sandbox as the task, a file path can be reused directly. If Chrome is remote, the provider may need to upload the file and return a new remote path. Downloads work the same way in reverse: the lease says where Chrome should put downloaded files and how to fetch the bytes afterward.
+A conversation can have useful side information that is not just another chat message. For example, an extension might want to show downloaded artifacts, cited web sources, a task checklist, or published sites. This file acts like the rulebook for that information: it says what each kind of slot is allowed to contain, how much data is allowed, and which links are safe enough to show.
 
-The file also defines SessionGone, the signal used when a saved browser session can no longer be reattached. That lets the caller start fresh instead of pretending an old page still exists. Overall, this file matters because it keeps browser transport flexible while keeping the core browser-engine-free.
+Most of the file is made of Pydantic models. Pydantic is a validation library: it checks that incoming data has the right fields and rejects data that is missing, too large, or suspicious. The models are frozen, meaning once created they cannot be changed, which makes them safer to pass around.
+
+The file also defines provider and context objects. A provider describes an extension-owned slot: its id, label, icon, content type, and two async callbacks for summarizing and reading the slot. The context tells that provider which conversation, agent, audience, messages, and already-visible slot items it is working with.
+
+The most important protective behavior is URL validation. Public links must be normal HTTP or HTTPS links without embedded usernames or passwords. Image preview links are stricter: they must be same-origin, root-relative paths, like “/preview/123”, so an extension cannot sneak in an outside or malformed image URL.
 
 #### Function details
 
-##### `CdpLease.endpoint`  (lines 59–59)
+##### `ImagePreview.same_origin_url`  (lines 52–65)
 
 ```
-async def endpoint(self) -> CdpEndpoint
+def same_origin_url(cls, value: str) -> str
 ```
 
-**Purpose**: Returns the Chrome DevTools Protocol connection details for this leased browser. The browser-driving engine uses this address, and any needed headers, to connect to Chrome.
+**Purpose**: This validates the URL used for an image preview. It only allows a local, root-relative path, so previews come from the same web origin as the app instead of from an arbitrary outside address.
 
-**Data flow**: The lease already represents a particular browser session. This method reads that session's connection information and returns a CdpEndpoint containing a URL and optional connection headers. If a concrete provider cannot supply an endpoint, its implementation may fail rather than returning a fake address.
+**Data flow**: It receives a URL string from an ImagePreview. It breaks the URL into parts, decodes escaped characters, and checks for unsafe patterns such as an external host, a scheme like “https:”, a fragment, backslashes, or hidden control characters. If the URL is safe, the same string comes out; if not, validation stops with an error.
 
-**Call relations**: A browser provider creates the lease first. Then the browser engine calls this method when it is ready to connect and drive the page. The details returned here are handed off to the engine, while the core remains unaware of how the browser was actually created.
+**Call relations**: Pydantic calls this automatically when an ImagePreview is created. The function relies on standard URL parsing and text inspection helpers to make the safety decision before the preview can be stored inside a conversation artifact.
 
-
-##### `CdpLease.token`  (lines 61–61)
-
-```
-async def token(self) -> str
-```
-
-**Purpose**: Returns a saved reconnect handle for this browser lease. The token lets a later recovered turn try to attach to the same browser session instead of always starting over.
-
-**Data flow**: The lease knows the provider-specific identity of the session, such as a hosted browser session id or a stable URL. This method turns that identity into a string that can be stored safely and used later. The output is not the browser itself, just a durable label for finding it again.
-
-**Call relations**: After a lease is minted, the browser extension or turn state can call this method to persist a reattach handle. Later, that saved string is passed to CdpProvider.reattach, which either returns a new lease over the old session or reports that the session is gone.
+*Call graph*: 3 external calls (category, unquote, urlsplit).
 
 
-##### `CdpLease.place_file`  (lines 63–63)
+##### `ConversationArtifact.http_url`  (lines 81–92)
 
 ```
-async def place_file(self, path: str, read: FileBytes) -> str
+def http_url(cls, value: str | None) -> str | None
 ```
 
-**Purpose**: Tells the caller where the leased Chrome can open a workspace file. It hides the difference between a browser that shares the sandbox filesystem and a remote browser that needs the file uploaded first.
+**Purpose**: This checks the optional public URL for a conversation artifact, such as a generated file. It allows no URL at all, but if a URL is present, it must be a normal HTTP or HTTPS link without login details hidden inside it.
 
-**Data flow**: The caller provides a sandbox path and a read function that can produce the file's bytes. The lease decides what is needed for its kind of browser. A local sandbox browser can return the same path without reading bytes; a remote provider can call the read function, send the bytes elsewhere, and return the remote location Chrome should use.
+**Data flow**: It receives either a URL string or None. None is returned unchanged. For a string, it parses the URL and checks that it has an HTTP or HTTPS scheme, a real hostname, and no embedded username or password. A valid URL is returned; an invalid one raises a validation error.
 
-**Call relations**: The browser engine uses this when it needs Chrome to open or upload a file from the workspace. The method sits between sandbox storage and the actual browser transport, so the engine does not need separate code for local and hosted Chrome.
+**Call relations**: Pydantic runs this during ConversationArtifact creation. It protects artifact slot payloads before they are shown through the conversation slot system.
 
-
-##### `CdpLease.download_dir`  (lines 65–65)
-
-```
-async def download_dir(self) -> str
-```
-
-**Purpose**: Returns the directory or storage location where this Chrome should write downloads. This gives the browser engine a safe place to point Chrome before downloads begin.
-
-**Data flow**: The lease inspects its browser environment and returns a path-like location suitable for downloads. For sandbox-local Chrome, this can be a directory inside the sandbox. For a hosted browser, it can be a provider-controlled download area.
-
-**Call relations**: The browser engine calls this before configuring Chrome's download behavior. Later, when Chrome reports a completed download by its download id, the companion method CdpLease.fetch_download is used to retrieve the bytes.
+*Call graph*: 1 external calls (urlsplit).
 
 
-##### `CdpLease.fetch_download`  (lines 67–67)
+##### `ConversationSource.http_url`  (lines 113–122)
 
 ```
-async def fetch_download(self, guid: str) -> bytes
+def http_url(cls, value: str) -> str
 ```
 
-**Purpose**: Retrieves the bytes of a completed Chrome download. It uses Chrome's download identifier, called a guid, as the key for finding the finished file.
+**Purpose**: This validates the URL for a cited source. It makes sure source links are ordinary HTTP or HTTPS web links and do not contain embedded credentials.
 
-**Data flow**: The input is the guid that Chrome assigned to a completed download. The lease looks in the right place for its browser type: a sandbox path for local Chrome, or provider storage/API for hosted Chrome. The output is the downloaded file as raw bytes.
+**Data flow**: It receives a source URL string. It parses that string into URL parts, checks the scheme and hostname, and rejects URLs with usernames or passwords. The accepted URL is returned unchanged; rejected data produces a validation error.
 
-**Call relations**: This method is used after the browser engine has allowed Chrome to download into the lease's download location. It pairs with CdpLease.download_dir: one tells Chrome where to write, and this one brings the resulting file back to the system.
+**Call relations**: Pydantic calls this when a ConversationSource is built. It is part of the safety gate for source lists that extensions attach to a conversation.
 
-
-##### `CdpLease.aclose`  (lines 69–69)
-
-```
-async def aclose(self) -> None
-```
-
-**Purpose**: Releases the browser lease at the end of a turn. This prevents temporary browser resources, especially remote hosted sessions, from being left open unnecessarily.
-
-**Data flow**: The method receives no extra input beyond the lease itself. A concrete implementation performs whatever cleanup its provider needs. A static local endpoint may do nothing; a remote provider may release or close the hosted session. The visible result is that the hold on the browser is ended.
-
-**Call relations**: Turn cleanup code calls this when browser work is done. It is the final step after the engine has connected, used files and downloads as needed, and no longer needs the leased browser.
+*Call graph*: 1 external calls (urlsplit).
 
 
-##### `CdpProvider.lease`  (lines 82–82)
+##### `TasksSlotPayload.consistent_progress`  (lines 151–165)
 
 ```
-async def lease(self, sandbox: SandboxSession | None=None) -> CdpLease
+def consistent_progress(self) -> 'TasksSlotPayload'
 ```
 
-**Purpose**: Creates a fresh browser lease for a turn. This is the main way the system asks, 'Give me a Chrome I can use for this unit of work.'
+**Purpose**: This checks that a task slot’s summary numbers match the visible task list. It prevents confusing displays like “3 completed out of 2 total” or a non-truncated list that does not actually contain every task.
 
-**Data flow**: The input may include a SandboxSession, which represents the task's isolated working environment. The provider uses that sandbox if it needs to find Chrome inside it, or ignores it if the browser is remote or static. The output is a CdpLease that the rest of the turn can use to connect, place files, collect downloads, and clean up.
+**Data flow**: It reads the task payload after its fields have been filled in: total count, completed count, visible tasks, and whether the list was truncated. It counts how many visible tasks are completed and incomplete, then compares those numbers with the totals. If everything agrees, it returns the same payload; if the numbers contradict each other, it raises a validation error.
 
-**Call relations**: A provider is selected at startup by configuration and contributed by an extension. During a turn, orchestration code calls this method before the browser engine connects. The returned lease then supplies endpoint, file, download, token, and cleanup behavior.
+**Call relations**: Pydantic runs this after creating a TasksSlotPayload. It does not call other project functions; it acts as an internal consistency check before task data can be returned by a conversation slot provider.
 
 
-##### `CdpProvider.reattach`  (lines 84–84)
+##### `ConversationSite.http_url`  (lines 181–190)
 
 ```
-async def reattach(self, token: str) -> CdpLease
+def http_url(cls, value: str) -> str
 ```
 
-**Purpose**: Tries to reconnect to a browser session named by a previously saved token. This supports recovery after interruption without losing the browser state when the old session is still alive.
+**Purpose**: This validates the URL for a site connected to the conversation. It requires a normal HTTP or HTTPS address and blocks URLs that hide usernames or passwords.
 
-**Data flow**: The input is a token that was earlier returned by CdpLease.token. The provider resolves that token into a live browser session and returns a new CdpLease for it. If the token points to a session that has expired or disappeared, the implementation raises SessionGone so the caller can create a fresh lease instead.
+**Data flow**: It receives a site URL string, parses it into parts, and checks that it uses HTTP or HTTPS, includes a hostname, and has no embedded credentials. A safe URL is returned unchanged; an unsafe one is rejected with a validation error.
 
-**Call relations**: Recovery code calls this when it has a saved token from an earlier run. If reattachment succeeds, the returned lease flows back into the same browser-driving path as a new lease. If SessionGone is raised, the caller falls back to CdpProvider.lease and starts with a fresh browser.
+**Call relations**: Pydantic calls this when a ConversationSite is created. That validated site can then be included in a sites slot payload, while private authorization fields remain excluded from serialized output.
+
+*Call graph*: 1 external calls (urlsplit).
 
 
 ### `core/src/ufo/ext/manifest.py`
 
-`data_model` · `startup and extension loading`
+`data_model` · `startup and extension/pack loading`
 
-This file is mostly a set of small, immutable data shapes. Think of it like an application form for extensions: an extension fills in the form, and the core system reads it at startup to decide what should exist. The core does not call registration functions one by one. Instead, each extension returns a Manifest, which lists its tools, web routes, background jobs, credential needs, connector providers, hooks, prompt sections, sandbox backends, search backends, and more.
+This file is like the application form an extension fills out before UFO starts using it. Instead of letting extensions directly poke at core internals, each extension returns a frozen Manifest object that lists what it offers and what it needs. A pack returns a Pack object that groups extensions and pack-level additions into one named product setup.
 
-This matters because many parts of the system are optional and pluggable. For example, one extension may add a browser provider, another may add a search provider, and another may add a credential slot that can be safely injected into outbound network requests. Without this shared declaration file, the loader would not have one reliable place to discover what extensions provide or require.
+Most of the file is made of small frozen data classes. “Frozen” means they are meant to be read-only after creation, which keeps startup decisions predictable. These classes describe many kinds of contribution: a credential slot for a needed secret, a route for an HTTP endpoint, a scheduled job, a connector provider, a sandbox backend, a search provider, a lifecycle hook, a subagent profile, a skill folder, and so on. Core can then collect all active manifests and build the runtime from those declarations.
 
-The file also defines Pack, which is a higher-level bundle of extensions plus pack-level skills and onboarding steps. A pack is like a curated product setup: turn it on, and a known group of extensions comes up together.
+The important idea is separation. Extensions declare their pieces; core decides how to wire them in safely. For example, credentials can be injected through a proxy so secrets do not sit inside the sandbox, hooks can filter tool use without granting extra power, and background jobs are scoped to workspaces rather than running across the whole fleet blindly.
 
-Most classes here do not perform work themselves. They describe work that other parts of the system will do later. The two helper functions at the bottom gather special declarations from multiple manifests: one finds the single allowed open connector namespace, and the other turns credential declarations into user-facing credential-slot records.
+The few functions near the end validate and assemble global views from all manifests, such as conversation slot providers, open connector namespaces, and declared credential slots. Without this file, extensions would not have one clear, safe, uniform way to tell UFO what they add.
 
 #### Function details
 
-##### `open_connector_namespace`  (lines 584–596)
+##### `conversation_slot_declarations`  (lines 622–651)
+
+```
+def conversation_slot_declarations(manifests: tuple[Manifest, ...]) -> tuple[tuple[Manifest, ConversationSlotProvider], ...]
+```
+
+**Purpose**: This function collects all typed conversation slot providers declared by active extensions and checks that they form one valid global set. A conversation slot is a named extra piece of conversation-related data that the portal and runtime can read in a typed way.
+
+**Data flow**: It receives the active manifests. It looks through each manifest’s conversation slot providers, checks each provider’s id, label, icon, callbacks, and payload type, and remembers which extension owns each id. If anything is malformed or two extensions claim the same id, it raises an error immediately. If everything is valid, it returns a tuple of pairs, each pairing the owning manifest with its provider.
+
+**Call relations**: This is used when core is assembling the active extension declarations at startup. It turns many per-extension declarations into one checked list that later portal and conversation code can trust, so later code does not need to keep re-checking ids, icons, callback presence, or ownership conflicts.
+
+
+##### `open_connector_namespace`  (lines 654–666)
 
 ```
 def open_connector_namespace(manifests: tuple[Manifest, ...]) -> OpenConnectorNamespace | None
 ```
 
-**Purpose**: Finds the one extension, if any, that declares an open connector namespace. This is a catch-all connector resolver, so the system must reject having two of them because it would not know which one owns an unknown connector name.
+**Purpose**: This function finds the single catch-all connector namespace, if any extension declares one. A connector namespace is a resolver that can serve connector provider slugs that were not individually registered.
 
-**Data flow**: It receives the active manifests. It walks through them looking for a connector_resolver value. If none are found, it returns None. If exactly one is found, it returns that resolver. If it finds a second one, it raises an error immediately so the server fails at startup instead of making ambiguous routing decisions later.
+**Data flow**: It receives the active manifests and scans their connector_resolver fields. If none are present, it returns None. If it finds exactly one, it returns that resolver. If it finds more than one, it raises an error, because two catch-all resolvers would make it unclear which one owns an unregistered connector slug.
 
-**Call relations**: This helper is used during the loading and derivation of extension capabilities. Later connector lookup, connect-flow routing, and related network rules depend on there being at most one catch-all resolver, so this function acts as the early gatekeeper.
+**Call relations**: This runs during extension assembly so connector setup has a single answer for unknown provider slugs. The connect flow, connector registry, and transfer-host derivation can then all route through the same resolver instead of making separate, possibly conflicting choices.
 
 
-##### `declared_slots`  (lines 617–630)
+##### `declared_slots`  (lines 687–700)
 
 ```
 def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]
 ```
 
-**Purpose**: Collects all credential slots declared by active extensions and converts them into the standard DeclaredSlot records used elsewhere. These records tell the system and user interface what secrets a workspace may need to provide.
+**Purpose**: This function builds the public list of credential slots declared by all active extensions. These are the “bring your own key” or provider-secret places a workspace member or deploy may need to fill.
 
-**Data flow**: It receives the active manifests. For every manifest, it reads each declared credential slot, copies its name, description, owning extension, whether a member is allowed to fill it, and the target host if the credential is injected into network traffic. It returns one tuple containing all of those DeclaredSlot records.
+**Data flow**: It receives the active manifests. For every credential slot in every manifest, it creates a DeclaredSlot record containing the slot name, description, owning extension name, whether a member is allowed to fill it, and the target host if the slot has wire injection configured. It returns all of those records as one tuple and does not change the manifests.
 
-**Call relations**: This function is the shared assembly point for credential declarations. Other parts of the system can use its output when showing credentials to users or when treating credentials as declared objects, without each caller having to understand the full Manifest structure.
+**Call relations**: This is the shared assembly point for views that need to know which credentials exist, such as the credential object kind and the portal’s credentials panel. It hands off each slot’s plain declaration into DeclaredSlot objects so the rest of the system can present and reason about credentials without reading every manifest directly.
 
 *Call graph*: 1 external calls (__init__).
 
 
-### Provider Interfaces
-Defines common contracts for memory recall, AI model messaging and events, and web search or page-fetching providers.
-
-### `core/src/ufo/memory.py`
-
-`data_model` · `cross-cutting`
-
-This file is a contract between two sides of the project. One side provides memory: stored notes, records, or other past context that can be searched or browsed. The other side consumes memory: it asks for useful past information and injects it into the current work. Without this file, each memory extension could invent its own result format and search methods, making them hard to swap or combine.
-
-The central result type is `MemoryMatch`. It is a small, frozen data record for one memory hit. It contains the kind of item, the text snippet to show, and, when available, a durable object reference that can be opened later plus a creation time for sorting or judging recency.
-
-`MemorySearchProvider` is a protocol, meaning a plain-language “promise” that any provider must follow. A provider must support searching by query text, listing recent readable memory items, and reporting which item kinds can be listed. Listing recent items uses a cursor, which is like a bookmark in a list, so new items arriving during browsing do not cause rows to be skipped or repeated.
-
-`MemorySearch` is a tiny forwarding wrapper around a chosen provider. It gives callers one stable object to use while the actual provider can vary behind the scenes.
-
-#### Function details
-
-##### `MemorySearchProvider.search`  (lines 36–42)
-
-```
-async def search(self, queries: tuple[str, ...], reader: SourceReader, start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
-```
-
-**Purpose**: Defines the required search operation for a memory provider. A caller uses it to ask, “given these query phrases and this readable context, what past memory items are relevant?”
-
-**Data flow**: It receives one or more query strings, a `SourceReader` that represents what sources the caller is allowed to read, and optional start and end times. The provider is expected to search its own memory store using those limits, then return a tuple of `MemoryMatch` results. This protocol method does not implement the search itself; it states what real providers must implement.
-
-**Call relations**: This is the method that `MemorySearch.search` forwards to. In the larger flow, consumers call the wrapper, and the wrapper hands the request to whichever memory extension has been selected as the provider.
-
-
-##### `MemorySearchProvider.list_recent`  (lines 44–50)
-
-```
-async def list_recent(self, subjects: frozenset[str], limit: int, kinds: frozenset[str] | None=None, cursor: ListingCursor | None=None) -> ListingPage[MemoryMatch]
-```
-
-**Purpose**: Defines the required browse operation for recent memory items. It is for showing readable memory in recency order without running a text search.
-
-**Data flow**: It receives a set of subject names that define what the caller may read, a maximum number of items to return, optional item kinds to filter by, and an optional cursor that marks where the previous page ended. The provider is expected to return a `ListingPage` of `MemoryMatch` items, including whatever paging information is needed to continue. The protocol only defines the shape of this operation; actual providers supply the behavior.
-
-**Call relations**: This is the method that `MemorySearch.list_recent` delegates to. It supports browsing flows where the caller wants the next page of recent memory items from the selected provider.
-
-
-##### `MemorySearchProvider.listable_kinds`  (lines 52–52)
-
-```
-def listable_kinds(self) -> tuple[str, ...]
-```
-
-**Purpose**: Defines how a memory provider tells callers which categories of memory items can be browsed. This lets user interfaces or consumers offer valid filters instead of guessing.
-
-**Data flow**: It takes no input beyond the provider itself. The provider returns a tuple of kind names, such as categories or classes of memory items that its `list_recent` method can list. The protocol does not decide those names; each provider does.
-
-**Call relations**: This is called through `MemorySearch.listable_kinds` when a consumer needs to know what filters it can safely present or request from the selected provider.
-
-
-##### `MemorySearch.search`  (lines 61–68)
-
-```
-async def search(self, reader: SourceReader, queries: tuple[str, ...], start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
-```
-
-**Purpose**: Runs a memory search through the selected provider. It gives callers a stable, simple method even though the actual search engine may come from an extension.
-
-**Data flow**: It receives a `SourceReader`, query strings, and optional time boundaries. It passes those values unchanged to `self.provider.search`, waits for the provider’s answer, and returns the resulting tuple of `MemoryMatch` objects. It does not alter the query or interpret the results.
-
-**Call relations**: This wrapper method is the consumer-facing path into `MemorySearchProvider.search`. When something in the system wants recall by query, it calls `MemorySearch.search`, which immediately hands the work to the active provider.
-
-
-##### `MemorySearch.list_recent`  (lines 70–77)
-
-```
-async def list_recent(self, subjects: frozenset[str], limit: int, kinds: frozenset[str] | None=None, cursor: ListingCursor | None=None) -> ListingPage[MemoryMatch]
-```
-
-**Purpose**: Asks the selected provider for a page of recent memory items. It is used when the caller wants to browse memory rather than search it by keywords.
-
-**Data flow**: It receives the readable subjects, a result limit, optional kind filters, and an optional paging cursor. It forwards all of that to `self.provider.list_recent` and returns the `ListingPage` it gets back. The page contains memory matches and paging state for continuing the browse.
-
-**Call relations**: This method sits between callers and `MemorySearchProvider.list_recent`. It keeps the caller insulated from the specific provider while preserving the provider’s paging and filtering behavior.
-
-
-##### `MemorySearch.listable_kinds`  (lines 79–80)
-
-```
-def listable_kinds(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the item kinds that the selected provider can list. Callers use this to build valid filters for browsing recent memory.
-
-**Data flow**: It takes no extra input. It asks `self.provider.listable_kinds` for the provider’s supported kind names and returns them directly. Nothing is transformed or cached here.
-
-**Call relations**: This method is the wrapper path to `MemorySearchProvider.listable_kinds`. It is used before or around browsing flows so consumers know what kinds they can request from `list_recent`.
-
+### Shared core data contracts
+Defines provider-neutral model interfaces, object naming validation, and turn-related record schemas shared across core, workers, and user surfaces.
 
 ### `core/src/ufo/models/interface.py`
 
-`data_model` · `request handling`
+`data_model` · `cross-cutting request and response handling`
 
-This file is the contract between the application and the AI models it uses. Different model providers have different APIs, but the rest of the system should not have to care about those details. This file creates shared message shapes, such as text blocks, image blocks, tool calls, tool results, and reasoning blocks, so the rest of the code can speak one internal format.
+This file is the contract between the application and the model services it can use. Different providers, such as Anthropic or OpenAI-style APIs, have different wire formats. This file gives the project one shared shape for messages, tools, images, reasoning traces, streamed text, usage records, and errors, so the rest of the code does not need to know every provider’s details.
 
-The central request type is ModelRequest. It says which model to use, what system instruction to send, what conversation messages to include, what tools are available, how many tokens the model may spend, and whether the model should use extra reasoning. It also checks one important rule: if the caller forces the model to use a specific tool, that tool must actually be offered, and extended reasoning must be turned off because at least one provider rejects that combination.
+Most of the file is made of small data models. A message can contain plain text or structured blocks such as text, images, tool requests, tool results, and reasoning blocks. The reasoning blocks are kept carefully because some providers require them to be sent back unchanged in later turns, like returning a sealed receipt exactly as it was given.
 
-The file also defines ModelClient, a protocol. A protocol is like a promise: any provider client counts as a model client if it has a complete method that takes a ModelRequest and streams back ModelEvent items.
+`ModelRequest` is the main request object. It says which model to use, what system prompt and conversation to send, what tools are available, how many tokens may be used, and whether extra reasoning is requested. It also enforces an important safety rule: if the caller forces the model to use one specific tool, that tool must actually be offered, and extended reasoning must be off.
 
-A practical helper, trim_images, protects requests from provider image limits. It counts images in normal message content and inside tool results, keeps the newest images first, and replaces dropped images with a short text note. Without this, a conversation with too many screenshots or scans could be rejected before the model ever sees it.
+The file also includes `trim_images`, which protects requests from provider image limits. It keeps newer images first, replaces removed images with a short placeholder, and counts images both at the top level and inside tool results. Without this trimming, a request with too many or too-large images could be rejected before the model ever answers.
 
 #### Function details
 
-##### `ModelRequest._forced_choice_names_an_offered_tool_with_reasoning_off`  (lines 139–146)
+##### `ModelRequest._forced_choice_names_an_offered_tool_with_reasoning_off`  (lines 147–154)
 
 ```
 def _forced_choice_names_an_offered_tool_with_reasoning_off(self) -> 'ModelRequest'
 ```
 
-**Purpose**: This validation step protects ModelRequest from an invalid forced tool setup. If the caller says the model must use a particular tool, this function makes sure that tool was actually included and that reasoning is turned off.
+**Purpose**: This validates a `ModelRequest` after it is built. It makes sure that if the caller forces the model to use a specific tool, that tool is actually in the list of available tools, and reasoning mode is turned off because the provider does not allow forced tool use with extended thinking.
 
-**Data flow**: It starts with a completed ModelRequest object. If there is no forced tool choice, it leaves the request unchanged. If there is a forced tool choice, it checks the offered tools by name and checks the reasoning setting; if either rule is broken, it raises an error, otherwise it returns the same request as valid.
+**Data flow**: It reads the request’s `tool_choice`, `tools`, and `reasoning` fields. If no forced tool is requested, it leaves the request unchanged. If a forced tool is named but missing from the offered tools, or if reasoning is still enabled, it raises an error instead of allowing a bad request to continue.
 
-**Call relations**: This is run automatically by Pydantic, the data validation library, after a ModelRequest is built. It prevents bad requests from reaching provider clients, where they would fail later in a harder-to-understand way.
+**Call relations**: This runs as part of Pydantic’s model validation when a `ModelRequest` is created. It acts as an early gatekeeper, so provider-specific clients receive only requests that obey these shared rules.
 
 
-##### `ModelClient.complete`  (lines 187–187)
+##### `ModelClient.complete`  (lines 201–201)
 
 ```
 def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: This is the shared method every model provider client must offer. It takes a prepared ModelRequest and streams back pieces of the model's answer, such as text, tool-call updates, reasoning blocks, or usage information.
+**Purpose**: This is the shared interface that every model client must provide. It says: given a `ModelRequest`, stream back model events such as text pieces, tool call pieces, reasoning blocks, and usage information.
 
-**Data flow**: A caller gives it one ModelRequest. An implementation sends that request to a real provider or compatible backend, then yields ModelEvent items over time as the provider responds. The method itself is only a required shape here; the actual sending and streaming are implemented elsewhere.
+**Data flow**: A caller gives it one complete model request. An implementation sends that request to a real provider or compatible backend, then yields events over time as the provider responds. The method itself is only a protocol definition here, so it describes the expected shape rather than doing the work.
 
-**Call relations**: Other parts of the system can call complete without knowing whether the backend is Anthropic, OpenAI, or another provider. Provider-specific clients satisfy this protocol by implementing this method and translating between the shared internal types and the provider's own API format.
+**Call relations**: Other parts of the system can call `complete` without caring whether the underlying implementation talks to Anthropic, OpenAI, OpenRouter, or another provider. Concrete model clients fulfill this promise and translate provider-specific responses into the common `ModelEvent` shapes defined in this file.
 
 
-##### `trim_images`  (lines 195–223)
+##### `trim_images`  (lines 209–237)
 
 ```
 def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]
 ```
 
-**Purpose**: This function makes a conversation safe to send to providers that limit how many images, and how much image data, can be included. It keeps the most recent images and replaces older or oversized ones with a small text placeholder.
+**Purpose**: This reduces the images in a conversation so the request stays within provider limits. It keeps the most recent images, removes older or over-budget ones, and leaves a clear text note where an image was omitted.
 
-**Data flow**: It receives a tuple of Message objects. First it finds every inline image, including images inside tool results. Then it applies three limits: maximum images per message, maximum images per whole request, and maximum total image bytes. Images that survive all limits stay as they are; images that do not are replaced with the text '[image omitted: over the provider image limit]'. It returns either the original messages, if no trimming is needed, or a copied tuple with the replacements.
+**Data flow**: It receives the full tuple of messages. First it asks `_image_positions` where all inline images are. It then chooses which images survive per-message limits, whole-request image-count limits, and a total image byte budget, favoring newer images. If nothing must be removed, it returns the original messages. Otherwise it asks `_trim_message` to rebuild affected messages with removed images replaced by placeholder text.
 
-**Call relations**: Before provider-specific clients translate messages into their own API formats, this function can normalize the image load once for everyone. It calls _image_positions to locate images, _image_data_len to measure kept images against the byte budget, and _trim_message to build the final message copies with placeholders.
+**Call relations**: This is used before model-provider clients translate the shared message format into provider-specific requests. It coordinates the helper functions: `_image_positions` finds images, `_image_data_len` measures their encoded size, and `_trim_message` produces the cleaned messages.
 
 *Call graph*: calls 3 internal fn (_image_data_len, _image_positions, _trim_message).
 
 
-##### `_image_data_len`  (lines 226–237)
+##### `_image_data_len`  (lines 240–251)
 
 ```
 def _image_data_len(messages: tuple[Message, ...], position: tuple[int, int, int | None]) -> int
 ```
 
-**Purpose**: This helper measures the size of one image's base64 data string. It is used so trim_images can enforce the total image byte budget.
+**Purpose**: This finds the size of one image’s base64 data at a known position in the message list. It is used to decide whether keeping that image would exceed the request-wide image byte budget.
 
-**Data flow**: It receives all messages plus a position that points to one image. The position says which message, which content block, and, for images inside a tool result, which nested part. It follows that address, reads the image data string, and returns its length. If the position does not actually point to an image, it raises an error because the caller's bookkeeping is wrong.
+**Data flow**: It receives all messages plus a position describing where one image should be. It looks up either a top-level image block or an image nested inside a tool result, then returns the length of that image’s encoded data string. If the position does not actually point to an image, it raises an error because the caller’s bookkeeping is inconsistent.
 
-**Call relations**: trim_images calls this while walking through the images it is considering keeping. The returned lengths let trim_images spend the request-wide image budget starting from the newest images and stop once the budget would be exceeded.
+**Call relations**: It is called by `trim_images` while that function walks backward through the images it would like to keep. Each returned size is subtracted from the remaining byte budget so `trim_images` can stop before the request becomes too large.
 
 *Call graph*: called by 1 (trim_images).
 
 
-##### `_image_positions`  (lines 240–260)
+##### `_image_positions`  (lines 254–274)
 
 ```
 def _image_positions(messages: tuple[Message, ...]) -> list[tuple[int, int, int | None]]
 ```
 
-**Purpose**: This helper finds every image in a set of messages and records where each one lives. It treats top-level image blocks and images nested inside tool results as real images that count toward provider limits.
+**Purpose**: This scans the conversation and records where every inline image appears. It includes images sent directly in a message and images nested inside a tool result.
 
-**Data flow**: It receives the message tuple. It scans messages from oldest to newest, skips plain string messages, and inspects structured content blocks. For each image it finds, it records a small address made of message index, block index, and either a nested sub-index or None for a top-level image. It returns the full list in oldest-first order.
+**Data flow**: It receives the tuple of messages and walks through them from oldest to newest. Plain string messages are skipped because they cannot contain image blocks. For structured messages, it records each image as a small address: message index, block index, and, for nested tool-result images, the inner content index. It returns the full list of these addresses in conversation order.
 
-**Call relations**: trim_images calls this first to get the map of all images that might need trimming. That ordered map is then used to decide which images are oldest, which are newest, and which ones fit within the per-message, per-request, and byte limits.
+**Call relations**: It is the first helper used by `trim_images`. Its list gives `trim_images` the map it needs to apply per-message limits, whole-request limits, and size limits without changing the messages yet.
 
 *Call graph*: called by 1 (trim_images).
 
 
-##### `_trim_message`  (lines 263–287)
+##### `_trim_message`  (lines 277–301)
 
 ```
 def _trim_message(message_index: int, message: Message, drop: set[tuple[int, int, int | None]]) -> Message
 ```
 
-**Purpose**: This helper rebuilds one message after trim_images has decided which images must be removed. It does not leave gaps; each removed image becomes a clear text note saying an image was omitted.
+**Purpose**: This rebuilds one message after `trim_images` has decided which images must be removed. Removed images are replaced with a short text placeholder so the model can still tell that something visual was present but omitted.
 
-**Data flow**: It receives a message index, one Message, and a set of image positions to drop. If the message is plain text, it returns it unchanged. If the message has structured content, it walks through each block. Top-level dropped images are replaced with a TextBlock placeholder. For tool results that contain nested image parts, only the dropped nested images are replaced, while the rest of the tool result is copied through. It returns a copied Message with updated content.
+**Data flow**: It receives a message index, one message, and a set of image positions to drop. If the message is plain text, it returns it unchanged. If the message has structured blocks, it walks through each block. Top-level images marked for removal become a `TextBlock` containing the omission message. Tool results with nested removed images are copied with only those inner image parts replaced. The result is a new message with safe content.
 
-**Call relations**: trim_images calls this for each message when at least one image must be dropped. This helper performs the actual rewriting, using TextBlock to create placeholders and Message.model_copy to preserve the original message while changing only its content.
+**Call relations**: It is called by `trim_images` only when at least one image must be removed. It performs the final rewrite step after `trim_images` has already calculated the drop set.
 
 *Call graph*: called by 1 (trim_images); 2 external calls (__init__, model_copy).
 
 
-### `core/src/ufo/search.py`
+### `core/src/ufo/object_name.py`
 
-`data_model` · `startup and request handling`
+`util` · `cross-cutting, especially during object creation or writes`
 
-This file is a boundary, or “seam,” between the core application and any real web search provider. The core code does not talk directly to Google, Tavily, Exa, or any other backend. Instead, it speaks in simple project-owned shapes: a search query, a search result, a fetched page, and a provider interface.
+Object names need to be predictable because they are used across different parts of the system, including places that create names before the full object system is available. This file is the single source of truth for those names. In everyday terms, it is like the rule printed on a form that says, “Your username may only contain these characters and must fit in this box.”
 
-That matters because search services need API keys and have different features. This design keeps those details outside the core. A provider is chosen when the system starts, and that provider reads its own key inside the host process. The sandboxed tool environment never sees the key.
+The allowed name is simple: it must use lowercase letters, digits, and hyphens; it must start and end with a lowercase letter or digit; and it cannot be longer than 64 characters. That means names like `abc`, `thing-1`, and `a1-b2` are fine, while `-thing`, `Thing`, `thing_1`, and an overly long name are refused.
 
-The data classes describe the information moving across this boundary. `SearchQuery` says what to search for. `SearchResults` contains ranked `SearchHit` entries and possibly a direct answer. `FetchRequest` asks for one URL to be read, and `FetchedPage` returns extracted page text and maybe a summary.
-
-`SearchProvider` is a protocol, meaning a promise about what methods a real provider must offer. It says every provider can search, but only some can fetch pages. If a caller asks a non-fetching provider to fetch, `SearchUnsupported` is the loud failure case. In normal use, tools check `supports_fetch` first, like checking whether a machine has a feature before pressing that button.
+The file also defines `InvalidName`, a special kind of `ValueError`, which means “the value exists, but it is not acceptable here.” Code that writes or creates objects can call `validate_object_name` at the moment a name is supplied. This matters because it stops invalid names from being saved first and only causing trouble later when another part of the system tries to show, link to, or look them up.
 
 #### Function details
 
-##### `SearchProvider.supports_fetch`  (lines 87–87)
+##### `validate_object_name`  (lines 17–25)
 
 ```
-def supports_fetch(self) -> bool
+def validate_object_name(name: str) -> None
 ```
 
-**Purpose**: This property tells callers whether the selected search provider can fetch and extract the contents of a specific web page. It exists so tools can hide or skip page-fetch behavior when the backend only supports search.
+**Purpose**: Checks whether a proposed object name follows the project-wide naming rule. Code uses it before accepting or saving a caller-supplied name, so invalid names are caught early.
 
-**Data flow**: A caller asks the provider for this true-or-false value. The concrete provider returns whether fetching is available. Nothing else is changed; the value is used as a safety check before attempting a page fetch.
+**Data flow**: It receives a text string called `name`. It checks two things: whether the string is no more than 64 characters long, and whether every character and position fits the allowed pattern. If the name is valid, it returns nothing and changes nothing. If the name is invalid, it raises `InvalidName` with a message explaining the expected rule.
 
-**Call relations**: This is part of the `SearchProvider` promise rather than working code in this file. Research tools consult it before calling `SearchProvider.fetch`, so a provider that cannot fetch is avoided instead of being asked to do something it does not support.
+**Call relations**: This function is the enforcement point for the naming rule defined in this file. When it finds a bad name, it creates and raises an `InvalidName` error, so the calling code can stop the write or creation step instead of letting an unusable object name enter the system.
 
+*Call graph*: 1 external calls (__init__).
 
-##### `SearchProvider.search`  (lines 89–89)
 
-```
-async def search(self, query: SearchQuery) -> SearchResults
-```
-
-**Purpose**: This method is the standard way to run a web search through whatever provider was selected at startup. It lets the rest of the system ask for results using one common request shape instead of learning each provider's API.
-
-**Data flow**: It receives a `SearchQuery` containing the search text, result count, and optional filters such as recency, allowed domains, or category. A concrete provider translates that request into its own backend call, then returns `SearchResults` containing page hits and possibly a direct answer.
-
-**Call relations**: This file only defines the method that providers must implement. During a turn, research tools reach the selected provider through the tool context and call this method when they need web search results.
-
-
-##### `SearchProvider.fetch`  (lines 91–91)
-
-```
-async def fetch(self, request: FetchRequest) -> FetchedPage
-```
-
-**Purpose**: This method is the standard way to fetch the readable text from one web page when the chosen provider supports that feature. It is used after a URL is known and the system wants page content, not just a search listing.
-
-**Data flow**: It receives a `FetchRequest` with the URL and optional instructions such as an extraction prompt, maximum text length, or whether to bypass a cache. A concrete provider retrieves and extracts the page, then returns a `FetchedPage` with the URL, text, and possibly a summary. If the provider does not support fetching, the contract says it should raise `SearchUnsupported`.
-
-**Call relations**: This method is paired with `SearchProvider.supports_fetch`. The research fetch tool is expected to check that flag first; only when fetching is supported does it call this method on the selected provider.
-
-
-### Source Connector Standards
-Defines the protocol for paged source ingestion and the standard labels used to identify shared or member-specific audiences.
-
-### `core/src/ufo/sources/connector.py`
-
-`domain_logic` · `sync run`
-
-A connector is the bridge between UFO and an outside service, such as a document app, code host, or email provider. This file sets the rules for that bridge so every provider can be synced in a predictable way. It defines stream descriptions, page shapes, pagination settings, and the base Connector class that provider-specific connectors inherit from.
-
-The most important idea is that data arrives in pages. A page may just be a list of live records, or it may also say which old records were deleted and what cursor should be saved to resume later. A cursor is like a bookmark in a long book: it lets the next sync continue from the right place instead of rereading everything.
-
-The file also solves a harder problem: some streams are split into partitions, such as one GitHub repository at a time or one Slack channel at a time. PartitionWalk keeps a separate bookmark for each partition, packs those bookmarks into one saved cursor, and carefully resumes without skipping records. It supports streams ordered oldest-first, newest-first, or with no useful ordering field.
-
-Finally, Connector.render provides a safe default way to turn a raw provider record into a title and body text. Content-heavy connectors can override it to produce nicer prose, but this fallback means even plain JSON records can still be stored and recalled.
-
-#### Function details
-
-##### `PartitionWalk.stream`  (lines 207–299)
-
-```
-async def stream(self, cursor: str | None) -> AsyncIterator[StreamPage]
-```
-
-**Purpose**: This is the main engine for syncing a stream that is split into many partitions, such as many repositories or channels. It reads the saved cursor, walks each partition in the right order, yields records page by page, and emits updated cursors so the sync can resume safely if it stops early.
-
-**Data flow**: It starts with an optional cursor string from a previous run and decodes it into a map of partition names to saved positions. It asks the connector for partitions, then for each partition asks for pages using a PartitionBound that says where to resume. As pages arrive, it updates the in-memory checkpoint, yields StreamPage objects containing records, deletes, and the next cursor, and finally cleans up cursor entries for partitions that are no longer present or no longer need temporary state.
-
-**Call relations**: The sync flow calls this when a connector needs per-partition progress tracking instead of one simple cursor. It relies on PartitionWalk._decode at the start to understand the stored bookmark and PartitionWalk._encode throughout the walk to turn updated progress back into a cursor string. It creates PartitionBound values to tell the connector-side page factory what slice to fetch, and it hands StreamPage objects back to the caller as the common page format.
-
-*Call graph*: calls 2 internal fn (_decode, _encode); 3 external calls (__init__, __init__, __init__).
-
-
-##### `PartitionWalk._decode`  (lines 302–331)
-
-```
-def _decode(cursor: str | None) -> dict[str, str | _Window]
-```
-
-**Purpose**: This converts a saved cursor string back into the per-partition bookmark map that PartitionWalk.stream can use. It is deliberately forgiving of cursors that clearly came from some other cursor style, but strict about malformed partition-walk cursors.
-
-**Data flow**: It receives a cursor string or nothing. If the cursor is missing, not JSON, or not a JSON object, it returns an empty map so the walk starts fresh. If it is a JSON object, each partition entry becomes either a plain watermark string or a validated in-progress window with high and until bounds; invalid entries raise an error instead of being silently ignored.
-
-**Call relations**: PartitionWalk.stream calls this once at the beginning of a partitioned sync. Its output becomes the starting checkpoint used to decide which partitions are already done, which ones are mid-backfill, and where each partition should resume.
-
-*Call graph*: called by 1 (stream); 1 external calls (loads).
-
-
-##### `PartitionWalk._encode`  (lines 334–339)
-
-```
-def _encode(partition_map: Mapping[str, 'str | _Window']) -> str
-```
-
-**Purpose**: This turns the current per-partition bookmark map into a stable JSON cursor string that can be saved after each page. That saved string is what makes interrupted or capped syncs resumable.
-
-**Data flow**: It receives a mapping from partition names to either simple watermark strings or temporary window objects. It converts window objects into plain dictionaries, then serializes the whole map as sorted JSON. The result is a cursor string suitable for placing on a StreamPage.
-
-**Call relations**: PartitionWalk.stream calls this whenever it yields progress to the rest of the sync system. The encoded cursor is later passed back into PartitionWalk._decode on the next run, closing the loop between one sync slice and the next.
-
-*Call graph*: called by 1 (stream); 1 external calls (dumps).
-
-
-##### `Connector.streams`  (lines 353–354)
-
-```
-def streams(self) -> list[StreamSpec]
-```
-
-**Purpose**: This abstract method requires every connector to list the streams it knows how to sync. A stream is one named collection from the outside service, such as users, issues, messages, or documents.
-
-**Data flow**: A concrete connector implementation supplies no special input here beyond its own configuration and returns a list of StreamSpec objects. Each StreamSpec tells the sync system the stream name, record identity field, cursor field if any, deletion behavior, and related settings.
-
-**Call relations**: The broader sync runner asks a connector for its streams before deciding what to sync. This base method is only a contract: provider-specific connector classes implement it with the actual stream list for that service.
-
-
-##### `Connector.fetch_page`  (lines 357–366)
-
-```
-def fetch_page(self, stream: StreamSpec, *, cursor: str | None, credential: Credential, base_url: str, self_user_id: str | None) -> AsyncIterator[list[dict[str, Any]] | StreamPage]
-```
-
-**Purpose**: This abstract method is the connector’s promise to fetch records for one stream and yield them in pages. It lets the rest of the system treat many different services in the same way, even though their APIs may work very differently.
-
-**Data flow**: It receives a StreamSpec, an optional saved cursor, a resolved Credential for authentication, a base URL, and optionally the current user’s id so self-authored records can be excluded where needed. A concrete connector uses those inputs to call the provider and asynchronously yields either plain lists of records or richer StreamPage objects containing records, deletes, and a next cursor.
-
-**Call relations**: The sync adapter calls this while running a stream. This base method defines the shape all connectors must follow, while each provider-specific connector supplies the real network calls, paging rules, and record conversion.
-
-
-##### `Connector.render`  (lines 368–387)
-
-```
-def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]
-```
-
-**Purpose**: This provides the default way to turn one raw provider record into readable page content. It chooses a human-friendly title when possible and otherwise falls back to the record’s stable id.
-
-**Data flow**: It receives one record dictionary and the stream description. It looks for common title-like fields such as title, name, login, or subject. If none exists, it uses the stream’s primary key value; if that is also missing or empty, it raises an error because the record cannot be identified. It returns a pair: the chosen title and a body containing a heading plus the record serialized as sorted JSON.
-
-**Call relations**: The sync adapter uses this after records have been fetched, when turning provider data into stored recallable content. Content-focused connectors can override this method to produce cleaner text, such as an email body or document prose, but this default keeps simple record-based streams usable without custom rendering.
-
-*Call graph*: 1 external calls (dumps).
-
-
-### `core/src/ufo/subjects.py`
+### `core/src/ufo/schema/records.py`
 
 `data_model` · `cross-cutting`
 
-This small file is a naming guide for “subjects,” which are labels that say what audience or owner something is tied to. One subject is always the same: `shared`, meaning the thing is meant for everyone or is not tied to a single member. The other kind is member-specific. For that, the file uses the prefix `member:` followed by a member’s unique ID. A unique ID here is a UUID, which is a long identifier designed to avoid collisions, like a very reliable serial number.
+This file is the project’s common vocabulary for conversation work. A “turn” is like a numbered ticket at a service desk: it records who asked for something, where it came from, what state it is in, and what final answer or error it produced. Without these shared models, the parts that accept user messages and the parts that process them could disagree about basic facts, such as whether a turn is still running or already finished.
 
-The value of this file is consistency. Without it, different parts of the system might invent slightly different labels, such as `user:...`, `member-...`, or `members/...`, and then they would fail to recognize that they are talking about the same person or audience. This file acts like a shared label maker: everyone gets the same format every time.
+Most of the file is made of Pydantic models. Pydantic is a library that checks and cleans data when records are created. The file defines allowed status words, constants for queue and workflow names, and structured payloads for special outcomes: asking the user a question, requesting credentials privately, connecting an account, or reporting token usage and cost.
 
-There is one helper function, `member_subject`, which turns a member ID into the exact subject string the rest of the system expects.
+Two helper functions create stable UUIDs, which are unique identifiers. They are based on the workspace, conversation, turn number, or billing dimension, so repeating the same operation produces the same ID. That matters for safe retries: the system can replay work without accidentally creating duplicate turns or duplicate billing rows.
+
+The most important records are `TurnContext` and `Turn`. `TurnContext` cleans user-reported text so it cannot fake internal markup, and checks that time zones are real. `Turn` checks timestamps and enforces a key rule: unfinished turns must not have a final result, and finished turns must have one that matches their status.
 
 #### Function details
 
-##### `member_subject`  (lines 9–10)
+##### `turn_id_for`  (lines 76–78)
 
 ```
-def member_subject(member_id: UUID) -> str
+def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID
 ```
 
-**Purpose**: This function creates the standard subject label for one specific member. Someone would use it when they need to tag or look up data that belongs to that member.
+**Purpose**: Creates the stable ID for a turn from its workspace, conversation, and sequence number. This lets the same turn get the same identifier every time, which is important when work may be retried or replayed.
 
-**Data flow**: It receives a member ID as a UUID. It places the fixed text `member:` in front of that ID, producing a string such as `member:<id>`. It returns that string and does not change anything else.
+**Data flow**: It receives a workspace ID, a conversation ID, and a turn sequence number. It combines those values into one text key and feeds that key into UUID generation. It returns a UUID that represents exactly that turn.
 
-**Call relations**: This helper is meant to be called by code that needs a member-specific subject label. It relies on the shared prefix constant in this file so callers do not have to remember or rebuild the format themselves.
+**Call relations**: When code needs to create or refer to a turn, it can call this helper before storing or running the turn. Internally it hands the combined key to `uuid.uuid5`, which makes a repeatable UUID from the same input instead of a random one.
+
+*Call graph*: 1 external calls (uuid5).
+
+
+##### `ledger_id_for`  (lines 81–86)
+
+```
+def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str='') -> UUID
+```
+
+**Purpose**: Creates a stable billing ledger ID for one turn, one billing category, and one run attempt. This prevents the same attempt from being billed twice while still allowing separate resumed attempts to be counted separately.
+
+**Data flow**: It receives the workspace ID, turn ID, billing dimension, and optionally an attempt ID. It builds one text key from those pieces and turns it into a repeatable UUID. The returned UUID can be used as the unique identity of that billing row.
+
+**Call relations**: Billing or usage-recording code can call this when writing token or cost records. Like `turn_id_for`, it relies on `uuid.uuid5` so repeated writes for the same attempt collapse onto the same ID instead of creating duplicates.
+
+*Call graph*: 1 external calls (uuid5).
+
+
+##### `TurnContext._tag_safe_line`  (lines 204–208)
+
+```
+def _tag_safe_line(cls, value: str | None) -> str | None
+```
+
+**Purpose**: Cleans the sender and source text that come from outside systems before the engine includes them in context. It removes angle brackets and collapses whitespace so that user-controlled text cannot pretend to be internal markup.
+
+**Data flow**: It receives either text or nothing. If there is text, it removes `<` and `>`, turns runs of spaces and line breaks into single spaces, and returns the cleaned one-line value. If the cleaned result is empty, it returns nothing.
+
+**Call relations**: Pydantic calls this automatically when a `TurnContext` is created for the `sender` and `source` fields. It does not call other project code; it acts as a small safety gate before the context is saved onto a turn.
+
+
+##### `TurnContext._known_zone`  (lines 212–219)
+
+```
+def _known_zone(cls, value: str | None) -> str | None
+```
+
+**Purpose**: Checks that a supplied time zone name is a real IANA time zone, such as `America/New_York`. This catches bad time zone data at the edge of the system instead of letting it fail later during a turn.
+
+**Data flow**: It receives a time zone string or nothing. If no time zone is supplied, it leaves it alone. If a value is supplied, it tries to load that zone; success means the original string is returned, and failure becomes a clear validation error.
+
+**Call relations**: Pydantic calls this automatically when creating a `TurnContext`. It uses Python’s `zoneinfo.ZoneInfo` as the source of truth for known time zones, so later code can trust that the stored value is usable.
+
+*Call graph*: 1 external calls (ZoneInfo).
+
+
+##### `Turn._aware_utc`  (lines 245–250)
+
+```
+def _aware_utc(cls, value: datetime | None) -> datetime | None
+```
+
+**Purpose**: Makes sure turn timestamps carry UTC time zone information. This protects against database drivers that return UTC timestamps without the marker saying they are UTC.
+
+**Data flow**: It receives a `created_at` or `updated_at` datetime value, or nothing. If the value is missing, it stays missing. If it already has time zone information, it is returned unchanged; if it has none, the function adds UTC as its time zone marker.
+
+**Call relations**: Pydantic calls this automatically when a `Turn` is built from incoming or database data. When it needs to add the missing marker, it uses `datetime.replace` so the clock time is treated as UTC rather than accidentally interpreted as local time.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `Turn._terminal_matches_status`  (lines 253–258)
+
+```
+def _terminal_matches_status(self) -> 'Turn'
+```
+
+**Purpose**: Enforces the rule that a turn’s final result and its status must agree. A queued, running, or parked turn cannot already have a terminal frame, and a done, failed, or cancelled turn must have one.
+
+**Data flow**: It looks at the completed `Turn` object after its fields have been parsed. It compares the turn status with whether a terminal frame is present, and if present, checks that the terminal frame’s own status matches the turn’s status. It returns the turn unchanged if everything is consistent, or raises a validation error if not.
+
+**Call relations**: Pydantic calls this after creating a `Turn`. It is the final consistency check that keeps queue records honest before other parts of the system read them, process them, or display their result.
