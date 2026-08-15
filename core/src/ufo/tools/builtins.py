@@ -130,17 +130,75 @@ EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
 MAX_REQUESTED_SLOTS = 4
 BACKGROUND_TASKS_DIR = ".tasks"
+TASK_PROBE_TIMEOUT_SECONDS = 5
+DETACHED_LEAD = "The command runs detached."
+MOVED_LEAD = "The command did not complete within its {applied_s}s timeout and continues detached."
 BACKGROUND_DIRECTIVE = (
-    "The command runs detached. `exit_file` appears exactly once, with the exit code — `watch` is "
-    "empty until then, so a monitor on it fires at completion; `stop` ends the command and still "
-    "writes `exit_file`."
+    "`read` on `log` shows the output so far. `exit_file` appears exactly once, with the exit "
+    "code — `watch` is empty until then, so a monitor on it fires at completion; `stop` ends the "
+    "command and still writes `exit_file`."
 )
+"""What holds of a detached command however it got there, so the lead sentence is the only thing
+that differs between a command detached on request and one that outgrew its wait. The log is the
+whole interface to a running command: it is read, never carried into the result, which would hand
+back a prefix that is already stale."""
+TASK_BASH = 'exec bash -c "$1" bash "$2" "$3" "$4"'
+"""Hand the launch to bash, replacing the shell rather than nesting inside it. Everything below
+rests on `set -m`, and dash — `/bin/sh` on the sandbox image — refuses monitor mode where there is
+no tty (`can't access tty; job control turned off`), which would leave every job in the launcher's
+own process group. From here down each part rides argv: the script, the task's base path and the
+command are positional parameters at every hop, so a command holding the delimiter and a workspace
+path holding a quote both arrive verbatim."""
+TASK_WRAPPER = (
+    'set -m; bash -lc "$2" > "$1.log" 2>&1 & child=$!; '
+    'trap "kill -- -$child 2>/dev/null" TERM INT; '
+    'echo $$ > "$1.pid"; '
+    'wait $child; echo $? > "$1.exit"'
+)
+"""The command's own parent: it redirects the command — not itself — into the log, so the log
+carries the command's interleaved output while the shell's job notices go nowhere, and it writes
+the exit code exactly once whether the command ended on its own or was stopped. `set -m` gives the
+command a process group of its own, so the trap's `kill -- -$child` reaches the descendants doing
+the work rather than the shell in front of them. The command runs under the login shell every bash
+call has always used, whose profile is what puts its tools on PATH. The wrapper writes its own pid
+only after the trap is armed, so no reader ever holds a pid whose kill would land before the
+trap — a stop the instant the handles return still signals."""
+TASK_LAUNCH = (
+    'mkdir -p "$(dirname "$2")" || exit 1; '
+    'set -m; nohup bash -c "$1" bash "$2" "$3" >/dev/null 2>&1 & task=$!; set +m; '
+    'for _ in $(seq 500); do [ -s "$2.pid" ] && break; sleep 0.01; done; '
+)
+"""Start the wrapper in a process group of its own, which is what lets it outlive this launcher: a
+carrier ends an exec by killing the launcher's whole group, so a wrapper sharing that group dies
+with it and the exit code no reader would ever see. `set +m` immediately after keeps monitor mode's
+job notice off the result. The launch is complete only when the wrapper's pid file appears —
+written past its trap — so what follows never reads an empty handle."""
+TASK_WAIT = (
+    'wait "$task"; code=$(cat "$2.exit"); cat "$2.log"; '
+    'rm -f "$2.log" "$2.exit" "$2.pid"; exit "$code"'
+)
+"""Answer as the command itself — its output, its exit code — so a command that fits its budget
+costs the single exec it always did, and waits on the wrapper directly rather than polling for it,
+since the launcher is its parent. The three files are the handles a moved command is reported by; a
+command that ended here is reported by its output instead, so they go rather than accumulating in
+the member's workspace."""
+TASK_DETACH = 'cat "$2.pid"'
+TASK_PROBE = (
+    'pid=$(cat "$1.pid" 2>/dev/null) || exit 1; '
+    'if [ -e "$1.exit" ] || kill -0 "$pid" 2>/dev/null; then printf %s "$pid"; fi'
+)
+"""Whether the work outlived the exec that launched it, answered by the wrapper's own pid: alive,
+or already past its exit file. Silence is the sandbox failing to run the command at all, which is
+the one reading that must still be reported as an error."""
 
 
 class BashInput(BaseModel):
     command: str = Field(description="The shell command to execute.")
     timeout: int | None = Field(
-        default=None, description="Optional timeout in milliseconds. Max 600000 (10 minutes)."
+        default=None,
+        description="How long to wait for the command in the foreground, in milliseconds. Max "
+        "600000 (10 minutes). A command still running at the deadline is not stopped — it "
+        "continues in the background and the result hands back its task id, log path, and pid.",
     )
     background: bool = Field(
         default=False,
@@ -360,87 +418,94 @@ class MessageSubagentInput(BaseModel):
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
-    """Run one command and report what ended it. A stopped command reports the deadline that
-    stopped it rather than a bare `exit code: 124`, which `timeout` inside the command produces
-    just as the sandbox does — a caller reading the code alone cannot tell which fired, and one
-    that assumes its own is the only deadline re-runs the same command against the same wall. The
-    seconds named are the ones that actually applied, so a request the cap reduced says so at the
-    moment it costs something rather than silently at the call."""
+    """Run one command and report what ended it. A command still running at its budget is not
+    stopped: it goes on detached and the result hands back the handles it can be watched by, so
+    work already paid for keeps running while the caller does something else — a foreground budget
+    is how long the caller waits, never how long the work may take. The command is detached from
+    the start, which is what makes that move free: foreground and background differ only in whether
+    this waits.
+
+    Only the sandbox failing to run the command at all is an error, and it reports the deadline
+    that fired rather than a bare `exit code: 124`, which `timeout` inside the command produces
+    just as the sandbox does — a caller reading the code alone cannot tell which fired. The seconds
+    named are the ones that actually applied, so a request the cap reduced says so at the moment it
+    costs something rather than silently at the call."""
     if args.background:
         return await _bash_background(ctx, args.command)
     requested_s = None if args.timeout is None else int(args.timeout / 1000)
     timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
-    result = await ctx.sandbox.bash(args.command, timeout_s=timeout_s)
+    task_id = uuid4().hex[:8]
+    result = await ctx.sandbox.sh(
+        TASK_BASH,
+        TASK_LAUNCH + TASK_WAIT,
+        TASK_WRAPPER,
+        _task_base(task_id),
+        args.command,
+        timeout_s=timeout_s,
+    )
+    if result.timed_out_after_s is not None:
+        return await _moved_to_background(
+            ctx, args.command, task_id, result.timed_out_after_s, requested_s
+        )
     output = result.stdout + result.stderr
     if result.exit_code == 0:
         return ToolResult(content=(TextContent(text=output),))
-    stopped = result.timed_out_after_s
-    if stopped is None:
-        notice = f"exit code: {result.exit_code}"
-    elif requested_s is None:
-        notice = (
-            f"timed out: the sandbox stopped this command after {stopped}s, the default when the "
-            f"call sets no timeout. Set timeout (up to {MAX_BASH_TIMEOUT_MS // 1000}s) to allow "
-            "longer work."
-        )
-    elif requested_s > stopped:
-        notice = (
-            f"timed out: the sandbox stopped this command after {stopped}s, the maximum. The "
-            f"{requested_s}s requested was capped."
-        )
-    else:
-        notice = f"timed out: the sandbox stopped this command after {stopped}s."
-    if stopped is not None:
-        await _record_exec_timeout(ctx, args.command, stopped, requested_s)
+    notice = f"exit code: {result.exit_code}"
     return ToolResult(
         content=(TextContent(text=f"{output}\n{notice}" if output else notice),),
         is_error=True,
     )
 
 
-async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
-    """Detach the command and hand back its handles. The command travels as its own argv element,
-    never interpolated into the launcher — its quoting cannot break out, and a host-path
-    carrier's `/workspace` rewrite reaches it exactly as it reaches a foreground command. The
-    wrapper redirects the command — not itself — into the log, so the log carries only the
-    command's output while the shell's own job notices go nowhere, and the exec's own pipes are
-    free the moment the pid prints. Every path the
-    launcher and the result name is absolute: an exec's working directory is carrier-dependent
-    (Docker sets none), and the workspace root is the one anchor every carrier shares. The pid
-    the result names is the wrapper's, and the wrapper forwards TERM and INT to the command's
-    whole process group — `set -m` gives the backgrounded command a group of its own, so the
-    signal reaches the descendants doing the actual work, not just the shell in front of them —
-    and the advertised kill ends the work AND still writes the exit file — the completion signal
-    fires exactly once whether the command finished or was stopped. The wrapper writes its own pid
-    only after the trap is armed and the launcher waits for that write, so no reader ever holds a
-    pid whose kill would land before the trap — a stop the instant the result returns still
-    signals."""
-    task_id = uuid4().hex[:8]
-    base = f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}/{task_id}"
-    made = await ctx.sandbox.bash(f'mkdir -p "{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"')
-    if made.exit_code != 0:
-        return ToolResult(
-            content=(TextContent(text=made.stderr or "could not create the tasks directory"),),
-            is_error=True,
-        )
-    wrapper = (
-        f'set -m; bash -c "$1" > "{base}.log" 2>&1 & child=$!; '
-        'trap "kill -- -$child 2>/dev/null" TERM INT; '
-        f'echo $$ > "{base}.pid"; '
-        f'wait $child; echo $? > "{base}.exit"'
+async def _moved_to_background(
+    ctx: ToolContext, command: str, task_id: str, applied_s: int, requested_s: int | None
+) -> ToolResult:
+    """The budget expired: say whether the work is still running, which is the difference between a
+    command that outgrew the wait and a sandbox that never ran it. One probe answers it — the
+    wrapper is alive, or its exit file is already there — and a live command is reported exactly as
+    a detached one, since that is now what it is.
+
+    A dead wrapper with no exit file is the sandbox failing, and only that is the caller's error."""
+    probe = await ctx.sandbox.sh(
+        TASK_PROBE, _task_base(task_id), timeout_s=TASK_PROBE_TIMEOUT_SECONDS
     )
-    started = await ctx.sandbox.sh(
-        f"nohup bash -c '{wrapper}' bash \"$1\" >/dev/null 2>&1 & "
-        f'for _ in $(seq 500); do [ -s "{base}.pid" ] && break; sleep 0.01; done; '
-        f'cat "{base}.pid"',
-        command,
-    )
-    if started.exit_code != 0 or not started.stdout.strip():
-        return ToolResult(
-            content=(TextContent(text=started.stderr or "the command did not detach"),),
-            is_error=True,
+    pid = probe.stdout.strip()
+    if probe.exit_code == 0 and pid:
+        return _task_result(task_id, pid, applied_s=applied_s)
+    if requested_s is None:
+        notice = (
+            f"timed out: the sandbox stopped this command after {applied_s}s, the default when the "
+            f"call sets no timeout. Set timeout (up to {MAX_BASH_TIMEOUT_MS // 1000}s) to allow "
+            "longer work."
         )
-    pid = started.stdout.strip()
+    elif requested_s > applied_s:
+        notice = (
+            f"timed out: the sandbox stopped this command after {applied_s}s, the maximum. The "
+            f"{requested_s}s requested was capped."
+        )
+    else:
+        notice = f"timed out: the sandbox stopped this command after {applied_s}s."
+    await _record_exec_timeout(ctx, command, applied_s, requested_s)
+    return ToolResult(content=(TextContent(text=notice),), is_error=True)
+
+
+def _task_base(task_id: str) -> str:
+    """Every path the launcher and the result name is absolute: an exec's working directory is
+    carrier-dependent (Docker sets none), and the workspace root is the one anchor every carrier
+    shares."""
+    return f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}/{task_id}"
+
+
+def _task_result(task_id: str, pid: str, applied_s: int | None = None) -> ToolResult:
+    """The handles a detached command is reached by, whichever way it got there — one result for a
+    command detached on request and one that outgrew its wait, so the two can never drift apart.
+    `applied_s` is the wait that expired, naming the seconds that actually applied; unset is a
+    command detached from the start.
+
+    The pid is the wrapper's, so the advertised stop ends the work AND still writes the exit file —
+    the completion signal fires exactly once whether the command finished or was stopped."""
+    lead = DETACHED_LEAD if applied_s is None else MOVED_LEAD.format(applied_s=applied_s)
+    base = _task_base(task_id)
     payload = {
         "task": task_id,
         "pid": pid,
@@ -449,7 +514,24 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
         "watch": f'cat "{base}.exit" || true',
         "stop": f'kill "$(cat "{base}.pid")"',
     }
-    return ToolResult(content=(TextContent(text=f"{BACKGROUND_DIRECTIVE}\n{json.dumps(payload)}"),))
+    return ToolResult(
+        content=(TextContent(text=f"{lead} {BACKGROUND_DIRECTIVE}\n{json.dumps(payload)}"),)
+    )
+
+
+async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
+    """Detach the command and hand back its handles without ever waiting on it — the same launch a
+    foreground command rides, stopping at the pid."""
+    task_id = uuid4().hex[:8]
+    started = await ctx.sandbox.sh(
+        TASK_BASH, TASK_LAUNCH + TASK_DETACH, TASK_WRAPPER, _task_base(task_id), command
+    )
+    if started.exit_code != 0 or not started.stdout.strip():
+        return ToolResult(
+            content=(TextContent(text=started.stderr or "the command did not detach"),),
+            is_error=True,
+        )
+    return _task_result(task_id, started.stdout.strip())
 
 
 async def _record_exec_timeout(
@@ -1006,8 +1088,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Python 3, Node.js, ripgrep, poppler, tesseract, libreoffice, pandoc, chromium, and "
             "standard Unix tools. Working directory: /workspace. Use absolute paths. Do NOT use "
             "for file reads/edits/searches — use the dedicated read/edit/glob/grep tools instead. "
-            "Set background for compute that outlives the turn: the result names the task's log "
-            "and the exit file whose appearance is the completion signal."
+            "A command still running at its timeout keeps running in the background rather than "
+            "being stopped; set background to detach it from the start. Either way the result "
+            "names the task's log and the exit file whose appearance is the completion signal."
         ),
         input_model=BashInput,
         handler=bash_handler,

@@ -56,6 +56,9 @@ class FakeSandbox:
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return self.bash_result
 
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return self.bash_result
+
     async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
         raise AssertionError(f"run_sbxfs({op}) must not run once a guard has rejected the call")
 

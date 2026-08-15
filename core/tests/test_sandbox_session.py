@@ -29,8 +29,12 @@ from ufo.sandbox.session import (
 )
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import (
+    BACKGROUND_DIRECTIVE,
+    BACKGROUND_TASKS_DIR,
+    DETACHED_LEAD,
     EXEC_TIMEOUT_COMMAND_MAX_CHARS,
     EXEC_TIMEOUT_VITALS_CMD,
+    TASK_PROBE,
     BashInput,
     bash_handler,
 )
@@ -178,7 +182,9 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
 
 
 class _RecordingCarrier:
-    """Records the exec timeout so the bash tool's ms→s conversion and cap can be asserted."""
+    """Records the exec timeout so the bash tool's ms→s conversion and cap can be asserted, and
+    answers the liveness probe as a sandbox that never ran the command at all — no wrapper alive,
+    no exit file — which is the one expiry that is still the caller's error rather than a task."""
 
     def __init__(self, result: ExecResult | None = None, probe: ExecResult | None = None) -> None:
         self.timeouts: list[int] = []
@@ -198,6 +204,8 @@ class _RecordingCarrier:
         self.commands.append(argv[-1] if argv else "")
         if self.probe is not None and argv and argv[-1] == EXEC_TIMEOUT_VITALS_CMD:
             return self.probe
+        if TASK_PROBE in argv:
+            return ExecResult(stdout="", stderr="", exit_code=0)
         return self.result
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
@@ -395,10 +403,144 @@ async def test_the_stop_line_reaches_the_commands_descendants(tmp_path: Path) ->
     raise AssertionError(f"descendant {descendant} survived the stop")
 
 
+async def test_a_command_inside_its_budget_answers_as_itself(tmp_path: Path) -> None:
+    """A command that fits the wait is reported by its output and its own exit code, detour through
+    a detached wrapper or not: the move is what happens at the budget, never a change to what a
+    caller gets before it."""
+    ctx = await _live_ctx(tmp_path)
+
+    passed = await bash_handler(
+        ctx,
+        BashInput(command="echo out-line; echo err-line >&2", user_description="checking the box"),
+    )
+    failed = await bash_handler(
+        ctx,
+        BashInput(command="echo out-line; exit 7", user_description="checking the box"),
+    )
+
+    assert not passed.is_error
+    assert passed.content[0].text == "out-line\nerr-line\n"
+    assert failed.is_error
+    assert failed.content[0].text == "out-line\n\nexit code: 7"
+
+
+async def test_a_finished_command_leaves_no_task_behind(tmp_path: Path) -> None:
+    """The task files are the handles a moved command is reported by. One that ended inside its
+    budget is reported by its output, so it leaves none — else every command a member ever ran
+    would pile up in the directory the live tasks are listed from."""
+    ctx = await _live_ctx(tmp_path)
+    await bash_handler(ctx, BashInput(command="echo done", user_description="checking the box"))
+    listed = await ctx.sandbox.bash(f'ls "{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"')
+    assert listed.stdout.strip() == ""
+
+
+async def test_a_foreground_command_carries_its_quoting_and_workspace_paths(
+    tmp_path: Path,
+) -> None:
+    """The command rides argv through every hop of the launch, so one holding the delimiter runs
+    verbatim and an absolute workspace path inside it lands under the real root."""
+    ctx = await _live_ctx(tmp_path)
+
+    quoted = f"{WORKSPACE_DIR}/quoted.txt"
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command=f"""echo "x'y" > "{quoted}"; cat "{quoted}" """,
+            user_description="checking the box",
+        ),
+    )
+
+    assert not result.is_error
+    assert result.content[0].text.strip() == "x'y"
+
+
+async def test_a_command_that_outgrows_its_budget_keeps_running(tmp_path: Path) -> None:
+    """The budget is how long the caller waits, not how long the work may take. A command still
+    running when it expires is handed back as a task rather than killed — the carrier ends the
+    exec by killing its whole process group, so the wrapper holding the command must sit in a group
+    of its own to survive it — and the work goes on: the log grows after the tool answered and the
+    exit code lands later."""
+    ctx = await _live_ctx(tmp_path)
+
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command='for i in 1 2 3 4 5 6 7 8; do echo "tick $i"; sleep 0.4; done',
+            timeout=1000,
+            user_description="building",
+        ),
+    )
+
+    assert not result.is_error
+    assert "did not complete within its 1s timeout" in result.content[0].text
+    task = _task_payload(result.content[0].text)
+    at_return = await ctx.sandbox.bash(f'cat "{task["log"]}"')
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
+    after = await ctx.sandbox.bash(f'cat "{task["log"]}"')
+    assert after.stdout != at_return.stdout
+    assert "tick 8" in after.stdout
+
+
+async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path) -> None:
+    """A command detached on request and one that outgrew its wait are the same thing by the time
+    they are reported, so they are reported the same way: the same handles under the same names,
+    and the same standing directive. Only the lead sentence differs, and only the moved one names
+    the seconds that expired — an agent handed two shapes for one state would need two ways to
+    watch it."""
+    ctx = await _live_ctx(tmp_path)
+
+    asked = await bash_handler(
+        ctx, BashInput(command="sleep 30", background=True, user_description="building")
+    )
+    moved = await bash_handler(
+        ctx, BashInput(command="sleep 30", timeout=1000, user_description="building")
+    )
+
+    assert not asked.is_error and not moved.is_error
+    assert (
+        _task_payload(asked.content[0].text).keys() == _task_payload(moved.content[0].text).keys()
+    )
+    assert BACKGROUND_DIRECTIVE in asked.content[0].text
+    assert BACKGROUND_DIRECTIVE in moved.content[0].text
+    assert DETACHED_LEAD in asked.content[0].text
+    assert "1s" not in asked.content[0].text.split("\n")[0]
+    await ctx.sandbox.bash(_task_payload(asked.content[0].text)["stop"])
+    await ctx.sandbox.bash(_task_payload(moved.content[0].text)["stop"])
+
+
+async def test_a_moved_commands_stop_line_reaches_its_descendants(tmp_path: Path) -> None:
+    """A moved command is a task like any other: the stop it is handed back with ends the work
+    itself, not just the shell in front of it."""
+    ctx = await _live_ctx(tmp_path)
+
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command=f'sleep 30 & echo $! > "{WORKSPACE_DIR}/moved.pid"; wait',
+            timeout=1000,
+            user_description="building",
+        ),
+    )
+
+    task = _task_payload(result.content[0].text)
+    descendant = await _wait_for_file(ctx.sandbox, f"{WORKSPACE_DIR}/moved.pid")
+    killed = await ctx.sandbox.bash(task["stop"])
+    assert killed.exit_code == 0
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) != "0"
+    for _ in range(200):
+        alive = await ctx.sandbox.bash(f'kill -0 "{descendant}" 2>/dev/null && echo alive || true')
+        if not alive.stdout.strip():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"descendant {descendant} survived the stop")
+
+
 async def test_a_stopped_command_names_the_deadline_that_stopped_it(tmp_path: Path) -> None:
-    """The seconds reported are the ones that applied, and a request the cap reduced says so. An
-    agent that cannot tell which deadline fired re-runs the same command against the same wall,
-    and one that never learns its request was capped keeps asking for a budget it cannot have."""
+    """A budget that expires over a sandbox holding nothing — no wrapper alive, no exit code
+    coming — has no task to hand back, and reports the deadline that fired. The seconds are the
+    ones that applied, and a request the cap reduced says so: an agent that cannot tell which
+    deadline fired re-runs the same command against the same wall, and one that never learns its
+    request was capped keeps asking for a budget it cannot have."""
     default_stop = _RecordingCarrier(
         ExecResult(
             stdout="",
@@ -458,9 +600,10 @@ async def test_a_commands_own_timeout_is_not_reported_as_the_sandboxs(tmp_path: 
 async def test_a_stopped_command_records_the_container_it_was_stopped_in(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The counter names the carrier and nothing else, so a timeout is unattributable: which
-    profile, which command, and what the container was doing are all absent. The record carries
-    them, and the vitals come from the container itself at the moment it stopped the work."""
+    """A sandbox that ran nothing is the fault worth recording, and the counter names the carrier
+    and nothing else: which profile, which command, and what the container was doing are all
+    absent. The record carries them, and the vitals come from the container itself at the moment it
+    failed the work."""
     carrier = _RecordingCarrier(
         ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=600),
         probe=ExecResult(stdout="1.90 1.20 0.80 3/210 900\n", stderr="", exit_code=0),
