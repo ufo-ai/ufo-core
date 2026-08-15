@@ -94,7 +94,7 @@ from ufo.schema.records import (
 )
 from ufo.search import SearchProvider
 from ufo.skills.runtime import LoadedSkill, SkillRegistry, mount_skill
-from ufo.tools.context import Spawn
+from ufo.tools.context import Spawn, UnknownSubagentProfile
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.workspace import ws
 
@@ -125,6 +125,24 @@ def _agent_tools(
     if allowed is None or admission == INTENT_ADMISSION:
         return tuple(tool for tool in all_tools if not tool.profile_only)
     return tuple(tool for tool in all_tools if tool.name in allowed)
+
+
+def _resolve_profile(registry: SubagentRegistry, turn_id: str, name: str) -> SubagentProfile:
+    """The profile a subagent turn runs under. Every admission resolves the name before it writes a
+    child turn, so a name that fails here is one the registry stopped holding under a child already
+    queued — the deploy that dropped the extension declaring it. The requested name and the set that
+    was registered ride their own log event, because the failure the backstop reports names a class
+    and a stack, and neither says which profile the fleet no longer has."""
+    try:
+        return registry.get(name)
+    except UnknownSubagentProfile as error:
+        log_error(
+            "turn.unknown_subagent_profile",
+            turn_id=turn_id,
+            requested_profile=error.requested,
+            registered_profiles=", ".join(error.registered),
+        )
+        raise
 
 
 def _subagent_tools(
@@ -421,7 +439,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT
             output_model = None
         else:
-            profile = runtime.subagents.get(turn.subagent_profile)
+            profile = _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
             preload = skills.closure(*(payload.get("preload_skills") or ()))
             resolved = Agent(

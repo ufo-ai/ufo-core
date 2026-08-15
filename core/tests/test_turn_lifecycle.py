@@ -1630,6 +1630,82 @@ async def test_a_foreground_child_does_not_also_arrive_as_a_message(surface: Tur
     assert sorted(turns) == [1], f"EXTRA TURNS: {sorted(turns)}"
 
 
+async def test_a_child_whose_profile_vanished_names_it_in_the_setup_failure(
+    surface: Turns, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #1721: two children died in setup under `UnknownSubagentProfile`, and the telemetry the
+    failure left named a class and a stack — not the profile that failed, and not what the fleet was
+    registered to hold. A registry that shrank under an admitted child is the one way a child still
+    reaches setup with a name nothing resolves, so the resolution logs both facts, and the terminal
+    the backstop commits carries them to whoever awaits the child."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    parent_id, child_conversation, child_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=parent_id,
+                workspace_id=seed.workspace_id,
+                conversation_id=seed.conversation_id,
+                agent_id=seed.agent_id,
+                seq=1,
+                status="running",
+                inbound="parent",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=child_conversation,
+                workspace_id=seed.workspace_id,
+                agent_id=seed.agent_id,
+                surface="subagent",
+                queue_key=str(child_id),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=child_id,
+                workspace_id=seed.workspace_id,
+                conversation_id=child_conversation,
+                agent_id=seed.agent_id,
+                seq=1,
+                status="queued",
+                inbound='{"value": 1}',
+                parent_turn_id=parent_id,
+                subagent_profile="vanished",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(seed.workspace_id), caplog.at_level(logging.ERROR, logger="ufo"):
+        assert await loop_queue._run_turn(runtime, str(child_id)) == "failed"
+    (event,) = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "turn.unknown_subagent_profile"
+    ]
+    assert event["turn_id"] == str(child_id)
+    assert event["requested_profile"] == "vanished"
+    assert "roundtrip" in str(event["registered_profiles"])
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == child_id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.terminal["error_class"] == "UnknownSubagentProfile"
+    assert "vanished" in row.terminal["error_message"]
+    assert "roundtrip" in row.terminal["error_message"]
+
+
 async def test_subagent_runs_at_the_parent_agents_reasoning_effort(surface: Turns) -> None:
     """A profile names a model but never an effort, so the child inherits the parent agent's row —
     every round of both turns asks the model for the seeded effort, not the record default."""

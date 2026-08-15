@@ -81,7 +81,16 @@ class UntrustedContentError(Exception):
 class UnknownSubagentProfile(Exception):
     """A spawn named a profile the registry does not hold. Its message names the bad profile and
     lists the registered profile names, so the spawning tool surfaces an error the model retries
-    against a valid name instead of dead-ending on a bare KeyError."""
+    against a valid name instead of dead-ending on a bare KeyError. The same two facts ride as
+    fields, so a failed setup names which profile failed in telemetry that carries no exception
+    message."""
+
+    def __init__(self, requested: str, registered: tuple[str, ...]) -> None:
+        super().__init__(
+            f"unknown subagent profile {requested!r}; valid profiles are: {', '.join(registered)}"
+        )
+        self.requested = requested
+        self.registered = registered
 
 
 class ToolResult(BaseModel):

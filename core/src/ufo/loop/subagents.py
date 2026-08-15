@@ -107,10 +107,7 @@ class SubagentRegistry:
         for profile in self.profiles:
             if profile.name == name:
                 return profile
-        valid = ", ".join(sorted(profile.name for profile in self.profiles))
-        raise UnknownSubagentProfile(
-            f"unknown subagent profile {name!r}; valid profiles are: {valid}"
-        )
+        raise UnknownSubagentProfile(name, tuple(sorted(profile.name for profile in self.profiles)))
 
 
 def subagent_system_prompt(
@@ -308,8 +305,12 @@ class Subagents:
         `turn.idempotency_key`: a re-run of the messaging tool step (crash recovery) finds the turn
         it already admitted under `dedup_key` instead of admitting a second one at the next seq.
         Returns the follow-up's status; refuses a turn id that is not a child of this parent,
-        mirroring cancel."""
-        await self._require_child(turn_id)
+        mirroring cancel, and a profile this registry no longer holds. That last check is the
+        admission's, not the child's: the follow-up carries the profile of the child it continues,
+        so admitting one whose profile nothing resolves queues a turn that can only die in its own
+        setup, where the caller that asked for it is no longer there to be told."""
+        profile = await self._require_child(turn_id)
+        self.registry.get(profile)
         async with workspace_tx() as connection:
             child = (
                 await connection.execute(

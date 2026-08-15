@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -19,9 +20,10 @@ from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.ext.surface import conversation_name
+from ufo.hub import InProcessHub
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.prompts.render import DELIVERY_REGISTER_BLOCK
-from ufo.loop.queue import _load_turn, _subagent_tools
+from ufo.loop.queue import _commit_failed_terminal, _load_turn, _subagent_tools
 from ufo.loop.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
@@ -427,7 +429,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(member_id),
     )
@@ -485,6 +487,77 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
         await subagents.message(stranger, "hello", dedup_key="turn-1/message_subagent/call-1")
 
 
+async def test_message_refuses_a_followup_whose_profile_is_no_longer_registered(
+    db: None, dbos_launched: Config
+) -> None:
+    """A follow-up runs under the profile of the child it continues, so a registry that no longer
+    holds that name can only admit a turn that dies in its own setup — after the tool that asked for
+    it has already answered "queued". The refusal happens at the admission instead, where the caller
+    is still there to read it, and leaves the child's conversation at the one turn it had."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    with pytest.raises(UnknownSubagentProfile) as caught:
+        await subagents.message(child_id, "keep going", dedup_key="turn-1/message_subagent/call-1")
+    assert GENERAL_PURPOSE in str(caught.value)
+    assert "research" in str(caught.value)
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(
+                    tables.turn.c.conversation_id == child_conversation
+                )
+            )
+        ).all()
+    assert [row.id for row in turns] == [child_id]
+    assert client.enqueued == []
+
+
+SETUP_FAILURE_WAIT_SECONDS = 10
+
+
+async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
+    db: None, dbos_launched: Config
+) -> None:
+    """The admission check cannot cover a registry that shrinks under a child already queued — a
+    deploy that drops the extension declaring its profile — so that child still reaches setup with a
+    name nothing resolves. The queue's backstop commits that fault's terminal, which is what ends
+    the poll of a parent spawning in the foreground: the parent raises the child's diagnostic,
+    naming the profile it asked for and the set the fleet was left holding, rather than waiting on a
+    terminal no execution will ever write."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn(
+        "research", {"task": "acme"}, background=True, dedup_key="vanished"
+    )
+    awaiting = asyncio.create_task(
+        subagents.spawn("research", {"task": "acme"}, dedup_key="vanished")
+    )
+    await _commit_failed_terminal(
+        InProcessHub(), spawned.turn_id, UnknownSubagentProfile("research", ("coding",))
+    )
+    async with asyncio.timeout(SETUP_FAILURE_WAIT_SECONDS):
+        with pytest.raises(RuntimeError) as caught:
+            await awaiting
+    message = str(caught.value)
+    assert "UnknownSubagentProfile" in message
+    assert "research" in message
+    assert "valid profiles are: coding" in message
+
+
 async def test_messages_dispatch_in_child_conversation_order(
     db: None, dbos_launched: Config
 ) -> None:
@@ -503,7 +576,7 @@ async def test_messages_dispatch_in_child_conversation_order(
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(None),
     )
@@ -549,7 +622,7 @@ async def test_message_reexecuted_with_its_dedup_key_reconnects_to_its_followup(
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(None),
     )
@@ -599,7 +672,7 @@ async def test_message_reconnect_past_queued_reports_status_without_redispatch(
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(None),
     )
@@ -636,7 +709,7 @@ async def test_message_reconnect_behind_an_earlier_queued_followup_stays_undispa
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(None),
     )
@@ -677,7 +750,7 @@ async def test_message_dedup_key_reused_for_another_child_is_refused(
     child_b, _ = await _running_child(workspace_id, agent_id, parent.id)
     subagents = Subagents(
         client=_RecordingClient(),
-        registry=SubagentRegistry(()),
+        registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=conversation_audience(None),
     )
