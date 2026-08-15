@@ -3348,32 +3348,47 @@ def test_a_sparse_counters_alert_can_clear_itself(monitor: str, environment: str
     assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
 
 
-def test_production_owns_database_and_model_dashboards() -> None:
-    production = (ROOT / "infra" / "envs" / "prod" / "dashboards.tf").read_text()
-    assert re.findall(r'resource "datadog_dashboard" "(\w+)"', production) == [
+def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
+    """Both boards read either fleet through `$env`, so the prod root declares no board at all. One
+    it declared would be a second copy under its own id rather than the prod view of this one."""
+    assert not (ROOT / "infra" / "envs" / "prod" / "dashboards.tf").exists()
+    dashboards = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    assert re.findall(r'resource "datadog_dashboard" "(\w+)"', dashboards) == [
         "database",
         "model_latency",
+        "turns",
+        "coding_quality",
+        "prompt_cache",
     ]
-    assert "env:testing" not in production
-    assert "env:prod" in production
-    assert "cpucredit_balance" not in production
-    assert "first three graphs" in production
-    assert re.findall(r'title\s+=\s+"([^"]+)"', production)[:4] == [
-        "ufo prod database",
+    assert "env:testing" not in dashboards
+    assert "env:prod" not in dashboards
+    assert "first three graphs" in dashboards
+    assert re.findall(r'title\s+=\s+"([^"]+)"', dashboards)[:4] == [
+        "ufo database",
         "transactions that never opened (client side)",
         "how long a transaction waited for a connection",
         "pools exhausted at their ceiling (client side)",
     ]
-    assert (
-        "sum:ufo.db_tx_unavailable_total{env:prod} by {path,error_class}.as_count()" in production
-    )
-    assert "p95:ufo.db_tx_acquire_ms{env:prod} by {path}" in production
-    assert "p99:ufo.db_tx_acquire_ms{env:prod} by {path}" in production
-    assert "sum:ufo.db_pool_exhausted_total{env:prod} by {path}.as_count()" in production
-    assert (
-        'resource "datadog_dashboard" "turns"'
-        in (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
-    )
+    assert "sum:ufo.db_tx_unavailable_total{$env} by {path,error_class}.as_count()" in dashboards
+    assert "p95:ufo.db_tx_acquire_ms{$env} by {path}" in dashboards
+    assert "p99:ufo.db_tx_acquire_ms{$env} by {path}" in dashboards
+    assert "sum:ufo.db_pool_exhausted_total{$env} by {path}.as_count()" in dashboards
+    assert "p50:ufo.model_round_ms{$env,!error_class:*} by {provider}" in dashboards
+
+
+def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
+    """CloudWatch reports the instance's own tags, where the environment reads `ufo-testing` on one
+    fleet and `prod` on the other, so no RDS query can ride `$env`. The presets are what keep one
+    selection moving both variables together."""
+    dashboards = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    assert re.findall(r"avg:aws\.rds\.\w+\{([^}]*)\}", dashboards) == ["$dbinstance"] * 7
+    assert "avg:aws.rds.cpucredit_balance{$dbinstance}" in dashboards
+    assert dashboards.count("template_variable_preset {") == 2
+    assert re.findall(r"available_values = \[([^]]*)\]", dashboards) == [
+        '"testing", "prod"',
+        '"ufo-testing-postgres", "prod-postgres"',
+        '"testing", "prod"',
+    ]
 
 
 def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:

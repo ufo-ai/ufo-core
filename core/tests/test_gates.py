@@ -315,6 +315,7 @@ def test_set_cookie_gate_allows_the_factory_helper_at_call_sites() -> None:
 
 TESTING_TF = Path("infra/envs/testing/datadog_aws.tf")
 PROD_TF = Path("infra/envs/prod/datadog_aws.tf")
+DASHBOARD = 'resource "datadog_dashboard" "database" {}\n'
 INTEGRATION = 'resource "datadog_integration_aws_account" "ufo" {}\n'
 EXTERNAL_ID = 'resource "datadog_integration_aws_external_id" "ufo" {}\n'
 TAG_CONFIGURATION = 'resource "datadog_metric_tag_configuration" "turn_ms" {}\n'
@@ -355,6 +356,14 @@ def test_shared_singleton_gate_covers_the_metric_metadata() -> None:
         {TESTING_TF: METRIC_METADATA, PROD_TF: METRIC_METADATA}
     )
     assert failures and "datadog_metric_metadata" in failures[0]
+
+
+def test_shared_singleton_gate_covers_the_dashboard() -> None:
+    """A board selects its fleet through an `env` template variable, so one declaration already
+    reads both. A second root declaring the same board builds a second board nobody chose between,
+    and each apply keeps its own id, so the two drift instead of colliding loudly."""
+    failures = gates._shared_singleton_failures({TESTING_TF: DASHBOARD, PROD_TF: DASHBOARD})
+    assert failures and "datadog_dashboard" in failures[0]
 
 
 def test_env_terraform_reaches_every_environment_root() -> None:

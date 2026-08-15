@@ -218,6 +218,7 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
     ),
 }
 SHARED_SINGLETON_RESOURCES = (
+    "datadog_dashboard",
     "datadog_integration_aws_account",
     "datadog_integration_aws_external_id",
     "datadog_metric_metadata",

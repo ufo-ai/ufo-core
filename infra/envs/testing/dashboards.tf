@@ -4,11 +4,54 @@
 # instance's own health so the pair is read together — the failure in #834 was invisible on every
 # database-side graph while a turn died waiting on a connect.
 #
-# One board for the testing fleet, in the root that owns its instance.
+# One board for both fleets, in the root the deploy pipeline applies.
 
 resource "datadog_dashboard" "database" {
-  title       = "ufo testing database"
+  title       = "ufo database"
   layout_type = "ordered"
+
+  # Every `ufo.*` query scopes to `$env` rather than a literal, so the board reads either fleet.
+  template_variable {
+    name             = "env"
+    prefix           = "env"
+    defaults         = ["testing"]
+    available_values = ["testing", "prod"]
+  }
+
+  # The CloudWatch half cannot ride `$env`: the AWS integration carries the instance's own tags,
+  # where the environment reads `ufo-testing` on one fleet and `prod` on the other, so nothing there
+  # matches the `env` tag the OTLP pipeline stamps. The RDS queries key on the instance identifier
+  # instead, as every monitor does, and the presets below move both selectors as one.
+  template_variable {
+    name             = "dbinstance"
+    prefix           = "dbinstanceidentifier"
+    defaults         = ["ufo-testing-postgres"]
+    available_values = ["ufo-testing-postgres", "prod-postgres"]
+  }
+
+  template_variable_preset {
+    name = "testing"
+    template_variable {
+      name   = "env"
+      values = ["testing"]
+    }
+    template_variable {
+      name   = "dbinstance"
+      values = ["ufo-testing-postgres"]
+    }
+  }
+
+  template_variable_preset {
+    name = "prod"
+    template_variable {
+      name   = "env"
+      values = ["prod"]
+    }
+    template_variable {
+      name   = "dbinstance"
+      values = ["prod-postgres"]
+    }
+  }
 
   widget {
     note_definition {
@@ -19,6 +62,12 @@ resource "datadog_dashboard" "database" {
         Postgres never received, and the pool graphs are what say whether the wait was ours or the
         network's. The CloudWatch series land minutes after the minute they describe; they answer
         capacity questions, never incident ones.
+
+        Read `connections` against the fleet the selector holds. On the testing fleet, 268 is what
+        every pool ceiling in `core/src/ufo/db.py` adds to and 397 is where that instance refuses;
+        between them is the fleet holding connections it did not budget for. The prod instance is a
+        larger class with its own ceiling, and its connections monitor is critical at 300 against
+        testing's 350.
       EOT
       background_color = "yellow"
       font_size        = "14"
@@ -31,7 +80,7 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "transactions that never opened (client side)"
       request {
-        q            = "sum:ufo.db_tx_unavailable_total{env:testing} by {path,error_class}.as_count()"
+        q            = "sum:ufo.db_tx_unavailable_total{$env} by {path,error_class}.as_count()"
         display_type = "bars"
       }
     }
@@ -44,11 +93,11 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "how long a transaction waited for a connection"
       request {
-        q            = "p95:ufo.db_tx_acquire_ms{env:testing} by {path}"
+        q            = "p95:ufo.db_tx_acquire_ms{$env} by {path}"
         display_type = "line"
       }
       request {
-        q            = "p99:ufo.db_tx_acquire_ms{env:testing} by {path}"
+        q            = "p99:ufo.db_tx_acquire_ms{$env} by {path}"
         display_type = "line"
       }
     }
@@ -61,31 +110,30 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "pools exhausted at their ceiling (client side)"
       request {
-        q            = "sum:ufo.db_pool_exhausted_total{env:testing} by {path}.as_count()"
+        q            = "sum:ufo.db_pool_exhausted_total{$env} by {path}.as_count()"
         display_type = "bars"
       }
     }
   }
 
-  # 268 is what every pool ceiling in `core/src/ufo/db.py` adds to, and 397 is where this instance
-  # refuses. Between them is the fleet holding connections it did not budget for.
   widget {
     timeseries_definition {
-      title = "connections (fleet budget 268, refused at 397)"
+      title = "connections"
       request {
-        q            = "avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.database_connections{$dbinstance}"
         display_type = "line"
       }
     }
   }
 
   # The graph that arrives before the charge, by a wide margin: the balance drains while CPU holds
-  # above the baseline.
+  # above the baseline. Burstable classes only, so it reports for the testing `db.t4g.medium` and
+  # reads empty under the prod preset, where the instance is a `db.m6g.large`.
   widget {
     timeseries_definition {
       title = "cpu credit balance"
       request {
-        q            = "avg:aws.rds.cpucredit_balance{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.cpucredit_balance{$dbinstance}"
         display_type = "line"
       }
     }
@@ -95,7 +143,7 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "cpu utilization"
       request {
-        q            = "avg:aws.rds.cpuutilization{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.cpuutilization{$dbinstance}"
         display_type = "line"
       }
     }
@@ -105,7 +153,7 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "freeable memory"
       request {
-        q            = "avg:aws.rds.freeable_memory{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.freeable_memory{$dbinstance}"
         display_type = "line"
       }
     }
@@ -115,11 +163,11 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "read and write latency"
       request {
-        q            = "avg:aws.rds.read_latency{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.read_latency{$dbinstance}"
         display_type = "line"
       }
       request {
-        q            = "avg:aws.rds.write_latency{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.write_latency{$dbinstance}"
         display_type = "line"
       }
     }
@@ -129,7 +177,7 @@ resource "datadog_dashboard" "database" {
     timeseries_definition {
       title = "free storage space"
       request {
-        q            = "avg:aws.rds.free_storage_space{dbinstanceidentifier:${module.platform.db_instance_identifier}}"
+        q            = "avg:aws.rds.free_storage_space{$dbinstance}"
         display_type = "line"
       }
     }
@@ -137,8 +185,16 @@ resource "datadog_dashboard" "database" {
 }
 
 resource "datadog_dashboard" "model_latency" {
-  title       = "ufo testing model latency"
+  title       = "ufo model latency"
   layout_type = "ordered"
+
+  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
+  template_variable {
+    name             = "env"
+    prefix           = "env"
+    defaults         = ["testing"]
+    available_values = ["testing", "prod"]
+  }
 
   widget {
     note_definition {
@@ -162,11 +218,11 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "first token wait by provider"
       request {
-        q            = "p50:ufo.model_first_event_ms{env:testing} by {provider}"
+        q            = "p50:ufo.model_first_event_ms{$env} by {provider}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_first_event_ms{env:testing} by {provider}"
+        q            = "p95:ufo.model_first_event_ms{$env} by {provider}"
         display_type = "line"
       }
     }
@@ -176,11 +232,11 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "whole round by provider"
       request {
-        q            = "p50:ufo.model_round_ms{env:testing,!error_class:*} by {provider}"
+        q            = "p50:ufo.model_round_ms{$env,!error_class:*} by {provider}"
         display_type = "line"
       }
       request {
-        q            = "p95:ufo.model_round_ms{env:testing,!error_class:*} by {provider}"
+        q            = "p95:ufo.model_round_ms{$env,!error_class:*} by {provider}"
         display_type = "line"
       }
     }
@@ -190,7 +246,7 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "generation rate by provider (tokens/s)"
       request {
-        q            = "sum:ufo.model_round_tokens_total{env:testing,kind:output} by {provider}.as_count() / (sum:ufo.model_round_ms{env:testing,!error_class:*} by {provider} / 1000)"
+        q            = "sum:ufo.model_round_tokens_total{$env,kind:output} by {provider}.as_count() / (sum:ufo.model_round_ms{$env,!error_class:*} by {provider} / 1000)"
         display_type = "line"
       }
     }
@@ -200,7 +256,7 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "rounds by provider"
       request {
-        q            = "count:ufo.model_round_ms{env:testing,!error_class:*} by {provider}"
+        q            = "count:ufo.model_round_ms{$env,!error_class:*} by {provider}"
         display_type = "bars"
       }
     }
@@ -210,7 +266,7 @@ resource "datadog_dashboard" "model_latency" {
     timeseries_definition {
       title = "failed rounds by provider and class"
       request {
-        q            = "count:ufo.model_round_ms{env:testing,error_class:*} by {provider,error_class}"
+        q            = "count:ufo.model_round_ms{$env,error_class:*} by {provider,error_class}"
         display_type = "bars"
       }
     }
@@ -220,7 +276,7 @@ resource "datadog_dashboard" "model_latency" {
     toplist_definition {
       title = "first token wait by model"
       request {
-        q = "p95:ufo.model_first_event_ms{env:testing} by {model,provider}"
+        q = "p95:ufo.model_first_event_ms{$env} by {model,provider}"
       }
     }
   }
