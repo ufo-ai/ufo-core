@@ -129,12 +129,27 @@ EXEC_TIMEOUT_VITALS_SECONDS = 5
 EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
 MAX_REQUESTED_SLOTS = 4
+BACKGROUND_TASKS_DIR = ".tasks"
+BACKGROUND_DIRECTIVE = (
+    "The command runs detached. `exit_file` appears exactly once, with the exit code — `watch` is "
+    "empty until then, so a monitor on it fires at completion; `stop` ends the command and still "
+    "writes `exit_file`."
+)
 
 
 class BashInput(BaseModel):
     command: str = Field(description="The shell command to execute.")
     timeout: int | None = Field(
         default=None, description="Optional timeout in milliseconds. Max 600000 (10 minutes)."
+    )
+    background: bool = Field(
+        default=False,
+        description="Run the command detached and return at once with its task id, log path, and "
+        "pid instead of waiting for it. Its output streams to .tasks/<id>.log, its pid sits in "
+        ".tasks/<id>.pid, and its exit code lands in .tasks/<id>.exit when it finishes — list "
+        "every task with ls /workspace/.tasks. The command's network egress ends with this turn, "
+        "and a sandbox that suspends between turns advances it only while awake — use background "
+        "for compute that needs no network past this turn: builds, test runs, data processing.",
     )
     user_description: str = Field(
         description="Brief plain-language description for non-technical users, shown in the "
@@ -351,6 +366,8 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     that assumes its own is the only deadline re-runs the same command against the same wall. The
     seconds named are the ones that actually applied, so a request the cap reduced says so at the
     moment it costs something rather than silently at the call."""
+    if args.background:
+        return await _bash_background(ctx, args.command)
     requested_s = None if args.timeout is None else int(args.timeout / 1000)
     timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
     result = await ctx.sandbox.bash(args.command, timeout_s=timeout_s)
@@ -379,6 +396,60 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
         content=(TextContent(text=f"{output}\n{notice}" if output else notice),),
         is_error=True,
     )
+
+
+async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
+    """Detach the command and hand back its handles. The command travels as its own argv element,
+    never interpolated into the launcher — its quoting cannot break out, and a host-path
+    carrier's `/workspace` rewrite reaches it exactly as it reaches a foreground command. The
+    wrapper redirects the command — not itself — into the log, so the log carries only the
+    command's output while the shell's own job notices go nowhere, and the exec's own pipes are
+    free the moment the pid prints. Every path the
+    launcher and the result name is absolute: an exec's working directory is carrier-dependent
+    (Docker sets none), and the workspace root is the one anchor every carrier shares. The pid
+    the result names is the wrapper's, and the wrapper forwards TERM and INT to the command's
+    whole process group — `set -m` gives the backgrounded command a group of its own, so the
+    signal reaches the descendants doing the actual work, not just the shell in front of them —
+    and the advertised kill ends the work AND still writes the exit file — the completion signal
+    fires exactly once whether the command finished or was stopped. The wrapper writes its own pid
+    only after the trap is armed and the launcher waits for that write, so no reader ever holds a
+    pid whose kill would land before the trap — a stop the instant the result returns still
+    signals."""
+    task_id = uuid4().hex[:8]
+    base = f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}/{task_id}"
+    made = await ctx.sandbox.bash(f'mkdir -p "{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"')
+    if made.exit_code != 0:
+        return ToolResult(
+            content=(TextContent(text=made.stderr or "could not create the tasks directory"),),
+            is_error=True,
+        )
+    wrapper = (
+        f'set -m; bash -c "$1" > "{base}.log" 2>&1 & child=$!; '
+        'trap "kill -- -$child 2>/dev/null" TERM INT; '
+        f'echo $$ > "{base}.pid"; '
+        f'wait $child; echo $? > "{base}.exit"'
+    )
+    started = await ctx.sandbox.sh(
+        f"nohup bash -c '{wrapper}' bash \"$1\" >/dev/null 2>&1 & "
+        f'for _ in $(seq 500); do [ -s "{base}.pid" ] && break; sleep 0.01; done; '
+        f'cat "{base}.pid"',
+        command,
+    )
+    if started.exit_code != 0 or not started.stdout.strip():
+        return ToolResult(
+            content=(TextContent(text=started.stderr or "the command did not detach"),),
+            is_error=True,
+        )
+    pid = started.stdout.strip()
+    payload = {
+        "task": task_id,
+        "pid": pid,
+        "log": f"{base}.log",
+        "exit_file": f"{base}.exit",
+        "watch": f'cat "{base}.exit" || true',
+        "stop": f'kill "$(cat "{base}.pid")"',
+    }
+    return ToolResult(content=(TextContent(text=f"{BACKGROUND_DIRECTIVE}\n{json.dumps(payload)}"),))
 
 
 async def _record_exec_timeout(
@@ -934,7 +1005,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             "Execute shell commands in the secure sandboxed workspace container. Pre-installed: "
             "Python 3, Node.js, ripgrep, poppler, tesseract, libreoffice, pandoc, chromium, and "
             "standard Unix tools. Working directory: /workspace. Use absolute paths. Do NOT use "
-            "for file reads/edits/searches — use the dedicated read/edit/glob/grep tools instead."
+            "for file reads/edits/searches — use the dedicated read/edit/glob/grep tools instead. "
+            "Set background for compute that outlives the turn: the result names the task's log "
+            "and the exit file whose appearance is the completion signal."
         ),
         input_model=BashInput,
         handler=bash_handler,

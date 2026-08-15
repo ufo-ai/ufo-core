@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -11,11 +12,15 @@ import pytest
 import ufo.tools.builtins as builtins_module
 from ufo.audience import conversation_audience
 from ufo.blob import FilesystemBlobStore
+from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
+from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
+    WORKSPACE_DIR,
     ExecResult,
     ProbeToken,
     ProbeTokenCodec,
+    ProxyEndpoint,
     RunToken,
     RunTokenCodec,
     SandboxHandle,
@@ -209,6 +214,36 @@ def _bash_ctx(carrier: _RecordingCarrier, tmp_path: Path) -> ToolContext:
     session = SandboxSession(
         carrier=carrier, handle=SandboxHandle(conversation_id=uuid4(), container_id="c")
     )
+    return _tool_ctx(session, tmp_path)
+
+
+async def _live_ctx(tmp_path: Path) -> ToolContext:
+    """A live local sandbox whose workspace root holds a space, so every shell string a
+    background task builds is exercised against the rewrite the terminal carrier performs on a
+    member's real directory."""
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref=SANDBOX_IMAGE_REF,
+            workspace_host_path=str(tmp_path / "my ws"),
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            run_token="off-turn-test",
+        )
+    )
+    return _tool_ctx(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+
+
+async def _wait_for_file(session: SandboxSession, path: str) -> str:
+    for _ in range(200):
+        result = await session.bash(f'cat "{path}" 2>/dev/null || true')
+        if result.stdout.strip():
+            return result.stdout.strip()
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{path} never appeared")
+
+
+def _tool_ctx(session: SandboxSession, tmp_path: Path) -> ToolContext:
     return ToolContext(
         sandbox=session,
         blob=FilesystemBlobStore(root=tmp_path),
@@ -243,6 +278,121 @@ async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path)
     )
     await bash_handler(ctx, BashInput(command="echo hi", user_description="checking the box"))
     assert carrier.timeouts == [5, 600, DEFAULT_EXEC_TIMEOUT_SECONDS]
+
+
+def _task_payload(text: str) -> dict[str, str]:
+    """The handles exactly as the result reports them, parsed as the data they are — every path
+    absolute, since an exec's working directory is carrier-dependent and only the reported
+    handles are the contract."""
+    payload = json.loads(text.splitlines()[-1])
+    assert isinstance(payload, dict)
+    return payload
+
+
+async def test_background_bash_detaches_and_signals_completion(tmp_path: Path) -> None:
+    """The handler returns before the command ends, and the directive's own probe line — clean
+    exit, empty output — stays quiet until the exit file appears exactly once with the code."""
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command="sleep 1; echo finished-marker", background=True, user_description="building"
+        ),
+    )
+    assert not result.is_error
+    task = _task_payload(result.content[0].text)
+    probe = await ctx.sandbox.bash(task["watch"])
+    assert probe.exit_code == 0
+    assert probe.stdout == ""
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
+    log = await ctx.sandbox.bash(f'cat "{task["log"]}"')
+    assert "finished-marker" in log.stdout
+
+
+async def test_background_bash_records_a_failing_exit_code(tmp_path: Path) -> None:
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(command="echo boom >&2; exit 7", background=True, user_description="building"),
+    )
+    task = _task_payload(result.content[0].text)
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "7"
+    log = await ctx.sandbox.bash(f'cat "{task["log"]}"')
+    assert "boom" in log.stdout
+
+
+async def test_background_bash_carries_the_commands_own_quoting(tmp_path: Path) -> None:
+    """The command travels as its own argv element: one containing the launcher's delimiter must run
+    verbatim rather than break out of the wrapper."""
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(command='echo "x\'y"', background=True, user_description="building"),
+    )
+    task = _task_payload(result.content[0].text)
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
+    log = await ctx.sandbox.bash(f'cat "{task["log"]}"')
+    assert log.stdout.strip() == "x'y"
+
+
+async def test_background_bash_rewrites_workspace_paths_inside_the_command(tmp_path: Path) -> None:
+    """The command travels as an argv element precisely so the carrier's /workspace rewrite
+    reaches its text: an absolute workspace path inside the command must land under the real
+    root, exactly as it would in the foreground."""
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command=f'echo rewritten > "{WORKSPACE_DIR}/out.txt"',
+            background=True,
+            user_description="building",
+        ),
+    )
+    task = _task_payload(result.content[0].text)
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
+    written = await ctx.sandbox.bash(f'cat "{WORKSPACE_DIR}/out.txt"')
+    assert written.stdout.strip() == "rewritten"
+
+
+async def test_the_advertised_stop_line_ends_the_command_and_signals(tmp_path: Path) -> None:
+    """The result's own stop line — reading the pid back from the id-keyed file — must end the
+    work AND still write the exit file, so a task is stoppable from a later turn that holds only
+    the id, and a stopped task's watch fires once instead of waiting forever."""
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(command="sleep 30", background=True, user_description="building"),
+    )
+    task = _task_payload(result.content[0].text)
+    killed = await ctx.sandbox.bash(task["stop"])
+    assert killed.exit_code == 0
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) != "0"
+
+
+async def test_the_stop_line_reaches_the_commands_descendants(tmp_path: Path) -> None:
+    """A command whose work runs in a descendant of its shell — a build's compilers, a runner's
+    workers — must die with the stop, not outlive an exit file that claims it ended: the wrapper
+    signals the command's whole process group, never just the shell in front of the work."""
+    ctx = await _live_ctx(tmp_path)
+    result = await bash_handler(
+        ctx,
+        BashInput(
+            command=f'sleep 30 & echo $! > "{WORKSPACE_DIR}/desc.pid"; wait',
+            background=True,
+            user_description="building",
+        ),
+    )
+    task = _task_payload(result.content[0].text)
+    descendant = await _wait_for_file(ctx.sandbox, f"{WORKSPACE_DIR}/desc.pid")
+    killed = await ctx.sandbox.bash(task["stop"])
+    assert killed.exit_code == 0
+    assert await _wait_for_file(ctx.sandbox, task["exit_file"]) != "0"
+    for _ in range(200):
+        alive = await ctx.sandbox.bash(f'kill -0 "{descendant}" 2>/dev/null && echo alive || true')
+        if not alive.stdout.strip():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"descendant {descendant} survived the stop")
 
 
 async def test_a_stopped_command_names_the_deadline_that_stopped_it(tmp_path: Path) -> None:

@@ -453,6 +453,16 @@ class SandboxSession:
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
 
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        """Run a POSIX script with `args` as its positional parameters — each one its own argv
+        element, so a host-path carrier's `/workspace` rewrite reaches it and no quoting ever
+        interpolates it into the script."""
+        return await self.carrier.exec(
+            self.handle,
+            ("sh", "-c", script, "sh", *args),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         """Run an in-sandbox python program with the containment guard importable, so a program that
         builds a path from an argument runs the checks `sbxfs` runs rather than its own — the one
