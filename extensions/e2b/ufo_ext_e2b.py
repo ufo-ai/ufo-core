@@ -46,7 +46,7 @@ import shlex
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast, overload
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -99,6 +99,11 @@ pause severs it with nothing upstream that reconnects. The dial guarantees the a
 ahead and renews to this, so a conversation that dialed holds its slot up to fifteen minutes;
 everything else frees at the autosuspend span."""
 EXEC_TIMEOUT_CODE = 124
+SESSION_LEADER_CMD = "setsid"
+"""What makes a command its own process group leader, so its pid names the whole tree it forks.
+envd runs every command in one shared group of its own, so the group a command is born into is the
+carrier's other commands — signalling that would stop the very call doing the signalling."""
+EXEC_STOP_TIMEOUT_SECONDS = 15
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
 E2B_NETWORK: SandboxNetworkOpts = {"allow_public_traffic": False}
@@ -175,10 +180,22 @@ class E2BCommandResult(Protocol):
     exit_code: int
 
 
+class E2BCommandHandle(Protocol):
+    """A launched command still running: its pid, and the wait that yields what `run` would have
+    returned. The pid is the reason the launch is a background one — a foreground `run` names the
+    command only once it is over, which is exactly too late to stop one that is not."""
+
+    pid: int
+
+    async def wait(self) -> E2BCommandResult: ...
+
+
 class E2BCommands(Protocol):
     """The SDK's own signatures, mirrored: `timeout` is e2b's keyword, not a timeout this repo
-    offers, so it cannot become an `asyncio.timeout` around the call."""
+    offers, so it cannot become an `asyncio.timeout` around the call. `background` selects which of
+    the two things `run` returns: the command's outcome, or the running command itself."""
 
+    @overload
     async def run(
         self,
         cmd: str,
@@ -187,6 +204,19 @@ class E2BCommands(Protocol):
         envs: dict[str, str] | None = None,
         user: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109
+        background: Literal[True],
+    ) -> E2BCommandHandle: ...
+
+    @overload
+    async def run(
+        self,
+        cmd: str,
+        *,
+        cwd: str | None = None,
+        envs: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+        background: Literal[False] = False,
     ) -> E2BCommandResult: ...
 
 
@@ -554,23 +584,45 @@ class E2BCarrier:
         standing lease still holds, and a gap that outruns it costs a sub-second resume, never a
         lost turn.
 
+        The deadline stops the work, not just the reporting of it. e2b's own `timeout` severs the
+        client's stream and leaves the command running, so a stopped command would otherwise keep
+        the container's CPU for as long as it lives — and the caller, told only that its deadline
+        fired, meets a box already consumed by the run it thinks it stopped. `setsid` makes the
+        command lead its own process group so the whole tree is nameable by one signal, and the
+        launch is a background one purely to learn that leader's pid before the deadline can fire.
+        The group is the unit because a signal to the shell alone leaves the descendants doing the
+        real work — a suite's parallel workers, a build's compilers — reparented and running.
+        The group is also the stop's whole reach: work a command detaches into a group of its own
+        survives it by construction, which is how a bash call whose budget expires continues as
+        the background task the tool hands back instead of dying with the launcher that waited on
+        it — the bash tool's launch script holds the other half of this contract. Nothing but this
+        ever stops what the group holds: no later call can name a group whose pid it never saw.
+        A deadline that fires before the launch answers has no pid to name and nothing yet running
+        behind it. The stop is best-effort and swallowed, since what the caller must still be told
+        is the deadline its own command hit.
+
         A stream severed while the command runs arrives as neither of those SDK exceptions, and as
         no class this can name. The command itself keeps running inside the sandbox and completes,
         so this is never retried — it is reported, and the lease is
         dropped so the next call reattaches rather than trust a deadline the provider abandoned."""
         sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
-        command = shlex.join(argv)
+        command = f"{SESSION_LEADER_CMD} {shlex.join(argv)}"
+        running: E2BCommandHandle | None = None
         try:
-            result = await sandbox.commands.run(
+            running = await sandbox.commands.run(
                 command,
                 cwd=WORKSPACE_DIR,
                 envs={**SANDBOX_ENV, **handle.egress_env},
                 timeout=timeout_s,
+                background=True,
             )
+            result = await running.wait()
         except CommandExitException as error:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
         except TimeoutException as error:
             emit_metric("sandbox_exec_timeout_total", carrier=CARRIER_NAME)
+            if running is not None:
+                await self._stop_group(sandbox, running.pid)
             return ExecResult(
                 stdout="",
                 stderr=str(error),
@@ -581,6 +633,20 @@ class E2BCarrier:
             self._drop(handle.conversation_id, "exec")
             raise
         return ExecResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.exit_code)
+
+    async def _stop_group(self, sandbox: E2BSandbox, pid: int) -> None:
+        """Signal the stopped command's whole process group, which `setsid` made the pid's own —
+        the negation is what reaches the descendants rather than the leader alone. It carries no
+        `--`: the signal already took the option slot, so the negative pid is unambiguous without
+        one, and dash's builtin `kill` — `/bin/sh` on Debian, and whichever shell a sandbox image
+        happens to give a command — rejects the separator outright (`Illegal number: -`), which
+        would leave every descendant running behind a stop that reported nothing. A sandbox that
+        cannot answer leaves the group running and says so in the counter; raising here would
+        replace the caller's timeout with an error about the cleanup after it."""
+        try:
+            await sandbox.commands.run(f"kill -9 -{pid}", timeout=EXEC_STOP_TIMEOUT_SECONDS)
+        except Exception:
+            emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """Upload through the sandbox's filesystem API, which creates the parent directories and

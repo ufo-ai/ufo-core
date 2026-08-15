@@ -14,11 +14,16 @@ about."""
 
 import asyncio
 import logging
+import os
+import re
 import shlex
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import httpcore
@@ -75,7 +80,14 @@ from ufo.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
-from ufo.tools.builtins import MAX_BASH_TIMEOUT_MS
+from ufo.tools.builtins import (
+    MAX_BASH_TIMEOUT_MS,
+    TASK_BASH,
+    TASK_LAUNCH,
+    TASK_PROBE,
+    TASK_WAIT,
+    TASK_WRAPPER,
+)
 
 
 @dataclass
@@ -120,6 +132,22 @@ class _Provider:
 
 
 @dataclass
+class _Handle:
+    """A launched command envd still holds: the pid the carrier signals, and the wait that yields
+    the outcome. Its deadline severs this wait and never the command — `alive` keeps the pid until
+    something signals its group, which is the whole behaviour a stopped command turns on."""
+
+    commands: "_Commands"
+    pid: int
+    cmd: str
+
+    async def wait(self) -> _Result:
+        result = await self.commands.outcome(self.cmd)
+        self.commands.alive.pop(self.pid, None)
+        return result
+
+
+@dataclass
 class _Commands:
     runs: list[tuple[str, str | None, float | None]] = field(default_factory=list)
     hangs: bool = False
@@ -131,21 +159,14 @@ class _Commands:
     fail_counts: dict[str, int] = field(default_factory=dict)
     timeout_on: tuple[str, ...] = ()
     timeout_counts: dict[str, int] = field(default_factory=dict)
+    alive: dict[int, str] = field(default_factory=dict)
+    stops_fail: bool = False
+    launch_never_answers: bool = False
+    _next_pid: int = 2000
 
-    async def run(
-        self,
-        cmd: str,
-        *,
-        cwd: str | None = None,
-        envs: dict[str, str] | None = None,
-        user: str | None = None,
-        timeout: float | None = None,  # noqa: ASYNC109
-    ) -> _Result:
-        self.runs.append((cmd, cwd, timeout))
+    async def outcome(self, cmd: str) -> _Result:
         if self.hangs:
             await asyncio.Event().wait()
-        self.users.append(user)
-        self.envs.append(envs)
         if any(token in cmd for token in self.fail_on):
             raise CommandExitException(stderr="", stdout="", exit_code=1, error="not mounted")
         for token, remaining in self.fail_counts.items():
@@ -163,6 +184,114 @@ class _Commands:
         if self.raises is not None:
             raise self.raises
         return self.result
+
+    async def run(
+        self,
+        cmd: str,
+        *,
+        cwd: str | None = None,
+        envs: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+        background: bool = False,
+    ) -> _Result | _Handle:
+        self.runs.append((cmd, cwd, timeout))
+        signalled = re.fullmatch(r"kill -9 -(\d+)", cmd)
+        if signalled:
+            if self.stops_fail:
+                raise TimeoutException("stop hung")
+            self.alive.pop(int(signalled.group(1)), None)
+            return _Result("", "", 0)
+        self.users.append(user)
+        self.envs.append(envs)
+        if not background:
+            return await self.outcome(cmd)
+        if self.launch_never_answers:
+            raise TimeoutException("the deadline fired before the launch answered")
+        self._next_pid += 1
+        self.alive[self._next_pid] = cmd
+        return _Handle(self, self._next_pid, cmd)
+
+
+@dataclass
+class _ProcessHandle:
+    proc: asyncio.subprocess.Process
+    pid: int
+    deadline: float | None
+
+    async def wait(self) -> _Result:
+        try:
+            async with asyncio.timeout(self.deadline):
+                stdout, stderr = await self.proc.communicate()
+        except TimeoutError:
+            raise TimeoutException("timed out") from None
+        code = self.proc.returncode or 0
+        if code != 0:
+            raise CommandExitException(
+                stderr=stderr.decode(), stdout=stdout.decode(), exit_code=code, error=""
+            )
+        return _Result(stdout.decode(), stderr.decode(), 0)
+
+
+@dataclass
+class _ProcessCommands:
+    """envd as real processes: every command the carrier sends runs as a local shell, so what a
+    signal ends and what survives it is read back from live pids and files rather than modelled.
+    Stands in for the transport only — the launched wrapper, its pid file and its exit file are
+    the real things asserted. The container's workspace path becomes `root`, and a host without a
+    `setsid` binary gets one on PATH that does what util-linux's does for a non-leader — setsid(2),
+    then exec.
+
+    A launch `exec`s, so the pid handed back is the command's own as envd's is: a shell that stays
+    in front of it holds a pid in the *launcher's* group, and every signal the carrier aims at that
+    pid would then name a group the command was never in. Only a launch — the signal that follows
+    is a shell builtin, which `exec` cannot replace a shell with."""
+
+    root: Path
+    launched: list[asyncio.subprocess.Process] = field(default_factory=list)
+
+    async def run(
+        self,
+        cmd: str,
+        *,
+        cwd: str | None = None,
+        envs: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+        background: bool = False,
+    ) -> _Result | _ProcessHandle:
+        proc = await asyncio.create_subprocess_shell(
+            f"exec {cmd}" if background else cmd,
+            cwd=self.root,
+            env=self._env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if background:
+            self.launched.append(proc)
+            return _ProcessHandle(proc=proc, pid=proc.pid, deadline=timeout)
+        stdout, stderr = await proc.communicate()
+        code = proc.returncode or 0
+        if code != 0:
+            raise CommandExitException(
+                stderr=stderr.decode(), stdout=stdout.decode(), exit_code=code, error=""
+            )
+        return _Result(stdout.decode(), stderr.decode(), 0)
+
+    def _env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        if shutil.which("setsid") is None:
+            shim = self.root / "bin" / "setsid"
+            if not shim.exists():
+                shim.parent.mkdir(parents=True, exist_ok=True)
+                shim.write_text(
+                    "#!/bin/sh\n"
+                    f'exec "{sys.executable}" -c '
+                    "'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \"$@\"\n"
+                )
+                shim.chmod(0o755)
+            env["PATH"] = f"{shim.parent}:{env['PATH']}"
+        return env
 
 
 @dataclass
@@ -1041,7 +1170,7 @@ async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result
 
     assert result == ExecResult(stdout="hello\n", stderr="", exit_code=0)
     command, cwd, timeout = sdk.sandboxes["sbx-1"].commands.runs[-1]
-    assert command == "bash -lc 'echo hi'"
+    assert command == "setsid bash -lc 'echo hi'"
     assert cwd == WORKSPACE_DIR
     assert timeout == 60
 
@@ -1085,6 +1214,135 @@ async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     assert result.exit_code == EXEC_TIMEOUT_CODE
     assert result.timed_out_after_s == 1
     assert "timed out" in result.stderr
+
+
+async def test_a_stopped_command_leads_its_own_process_group() -> None:
+    """The command's own group is what makes it stoppable at all: envd runs every command in one
+    shared group, so the pid the carrier signals must lead a group of the command's own or the
+    signal reaches the carrier's other calls instead."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+
+    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
+
+    launched, _, _ = sdk.sandboxes["sbx-1"].commands.runs[-1]
+    assert launched == "setsid bash -lc 'pytest -n auto'"
+
+
+async def test_a_command_the_deadline_stopped_is_no_longer_running() -> None:
+    """The deadline severs the client's stream and leaves the command running: a suite launched
+    under one stopped call otherwise keeps every core of the container for as long as it lives, and
+    the next call in the same turn meets a box consumed by the run it believes it stopped. Nothing
+    else can stop it — no later call knows the pid this one saw."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+
+    result = await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
+
+    assert result.timed_out_after_s == 60
+    assert commands.alive == {}
+    assert any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
+
+
+async def test_a_stop_the_sandbox_refuses_still_reports_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's own deadline is the outcome; a cleanup that cannot land counts rather than
+    replacing that outcome with an error about itself."""
+    reader = _counters(monkeypatch)
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.raises = TimeoutException("timed out")
+    commands.stops_fail = True
+
+    result = await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
+
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.timed_out_after_s == 60
+    assert _counted(reader, "ufo.sandbox_exec_stop_failed_total") == [
+        (1, {"carrier": CARRIER_NAME})
+    ]
+
+
+async def test_a_command_that_ends_on_its_own_is_not_signalled() -> None:
+    """A command that exits leaves nothing to stop, and a backgrounded descendant outliving the
+    exec that launched it is how a turn starts a server."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+
+    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 60)
+
+    assert not any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
+
+
+async def test_a_deadline_that_beats_the_launch_has_nothing_to_stop() -> None:
+    """A deadline that fires before the launch answers has no pid to name and nothing yet running
+    behind it: the stop is skipped, not sent to a group that does not exist, and the caller is
+    still told its own deadline fired."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+    commands.launch_never_answers = True
+
+    result = await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
+
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.timed_out_after_s == 60
+    assert not any(cmd.startswith("kill") for cmd, _, _ in commands.runs)
+
+
+async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
+    tmp_path: Path,
+) -> None:
+    """The bash tool never hands the carrier the command itself: its launcher forks a wrapper into
+    a process group of its own (`set -m`) and waits, precisely so a budget that expires moves the
+    command to the background rather than ending it. The deadline stop must therefore end the
+    launcher's group and nothing wider — one that reached the wrapper's group would kill the task
+    the caller is about to be told continues detached. Real processes prove the composition: the
+    launcher dies of the stop, the wrapper survives it, the probe the tool decides detachment by
+    answers a live pid, and the task's advertised stop still lands its exit code."""
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    commands = _ProcessCommands(root=tmp_path)
+    sdk.sandboxes["sbx-live"] = _Sandbox(
+        sandbox_id="sbx-live",
+        provider=_Provider(clock=sdk.clock, expires_at=0),
+        commands=cast(_Commands, commands),
+        files=_Files(),
+    )
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-live")
+    base = f"{tmp_path}/tasks/t-0001"
+    launch = ("sh", "-c", TASK_BASH, "sh", TASK_LAUNCH + TASK_WAIT, TASK_WRAPPER, base, "sleep 30")
+
+    result = await carrier.exec(handle, launch, 1)
+
+    assert result.exit_code == EXEC_TIMEOUT_CODE
+    assert result.timed_out_after_s == 1
+    assert await asyncio.wait_for(commands.launched[0].wait(), 10) == -9
+    probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)
+    assert probe.exit_code == 0
+    wrapper = probe.stdout.strip()
+    assert wrapper
+    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{wrapper}"'), 5)
+    assert stopped.exit_code == 0
+    for _ in range(100):
+        ended = await carrier.exec(
+            handle, ("bash", "-lc", f'cat "{base}.exit" 2>/dev/null || true'), 5
+        )
+        if ended.stdout.strip():
+            assert ended.stdout.strip() != "0"
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the stopped task never wrote its exit code")
 
 
 def _leased(clock: _Clock) -> tuple[_Sdk, E2BCarrier]:
@@ -1378,8 +1636,8 @@ async def test_a_provider_fault_leaves_no_lease_for_the_next_call_to_trust(
     assert recovered.exit_code == 0
     assert sdk.connected == ["sbx-1"]
     assert [command for command, _, _ in sdk.sandboxes["sbx-1"].commands.runs][-2:] == [
-        "bash -lc make",
-        "bash -lc 'echo back'",
+        "setsid bash -lc make",
+        "setsid bash -lc 'echo back'",
     ]
 
 
