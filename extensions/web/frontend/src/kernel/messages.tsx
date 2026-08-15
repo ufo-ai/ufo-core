@@ -399,8 +399,10 @@ function RunRow({
               live={live}
             />
             {run.output ? (
-              <div className="whitespace-pre-wrap pl-lg">
-                <Reveal bare>{run.output}</Reveal>
+              <div className="pl-lg">
+                <Reveal bare>
+                  <Markdown text={run.output} />
+                </Reveal>
               </div>
             ) : null}
           </>

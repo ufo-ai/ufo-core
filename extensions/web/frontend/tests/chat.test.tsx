@@ -732,7 +732,7 @@ test("a reloaded conversation nests its subagent work under the reply and still 
                 { kind: "note", text: "Checking the release notes first." },
                 { kind: "tool", name: "fetch_url", preview: "", description: "Fetching the page" },
               ],
-              output: "The release shipped on Tuesday.",
+              output: "The release shipped on **Tuesday**.",
               subagents: [
                 {
                   profile: "deep_research",
@@ -766,7 +766,7 @@ test("a reloaded conversation nests its subagent work under the reply and still 
   await userEvent.click(link.closest("summary")!);
   expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
   expect(screen.getByText("Fetching the page")).toBeTruthy();
-  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
+  expect(screen.getByText("Tuesday").tagName).toBe("STRONG");
   const nested = screen.getByRole("link", { name: /Subagent · deep_research/ });
   expect(nested.getAttribute("href")).toBe(
     "#/subagents/deep_research/conversations/" + nestedId + "?root=" + conversationId,
