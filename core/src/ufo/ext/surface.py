@@ -380,6 +380,24 @@ class ListedArtifact:
 
 
 @dataclass(frozen=True)
+class ScheduledRun:
+    """One turn that fired on its own — a scheduled task's cron fire or a durable pause's timer
+    resume — as the portal's feed reads it: where and when it ran, how it ended, the reply it
+    closed with, the files it shared, and the admission key that names what fired it."""
+
+    turn_id: UUID
+    conversation_id: UUID
+    conversation_title: str | None
+    origin: str | None
+    agent_id: UUID
+    fired_at: datetime
+    status: str
+    text: str
+    idempotency_key: str | None
+    artifacts: tuple["SharedArtifact", ...]
+
+
+@dataclass(frozen=True)
 class SharedArtifact:
     """A file a turn shared, as the writeback poller hands it to a surface's `attach`: the blob key
     to stream from, the download name, an optional human caption (`subject`), and its media type and
@@ -2247,6 +2265,112 @@ class SurfaceContext:
                 conversation_id=conversation_id,
             )
             for row in rows
+        )
+
+    async def list_scheduled_runs(
+        self,
+        member_id: UUID,
+        *,
+        limit: int,
+        cursor: "ListingCursor | None" = None,
+        agent_id: UUID | None = None,
+    ) -> "ListingPage[ScheduledRun]":
+        """One keyset page of the turns that fired on their own — scheduled admissions — newest
+        first, reporting into conversations whose content this reader reads: the workspace-shared
+        ones and their own. A run's reply is transcript content, so the page never widens for an
+        admin the way `readable_conversation` never answers them a private conversation without a
+        recorded disclosure, or a room at all — a feed aggregates, and an aggregate of what each
+        row would refuse is still refused. Each run carries its terminal reply and the files it
+        shared, so a feed renders output and previews without a second walk."""
+        query = (
+            sa.select(
+                tables.turn.c.id,
+                tables.turn.c.conversation_id,
+                tables.turn.c.agent_id,
+                tables.turn.c.status,
+                tables.turn.c.idempotency_key,
+                tables.turn.c.terminal,
+                tables.turn.c.created_at,
+                tables.conversation.c.title,
+                tables.conversation.c.surface_label,
+                tables.conversation.c.surface,
+            )
+            .select_from(
+                tables.turn.join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.admission_source == SCHEDULED_ADMISSION,
+                tables.conversation.c.audience.in_(readable_audiences(member_id)),
+            )
+        )
+        if agent_id is not None:
+            query = query.where(tables.turn.c.agent_id == agent_id)
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    page_query(
+                        query,
+                        cursor,
+                        limit,
+                        created_at=tables.turn.c.created_at,
+                        ident=tables.turn.c.id,
+                    )
+                )
+            ).all()
+            files = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact)
+                    .where(
+                        tables.shared_artifact.c.workspace_id == self.workspace_id,
+                        tables.shared_artifact.c.turn_id.in_(tuple(row.id for row in rows)),
+                    )
+                    .order_by(
+                        tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key
+                    )
+                )
+            ).all()
+        shared: dict[UUID, list[SharedArtifact]] = {}
+        for file in files:
+            shared.setdefault(file.turn_id, []).append(
+                SharedArtifact(
+                    blob_key=file.blob_key,
+                    filename=file.filename,
+                    subject=file.subject,
+                    media_type=file.media_type,
+                    size_bytes=file.size_bytes,
+                    preview_blob_key=file.preview_blob_key,
+                    preview_media_type=file.preview_media_type,
+                    preview_size_bytes=file.preview_size_bytes,
+                )
+            )
+        return page_of(
+            rows,
+            cursor,
+            limit,
+            render=lambda row: ScheduledRun(
+                turn_id=row.id,
+                conversation_id=row.conversation_id,
+                conversation_title=row.title,
+                origin=row.surface_label or (row.surface if row.surface != "web" else None),
+                agent_id=row.agent_id,
+                fired_at=(
+                    row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC)
+                ),
+                status=row.status,
+                text=(
+                    "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
+                ),
+                idempotency_key=row.idempotency_key,
+                artifacts=tuple(shared.get(row.id, ())),
+            ),
+            position=lambda row: (
+                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
+                str(row.id),
+            ),
         )
 
     async def list_member_objects(

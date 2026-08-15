@@ -4,7 +4,7 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { Artifacts } from "@/views/Artifacts";
-import { Automations } from "@/views/Automations";
+import { Radar } from "@/views/Radar";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
@@ -66,11 +66,13 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 };
 
 export const SECTION_VIEWS: Record<Section, PaneView> = {
-  automations: {
-    label: "Automations",
+  radar: {
+    label: "Radar",
     remountOnPlace: false,
     ownsHeader: true,
-    render: () => <Automations agentId={null} title="Automations" />,
+    render: (place, onPlace) => (
+      <Radar agentId={null} title="Radar" place={place} onPlace={onPlace} />
+    ),
   },
   artifacts: {
     label: "Artifacts",

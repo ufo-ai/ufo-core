@@ -9,7 +9,7 @@ import {
   PlacedWorkspace,
   AGENT,
   MEMBER,
-  NO_TASKS,
+  NO_RUNS,
   TASK_KIND,
   TRIGGER_KIND,
   json,
@@ -40,6 +40,7 @@ test("switching tabs discards the read left behind rather than painting it", asy
           releaseConnectors = resolve;
         });
       }
+      if (url.includes("/workspace/radar")) return json({ runs: [] });
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
       if (url.includes("/api/chats")) return json({ chats: [] });
@@ -52,14 +53,14 @@ test("switching tabs discards the read left behind rather than painting it", asy
 
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
-  await userEvent.click(screen.getByRole("tab", { name: "Automations" }));
-  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  await userEvent.click(screen.getByRole("tab", { name: "Radar" }));
+  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("stale-provider")).toBeNull();
-  expect(screen.getByText(NO_TASKS)).toBeTruthy();
+  expect(screen.getByText(NO_RUNS)).toBeTruthy();
 });
 
 test("a slow read for a filter the member left never paints over the filter they chose", async () => {

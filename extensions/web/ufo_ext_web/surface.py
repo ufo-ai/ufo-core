@@ -84,6 +84,7 @@ from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectListQuery
+from ufo.sdk.scheduled_fire import scheduled_fire_task_id
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
@@ -93,6 +94,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestInvalid,
     ListedConversation,
     PortalKind,
+    ScheduledRun,
     SubagentDetail,
     SubagentRun,
     SurfaceAuth,
@@ -130,6 +132,9 @@ MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 ARTIFACT_LIST_LIMIT = 100
+RADAR_LIST_LIMIT = 20
+RADAR_TEXT_MAX = 1_500
+SCHEDULED_TASK_KIND = "scheduled_task"
 ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "data", "other"))
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
@@ -2296,6 +2301,103 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
     )
 
 
+def _radar_run(
+    ctx: SurfaceContext,
+    run: ScheduledRun,
+    agent_names: Mapping[UUID, str],
+    task_names: Mapping[UUID, str],
+) -> dict[str, object]:
+    task_id = None if run.idempotency_key is None else scheduled_fire_task_id(run.idempotency_key)
+    return {
+        "turn_id": str(run.turn_id),
+        "conversation_id": str(run.conversation_id),
+        "title": run.conversation_title,
+        "origin": run.origin,
+        "agent_id": str(run.agent_id),
+        "agent_name": agent_names.get(run.agent_id),
+        "fired_at": _iso(run.fired_at),
+        "status": run.status,
+        "task": None if task_id is None else task_names.get(task_id),
+        "text": run.text[:RADAR_TEXT_MAX],
+        "artifacts": [
+            {
+                "filename": artifact.filename,
+                "subject": artifact.subject,
+                "media_type": artifact.media_type,
+                "size_bytes": artifact.size_bytes,
+                "url": ctx.artifact_link(artifact),
+                "preview_url": ctx.artifact_preview_link(artifact),
+            }
+            for artifact in run.artifacts
+        ],
+    }
+
+
+async def _radar_task_names(
+    ctx: SurfaceContext,
+    audience: WebAudience,
+    member_id: UUID,
+    runs: tuple[ScheduledRun, ...],
+) -> dict[UUID, str]:
+    """Each visible scheduled task's name by its id, read only for the agents this page's runs
+    fired on. A run of a since-deleted task resolves no name and reads on the conversation it
+    reported into alone."""
+    fired = {run.agent_id for run in runs}
+    names: dict[UUID, str] = {}
+    for agent in audience.agents:
+        if agent.id not in fired:
+            continue
+        page = await ctx.list_member_objects(
+            SCHEDULED_TASK_KIND, agent.id, member_id, admin=audience.admin, query=ObjectListQuery()
+        )
+        if page is None:
+            return {}
+        for row in page.rows:
+            named = row.fields.get("id")
+            if isinstance(named, str):
+                names[UUID(named)] = row.name
+    return names
+
+
+async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
+    """One keyset page of what ran on its own — the scheduled turns reporting into conversations
+    whose content this reader reads, an admin's page included, each naming the task that fired it,
+    the reply it closed with, and links to the files it shared. `agent` narrows the page to one
+    agent the audience holds."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    raw_cursor = request.query_params.get("after", "").strip()
+    cursor: ListingCursor | None = None
+    if raw_cursor:
+        try:
+            cursor = ListingCursor.decode(raw_cursor)
+        except MalformedCursor:
+            return Response("malformed listing cursor", status_code=400)
+    agent_id: UUID | None = None
+    raw_agent = request.query_params.get("agent", "").strip()
+    if raw_agent:
+        try:
+            agent_id = UUID(raw_agent)
+        except ValueError:
+            return Response("invalid agent", status_code=400)
+        if not audience.allows(agent_id):
+            return Response("unknown agent", status_code=404)
+    page = await ctx.list_scheduled_runs(
+        member_id, limit=RADAR_LIST_LIMIT, cursor=cursor, agent_id=agent_id
+    )
+    agent_names = {agent.id: agent.name for agent in audience.agents}
+    task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
+    return JSONResponse(
+        {
+            "runs": [_radar_run(ctx, run, agent_names, task_names) for run in page.rows],
+            "older": None if page.older is None else page.older.encode(),
+            "newer": None if page.newer is None else page.newer.encode(),
+        }
+    )
+
+
 async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     """The reader's own range and all-time usage and their member-scoped caps — a member's burn is
     theirs to read, so this answers every member. An admin additionally receives the workspace
@@ -2851,6 +2953,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
+    SurfaceRoute(method="GET", path="workspace/radar", handler=workspace_radar),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),

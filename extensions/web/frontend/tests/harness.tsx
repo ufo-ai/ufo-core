@@ -179,13 +179,15 @@ export const CHAT_ROW = {
 
 export const json = (payload: unknown) => Response.json(payload);
 
+export const NO_RUNS =
+  "Each scheduled run reports here: the reply it closed with and the files it shared.";
 export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
 export const NO_ARTIFACTS = "A file or site an agent makes in a conversation is listed here.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",
-  fields: ["conversation", "mine", "next_run_at", "origin", "paused", "owner_email", "prompt"],
+  fields: ["conversation", "id", "mine", "next_run_at", "origin", "paused", "owner_email", "prompt"],
   spec_schema: {
     properties: {
       schedule: { type: "string" },

@@ -2,7 +2,7 @@ import { useBeside } from "@/kernel/beside";
 import { BANDS, RecordPanel } from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TabPanel, TabRow } from "@/kernel/tabs";
-import { Automations } from "@/views/Automations";
+import { Radar } from "@/views/Radar";
 import { AgentConnectors } from "@/views/Connectors";
 import { Conversations } from "@/views/Conversations";
 import { AgentSkills } from "@/views/AgentSkills";
@@ -14,7 +14,7 @@ import type { Agent } from "@/lib/types";
 const TAB_LABELS: Record<AgentTab, string> = {
   overview: "Overview",
   conversations: "Conversations",
-  automations: "Automations",
+  radar: "Radar",
   connectors: "Connectors",
   skills: "Skills",
   usage: "Usage",
@@ -51,7 +51,9 @@ export function AgentPane({ agent, tab, tabs, onTab, onClose, place, onPlace }: 
       />
       <TabPanel group="agent" current={tab} className={BANDS} data-testid="panel">
         {tab === "overview" ? <Overview key={agent.id} agent={agent} /> : null}
-        {tab === "automations" ? <Automations key={agent.id} agentId={agent.id} /> : null}
+        {tab === "radar" ? (
+          <Radar key={agent.id} agentId={agent.id} place={merged} onPlace={record} />
+        ) : null}
         {tab === "conversations" ? (
           <Conversations key={key} agent={agent} place={merged} onPlace={record} />
         ) : null}

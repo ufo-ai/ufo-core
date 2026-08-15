@@ -7,7 +7,7 @@ import { App } from "@/App";
 import {
   AGENT,
   MEMBER,
-  NO_TASKS,
+  NO_RUNS,
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
@@ -37,6 +37,7 @@ function serve() {
     "fetch",
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [ARTIFACT] });
+      if (url.includes("/workspace/radar")) return json({ runs: [] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
@@ -56,11 +57,11 @@ test("the artifact viewer is torn down when the member navigates to another view
   await userEvent.click(await viewCard("notes.txt"));
   expect(await screen.findByText("file body")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Automations" }));
+  await userEvent.click(screen.getByRole("button", { name: "Radar" }));
 
   await waitFor(() => expect(screen.queryByText("file body")).toBeNull());
   expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
 });
 
 test("the artifact viewer is torn down when the member returns to a conversation", async () => {

@@ -37,6 +37,9 @@ const AGENT_FIELD = "object-agent";
  *  value is a uuid, which is the wire's word for a thread and nobody's answer to "which one". The
  *  name carries the press, and the row's own `View` still opens the record itself. */
 const CONVERSATION_FIELD = "conversation";
+/** A row's durable id is the wire's join key — the radar feed resolves a run's task by it — and
+ *  the name is already the member's word for the record, so it is never a column either. */
+const ID_FIELD = "id";
 
 /** How many of the kind's own declared fields the index carries beside the name and the summary.
  *  The kind states its fields in the order it leads with, so the first is the one a member came to
@@ -257,6 +260,7 @@ function ObjectIndex({
             field !== CONVERSATION_FIELD &&
             field !== OWNER_FIELD &&
             field !== PROSE_FIELD &&
+            field !== ID_FIELD &&
             field !== "mine",
         );
         const led = shown.slice(0, LEADING_FIELDS);
@@ -536,7 +540,7 @@ export function ObjectDetail({
             </Section>
             <Section title="Status">
               <Facts
-                rows={payload.fields.map((field) =>
+                rows={payload.fields.filter((field) => field !== ID_FIELD).map((field) =>
                   field === OWNER_FIELD
                     ? { label: OWNER_HEADING, value: creator(payload.status[field], viewer) }
                     : {

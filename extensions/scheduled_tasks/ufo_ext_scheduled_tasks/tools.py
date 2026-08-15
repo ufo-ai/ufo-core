@@ -252,6 +252,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 ),
                 owner=_owner(listed),
                 fields={
+                    "id": str(listed.task.id),
                     "conversation": str(listed.task.conversation_id),
                     "next_run_at": listed.task.next_run_at.isoformat(),
                     "paused": listed.task.paused,
@@ -446,7 +447,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),
     list_fields=frozenset(
-        {"conversation", "next_run_at", "paused", "owner_email", "origin", "mine", "prompt"}
+        {"id", "conversation", "next_run_at", "paused", "owner_email", "origin", "mine", "prompt"}
     ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
 )

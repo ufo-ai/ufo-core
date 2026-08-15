@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.scheduled_fire import scheduled_fire_key
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
 
@@ -36,12 +37,13 @@ def fire_body(task: ScheduledTask, runtime_instruction: str | None) -> tuple[str
     """The inbound a scheduled fire delivers, and the key it is admitted under.
 
     The two renderings of the occurrence differ on purpose and must not be collapsed: the key keeps
-    `isoformat()`'s `+00:00`, because it is the dedupe contract a turn admitted before a deploy roll
-    was keyed with, while the `scheduled_fire` line the model reads carries `Z`."""
-    fire_at = task.next_run_at.astimezone(UTC).isoformat()
+    `isoformat()`'s `+00:00` inside the sdk key shape — the dedupe contract a turn admitted before
+    a deploy roll was keyed with, and the link the portal's runs feed resolves a run's task by —
+    while the `scheduled_fire` line the model reads carries `Z`."""
+    fire_at = task.next_run_at.astimezone(UTC)
     inbound = (
         "<scheduled_task>\n"
-        f"scheduled_fire: {fire_at.replace('+00:00', 'Z')}\n"
+        f"scheduled_fire: {fire_at.isoformat().replace('+00:00', 'Z')}\n"
         "</scheduled_task>\n"
         f"{task.prompt}"
     )
@@ -49,7 +51,7 @@ def fire_body(task: ScheduledTask, runtime_instruction: str | None) -> tuple[str
         inbound += (
             f"\n<scheduled_task_instruction>\n{runtime_instruction}\n</scheduled_task_instruction>"
         )
-    return inbound, f"{task.id}:{fire_at}"
+    return inbound, scheduled_fire_key(task.id, fire_at)
 
 
 @dataclass(frozen=True)

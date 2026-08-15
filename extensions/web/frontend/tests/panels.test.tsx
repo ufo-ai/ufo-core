@@ -15,7 +15,7 @@ import {
   SECOND,
   SECOND_ID,
   NO_ARTIFACTS,
-  NO_TASKS,
+  NO_RUNS,
   SITE_KIND,
   StreamFake,
   TASK_KIND,
@@ -323,7 +323,7 @@ test("the scheduled index leads with the next run, and its detail pauses through
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/automations";
+  location.hash = "#/agents/" + AGENT_ID + "/radar?chip=scheduled_task";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const listed = (await screen.findByText("digest")).closest("tr");
@@ -1088,6 +1088,7 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
     "/transcript": () => json({ messages: [] }),
     "/overview": () => json(OVERVIEW),
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/workspace/radar": () => json({ runs: [] }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
@@ -1106,11 +1107,11 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/agents/" + SECOND.id);
   expect(screen.getByRole("button", { name: "Agents" }).getAttribute("aria-current")).toBe("true");
 
-  await userEvent.click(screen.getByRole("button", { name: "Automations" }));
-  expect(location.hash).toBe("#/automations");
-  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Radar" }));
+  expect(location.hash).toBe("#/radar");
+  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
   expect(screen.getAllByRole("tablist")).toHaveLength(1);
-  expect(screen.getByRole("tab", { name: "Scheduled" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
 
   await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
   expect(location.hash).toBe("#/artifacts");

@@ -1,13 +1,15 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { ObjectPane } from "@/kernel/objects";
+import type { Placement } from "@/kernel/pager";
 import { Viewer } from "@/lib/audience";
 import { relativeMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { Automations } from "@/views/Automations";
+import { Radar } from "@/views/Radar";
 
 import {
   AGENT,
@@ -15,6 +17,7 @@ import {
   CONVO_ID,
   MEMBER,
   NO_ARTIFACTS,
+  NO_RUNS,
   NO_TASKS,
   NO_TRIGGERS,
   SECOND,
@@ -73,6 +76,20 @@ const SECOND_TASK_ROW = owned(
   },
   SECOND,
 );
+
+const RUN = {
+  turn_id: "0b7e2d43-5a86-4f19-9c3d-8e64a02b7c15",
+  conversation_id: CONVO_ID,
+  title: "Morning digest",
+  origin: "#general",
+  agent_id: AGENT_ID,
+  agent_name: "assistant",
+  fired_at: "2026-08-14T09:00:00+00:00",
+  status: "done",
+  task: "daily-brief",
+  text: "All quiet.",
+  artifacts: [],
+};
 
 const TASK_DETAIL = {
   ...TASK_KIND,
@@ -149,10 +166,22 @@ function mountAgent() {
   );
 }
 
-function mountAutomations() {
+function PlacedRadar() {
+  const [place, setPlace] = useState<Placement>({});
+  return (
+    <Radar
+      agentId={null}
+      title="Radar"
+      place={place}
+      onPlace={(patch) => setPlace((held) => ({ ...held, ...patch }))}
+    />
+  );
+}
+
+function mountRadar() {
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <Automations agentId={null} title="Automations" />
+      <PlacedRadar />
     </MainAgentProvider>,
   );
 }
@@ -683,28 +712,41 @@ test("a deleted row lands back on the index; a refused delete states the refusal
   ]);
 });
 
-test("the automations section is reached by its own hash and lists across the audience", async () => {
+test("the radar section is reached by its own hash and leads with the feed", async () => {
   const reads: string[] = [];
+  const listed: string[] = [];
   wire({
-    "/objects/scheduled_task": (url) => {
+    "/workspace/radar": (url) => {
       reads.push(url);
+      return json({ runs: [RUN], older: null, newer: null });
+    },
+    "/objects/scheduled_task": (url) => {
+      listed.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]);
     },
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/automations";
+  location.hash = "#/radar";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { level: 1, name: "Automations" })).toBeTruthy();
-  expect(screen.getByText("weekly-roll")).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
+  expect(await screen.findByText("Morning digest")).toBeTruthy();
   expect(reads[0]).not.toContain("agent=");
-  expect(screen.getByRole("tab", { name: "Scheduled" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Runs" }).getAttribute("aria-selected")).toBe("true");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+  expect(await screen.findByText("weekly-roll")).toBeTruthy();
+  expect(listed[0]).not.toContain("agent=");
 });
 
-test("the automations tab of an agent reads both kinds in that agent's namespace", async () => {
+test("the radar tab of an agent narrows the feed and both kinds to its namespace", async () => {
   const reads: string[] = [];
   wire({
+    "/workspace/radar": (url) => {
+      reads.push(url);
+      return json({ runs: [RUN], older: null, newer: null });
+    },
     "/objects/scheduled_task": (url) => {
       reads.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW]);
@@ -715,24 +757,26 @@ test("the automations tab of an agent reads both kinds in that agent's namespace
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/automations";
+  location.hash = "#/agents/" + AGENT_ID + "/radar";
   render(<App agents={[AGENT]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
-  expect(await screen.findByText("daily-brief")).toBeTruthy();
+  expect(await screen.findByText("Morning digest")).toBeTruthy();
   expect(reads[0]).toContain("agent=" + AGENT_ID);
-  expect(screen.queryByRole("heading", { level: 1, name: "Automations" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 1, name: "Radar" })).toBeNull();
 
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+  expect(await screen.findByText("daily-brief")).toBeTruthy();
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
   await waitFor(() =>
     expect(reads.some((read) => read.includes("/objects/source_trigger"))).toBe(true),
   );
   expect(reads.every((read) => read.includes("agent=" + AGENT_ID))).toBe(true);
-  expect(screen.getByRole("button", { name: "Automations" }).getAttribute("aria-current")).toBe(
+  expect(screen.getByRole("button", { name: "Radar" }).getAttribute("aria-current")).toBe(
     "false",
   );
 });
 
-test("landing on another agent's automations tab leaves the first agent's detail behind", async () => {
+test("landing on another agent's radar tab leaves the first agent's detail behind", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
     "/objects/scheduled_task": (url) =>
@@ -740,13 +784,13 @@ test("landing on another agent's automations tab leaves the first agent's detail
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents/" + AGENT_ID + "/automations";
+  location.hash = "#/agents/" + AGENT_ID + "/radar?chip=scheduled_task";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("daily-brief");
   await screen.findByRole("heading", { name: "daily-brief" });
 
-  location.hash = "#/agents/" + SECOND_ID + "/automations";
+  location.hash = "#/agents/" + SECOND_ID + "/radar?chip=scheduled_task";
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   expect(await screen.findByText("weekly-roll")).toBeTruthy();
@@ -764,7 +808,7 @@ test("a row opens under the agent that owns it, and Back returns to the whole in
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/automations";
+  location.hash = "#/radar?chip=scheduled_task";
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   await openRow("weekly-roll");
@@ -983,9 +1027,13 @@ const TRIGGER_ROW = owned({
   mine: true,
 });
 
-test("Automations shows one kind at a time and the switcher names which", async () => {
+test("Radar shows one family at a time and the switcher names which", async () => {
   const reads: string[] = [];
   wire({
+    "/workspace/radar": (url) => {
+      reads.push(url);
+      return json({ runs: [RUN], older: null, newer: null });
+    },
     "/objects/scheduled_task": (url) => {
       reads.push(url);
       return objectIndex(TASK_KIND, [TASK_ROW]);
@@ -995,11 +1043,16 @@ test("Automations shows one kind at a time and the switcher names which", async 
       return objectIndex(TRIGGER_KIND, [TRIGGER_ROW]);
     },
   });
-  mountAutomations();
+  mountRadar();
 
-  expect(await screen.findByRole("heading", { level: 1, name: "Automations" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
+  expect(await screen.findByText("Morning digest")).toBeTruthy();
+  expect(reads.every((read) => read.includes("/workspace/radar"))).toBe(true);
+
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
+
   expect(await screen.findByText("daily-brief")).toBeTruthy();
-  expect(reads.every((read) => read.includes("/objects/scheduled_task"))).toBe(true);
+  expect(screen.queryByText("Morning digest")).toBeNull();
 
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
 
@@ -1024,12 +1077,13 @@ test("a trigger is ended from its own page and never created from one", async ()
         updated_at: null,
       }),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
+    "/workspace/radar": () => json({ runs: [] }),
     "/intents": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Deleted the trigger." });
     },
   });
-  mountAutomations();
+  mountRadar();
 
   await userEvent.click(await screen.findByRole("tab", { name: "Triggers" }));
   expect(screen.queryByRole("button", { name: "New source trigger" })).toBeNull();
@@ -1050,11 +1104,14 @@ test("a trigger is ended from its own page and never created from one", async ()
 
 test("a section with no trigger says so without saying none was ever made", async () => {
   wire({
+    "/workspace/radar": () => json({ runs: [] }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
   });
-  mountAutomations();
+  mountRadar();
 
+  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+  await userEvent.click(screen.getByRole("tab", { name: "Scheduled" }));
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   await userEvent.click(screen.getByRole("tab", { name: "Triggers" }));
   expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();

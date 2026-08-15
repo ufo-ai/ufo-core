@@ -67,6 +67,9 @@ from ufo.ext.surface import (
     QueuedArrival as QueuedArrival,
 )
 from ufo.ext.surface import (
+    ScheduledRun as ScheduledRun,
+)
+from ufo.ext.surface import (
     SharedArtifact as SharedArtifact,
 )
 from ufo.ext.surface import (

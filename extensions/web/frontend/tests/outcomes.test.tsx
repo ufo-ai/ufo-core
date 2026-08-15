@@ -403,7 +403,7 @@ test("the scheduled, overview, and skills refusals tone their notices", async ()
   };
   const refuse = () => json({ applied: false, message: "The workspace refuses it." });
 
-  location.hash = "#/agents/" + AGENT.id + "/automations";
+  location.hash = "#/agents/" + AGENT.id + "/radar?chip=scheduled_task";
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),

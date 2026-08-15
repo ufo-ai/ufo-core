@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IconAdjustments,
-  IconAutomation,
   IconBrandSlack,
   IconDeviceDesktop,
   IconEdit,
   IconFolder,
   IconLayoutSidebarRight,
   IconMoon,
+  IconRadar,
   IconSettings,
   IconSparkles,
   IconSun,
@@ -1023,14 +1023,12 @@ function SurfaceGlyph({ surface }: { surface: string }) {
 
 const NewChatGlyph = () => <IconEdit className="size-(--size-glyph) shrink-0" aria-hidden />;
 const AgentsGlyph = () => <IconSparkles className="size-(--size-glyph) shrink-0" aria-hidden />;
-const AutomationsGlyph = () => (
-  <IconAutomation className="size-(--size-glyph) shrink-0" aria-hidden />
-);
+const RadarGlyph = () => <IconRadar className="size-(--size-glyph) shrink-0" aria-hidden />;
 const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
 const WorkspaceGlyph = () => <IconUsers className="size-(--size-glyph) shrink-0" aria-hidden />;
 const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-0" aria-hidden />;
 
 const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
-  automations: <AutomationsGlyph />,
+  radar: <RadarGlyph />,
   artifacts: <ArtifactsGlyph />,
 };

@@ -279,6 +279,10 @@ async def _seed_turn(
     *,
     surface: str = SURFACE,
     member_id: UUID | None = None,
+    audience: str | None = None,
+    admission_source: str = "internal",
+    idempotency_key: str | None = None,
+    created_at: datetime | None = None,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = (
@@ -302,6 +306,7 @@ async def _seed_turn(
                 member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
+                **({} if audience is None else {"audience": audience}),
             )
         )
         await connection.execute(
@@ -313,8 +318,10 @@ async def _seed_turn(
                 seq=1,
                 status=status,
                 inbound="ask",
+                admission_source=admission_source,
+                idempotency_key=idempotency_key,
                 terminal=terminal,
-                created_at=sa.func.now(),
+                created_at=created_at or sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
@@ -338,6 +345,9 @@ async def _seed_turn(
                     subject=artifact.subject,
                     media_type=artifact.media_type,
                     size_bytes=artifact.size_bytes,
+                    preview_blob_key=artifact.preview_blob_key,
+                    preview_media_type=artifact.preview_media_type,
+                    preview_size_bytes=artifact.preview_size_bytes,
                     created_at=artifact_created_at,
                     updated_at=artifact_created_at,
                 )
@@ -1671,6 +1681,98 @@ async def test_artifact_listing_carries_the_conversation_owner_email(db: None, t
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     page = await context.list_artifacts(owner_id, admin=False, limit=10)
     assert [entry.owner_email for entry in page.rows] == ["owner@example.com"]
+
+
+async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
+    db: None, tmp_path
+) -> None:
+    """The runs page lists only scheduled admissions whose conversation content the reader reads —
+    the shared conversations' runs and their own. A run's reply is transcript content, so another
+    member's private conversation and a room never list, whoever asks — and each run carries its
+    key, terminal text, and shared files whole, previews included."""
+    workspace_id, agent_id, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    other_id = await _seed_member_row(workspace_id, "n@example.com")
+    chart = SharedArtifact(
+        blob_key="artifacts/x/chart.png",
+        filename="chart.png",
+        subject="the chart",
+        media_type="image/png",
+        size_bytes=3,
+    )
+    brief = SharedArtifact(
+        blob_key="artifacts/x/brief.pdf",
+        filename="brief.pdf",
+        subject=None,
+        media_type="application/pdf",
+        size_bytes=5,
+        preview_blob_key="artifacts/x/brief.png",
+        preview_media_type="image/png",
+        preview_size_bytes=4,
+    )
+    shared_run = await _seed_turn(
+        workspace_id,
+        "R1",
+        "done",
+        "the digest",
+        artifacts=(chart, brief),
+        admission_source="scheduled",
+        idempotency_key="11111111-1111-4111-8111-111111111111:2026-08-14T09:00:00+00:00",
+    )
+    private_run = await _seed_turn(
+        workspace_id, "R2", "done", "private", member_id=other_id, admission_source="scheduled"
+    )
+    await _seed_turn(
+        workspace_id,
+        "R4",
+        "done",
+        "in a room",
+        audience=str(room_audience("slack", "C123")),
+        admission_source="scheduled",
+    )
+    await _seed_turn(workspace_id, "R3", "done", "typed")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    page = await context.list_scheduled_runs(member_id, limit=10)
+    assert [run.turn_id for run in page.rows] == [shared_run]
+    run = page.rows[0]
+    assert (run.status, run.text) == ("done", "the digest")
+    assert run.idempotency_key is not None
+    assert run.idempotency_key.startswith("11111111-1111-4111-8111-111111111111:")
+    assert run.agent_id == agent_id
+    assert [artifact.filename for artifact in run.artifacts] == ["brief.pdf", "chart.png"]
+    assert run.artifacts[0].preview_blob_key == "artifacts/x/brief.png"
+    assert page.older is None and page.newer is None
+    own_page = await context.list_scheduled_runs(other_id, limit=10)
+    assert {run.turn_id for run in own_page.rows} == {shared_run, private_run}
+    foreign = await context.list_scheduled_runs(other_id, limit=10, agent_id=uuid4())
+    assert foreign.rows == ()
+    narrowed = await context.list_scheduled_runs(other_id, limit=10, agent_id=agent_id)
+    assert {run.turn_id for run in narrowed.rows} == {shared_run, private_run}
+
+
+async def test_scheduled_runs_page_by_keyset_without_repeats(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    member_id = await _seed_member_row(workspace_id, "m@example.com")
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    seeded = {
+        await _seed_turn(
+            workspace_id,
+            f"P{index}",
+            "done",
+            str(index),
+            admission_source="scheduled",
+            created_at=fired + timedelta(minutes=index),
+        )
+        for index in range(3)
+    }
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    first = await context.list_scheduled_runs(member_id, limit=2)
+    assert len(first.rows) == 2 and first.older is not None
+    rest = await context.list_scheduled_runs(member_id, limit=2, cursor=first.older)
+    walked = [run.turn_id for run in (*first.rows, *rest.rows)]
+    assert len(walked) == 3 and set(walked) == seeded
+    back = await context.list_scheduled_runs(member_id, limit=2, cursor=rest.newer)
+    assert [run.turn_id for run in back.rows] == [run.turn_id for run in first.rows]
 
 
 async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(

@@ -177,6 +177,7 @@ test("leaving the section takes the viewer with it", async () => {
     "fetch",
     vi.fn(async (url: string) => {
       if (url.includes("/workspace/artifacts")) return json({ artifacts: [artifact()] });
+      if (url.includes("/workspace/radar")) return json({ runs: [] });
       if (url.includes("/objects/site")) return objectIndex(SITE_KIND, []);
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
@@ -196,7 +197,7 @@ test("leaving the section takes the viewer with it", async () => {
 
   view.rerender(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="automations" />
+      <PlacedSection section="radar" />
     </MainAgentProvider>,
   );
 

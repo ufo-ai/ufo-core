@@ -147,7 +147,7 @@ from ufo.schema.records import (
     TurnContext,
     Usage,
 )
-from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, room_audience
 from ufo.sdk.jobs import store_key_workspaces
 from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.sdk.seats import Seats
@@ -2587,6 +2587,248 @@ async def test_artifacts_paging_breaks_a_shared_timestamp_at_the_boundary(
     walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token}"})
     assert sorted(walked) == ["first.txt", "second.txt", "third.txt"]
     assert len(walked) == len(set(walked))
+
+
+RADAR_PATH = "/surface/web/workspace/radar"
+
+
+async def _seed_radar_task(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    *,
+    name: str,
+    created_by_member_id: UUID,
+) -> UUID:
+    task_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(scheduled_task).values(
+                id=task_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                name=name,
+                created_by_member_id=created_by_member_id,
+                schedule="0 9 * * *",
+                prompt="check the queue",
+                description="the queue check",
+                next_run_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
+                paused=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return task_id
+
+
+async def _seed_scheduled_run(
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    *,
+    seq: int = 1,
+    key: str | None = None,
+    text: str,
+    fired: datetime,
+    artifact: tuple[str, str] | None = None,
+) -> UUID:
+    run_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=run_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="done",
+                inbound="fired",
+                admission_source="scheduled",
+                idempotency_key=key,
+                terminal=TerminalFrame(status="done", text=text).model_dump(mode="json"),
+                created_at=fired,
+                updated_at=fired,
+            )
+        )
+        if artifact is not None:
+            filename, media_type = artifact
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=run_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject="the file",
+                    media_type=media_type,
+                    size_bytes=3,
+                    created_at=fired,
+                    updated_at=fired,
+                )
+            )
+    return run_id
+
+
+async def test_radar_lists_scheduled_runs_with_output_and_files(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The radar feed: every reader — an admin included — gets only the runs of conversations
+    whose content they read, each naming its task and carrying the terminal reply and signed
+    download and preview links for the files it shared. Another member's private run, a room's
+    run, and a member turn never list, and an agent outside the audience is unknown."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, token_n = await _seed_member(workspace_id, "n@example.com")
+    _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    shared_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/radar",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+        surface_label="#eng",
+    )
+    task_id = await _seed_radar_task(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        name="morning-digest",
+        created_by_member_id=member_m,
+    )
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    shared_run = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        key=f"{task_id}:2026-08-14T09:00:00+00:00",
+        text="12 items, 2 stale",
+        fired=fired,
+        artifact=("queue.png", "image/png"),
+    )
+    private_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"{agent_id}/n@example.com/{uuid4().hex}",
+        audience=str(conversation_audience(member_n)),
+        member_id=member_n,
+    )
+    private_run = await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        private_conversation,
+        key=f"pause-fired:{uuid4()}",
+        text="resumed",
+        fired=fired + timedelta(minutes=1),
+    )
+    room_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/room",
+        audience=str(room_audience("slack", "C123")),
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        room_conversation,
+        text="in a room",
+        fired=fired + timedelta(minutes=2),
+    )
+    await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_n,
+        "n@example.com",
+        TerminalFrame(status="done", text="typed"),
+    )
+    m_view = (
+        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    ).json()
+    assert [run["turn_id"] for run in m_view["runs"]] == [str(shared_run)]
+    run = m_view["runs"][0]
+    assert run["task"] == "morning-digest"
+    assert "prompt" not in run
+    assert run["text"] == "12 items, 2 stale"
+    assert run["status"] == "done"
+    assert run["origin"] == "#eng"
+    assert run["agent_name"] == "assistant"
+    assert run["conversation_id"] == str(shared_conversation)
+    assert [entry["filename"] for entry in run["artifacts"]] == ["queue.png"]
+    assert run["artifacts"][0]["url"].startswith("https://web/")
+    assert "preview" in run["artifacts"][0]["preview_url"]
+    n_view = (
+        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+    ).json()
+    assert {run["turn_id"] for run in n_view["runs"]} == {str(shared_run), str(private_run)}
+    resumed = next(run for run in n_view["runs"] if run["turn_id"] == str(private_run))
+    assert resumed["task"] is None
+    assert resumed["text"] == "resumed"
+    admin_view = (
+        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    ).json()
+    assert [run["turn_id"] for run in admin_view["runs"]] == [str(shared_run)]
+    narrowed = (
+        await client.get(
+            f"{RADAR_PATH}?agent={agent_id}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+    ).json()
+    assert [run["turn_id"] for run in narrowed["runs"]] == [str(shared_run)]
+    unknown = await client.get(
+        f"{RADAR_PATH}?agent={uuid4()}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert unknown.status_code == 404
+    malformed = await client.get(
+        f"{RADAR_PATH}?after=nonsense", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert malformed.status_code == 400
+    anonymous = await client.get(RADAR_PATH)
+    assert anonymous.status_code == 401
+
+
+async def test_radar_pages_by_keyset_and_bounds_the_story(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, workspace_id, agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="slack/radar-pages",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    runs = [
+        await _seed_scheduled_run(
+            workspace_id,
+            agent_id,
+            conversation,
+            seq=index + 1,
+            key=f"{uuid4()}:2026-08-14T09:0{index}:00+00:00",
+            text="t" * 2_000,
+            fired=fired + timedelta(minutes=index),
+        )
+        for index in range(3)
+    ]
+    monkeypatch.setattr(web_surface, "RADAR_LIST_LIMIT", 2)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    first = (await client.get(RADAR_PATH, headers=headers)).json()
+    assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
+    assert len(first["runs"][0]["text"]) == web_surface.RADAR_TEXT_MAX
+    assert first["runs"][0]["task"] is None
+    assert first["newer"] is None and first["older"] is not None
+    second = (
+        await client.get(f"{RADAR_PATH}?after={quote(first['older'])}", headers=headers)
+    ).json()
+    assert [run["turn_id"] for run in second["runs"]] == [str(runs[0])]
+    assert second["older"] is None and second["newer"] is not None
+    back = (
+        await client.get(f"{RADAR_PATH}?after={quote(second['newer'])}", headers=headers)
+    ).json()
+    assert [run["turn_id"] for run in back["runs"]] == [run["turn_id"] for run in first["runs"]]
 
 
 async def test_artifacts_paging_is_stable_across_a_concurrent_share(
