@@ -78,13 +78,15 @@ SHA256_DIGEST_PREFIX = "sha256:"
 ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
 ARTIFACT_PUT_TTL_SECONDS = 900
 ARTIFACT_PUT_TIMEOUT_SECONDS = 900
-ARTIFACT_PREVIEW_SUFFIXES = frozenset((".docx", ".pdf", ".pptx"))
+ARTIFACT_PREVIEW_SUFFIXES = frozenset((".docx", ".pdf", ".pptx", ".svg", ".xlsx"))
 ARTIFACT_PREVIEW_MEDIA_TYPE = "image/png"
 ARTIFACT_PREVIEW_DPI = 100
 ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 180
 ARTIFACT_PREVIEW_DETAIL_CHARS = 500
-# One page, one raster: `soffice` reaches PDF from the Office formats and `pdftoppm` reaches a
-# picture from the PDF, so a `.pdf` skips the first step and every type shares the second.
+# One page, one raster: `soffice` reaches PDF from the Office formats and SVG (its import is
+# lenient — an `xmlns`-less generated file, dead in a browser's `<img>`, still draws) and
+# `pdftoppm` reaches a picture from the PDF, so a `.pdf` skips the first step and every type
+# shares the second.
 # `-singlefile` fixes the output at `<stem>.png` — a page-numbered name would have to be guessed
 # back. The convert writes into the engine's own offload dir, never beside the member's file.
 ARTIFACT_PREVIEW_PROG = """

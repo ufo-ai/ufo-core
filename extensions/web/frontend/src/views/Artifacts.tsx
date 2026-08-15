@@ -51,6 +51,7 @@ type Artifact = {
   size_bytes: number;
   created_at: string;
   url: string | null;
+  preview_url: string | null;
   owner_email: string | null;
   origin: string | null;
   conversation_id: string;
@@ -129,7 +130,7 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
     status: day(entry.created_at),
     body: entry.subject,
     meta: ownerLabel(entry.owner_email, viewer),
-    image: isImage(entry) ? entry.url : null,
+    image: entry.preview_url ?? (isImage(entry) ? entry.url : null),
     link: null,
     file: entry,
   };
@@ -374,7 +375,7 @@ function Viewer({ entry, onClose }: { entry: Artifact; onClose: () => void }) {
       }
     >
       <div className="font-mono text-small text-ink-soft">{meta}</div>
-      {isImage(entry) ? (
+      {isImage(entry) || entry.preview_url ? (
         <FullImage entry={entry} />
       ) : isTextMedia(entry.media_type) ? (
         <ArtifactText url={entry.url} name={entry.filename} mediaType={entry.media_type} />
@@ -399,7 +400,7 @@ function FullImage({ entry }: { entry: Artifact }) {
   return (
     <img
       alt={entry.subject || entry.filename}
-      src={entry.url ?? ""}
+      src={entry.preview_url ?? entry.url ?? ""}
       onError={() => setFailed(true)}
       className="max-h-(--media-tall) max-w-full object-contain"
     />

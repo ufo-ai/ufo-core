@@ -601,6 +601,21 @@ async def _shared_row(blob_key: str) -> sa.Row:
             "PY\n"
             "soffice --headless --convert-to pdf --outdir /workspace /workspace/notes.pptx\n",
         ),
+        (
+            "grid.xlsx",
+            "python3 - <<'PY'\n"
+            "from openpyxl import Workbook\n"
+            "w = Workbook()\n"
+            "w.active['A1'] = 'the number moved'\n"
+            "w.save('/workspace/grid.xlsx')\n"
+            "PY\n",
+        ),
+        (
+            "diagram.svg",
+            'printf \'%s\' \'<svg width="320" height="180">'
+            '<rect width="320" height="180" fill="#10b981"/></svg>\''
+            " > /workspace/diagram.svg\n",
+        ),
     ],
 )
 async def test_share_file_renders_a_document_first_page_beside_its_bytes(

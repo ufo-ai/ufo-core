@@ -2290,6 +2290,7 @@ async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response
                     "size_bytes": entry.artifact.size_bytes,
                     "created_at": _iso(entry.created_at),
                     "url": ctx.artifact_link(entry.artifact),
+                    "preview_url": ctx.artifact_preview_link(entry.artifact),
                     "origin": entry.origin,
                     "conversation_id": str(entry.conversation_id),
                 }

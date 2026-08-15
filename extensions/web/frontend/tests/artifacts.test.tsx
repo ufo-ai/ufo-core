@@ -47,6 +47,7 @@ const artifact = (over: Record<string, unknown> = {}) => ({
   size_bytes: 12,
   created_at: "2026-07-31T09:00:00",
   url: TEXT_URL,
+  preview_url: null,
   owner_email: "member@example.com",
   origin: null,
   conversation_id: "c1",
@@ -454,6 +455,57 @@ test("an image artifact fills its band, and a dead link leaves the placeholder",
 
   image.dispatchEvent(new Event("error"));
   await waitFor(() => expect(band.querySelector("img")).toBeNull());
+});
+
+test("a document's rendered page fills its band and its viewer", async () => {
+  only([
+    artifact({
+      media_type: "application/pdf",
+      filename: "report.pdf",
+      preview_url: "/dl/report-preview.png",
+    }),
+  ]);
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("report.pdf"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  expect(band.querySelector("img")?.getAttribute("src")).toBe("/dl/report-preview.png");
+
+  await userEvent.click(await viewCard("report.pdf"));
+  const full = document.querySelector(
+    "aside img[src='/dl/report-preview.png'], [role='dialog'] img[src='/dl/report-preview.png']",
+  );
+  expect(full).not.toBeNull();
+  expect(
+    screen.queryByText("No preview for this file type. Download it to open it."),
+  ).toBeNull();
+});
+
+test("an image's band prefers its validated preview link over the download link", async () => {
+  only([
+    artifact({
+      media_type: "image/png",
+      filename: "shot.png",
+      preview_url: "/dl/shot-preview.png",
+    }),
+  ]);
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedSection section="artifacts" />
+    </MainAgentProvider>,
+  );
+
+  const item = (await screen.findAllByRole("listitem")).find((entry) =>
+    entry.textContent?.includes("shot.png"),
+  );
+  const band = item?.querySelector('[data-part="mark"]') as HTMLElement;
+  expect(band.querySelector("img")?.getAttribute("src")).toBe("/dl/shot-preview.png");
 });
 
 function shelf(objects: unknown[], artifacts: unknown[]) {

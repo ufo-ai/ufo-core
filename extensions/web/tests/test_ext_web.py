@@ -2165,8 +2165,9 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The workspace artifacts view: a member reads their own conversations' shared files newest
-    first, each carrying the signed TTL download link and the media type the page previews an
-    image by; another member's files never list; an admin reads the workspace's."""
+    first, each carrying the signed TTL download link and a signed preview link — a document's off
+    its rendered first page, an image's off its own bytes, a plain file's absent; another member's
+    files never list; an admin reads the workspace's."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -2177,14 +2178,19 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
             member_m,
             "m@example.com",
             (
-                (f"artifacts/{uuid4()}/report.pdf", "report.pdf", "application/pdf"),
-                (f"artifacts/{uuid4()}/chart.png", "chart.png", "image/png"),
+                (
+                    f"artifacts/{uuid4()}/report.pdf",
+                    "report.pdf",
+                    "application/pdf",
+                    f"artifacts/{uuid4()}/report.png",
+                ),
+                (f"artifacts/{uuid4()}/chart.png", "chart.png", "image/png", None),
             ),
         ),
         (
             member_n,
             "n@example.com",
-            ((f"artifacts/{uuid4()}/notes.txt", "notes.txt", "text/plain"),),
+            ((f"artifacts/{uuid4()}/notes.txt", "notes.txt", "text/plain", None),),
         ),
     )
     minute = 0
@@ -2192,7 +2198,7 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
         _conversation, turn_id = await _seed_web_turn(
             workspace_id, agent_id, member_id, email, TerminalFrame(status="done", text="ok")
         )
-        for blob_key, filename, media_type in files:
+        for blob_key, filename, media_type, preview_blob_key in files:
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(tables.shared_artifact).values(
@@ -2203,6 +2209,9 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
                         subject="the file",
                         media_type=media_type,
                         size_bytes=3,
+                        preview_blob_key=preview_blob_key,
+                        preview_media_type=None if preview_blob_key is None else "image/png",
+                        preview_size_bytes=None if preview_blob_key is None else 4,
                         created_at=minted + timedelta(minutes=minute),
                         updated_at=sa.func.now(),
                     )
@@ -2218,8 +2227,12 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
     assert {entry["owner_email"] for entry in m_view["artifacts"]} == {"m@example.com"}
     assert m_view["artifacts"][0]["url"].startswith("https://web/")
     assert "/chart.png?exp=" in m_view["artifacts"][0]["url"]
+    previews = {entry["filename"]: entry["preview_url"] for entry in m_view["artifacts"]}
+    assert "/chart.png?" in previews["chart.png"] and "preview=" in previews["chart.png"]
+    assert "/report.png?" in previews["report.pdf"] and "preview=" in previews["report.pdf"]
     n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
     assert [entry["filename"] for entry in n_view["artifacts"]] == ["notes.txt"]
+    assert n_view["artifacts"][0]["preview_url"] is None
     admin_view = (
         await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
