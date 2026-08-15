@@ -672,7 +672,7 @@ test("the sidebar marks the section the member is in and leaves the others off",
   render(<App agents={[AGENT, SECOND]} subagents={[]} member={MEMBER} newAgent={null} onAgents={() => {}} />);
 
   const marked = () =>
-    ["Agents", "Automations", "Artifacts", "Memory", "Workspace"].filter(
+    ["Agents", "Automations", "Artifacts", "Workspace"].filter(
       (name) => screen.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 

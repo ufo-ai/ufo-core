@@ -6,7 +6,7 @@ import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
 import {
-  PlacedSection,
+  PlacedWorkspace,
   AGENT,
   MEMBER,
   NO_TASKS,
@@ -76,7 +76,7 @@ test("a slow read for a filter the member left never paints over the filter they
 
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="memory" />
+      <PlacedWorkspace view="memory" />
     </MainAgentProvider>,
   );
 

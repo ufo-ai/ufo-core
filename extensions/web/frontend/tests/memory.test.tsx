@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, PlacedSection, json, refusedNotice, useStreamFake, wire } from "./harness";
+import { AGENT, PlacedWorkspace, json, refusedNotice, useStreamFake, wire } from "./harness";
 const MATCH = {
   text: "the deploy runs on EKS",
   kind: "fact",
@@ -16,7 +16,7 @@ const MATCH = {
 function open() {
   return render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedSection section="memory" />
+      <PlacedWorkspace view="memory" />
     </MainAgentProvider>,
   );
 }
@@ -38,7 +38,7 @@ test("the search heads the page and the filter stands with the table", async () 
   });
   open();
 
-  const header = screen.getByRole("heading", { level: 1, name: "Memory" }).parentElement!;
+  const header = screen.getByRole("heading", { level: 1, name: "Workspace" }).parentElement!;
   expect(header.contains(await screen.findByPlaceholderText("Search"))).toBe(true);
   expect(header.contains(screen.getByRole("table"))).toBe(false);
 

@@ -1116,15 +1116,18 @@ test("the sidebar routes agents, sections, and the workspace by hash and marks t
   expect(location.hash).toBe("#/artifacts");
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Memory" }));
-  expect(location.hash).toBe("#/memory");
-  expect(screen.getByRole("button", { name: "Memory" }).getAttribute("aria-current")).toBe(
-    "true",
-  );
-  expect(await screen.findByRole("heading", { level: 1, name: "Memory" })).toBeTruthy();
-
   await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
   expect(location.hash).toBe("#/workspace/team");
+  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+
+  await userEvent.click(await screen.findByRole("tab", { name: "Memory" }));
+  expect(location.hash).toBe("#/workspace/memory");
+  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+  expect(await screen.findByText("No memories yet.")).toBeTruthy();
 });
 
 /** The mark a subagent's name carries in the list, which stands in the cell beside the name. */

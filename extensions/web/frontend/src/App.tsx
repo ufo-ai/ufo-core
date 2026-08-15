@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IconAdjustments,
-  IconAdjustmentsHorizontal,
   IconAutomation,
   IconBrandSlack,
   IconDeviceDesktop,
@@ -1028,14 +1027,10 @@ const AutomationsGlyph = () => (
   <IconAutomation className="size-(--size-glyph) shrink-0" aria-hidden />
 );
 const ArtifactsGlyph = () => <IconFolder className="size-(--size-glyph) shrink-0" aria-hidden />;
-const MemoryGlyph = () => (
-  <IconAdjustmentsHorizontal className="size-(--size-glyph) shrink-0" aria-hidden />
-);
 const WorkspaceGlyph = () => <IconUsers className="size-(--size-glyph) shrink-0" aria-hidden />;
 const SettingsGlyph = () => <IconSettings className="size-(--size-glyph) shrink-0" aria-hidden />;
 
 const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
   automations: <AutomationsGlyph />,
   artifacts: <ArtifactsGlyph />,
-  memory: <MemoryGlyph />,
 };

@@ -7,11 +7,18 @@ export const AGENT_TABS = [
   "usage",
 ] as const;
 
-export const WORKSPACE_TABS = ["team", "sources", "connectors", "credentials", "usage"] as const;
+export const WORKSPACE_TABS = [
+  "team",
+  "memory",
+  "sources",
+  "connectors",
+  "credentials",
+  "usage",
+] as const;
 
 export const SUBAGENT_TABS = ["overview", "conversations", "skills"] as const;
 
-export const SECTIONS = ["automations", "artifacts", "memory"] as const;
+export const SECTIONS = ["automations", "artifacts"] as const;
 
 export type AgentTab = (typeof AGENT_TABS)[number];
 export type SubagentTab = (typeof SUBAGENT_TABS)[number];

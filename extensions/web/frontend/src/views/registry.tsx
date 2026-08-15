@@ -44,6 +44,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search members",
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
   },
+  memory: {
+    label: "Memory",
+    remountOnPlace: false,
+    search: "Search memory",
+    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
+  },
   sources: declared("Sources", SOURCES),
   connectors: {
     label: "Connectors",
@@ -65,12 +71,6 @@ export const SECTION_VIEWS: Record<Section, PaneView> = {
     remountOnPlace: false,
     ownsHeader: true,
     render: () => <Automations agentId={null} title="Automations" />,
-  },
-  memory: {
-    label: "Memory",
-    remountOnPlace: false,
-    search: "Search memory",
-    render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
   artifacts: {
     label: "Artifacts",
