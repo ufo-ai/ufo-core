@@ -329,6 +329,22 @@ fn scratch_home(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn help_prints_usage_and_never_touches_the_wire() {
+    let home = scratch_home("help");
+    for flag in ["--help", "-h"] {
+        let (stdout, code) = run_client("http://127.0.0.1:9", &[flag], "", &home);
+        assert_eq!(code, 0, "{flag} exits 0");
+        assert!(
+            stdout.contains("Usage: ufo"),
+            "{flag} prints usage:\n{stdout}"
+        );
+        for named in ["login", "logout", "--resume", "--json", "--help"] {
+            assert!(stdout.contains(named), "{flag} names {named}:\n{stdout}");
+        }
+    }
+}
+
+#[test]
 fn plain_session_round_trips_ask_and_exit() {
     let served = serve(vec![
         Exchange {

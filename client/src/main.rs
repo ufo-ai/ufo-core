@@ -21,6 +21,22 @@ use crate::ui::plain::Plain;
 use crate::ui::{App, Reply};
 use crate::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
 
+const HELP: &str = "\
+Opens a conversation with your workspace assistant.
+
+Usage: ufo [--resume [id]] [--json] [message...]
+       ufo login | logout
+
+Commands:
+  login          Sign in again.
+  logout         Sign out.
+
+Options:
+  --resume [id]  Resume a conversation; bare --resume picks from this machine's list.
+  --json         Read and write JSON events on stdin and stdout.
+  -h, --help     Show this help.
+";
+
 const GATEWAY_URL_DEFAULT: &str = "https://flyingobject.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
 const RECONNECT_ATTEMPTS: u32 = 3;
@@ -41,6 +57,10 @@ fn main() {
     let mut json = false;
     loop {
         match rest.first().map(String::as_str) {
+            Some("--help") | Some("-h") => {
+                print!("{HELP}");
+                return;
+            }
             Some("logout") => {
                 home.clear_signin();
                 println!("Signed out.");
