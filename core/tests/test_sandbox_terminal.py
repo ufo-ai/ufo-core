@@ -571,6 +571,77 @@ def test_the_glob_walk_measures_the_paths_it_listed(tmp_path: Path) -> None:
     ]
 
 
+def _repository(root: Path, name: str) -> Path:
+    repo = root / name
+    repo.mkdir(parents=True)
+    (repo / "mod.py").write_text("x = 1\n")
+    for args in (
+        ("init", "-q", "."),
+        ("add", "-A"),
+        ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"),
+    ):
+        completed = subprocess.run(
+            ["/usr/bin/git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+        )
+        assert completed.returncode == 0, completed.stderr
+    return repo
+
+
+def test_the_changes_walk_diffs_only_repositories_that_report_changes(tmp_path: Path) -> None:
+    """A clean checkout answers its marker with empty sections off one status probe — no diff run —
+    and a changed one still carries its porcelain entries and its patch."""
+    root = tmp_path / "workspace"
+    clean = _repository(root, "clean")
+    dirty = _repository(root, "dirty")
+    (dirty / "mod.py").write_text("x = 2\n")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", terminal.WALK_ENUMERATION["changes"]],
+        env={"UFO_WALK_ROOT": str(root), "UFO_OP_WORKDIR": str(workdir), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    enum = (workdir / "changes-enum").read_bytes()
+    assert b"R\x00" + str(clean).encode() + b"\x00D\x00\x00" in enum
+    assert b"R\x00" + str(dirty).encode() + b"\x00 M mod.py\x00" in enum
+    assert b"-x = 1\n+x = 2" in enum
+
+
+def test_the_changes_walk_stops_at_the_outermost_checkout(tmp_path: Path) -> None:
+    """`sbxfs`'s `_repositories` rule: a bound directory that is itself a checkout is the one
+    answer — a repository nested inside it (a vendored clone, a worktree) is what the checkout
+    above already reports — and a checkout under a hidden parent is still found."""
+    root = _repository(tmp_path, "workspace")
+    _repository(root, "vendored")
+    hidden = _repository(tmp_path / "elsewhere", ".hidden")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    for walk_root in (root, hidden.parent):
+        completed = subprocess.run(
+            ["/bin/sh", "-c", terminal.WALK_ENUMERATION["changes"]],
+            env={
+                "UFO_WALK_ROOT": str(walk_root),
+                "UFO_OP_WORKDIR": str(workdir),
+                "PATH": "/usr/bin:/bin",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+        enum = (workdir / "changes-enum").read_bytes()
+        assert enum.count(b"R\x00") == 1
+        expected = root if walk_root == root else hidden
+        assert enum.startswith(b"R\x00" + str(expected).encode() + b"\x00")
+
+
 async def test_dial_is_unreachable() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)

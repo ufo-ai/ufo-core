@@ -74,6 +74,11 @@ _UNSKIPPED_ROOT = r'! -path "$UFO_WALK_ROOT"'
 _REPOSITORY_COMMANDS = r"""[ -n "$1" ] || exit 0
 r=${1%/.git}
 printf "R\000%s\000" "$r"
+if [ -z "$(/usr/bin/git -C "$r" status --porcelain=v1 --no-renames -uall 2>/dev/null \
+| /usr/bin/head -c1)" ]; then
+printf "D\000\000"
+exit 0
+fi
 /usr/bin/git -C "$r" -c core.quotePath=false status --porcelain=v1 -z --no-renames -uall
 printf "D\000%s\000" "$(/usr/bin/git -C "$r" -c core.quotePath=false diff HEAD --no-renames -U3 \
 2>/dev/null)"
@@ -94,9 +99,14 @@ walked="$UFO_OP_WORKDIR/glob-walk"
 { /bin/cat "$walked"; printf '\000'; measure < "$walked"; } > "$UFO_OP_WORKDIR/glob-enum"
 """,
     "changes": rf"""r='{_REPOSITORY_COMMANDS}'
-/usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a -name '.git' \) -prune -print0 \
--o \( {_UNSKIPPED_ROOT} -a \( {_SKIPPED} \) \) -prune \
-| /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
+walk() {{
+if [ -e "$1/.git" ]; then printf '%s\000' "$1/.git"; return; fi
+for entry in "$1"/* "$1"/.*; do
+case "${{entry##*/}}" in .|..|{"|".join(WALK_SKIP_NAMES)}) continue;; esac
+if [ -d "$entry" ] && [ ! -L "$entry" ]; then walk "$entry"; fi
+done
+}}
+walk "$UFO_WALK_ROOT" | /usr/bin/xargs -0 -n1 /bin/sh -c "$r" sh > "$UFO_OP_WORKDIR/changes-enum"
 """,
 }
 """The one command each tree walk needs run first, reading `$UFO_WALK_ROOT` and leaving its
@@ -109,8 +119,13 @@ container's own glob returns. Only glob measures with `stat` — over the listin
 a second walk, because the client pairs the two sections by position — and its flags split by OS:
 `stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
 (macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client
-parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
-`git`, `cat`, and `xargs` are POSIX across both."""
+parses one shape and the double it reconstructs is the one `os.stat` reports on either. `changes`
+descends directories and stops at the outermost checkout on each path — `sbxfs`'s own
+`_repositories` rule, under which a bound directory that is itself a checkout costs one stat, and
+a repository nested inside another (a vendored clone, a worktree) is not a second answer — and it
+answers a checkout whose one cheap status probe reports nothing with empty sections and no diff,
+so the probe, not the patch, is the steady-state cost per repository. `find`, `git`, `cat`,
+`head -c`, and `xargs` behave alike across both."""
 ARRIVAL_GRACE_SECONDS = 30.0
 """How long an op or an open waits for the terminal to reconnect. The client's stream ends at every
 hold and reconnects on a ~1s poll, so work landing in that gap is the normal case — a different
