@@ -225,7 +225,7 @@ def _bash_ctx(carrier: _RecordingCarrier, tmp_path: Path) -> ToolContext:
     return _tool_ctx(session, tmp_path)
 
 
-async def _live_ctx(tmp_path: Path) -> ToolContext:
+async def _live_ctx(tmp_path: Path, idempotency_key: str | None = None) -> ToolContext:
     """A live local sandbox whose workspace root holds a space, so every shell string a
     background task builds is exercised against the rewrite the terminal carrier performs on a
     member's real directory."""
@@ -239,7 +239,7 @@ async def _live_ctx(tmp_path: Path) -> ToolContext:
             run_token="off-turn-test",
         )
     )
-    return _tool_ctx(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    return _tool_ctx(SandboxSession(carrier=carrier, handle=handle), tmp_path, idempotency_key)
 
 
 async def _wait_for_file(session: SandboxSession, path: str) -> str:
@@ -251,8 +251,11 @@ async def _wait_for_file(session: SandboxSession, path: str) -> str:
     raise AssertionError(f"{path} never appeared")
 
 
-def _tool_ctx(session: SandboxSession, tmp_path: Path) -> ToolContext:
+def _tool_ctx(
+    session: SandboxSession, tmp_path: Path, idempotency_key: str | None = None
+) -> ToolContext:
     return ToolContext(
+        idempotency_key=idempotency_key,
         sandbox=session,
         blob=FilesystemBlobStore(root=tmp_path),
         turn=Turn(
@@ -424,14 +427,78 @@ async def test_a_command_inside_its_budget_answers_as_itself(tmp_path: Path) -> 
     assert failed.content[0].text == "out-line\n\nexit code: 7"
 
 
-async def test_a_finished_command_leaves_no_task_behind(tmp_path: Path) -> None:
-    """The task files are the handles a moved command is reported by. One that ended inside its
-    budget is reported by its output, so it leaves none — else every command a member ever ran
-    would pile up in the directory the live tasks are listed from."""
+async def test_a_finished_task_is_swept_a_window_after_it_ended(tmp_path: Path) -> None:
+    """A finished command keeps its files past its result: they are the journal a dispatch step
+    re-running after a crash reads the result from, so sweeping them at completion would hand the
+    replay a fresh launch instead. The sweep window outlives any recovery, and the next launch is
+    where old completed tasks go — while a task still running keeps its files whatever its age."""
     ctx = await _live_ctx(tmp_path)
+    tasks_dir = f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"
     await bash_handler(ctx, BashInput(command="echo done", user_description="checking the box"))
-    listed = await ctx.sandbox.bash(f'ls "{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"')
-    assert listed.stdout.strip() == ""
+    finished = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
+    assert len(finished) == 3
+    running = await bash_handler(
+        ctx, BashInput(command="sleep 30", background=True, user_description="building")
+    )
+    await ctx.sandbox.bash(f'touch -t 202001010000 "{tasks_dir}"/*')
+    await bash_handler(ctx, BashInput(command="echo next", user_description="checking the box"))
+    remaining = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
+    assert not set(finished) & set(remaining)
+    live = _task_payload(running.content[0].text)["task"]
+    assert {name for name in remaining if name.startswith(live)} == {
+        f"{live}.log",
+        f"{live}.pid",
+    }
+    await ctx.sandbox.bash(_task_payload(running.content[0].text)["stop"])
+
+
+async def test_a_replayed_call_reattaches_and_reads_the_first_run(tmp_path: Path) -> None:
+    """A dispatch step that crashes after its command launched re-runs its whole body on recovery.
+    The call's idempotency key names the same task, the pid file says the launch already happened,
+    and the re-run answers with the first run's output — the command itself ran once, so a
+    non-idempotent command (a migration, a send) is never repeated by the crash."""
+    key = f"{uuid4()}/bash/call_1"
+    runs = f"{WORKSPACE_DIR}/runs.txt"
+    command = f'echo ran >> "{runs}"; cat "{runs}"'
+    first = await bash_handler(
+        await _live_ctx(tmp_path, idempotency_key=key),
+        BashInput(command=command, user_description="building"),
+    )
+    replayed = await bash_handler(
+        await _live_ctx(tmp_path, idempotency_key=key),
+        BashInput(command=command, user_description="building"),
+    )
+    assert first.content[0].text == "ran\n"
+    assert replayed.content[0].text == "ran\n"
+
+
+async def test_a_replayed_call_picks_up_a_command_still_running(tmp_path: Path) -> None:
+    """The reattached wrapper belongs to an exec that died with the crashed process, so the re-run
+    cannot `wait` on it as a child — it watches for the exit file instead, and still answers as the
+    command: the results land with the recovered turn, not lost with the process that asked."""
+    key = f"{uuid4()}/bash/call_2"
+    command = "sleep 1; echo finished"
+    await bash_handler(
+        await _live_ctx(tmp_path, idempotency_key=key),
+        BashInput(command=command, background=True, user_description="building"),
+    )
+    picked = await bash_handler(
+        await _live_ctx(tmp_path, idempotency_key=key),
+        BashInput(command=command, user_description="building"),
+    )
+    assert not picked.is_error
+    assert picked.content[0].text == "finished\n"
+
+
+async def test_without_a_resume_identity_every_call_is_a_fresh_task(tmp_path: Path) -> None:
+    """No idempotency key means no earlier attempt to reattach to: two identical calls are two
+    runs, never one run answering twice."""
+    ctx = await _live_ctx(tmp_path)
+    runs = f"{WORKSPACE_DIR}/runs.txt"
+    command = f'echo ran >> "{runs}"; cat "{runs}"'
+    await bash_handler(ctx, BashInput(command=command, user_description="building"))
+    second = await bash_handler(ctx, BashInput(command=command, user_description="building"))
+    assert second.content[0].text == "ran\nran\n"
 
 
 async def test_a_foreground_command_carries_its_quoting_and_workspace_paths(

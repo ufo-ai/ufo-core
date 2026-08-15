@@ -1315,12 +1315,14 @@ async def test_a_side_effecting_tool_is_never_preempted_by_queued_guidance(
 
 
 async def test_preemptibility_reads_the_builtin_declarations(db: None, tmp_path: Path) -> None:
-    """bash — the long command the preemption exists for — stays preemptible; the delegation
-    builtins that key children on `ctx.idempotency_key` are spared; an unknown name never
-    dispatches, so there is nothing to preempt."""
+    """Every builtin that keys work on `ctx.idempotency_key` is spared: bash reattaches to its
+    task's files and the delegation builtins to their children, so preempting a replay would strand
+    running work a re-issued call could only duplicate. An unknown name never dispatches, so there
+    is nothing to preempt."""
     turn = await _seed_turn("running", None)
     engine = _engine(turn, object(), tmp_path)
-    assert engine._redoes_on_replay("bash") is True
+    assert engine._redoes_on_replay("bash") is False
+    assert engine._redoes_on_replay("read") is True
     assert engine._redoes_on_replay("spawn_subagent") is False
     assert engine._redoes_on_replay("message_subagent") is False
     assert engine._redoes_on_replay("unknown") is False

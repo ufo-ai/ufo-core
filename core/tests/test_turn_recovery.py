@@ -413,8 +413,8 @@ GUIDANCE_PROBE = "guidance-probe"
 @dataclass(frozen=True)
 class _GuidanceProbeModel:
     """Round one launches the probe command, whose dispatch kills the worker mid-command. The
-    closing round reports what the window shows: `redirected` when the in-flight call came back
-    unexecuted and the member's follow-up is present, `recovered` when the call was redone clean
+    closing round reports what the window shows: `redirected` when the redone call came back clean
+    and the member's follow-up is present beside it, `recovered` when the call was redone clean
     with no follow-up queued, `wrong` otherwise."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
@@ -441,8 +441,7 @@ class _GuidanceProbeModel:
         )
         (result,) = results
         if guidance:
-            skipped = result.is_error and "restarted" in str(result.content)
-            yield TextDelta(text="redirected" if skipped else "wrong")
+            yield TextDelta(text="redirected" if not result.is_error else "wrong")
         else:
             yield TextDelta(text="recovered" if not result.is_error else "wrong")
         yield Usage(input_tokens=1, output_tokens=1)
@@ -501,12 +500,14 @@ async def _admit_member_arrival(
 
 
 @pytest.mark.serial
-async def test_guidance_queued_during_the_crash_window_preempts_the_inflight_redo(
+async def test_guidance_queued_during_the_crash_window_is_answered_after_the_redo(
     db: None, dbos_launched: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member message durable before recovery reaches the model ahead of the in-flight step's
-    re-execution: the adopted dispatch records an unexecuted result instead of redoing the command,
-    the next round folds the message, and the model answers it."""
+    """A member message durable before recovery does not preempt an adopted bash dispatch: bash
+    keys its task on the call's idempotency key and reattaches, so preempting would strand running
+    work a re-issued call could only duplicate. The re-executed dispatch lands its result, the
+    next round folds the message beside it, and the model answers the member — the guidance waits
+    one dispatch, never the work discarded."""
     workspace_id, conversation_id, turn_id = await _seed_turn()
     probe_execs: list[tuple[str, ...]] = []
     monkeypatch.setattr(LocalCarrier, "exec", _crash_once_exec(probe_execs))
@@ -527,7 +528,7 @@ async def test_guidance_queued_during_the_crash_window_preempts_the_inflight_red
 
         assert terminal.status == "done"
         assert terminal.text == "redirected"
-        assert len(probe_execs) == 1
+        assert len(probe_execs) == 2
         async with workspace_tx() as connection:
             consumed = (
                 await connection.execute(

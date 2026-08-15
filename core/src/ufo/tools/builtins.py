@@ -29,6 +29,7 @@ that runs as its next turn — scoped to the children this turn
 spawned."""
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import shlex
@@ -130,6 +131,7 @@ EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
 MAX_REQUESTED_SLOTS = 4
 BACKGROUND_TASKS_DIR = ".tasks"
+TASK_SWEEP_MINUTES = 60
 TASK_PROBE_TIMEOUT_SECONDS = 5
 DETACHED_LEAD = "The command runs detached."
 MOVED_LEAD = "The command did not complete within its {applied_s}s timeout and continues detached."
@@ -164,24 +166,38 @@ call has always used, whose profile is what puts its tools on PATH. The wrapper 
 only after the trap is armed, so no reader ever holds a pid whose kill would land before the
 trap — a stop the instant the handles return still signals."""
 TASK_LAUNCH = (
-    'mkdir -p "$(dirname "$2")" || exit 1; '
+    'dir=$(dirname "$2"); mkdir -p "$dir" || exit 1; '
+    f'find "$dir" -maxdepth 1 -name "*.exit" -mmin +{TASK_SWEEP_MINUTES} 2>/dev/null | '
+    'while read -r f; do rm -f "${f%.exit}.log" "${f%.exit}.pid" "$f"; done; '
+    'if [ ! -e "$2.pid" ]; then '
     'set -m; nohup bash -c "$1" bash "$2" "$3" >/dev/null 2>&1 & task=$!; set +m; '
+    "fi; "
     'for _ in $(seq 500); do [ -s "$2.pid" ] && break; sleep 0.01; done; '
 )
-"""Start the wrapper in a process group of its own, which is what lets it outlive this launcher: a
-carrier ends an exec by killing the launcher's whole group, so a wrapper sharing that group dies
-with it and the exit code no reader would ever see. `set +m` immediately after keeps monitor mode's
-job notice off the result. The launch is complete only when the wrapper's pid file appears —
-written past its trap — so what follows never reads an empty handle."""
+"""Launch once per task, however many times the exec runs: the pid file is the record that this
+task's command is already launched, so a dispatch step re-running after a crash reattaches to the
+work instead of repeating it — the sandbox outlives the process that asked, and the launch script
+runs sandbox-side to completion whatever happens to the host, so the pid file and the launch are
+one fate. The wrapper starts in a process group of its own, which is what lets it outlive this
+launcher: a carrier ends an exec by killing the launcher's whole group, so a wrapper sharing that
+group dies with it and the exit code no reader would ever see (`set +m` immediately after keeps
+monitor mode's job notice off the result). The wrapper writes the pid file itself, past its trap,
+and the launch is complete only when it appears — so no reader ever holds a pid whose kill would
+land before the trap, and a reattach passes straight through. Completed tasks older than the sweep
+window go here, the one place every task passes through — the window outlives any crash recovery,
+so a journal is never swept before its reader arrives, and a task still running keeps its files
+whatever its age."""
 TASK_WAIT = (
-    'wait "$task"; code=$(cat "$2.exit"); cat "$2.log"; '
-    'rm -f "$2.log" "$2.exit" "$2.pid"; exit "$code"'
+    'if [ -n "$task" ]; then wait "$task"; else '
+    'until [ -e "$2.exit" ] || ! kill -0 "$(cat "$2.pid")" 2>/dev/null; do sleep 0.2; done; fi; '
+    'code=$(cat "$2.exit" 2>/dev/null) || { echo "the command ended without an exit code" >&2; '
+    'exit 1; }; cat "$2.log"; exit "$code"'
 )
 """Answer as the command itself — its output, its exit code — so a command that fits its budget
-costs the single exec it always did, and waits on the wrapper directly rather than polling for it,
-since the launcher is its parent. The three files are the handles a moved command is reported by; a
-command that ended here is reported by its output instead, so they go rather than accumulating in
-the member's workspace."""
+costs the single exec it always did. A launch this exec performed is waited on directly, since the
+launcher is its parent; a reattached one belongs to a dead exec, so the wait falls back to watching
+for the exit file while the wrapper lives. The files stay: they are the journal a re-run of the
+same call reads its result from, gone only through the launch-time sweep."""
 TASK_DETACH = 'cat "$2.pid"'
 TASK_PROBE = (
     'pid=$(cat "$1.pid" 2>/dev/null) || exit 1; '
@@ -429,12 +445,17 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     that fired rather than a bare `exit code: 124`, which `timeout` inside the command produces
     just as the sandbox does — a caller reading the code alone cannot tell which fired. The seconds
     named are the ones that actually applied, so a request the cap reduced says so at the moment it
-    costs something rather than silently at the call."""
+    costs something rather than silently at the call.
+
+    The task's identity is the call's, so the whole run is durable across a crash of this process:
+    a dispatch step that re-runs on recovery derives the same task, finds the launch already made,
+    and answers with the first run's result — the command itself runs once however many times the
+    step does."""
     if args.background:
         return await _bash_background(ctx, args.command)
     requested_s = None if args.timeout is None else int(args.timeout / 1000)
     timeout_s = int(min(args.timeout, MAX_BASH_TIMEOUT_MS) / 1000) if args.timeout else None
-    task_id = uuid4().hex[:8]
+    task_id = _task_id(ctx)
     result = await ctx.sandbox.sh(
         TASK_BASH,
         TASK_LAUNCH + TASK_WAIT,
@@ -489,6 +510,16 @@ async def _moved_to_background(
     return ToolResult(content=(TextContent(text=notice),), is_error=True)
 
 
+def _task_id(ctx: ToolContext) -> str:
+    """The task's identity across attempts: a dispatch step re-running after a crash carries the
+    same idempotency key, so it names the same task and reattaches to its files instead of
+    launching the command again. No key — a context outside a recorded dispatch — is a fresh task
+    every time, since there is no earlier attempt to reattach to."""
+    if ctx.idempotency_key is None:
+        return uuid4().hex[:8]
+    return hashlib.sha256(ctx.idempotency_key.encode()).hexdigest()[:8]
+
+
 def _task_base(task_id: str) -> str:
     """Every path the launcher and the result name is absolute: an exec's working directory is
     carrier-dependent (Docker sets none), and the workspace root is the one anchor every carrier
@@ -522,7 +553,7 @@ def _task_result(task_id: str, pid: str, applied_s: int | None = None) -> ToolRe
 async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
     """Detach the command and hand back its handles without ever waiting on it — the same launch a
     foreground command rides, stopping at the pid."""
-    task_id = uuid4().hex[:8]
+    task_id = _task_id(ctx)
     started = await ctx.sandbox.sh(
         TASK_BASH, TASK_LAUNCH + TASK_DETACH, TASK_WRAPPER, _task_base(task_id), command
     )
@@ -1094,6 +1125,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=BashInput,
         handler=bash_handler,
+        side_effecting=True,
     ),
     ToolDef(
         name="read",
