@@ -38,6 +38,7 @@ pub enum Key {
     HistPrev,
     HistNext,
     Paste(String),
+    Image(String),
     Eof,
 }
 
@@ -69,6 +70,7 @@ struct Snapshot {
     text: String,
     cursor: usize,
     pastes: BTreeMap<usize, Arc<str>>,
+    images: BTreeMap<usize, Arc<str>>,
 }
 
 /// The in-flight ask: the text, the byte cursor, and where history browsing stands. The draft the
@@ -79,6 +81,7 @@ pub struct AskState {
     hist_at: Option<usize>,
     draft: String,
     pastes: BTreeMap<usize, Arc<str>>,
+    images: BTreeMap<usize, Arc<str>>,
     kills: Vec<String>,
     killing: bool,
     undos: Vec<Snapshot>,
@@ -94,6 +97,7 @@ impl AskState {
             hist_at: None,
             draft: String::new(),
             pastes: BTreeMap::new(),
+            images: BTreeMap::new(),
             kills: Vec::new(),
             killing: false,
             undos: Vec::new(),
@@ -126,6 +130,12 @@ impl AskState {
                 } else {
                     self.insert(&text);
                 }
+            }
+            Key::Image(path) => {
+                self.snapshot();
+                let at = self.images.len() + 1;
+                self.images.insert(at, Arc::from(path.as_str()));
+                self.insert(&image_marker(at));
             }
             Key::Backspace => {
                 if let Some(prev) = self.prev_boundary() {
@@ -200,6 +210,7 @@ impl AskState {
                     self.text = snapshot.text;
                     self.cursor = snapshot.cursor;
                     self.pastes = snapshot.pastes;
+                    self.images = snapshot.images;
                     self.hist_at = None;
                 }
             }
@@ -258,6 +269,7 @@ impl AskState {
             text: self.text.clone(),
             cursor: self.cursor,
             pastes: self.pastes.clone(),
+            images: self.images.clone(),
         });
     }
 
@@ -319,6 +331,9 @@ impl AskState {
         for (at, contents) in &self.pastes {
             out = out.replace(&marker(*at, contents), contents);
         }
+        for (at, path) in &self.images {
+            out = out.replace(&image_marker(*at), &format!("[Image #{at}: {path}]"));
+        }
         out
     }
 
@@ -329,7 +344,13 @@ impl AskState {
             .filter(|(at, contents)| self.text.contains(&marker(**at, contents)))
             .map(|(at, contents)| (*at, contents.clone()))
             .collect();
-        if kept.len() == self.pastes.len() {
+        let kept_images: Vec<(usize, Arc<str>)> = self
+            .images
+            .iter()
+            .filter(|(at, _)| self.text.contains(&image_marker(**at)))
+            .map(|(at, path)| (*at, path.clone()))
+            .collect();
+        if kept.len() == self.pastes.len() && kept_images.len() == self.images.len() {
             return;
         }
         let mut spans: Vec<(usize, usize, String)> = Vec::new();
@@ -339,6 +360,13 @@ impl AskState {
             let start = self.text.find(&was).unwrap();
             spans.push((start, start + was.len(), marker(index + 1, &contents)));
             pastes.insert(index + 1, contents);
+        }
+        let mut images = BTreeMap::new();
+        for (index, (at, path)) in kept_images.into_iter().enumerate() {
+            let was = image_marker(at);
+            let start = self.text.find(&was).unwrap();
+            spans.push((start, start + was.len(), image_marker(index + 1)));
+            images.insert(index + 1, path);
         }
         spans.sort_by_key(|(start, _, _)| *start);
         let mut rebuilt = String::with_capacity(self.text.len());
@@ -358,13 +386,17 @@ impl AskState {
         self.text = rebuilt;
         self.cursor = cursor.min(self.text.len());
         self.pastes = pastes;
+        self.images = images;
     }
 
     fn markers(&self) -> Vec<(usize, usize)> {
-        self.pastes
+        let texts = self
+            .pastes
             .iter()
-            .filter_map(|(at, contents)| {
-                let text = marker(*at, contents);
+            .map(|(at, contents)| marker(*at, contents))
+            .chain(self.images.keys().map(|at| image_marker(*at)));
+        texts
+            .filter_map(|text| {
                 self.text
                     .find(&text)
                     .map(|start| (start, start + text.len()))
@@ -510,6 +542,10 @@ impl AskState {
 
 fn marker(at: usize, contents: &str) -> String {
     format!("[paste #{at} +{} lines]", contents.lines().count())
+}
+
+fn image_marker(at: usize) -> String {
+    format!("[Image #{at}]")
 }
 
 impl Default for AskState {
@@ -1017,6 +1053,92 @@ mod tests {
         drive(&mut state, &[Key::Undo], &[]);
         assert_eq!(state.text, "[paste #1 +12 lines]");
         assert_eq!(state.expand(), pasted);
+    }
+
+    #[test]
+    fn an_image_paste_shows_a_marker_and_expands_to_its_path() {
+        let mut state = AskState::new();
+        drive(&mut state, &[Key::Image("/tmp/shot.png".into())], &[]);
+        assert_eq!(state.text, "[Image #1]");
+        assert_eq!(state.expand(), "[Image #1: /tmp/shot.png]");
+        drive(&mut state, &[Key::Char('?')], &[]);
+        assert_eq!(state.expand(), "[Image #1: /tmp/shot.png]?");
+    }
+
+    #[test]
+    fn images_and_text_pastes_number_independently() {
+        let mut state = AskState::new();
+        let pasted = big(12);
+        drive(
+            &mut state,
+            &[Key::Paste(pasted.clone()), Key::Image("/tmp/a.png".into())],
+            &[],
+        );
+        assert_eq!(state.text, "[paste #1 +12 lines][Image #1]");
+        assert_eq!(state.expand(), format!("{pasted}[Image #1: /tmp/a.png]"));
+    }
+
+    #[test]
+    fn an_image_marker_moves_and_deletes_as_one() {
+        let mut state = AskState::new();
+        drive(&mut state, &[Key::Image("/tmp/a.png".into())], &[]);
+        drive(&mut state, &[Key::Left], &[]);
+        assert_eq!(state.cursor, 0);
+        drive(&mut state, &[Key::Right], &[]);
+        assert_eq!(state.cursor, "[Image #1]".len());
+        drive(&mut state, &[Key::Backspace], &[]);
+        assert_eq!(state.text, "");
+        assert_eq!(state.expand(), "");
+    }
+
+    #[test]
+    fn deleting_an_image_marker_renumbers_the_rest() {
+        let mut state = AskState::new();
+        drive(
+            &mut state,
+            &[
+                Key::Image("/tmp/a.png".into()),
+                Key::Image("/tmp/b.png".into()),
+                Key::Image("/tmp/c.png".into()),
+            ],
+            &[],
+        );
+        assert_eq!(state.text, "[Image #1][Image #2][Image #3]");
+        drive(&mut state, &[Key::BufferHome, Key::Delete], &[]);
+        assert_eq!(state.text, "[Image #1][Image #2]");
+        assert_eq!(
+            state.expand(),
+            "[Image #1: /tmp/b.png][Image #2: /tmp/c.png]"
+        );
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn undo_brings_a_deleted_image_back() {
+        let mut state = AskState::new();
+        drive(
+            &mut state,
+            &[Key::Image("/tmp/a.png".into()), Key::Backspace],
+            &[],
+        );
+        assert_eq!(state.text, "");
+        drive(&mut state, &[Key::Undo], &[]);
+        assert_eq!(state.text, "[Image #1]");
+        assert_eq!(state.expand(), "[Image #1: /tmp/a.png]");
+    }
+
+    #[test]
+    fn killing_an_image_marker_rings_its_path() {
+        let mut state = AskState::new();
+        drive(
+            &mut state,
+            &[Key::Image("/tmp/a.png".into()), Key::KillLine],
+            &[],
+        );
+        assert_eq!(state.text, "");
+        assert!(state.images.is_empty());
+        drive(&mut state, &[Key::Yank], &[]);
+        assert_eq!(state.text, "[Image #1: /tmp/a.png]");
     }
 
     #[test]

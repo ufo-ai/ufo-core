@@ -176,6 +176,10 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+U / Ctrl+K / Ctrl+W", "Kill to start / end / word"),
         ("Ctrl+Y", "Yank"),
         ("Ctrl+Z", "Undo"),
+        (
+            "Ctrl+V",
+            "Paste from the clipboard; an image attaches as [Image #N]",
+        ),
         ("@", "Path completion"),
         ("PgUp / PgDn", "Scroll the transcript"),
         ("End", "Follow the live end, when scrolled"),

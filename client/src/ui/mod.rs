@@ -115,6 +115,7 @@ impl Drop for RawGuard {
 pub enum Reply {
     None,
     Send(String),
+    Clipboard,
     Recall { text: String, arrival_id: String },
     Choice(String),
     ChoiceCancelled,
@@ -124,6 +125,7 @@ pub enum Reply {
     Exit,
 }
 
+#[derive(PartialEq)]
 enum Focus {
     Compose,
     Choose,
@@ -649,6 +651,18 @@ impl App {
         }
     }
 
+    /// A clipboard image lands in the ask as an `[Image #N]` marker; the send expands it to the
+    /// saved path. Only the composer takes an image — a masked entry or path popup drops it, as
+    /// they drop every paste that is not theirs.
+    pub fn paste_image(&mut self, path: &str) {
+        if self.focus != Focus::Compose {
+            return;
+        }
+        let width = self.entry_width();
+        self.ask
+            .apply(Key::Image(path.to_string()), &self.history.entries, width);
+    }
+
     /// Pasted text reaches whichever entry holds input. Where a terminal brackets a paste the
     /// member never types the characters, so an entry that ignored the event took nothing at all —
     /// a masked entry above all, whose prompt is what asks for a pasted value. That entry holds one
@@ -688,6 +702,7 @@ impl App {
                 self.copy_last_reply();
                 return Reply::None;
             }
+            KeyCode::Char('v') if ctrl => return Reply::Clipboard,
             KeyCode::Char('?') if self.ask.text.is_empty() => {
                 self.focus = Focus::Keys;
                 return Reply::None;
@@ -775,6 +790,7 @@ impl App {
                 entry.value.clear();
                 Reply::None
             }
+            KeyCode::Char('v') if ctrl => Reply::Clipboard,
             KeyCode::Char(ch) if !ctrl => {
                 entry.value.push(ch);
                 Reply::None
@@ -846,6 +862,9 @@ impl App {
                 }
                 self.ask.apply(Key::Backspace, &self.history.entries, width);
                 self.refilter_paths();
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Reply::Clipboard;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.ask.apply(Key::Char(ch), &self.history.entries, width);

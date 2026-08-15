@@ -1,3 +1,4 @@
+mod clipboard;
 mod config;
 mod jsonio;
 mod ops;
@@ -14,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event as TermEvent, KeyEventKind};
 
+use crate::clipboard::Clip;
 use crate::ops::OpRuntime;
 use crate::ui::history::{list_conversations, record_conversation, PastConversation};
 use crate::ui::picker::{PickOutcome, Picker};
@@ -738,6 +740,7 @@ impl Wire {
 enum LoopEvent {
     Term(TermEvent),
     Wire(WireEvent),
+    Clip(Result<Clip, String>),
     StdinClosed,
 }
 
@@ -764,6 +767,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         .to_string();
     let channel_name = session.channel.clone();
     let cwd = runtime.cwd.clone();
+    let stash_dir = runtime.workdir.clone();
     let workspace_url = session.workspace_url.clone();
 
     let raw = ui::RawGuard::new();
@@ -809,6 +813,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     let mut gate = Gate::default();
     let mut stop: Option<Stop> = None;
     let mut sends: Option<SendLane> = None;
+    let mut clip_pending = false;
     let mut latest_workspace = workspace_url;
     let mut latest_channel = channel_name;
     let code = loop {
@@ -825,6 +830,15 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::Term(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => {
                 match app.on_key(key) {
                     Reply::None => {}
+                    Reply::Clipboard => {
+                        if !clip_pending {
+                            clip_pending = true;
+                            let notify = stop_evt.clone();
+                            thread::spawn(move || {
+                                let _ = notify.send(LoopEvent::Clip(clipboard::read()));
+                            });
+                        }
+                    }
                     Reply::Send(text) => {
                         if app.is_working() {
                             app.push_queued(&text);
@@ -906,6 +920,21 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             }
             LoopEvent::Term(TermEvent::Paste(text)) => {
                 app.on_paste(text);
+                app.paint();
+            }
+            LoopEvent::Clip(result) => {
+                clip_pending = false;
+                match result {
+                    Ok(Clip::Image(bytes)) => match clipboard::stash_image(&bytes, &stash_dir) {
+                        Ok(path) => app.paste_image(&path),
+                        Err(error) => app.note(&error),
+                    },
+                    Ok(Clip::Text(text)) => {
+                        app.on_paste(text);
+                    }
+                    Ok(Clip::Empty) => app.note("The clipboard holds nothing to paste."),
+                    Err(error) => app.note(&error),
+                }
                 app.paint();
             }
             LoopEvent::Term(TermEvent::Resize(..)) => {
@@ -1107,7 +1136,9 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     let code = loop {
         let event = match evt_rx.recv() {
             Ok(LoopEvent::Wire(event)) => event,
-            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::StdinClosed) => continue,
+            Ok(LoopEvent::Term(_)) | Ok(LoopEvent::Clip(_)) | Ok(LoopEvent::StdinClosed) => {
+                continue
+            }
             Err(_) => break 0,
         };
         match event {
@@ -1309,7 +1340,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     Err(event) => emit_json(&event),
                 }
             }
-            LoopEvent::Term(_) => {}
+            LoopEvent::Term(_) | LoopEvent::Clip(_) => {}
             LoopEvent::StdinClosed => {
                 stdin_open = false;
                 if !in_turn {
